@@ -122,6 +122,19 @@ impl<'a> FnLowerer<'a> {
         self.lower_array_index(*array, ty, element, *index)
     }
 
+    /// `coerce_primitive_array_argument` for a user-visible `any` slot: a native array passed
+    /// there stays a live view of the array.
+    fn coerce_primitive_array_argument_aliasing(
+        &mut self,
+        value: HirExpr,
+        declared: &HirType,
+    ) -> Result<HirExpr, String> {
+        self.alias_native_arrays = Self::type_holds_any(declared);
+        let result = self.coerce_primitive_array_argument(value, declared);
+        self.alias_native_arrays = false;
+        result
+    }
+
     fn coerce_primitive_array_argument(
         &mut self,
         value: HirExpr,
@@ -182,6 +195,19 @@ impl<'a> FnLowerer<'a> {
                 )
             }
             HirType::Undefined => (HirExpr::Lit(HirLit::Undefined), HirExpr::Lit(HirLit::Undefined)),
+            // A null `string` slot is `undefined` (a tagged template's invalid-escape cooked entry).
+            HirType::Str => (
+                HirExpr::Conditional(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                        vec![value.clone()],
+                    )),
+                    Box::new(HirExpr::OptionalNone(HirType::Str)),
+                    Box::new(HirExpr::OptionalSome(Box::new(value), HirType::Str)),
+                    ty.clone(),
+                ),
+                HirExpr::OptionalNone(HirType::Str),
+            ),
             HirType::Union(_) => {
                 let HirType::Union(members) = &ty else { unreachable!() };
                 let index = members.iter().position(|member| member == &HirType::Undefined).unwrap();
@@ -213,25 +239,55 @@ impl<'a> FnLowerer<'a> {
         callback: Option<HirExpr>,
         this_arg: Option<HirExpr>,
     ) -> Result<HirExpr, String> {
+        // Array.from evaluates the source before mapfn/thisArg, but reads
+        // its length only after those arguments have been evaluated.
+        let (source_binding, length) = if let HirExpr::PropAccess(source, ty, key) = length {
+            let name = format!("__thaw_array_from_source_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            (Some((name.clone(), ty.clone(), *source)),
+                HirExpr::PropAccess(Box::new(HirExpr::Var(name)), ty, key))
+        } else { (None, length) };
         let length_name = format!("__thaw_array_from_length_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(length_name.clone(), HirType::F64);
-        let mut bindings = vec![(length_name.clone(), HirType::F64, length)];
-        let Some(callback) = callback else {
+        let mut bindings = source_binding.into_iter().collect::<Vec<_>>();
+        let callback_type = callback.as_ref()
+            .map(|value| self.infer_expr_type(value)).transpose()?;
+        if callback_type.as_ref().is_none_or(|ty| ty == &HirType::Undefined) {
+            if let Some(callback) = callback {
+                let name = format!("__thaw_array_from_ignored_mapper_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Undefined);
+                bindings.push((name, HirType::Undefined, callback));
+            }
+            if let Some(this_arg) = this_arg {
+                let ty = self.infer_expr_type(&this_arg)?;
+                let name = format!("__thaw_array_from_ignored_this_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                bindings.push((name, ty, this_arg));
+            }
+            bindings.push((length_name.clone(), HirType::F64, length));
             let result = HirExpr::ArrayAlloc(
                 Box::new(HirExpr::Var(length_name)),
                 HirType::Undefined,
             );
             return self.wrap_call_argument_bindings(result, &bindings);
-        };
+        }
+        let callback = callback.expect("a non-undefined mapper is present");
         let callback_name = format!("__thaw_array_from_callback_{}", self.next_binding);
         self.next_binding += 1;
-        let callback_type = self.infer_expr_type(&callback)?;
-        let HirType::Function(params, output_type) = &callback_type else {
-            unreachable!("Array.from mapper was validated as a function")
+        let callback_type = callback_type.expect("a non-undefined mapper type is present");
+        let signature = match &callback_type {
+            HirType::FunctionWithThis(_, inner) => inner.as_ref().clone(),
+            other => other.clone(),
         };
-        let returns_void = **output_type == HirType::Void;
-        let output_type = if returns_void { HirType::Undefined } else { output_type.as_ref().clone() };
+        let HirType::Function(params, callback_return_type) = &signature else {
+            return Err("Array.from mapper needs a fixed function signature".into());
+        };
+        let returns_void = **callback_return_type == HirType::Void;
+        let output_type = if returns_void { HirType::Undefined } else { callback_return_type.as_ref().clone() };
         self.scope
             .insert(callback_name.clone(), callback_type.clone());
         let result_name = format!("__thaw_array_from_result_{}", self.next_binding);
@@ -241,12 +297,21 @@ impl<'a> FnLowerer<'a> {
         let result_type = HirType::Array(Box::new(output_type.clone()));
         self.scope.insert(result_name.clone(), result_type.clone());
         self.scope.insert(index_name.clone(), HirType::F64);
+        let this_binding = if let Some(this_arg) = this_arg {
+            let ty = self.infer_expr_type(&this_arg)?;
+            let name = format!("__thaw_array_from_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            Some((name, ty, this_arg))
+        } else { None };
         let available = [
             HirExpr::Lit(HirLit::Undefined),
             HirExpr::Var(index_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        let callback_call = self.lower_array_from_mapper_call(
+            &callback_name, params, callback_return_type.as_ref(), &available,
+            this_binding.as_ref().map(|(name, _, _)| name.as_str()),
+        )?;
         let callback_call = if returns_void {
             self.array_void_to_undefined(callback_call)?
         } else {
@@ -267,7 +332,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::BinOp(
                     BinOp::Lt,
                     Box::new(HirExpr::Var(index_name.clone())),
-                    Box::new(HirExpr::Var(length_name)),
+                    Box::new(HirExpr::Var(length_name.clone())),
                 ),
                 vec![
                     HirStmt::Expr(HirExpr::IndexAssign(
@@ -288,14 +353,16 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Return(Some(HirExpr::Var(result_name))),
         ]);
         bindings.push((callback_name, callback_type, callback));
-        if let Some(this_arg) = this_arg {
-            let ty = self.infer_expr_type(&this_arg)?;
-            let name = format!("__thaw_array_from_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, this_arg));
-        }
+        bindings.extend(this_binding);
+        bindings.push((length_name, HirType::F64, length));
         self.wrap_call_argument_bindings(body, &bindings)
+    }
+
+    fn mapper_return(signature: &HirType) -> HirType {
+        match signature {
+            HirType::Function(_, ret) => ret.as_ref().clone(),
+            _ => HirType::Void,
+        }
     }
 
     fn lower_array_map(
@@ -307,16 +374,46 @@ impl<'a> FnLowerer<'a> {
         callback: HirExpr,
         this_arg: Option<HirExpr>,
     ) -> Result<HirExpr, String> {
+        self.lower_array_map_mode(receiver, array_type, element_type, callback_element_type, callback, this_arg, false)
+    }
+
+    fn lower_array_flat_map(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback_element_type: HirType,
+        callback: HirExpr,
+        this_arg: Option<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        self.lower_array_map_mode(receiver, array_type, element_type, callback_element_type, callback, this_arg, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_array_map_mode(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback_element_type: HirType,
+        callback: HirExpr,
+        this_arg: Option<HirExpr>,
+        snapshot_flat_map_results: bool,
+    ) -> Result<HirExpr, String> {
         let receiver_name = format!("__thaw_map_receiver_{}", self.next_binding);
         self.next_binding += 1;
         let callback_name = format!("__thaw_map_callback_{}", self.next_binding);
         self.next_binding += 1;
         let callback_type = self.infer_expr_type(&callback)?;
-        let HirType::Function(params, output_type) = &callback_type else {
+        let signature = match &callback_type {
+            HirType::FunctionWithThis(_, inner) => inner.as_ref().clone(),
+            other => other.clone(),
+        };
+        let HirType::Function(params, output_type) = &signature else {
             unreachable!("array mapper was validated as a function")
         };
         let returns_void = **output_type == HirType::Void;
-        let output_type = if returns_void { HirType::Undefined } else { output_type.as_ref().clone() };
+        let callback_output_type = if returns_void { HirType::Undefined } else { output_type.as_ref().clone() };
         self.scope.insert(receiver_name.clone(), array_type.clone());
         self.scope
             .insert(callback_name.clone(), callback_type.clone());
@@ -328,6 +425,25 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let element_name = format!("__thaw_map_element_{}", self.next_binding);
         self.next_binding += 1;
+        let callback_result_name = if snapshot_flat_map_results {
+            let name = format!("__thaw_flat_map_callback_result_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), callback_output_type.clone());
+            Some(name)
+        } else {
+            None
+        };
+        // shortcut: per-callback snapshots allocate temporary arrays; use direct appends when allocation cost matters.
+        let (output_type, flat_map_snapshot) = if let Some(name) = &callback_result_name {
+            let snapshot = self.lower_array_flat_map_result(HirExpr::ArrayLit(vec![HirExpr::Var(name.clone())]))?;
+            let snapshot_type = self.infer_expr_type(&snapshot)?;
+            if !matches!(&snapshot_type, HirType::Array(_)) {
+                unreachable!("flatMap callback normalization returns an array")
+            }
+            (snapshot_type, Some(snapshot))
+        } else {
+            (callback_output_type.clone(), None)
+        };
         let result_type = HirType::Array(Box::new(output_type.clone()));
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(result_name.clone(), result_type.clone());
@@ -365,12 +481,41 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        // `thisArg` becomes the `this` of a receiver-taking mapper.
+        let this_binding = if matches!(callback_type, HirType::FunctionWithThis(..)) {
+            self.bind_array_callback_this("map", &callback_type, &this_arg)?
+        } else { None };
+        let callback_call = if let Some((name, _, _)) = &this_binding {
+            self.lower_array_from_mapper_call(
+                &callback_name, params, &Self::mapper_return(&signature), &available, Some(name),
+            )?
+        } else {
+            self.lower_array_callback_call(&callback_name, params, &available)?
+        };
         let callback_call = if returns_void {
             self.array_void_to_undefined(callback_call)?
         } else {
             callback_call
+        };
+        let mapped_statements = if let (Some(name), Some(snapshot)) = (&callback_result_name, &flat_map_snapshot) {
+            vec![
+                HirStmt::Let(element_name, callback_element_type, element),
+                HirStmt::Let(name.clone(), callback_output_type.clone(), callback_call),
+                HirStmt::Expr(HirExpr::IndexAssign(
+                    Box::new(HirExpr::Var(result_name.clone())),
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(snapshot.clone()),
+                )),
+            ]
+        } else {
+            vec![
+                HirStmt::Let(element_name, callback_element_type, element),
+                HirStmt::Expr(HirExpr::IndexAssign(
+                    Box::new(HirExpr::Var(result_name.clone())),
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(callback_call),
+                )),
+            ]
         };
         let body = HirExpr::Block(vec![
             HirStmt::Let(
@@ -403,19 +548,11 @@ impl<'a> FnLowerer<'a> {
                                 HirExpr::Var(index_name.clone()),
                             ],
                         ),
-                        vec![
-                            HirStmt::Let(
-                                element_name,
-                                callback_element_type,
-                                element,
-                            ),
-                            HirStmt::Expr(HirExpr::IndexAssign(
-                                Box::new(HirExpr::Var(result_name.clone())),
-                                Box::new(HirExpr::Var(index_name.clone())),
-                                Box::new(callback_call),
-                            )),
-                        ],
-                        Vec::new(),
+                        mapped_statements,
+                        vec![HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_set_hole".into())),
+                            vec![HirExpr::Var(result_name.clone()), HirExpr::Var(index_name.clone())],
+                        ))],
                     ),
                     HirStmt::Expr(HirExpr::Assign(
                         index_name.clone(),
@@ -427,19 +564,15 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_array_map_presence".into())),
-                vec![
-                    HirExpr::Var(result_name),
-                    HirExpr::Var(receiver_name.clone()),
-                ],
-            ))),
+            HirStmt::Return(Some(HirExpr::Var(result_name))),
         ]);
         let mut bindings = vec![
             (receiver_name, array_type, receiver),
             (callback_name, callback_type, callback),
         ];
-        if let Some(this_arg) = this_arg {
+        if let Some(binding) = this_binding {
+            bindings.push(binding);
+        } else if let Some(this_arg) = this_arg {
             let ty = self.infer_expr_type(&this_arg)?;
             let name = format!("__thaw_map_this_{}", self.next_binding);
             self.next_binding += 1;
@@ -476,17 +609,19 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let element_name = format!("__thaw_filter_element_{}", self.next_binding);
         self.next_binding += 1;
+        let raw_name = format!("__thaw_filter_raw_{}", self.next_binding);
+        self.next_binding += 1;
+        let state_name = format!("__thaw_filter_state_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(raw_name.clone(), element_type.clone());
+        self.scope.insert(state_name.clone(), HirType::F64);
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(result_name.clone(), array_type.clone());
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope.insert(output_index_name.clone(), HirType::F64);
         self.scope
             .insert(element_name.clone(), callback_element_type.clone());
-        let raw_element = HirExpr::TypedIndex(
-            Box::new(HirExpr::Var(receiver_name.clone())),
-            Box::new(HirExpr::Var(index_name.clone())),
-            element_type.clone(),
-        );
+        let raw_element = HirExpr::Var(raw_name.clone());
         let element = if callback_element_type == element_type
             && !matches!(element_type, HirType::Optional(_) | HirType::Nullish(_))
             && !matches!(&element_type, HirType::Union(members) if members.contains(&HirType::Undefined))
@@ -497,10 +632,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Conditional(
                 Box::new(HirExpr::BinOp(
                     BinOp::EqEqEq,
-                    Box::new(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
-                        vec![HirExpr::Var(receiver_name.clone()), HirExpr::Var(index_name.clone())],
-                    )),
+                    Box::new(HirExpr::Var(state_name.clone())),
                     Box::new(HirExpr::Lit(HirLit::F64(1.0))),
                 )),
                 Box::new(present),
@@ -508,7 +640,9 @@ impl<'a> FnLowerer<'a> {
                 ty,
             )
         };
-        let HirType::Function(params, _) = &callback_type else {
+        let this_binding = self.bind_array_callback_this("filter", &callback_type, &this_arg)?;
+        let (signature, call_this) = Self::array_callback_signature(&callback_type, &this_binding);
+        let HirType::Function(params, returned) = &signature else {
             unreachable!("array filter was validated as a function")
         };
         let available = [
@@ -516,8 +650,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        let callback_call = self.lower_array_from_mapper_call(
+            &callback_name, params, returned, &available, call_this.as_deref(),
+        )?;
         let callback_truthy = self.array_callback_truthy(callback_call)?;
         let increment = |name: &str| {
             HirStmt::Expr(HirExpr::Assign(
@@ -570,6 +705,20 @@ impl<'a> FnLowerer<'a> {
                         ),
                         vec![
                             HirStmt::Let(
+                                state_name.clone(), HirType::F64,
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                                    vec![HirExpr::Var(receiver_name.clone()), HirExpr::Var(index_name.clone())],
+                                ),
+                            ),
+                            HirStmt::Let(
+                                raw_name.clone(), element_type.clone(),
+                                HirExpr::TypedIndex(
+                                    Box::new(HirExpr::Var(receiver_name.clone())),
+                                    Box::new(HirExpr::Var(index_name.clone())), element_type.clone(),
+                                ),
+                            ),
+                            HirStmt::Let(
                                 element_name.clone(),
                                 callback_element_type,
                                 element,
@@ -577,24 +726,21 @@ impl<'a> FnLowerer<'a> {
                             HirStmt::If(
                                 callback_truthy,
                                 vec![
-                                    HirStmt::Expr(HirExpr::IndexAssign(
-                                        Box::new(HirExpr::Var(result_name.clone())),
-                                        Box::new(HirExpr::Var(output_index_name.clone())),
-                                        Box::new(HirExpr::TypedIndex(
-                                            Box::new(HirExpr::Var(receiver_name.clone())),
-                                            Box::new(HirExpr::Var(index_name.clone())),
-                                            element_type.clone(),
-                                        )),
-                                    )),
-                                    HirStmt::Expr(HirExpr::Call(
-                                        Box::new(HirExpr::Var("__thaw_array_copy_index_state".into())),
-                                        vec![
-                                            HirExpr::Var(result_name.clone()),
-                                            HirExpr::Var(output_index_name.clone()),
-                                            HirExpr::Var(receiver_name.clone()),
-                                            HirExpr::Var(index_name.clone()),
-                                        ],
-                                    )),
+                                    HirStmt::If(
+                                        HirExpr::BinOp(
+                                            BinOp::EqEqEq, Box::new(HirExpr::Var(state_name)),
+                                            Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+                                        ),
+                                        vec![HirStmt::Expr(HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_array_set_undefined".into())),
+                                            vec![HirExpr::Var(result_name.clone()), HirExpr::Var(output_index_name.clone())],
+                                        ))],
+                                        vec![HirStmt::Expr(HirExpr::IndexAssign(
+                                            Box::new(HirExpr::Var(result_name.clone())),
+                                            Box::new(HirExpr::Var(output_index_name.clone())),
+                                            Box::new(HirExpr::Var(raw_name)),
+                                        ))],
+                                    ),
                                     increment(&output_index_name),
                                 ],
                                 Vec::new(),
@@ -615,13 +761,7 @@ impl<'a> FnLowerer<'a> {
             (receiver_name, array_type, receiver),
             (callback_name, callback_type, callback),
         ];
-        if let Some(this_arg) = this_arg {
-            let ty = self.infer_expr_type(&this_arg)?;
-            let name = format!("__thaw_filter_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, this_arg));
-        }
+        bindings.extend(this_binding);
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
@@ -630,6 +770,13 @@ impl<'a> FnLowerer<'a> {
         let HirType::Array(element) = mapped_type.clone() else {
             unreachable!("array map always returns an array")
         };
+        fn has_dynamic_json_member(ty: &HirType) -> bool {
+            match ty {
+                HirType::Json => true,
+                HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => has_dynamic_json_member(inner),
+                _ => false,
+            }
+        }
         match *element {
             HirType::Array(inner) => {
                 self.lower_array_flat_one(mapped, mapped_type, *inner)
@@ -643,48 +790,20 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
                 vec![mapped, HirExpr::Lit(HirLit::F64(1.0))],
             )),
-            // A ternary/mixed-return callback (`(v) => Array.isArray(v) ?
-            // v : [v]`) infers as `Union([Json, Array(Json), ...])`, not
-            // plain `Json` -- normalize every element to `Json` first
-            // (via a nested `.map()`, reusing `coerce_to_declared`'s
-            // existing Union-to-Json support), then reuse the runtime
-            // flattener above.
-            HirType::Union(members) if members.contains(&HirType::Json) => {
-                let union_type = HirType::Union(members.clone());
-                let parameter = format!("__thaw_flat_map_any_normalize_{}", self.next_binding);
-                self.next_binding += 1;
-                self.scope.insert(parameter.clone(), union_type.clone());
-                let coerced =
-                    self.coerce_to_declared(&HirType::Json, HirExpr::Var(parameter.clone()))?;
-                let callback = HirExpr::Lambda(
-                    Vec::new(),
-                    vec![HirParam { name: parameter, ty: union_type.clone() }],
-                    HirType::Json,
-                    Box::new(coerced),
-                );
-                // `callback_element_type` (the 4th argument) must match
-                // this callback's own *parameter* type (`union_type`),
-                // not its return type (`Json`) -- passing `Json` here
-                // once made `lower_array_map` size its internal "element
-                // read from the source array" scratch variable/alloca
-                // for an 8-byte pointer while actually storing a 16-byte
-                // `{tag, payload}` union struct into it: a stack buffer
-                // overflow that silently corrupted the tag/payload bits
-                // read back, observed as `thaw_json_object_set_json`
-                // segfaulting on a garbage "pointer" that was actually
-                // leftover float bits. Found via `gdb` on a locally
-                // unstripped build (`-Wl,--strip-all` removed from
-                // `thaw-cli`'s linker invocation) plus a scratch
-                // `#[test]` dumping `compiler.print_to_string()`'s LLVM
-                // IR for the crashing case -- tracing the IR by hand
-                // located the undersized alloca precisely.
-                let normalized = self.lower_array_map(
-                    mapped, mapped_type, union_type.clone(), union_type, callback, None,
-                )?;
-                Ok(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
-                    vec![normalized, HirExpr::Lit(HirLit::F64(1.0))],
-                ))
+            wrapped @ (HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_))
+                if has_dynamic_json_member(&wrapped) =>
+            {
+                self.lower_array_flat_map_dynamic_json(mapped, mapped_type, wrapped)
+            }
+            // A ternary/mixed-return callback may infer a union containing
+            // Json, an absence-wrapped Json, or an array of either. Normalize
+            // each input to Json before the runtime depth-one flatten.
+            HirType::Union(members) if members.iter().any(has_dynamic_json_member) => {
+                self.lower_array_flat_map_dynamic_json(
+                    mapped,
+                    mapped_type,
+                    HirType::Union(members),
+                )
             }
             // A callback returning a fixed-shape mixed-type array literal
             // (e.g. `(v) => [v, v * 2]` where `v: any` and `v * 2:
@@ -766,6 +885,34 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn lower_array_flat_map_dynamic_json(
+        &mut self,
+        mapped: HirExpr,
+        mapped_type: HirType,
+        element_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let parameter = format!("__thaw_flat_map_any_normalize_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(parameter.clone(), element_type.clone());
+        let coerced = self.coerce_to_declared(&HirType::Json, HirExpr::Var(parameter.clone()))?;
+        let callback = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam { name: parameter, ty: element_type.clone() }],
+            HirType::Json,
+            Box::new(coerced),
+        );
+        // The source read ABI must match the normalization callback input,
+        // not its Json return type: lower_array_map sizes its element alloca
+        // from this argument, and a mismatch corrupts tagged union payloads.
+        let normalized = self.lower_array_map(
+            mapped, mapped_type, element_type.clone(), element_type, callback, None,
+        )?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
+            vec![normalized, HirExpr::Lit(HirLit::F64(1.0))],
+        ))
+    }
+
     fn lower_array_flat_map_scalar(
         &mut self,
         mapped: HirExpr,
@@ -785,6 +932,164 @@ impl<'a> FnLowerer<'a> {
             ),
             None,
         )
+    }
+
+    /// `(T[] | undefined)[]` `.flat()`: every present inner array is spread and
+    /// an `undefined` slot stays an `undefined` element, so the result is a
+    /// `(T | undefined)[]`. Holes of the outer array are skipped.
+    fn lower_array_flat_optional(
+        &mut self,
+        receiver: HirExpr,
+        outer_type: HirType,
+        inner_element: HirType,
+    ) -> Result<HirExpr, String> {
+        let inner_array_type = HirType::Array(Box::new(inner_element.clone()));
+        let slot_type = HirType::Optional(Box::new(inner_array_type.clone()));
+        let result_element = HirType::Optional(Box::new(inner_element.clone()));
+        let result_type = HirType::Array(Box::new(result_element.clone()));
+        let fresh = |lowerer: &mut Self, label: &str, ty: HirType| {
+            let name = format!("__thaw_flat_opt_{label}_{}", lowerer.next_binding);
+            lowerer.next_binding += 1;
+            lowerer.scope.insert(name.clone(), ty);
+            name
+        };
+        let receiver_name = fresh(self, "receiver", outer_type.clone());
+        let length_name = fresh(self, "length", HirType::F64);
+        let total_name = fresh(self, "total", HirType::F64);
+        let outer_index = fresh(self, "outer", HirType::F64);
+        let inner_index = fresh(self, "inner", HirType::F64);
+        let destination = fresh(self, "dest", HirType::F64);
+        let slot_name = fresh(self, "slot", slot_type.clone());
+        let inner_name = fresh(self, "inner_array", inner_array_type.clone());
+        let inner_length = fresh(self, "inner_len", HirType::F64);
+        let result_name = fresh(self, "result", result_type.clone());
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let var = |name: &str| HirExpr::Var(name.into());
+        let add = |left, right| HirExpr::BinOp(BinOp::Add, Box::new(left), Box::new(right));
+        let assign = |name: &str, value| HirStmt::Expr(HirExpr::Assign(name.into(), Box::new(value)));
+        let increment = |name: &str| assign(name, add(var(name), number(1.0)));
+        let has_outer = || HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+            vec![var(&receiver_name), var(&outer_index)],
+        );
+        let load_slot = || HirStmt::Let(
+            slot_name.clone(),
+            slot_type.clone(),
+            HirExpr::TypedIndex(
+                Box::new(var(&receiver_name)),
+                Box::new(var(&outer_index)),
+                slot_type.clone(),
+            ),
+        );
+        let is_none = || HirExpr::OptionalIsNone(Box::new(var(&slot_name)), inner_array_type.clone());
+        let load_inner = || HirStmt::Let(
+            inner_name.clone(),
+            inner_array_type.clone(),
+            HirExpr::OptionalValue(Box::new(var(&slot_name)), inner_array_type.clone()),
+        );
+        let outer_loop = |body: Vec<HirStmt>| {
+            HirStmt::While(
+                HirExpr::BinOp(BinOp::Lt, Box::new(var(&outer_index)), Box::new(var(&length_name))),
+                body,
+            )
+        };
+        let mut count_body = vec![HirStmt::If(
+            has_outer(),
+            vec![
+                load_slot(),
+                HirStmt::If(
+                    is_none(),
+                    vec![increment(&total_name)],
+                    vec![
+                        load_inner(),
+                        assign(
+                            &total_name,
+                            add(var(&total_name), HirExpr::ArrayLen(Box::new(var(&inner_name)))),
+                        ),
+                    ],
+                ),
+            ],
+            Vec::new(),
+        )];
+        count_body.push(increment(&outer_index));
+        let wrapped = |lowerer: &mut Self, value: HirExpr| {
+            lowerer.coerce_to_declared(&result_element, value)
+        };
+        let element_value = wrapped(
+            self,
+            HirExpr::TypedIndex(
+                Box::new(var(&inner_name)),
+                Box::new(var(&inner_index)),
+                inner_element.clone(),
+            ),
+        )?;
+        let fill_body = vec![
+            HirStmt::If(
+                has_outer(),
+                vec![
+                    load_slot(),
+                    HirStmt::If(
+                        is_none(),
+                        vec![
+                            HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(var(&result_name)),
+                                Box::new(var(&destination)),
+                                Box::new(HirExpr::OptionalNone(inner_element.clone())),
+                            )),
+                            increment(&destination),
+                        ],
+                        vec![
+                            load_inner(),
+                            HirStmt::Let(inner_length.clone(), HirType::F64, HirExpr::ArrayLen(Box::new(var(&inner_name)))),
+                            HirStmt::Let(inner_index.clone(), HirType::F64, number(0.0)),
+                            HirStmt::While(
+                                HirExpr::BinOp(BinOp::Lt, Box::new(var(&inner_index)), Box::new(var(&inner_length))),
+                                vec![
+                                    HirStmt::If(
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                                            vec![var(&inner_name), var(&inner_index)],
+                                        ),
+                                        vec![
+                                            HirStmt::Expr(HirExpr::IndexAssign(
+                                                Box::new(var(&result_name)),
+                                                Box::new(var(&destination)),
+                                                Box::new(element_value),
+                                            )),
+                                            increment(&destination),
+                                        ],
+                                        Vec::new(),
+                                    ),
+                                    increment(&inner_index),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+                Vec::new(),
+            ),
+            increment(&outer_index),
+        ];
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(length_name.clone(), HirType::F64, HirExpr::ArrayLen(Box::new(var(&receiver_name)))),
+            HirStmt::Let(total_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(outer_index.clone(), HirType::F64, number(0.0)),
+            outer_loop(count_body),
+            HirStmt::Let(
+                result_name.clone(),
+                result_type,
+                HirExpr::ArrayAlloc(Box::new(var(&total_name)), result_element.clone()),
+            ),
+            assign(&outer_index, number(0.0)),
+            HirStmt::Let(destination.clone(), HirType::F64, number(0.0)),
+            outer_loop(fill_body),
+            HirStmt::Return(Some(HirExpr::ArraySetLen(
+                Box::new(var(&result_name)),
+                Box::new(var(&destination)),
+                result_element,
+            ))),
+        ]);
+        self.wrap_call_argument_bindings(body, &[(receiver_name, outer_type, receiver)])
     }
 
     fn lower_array_flat_one(

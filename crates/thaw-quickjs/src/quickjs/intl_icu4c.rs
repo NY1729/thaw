@@ -161,11 +161,9 @@ type UFormattedNumberRange = c_void;
 type UNumberRangeFormatter = c_void;
 
 unsafe fn resolve<T>(handle: *mut c_void, base: &str) -> Option<T> {
-    // Fedora (and some other distros) build ICU with a per-major symbol
-    // suffix for parallel installability (`ucol_open_77`), while upstream
-    // exports the unsuffixed name (versioned); try the suffixed names
-    // first, then the plain one.
-    for major in [77_i32, 76, 75, 74, 73, 72, 71, 70] {
+    // Some ICU builds export per-major symbols (`ucol_open_78`), while
+    // others export unsuffixed names; try suffixes before the plain name.
+    for major in [78_i32, 77, 76, 75, 74, 73, 72, 71, 70] {
         let name = CString::new(format!("{base}_{major}")).ok()?;
         let symbol = unsafe { dlsym(handle, name.as_ptr()) };
         if !symbol.is_null() {
@@ -183,7 +181,7 @@ unsafe fn resolve<T>(handle: *mut c_void, base: &str) -> Option<T> {
 fn icu() -> Option<&'static Icu> {
     static ICU: OnceLock<Option<Icu>> = OnceLock::new();
     ICU.get_or_init(|| unsafe {
-        let handle = ["libicui18n.so", "libicui18n.so.77", "libicui18n.so.76"]
+        let handle = ["libicui18n.so", "libicui18n.so.78", "libicui18n.so.77", "libicui18n.so.76"]
             .into_iter()
             .find_map(|name| {
                 let name = CString::new(name).ok()?;
@@ -342,10 +340,14 @@ fn intl_collator_compare_search(
     ignore_punctuation: bool,
     numeric: bool,
     case_first: &str,
-    a: &str,
-    b: &str,
+    a: &[u8],
+    b: &[u8],
 ) -> i32 {
-    let codepoint_fallback = || match a.encode_utf16().cmp(b.encode_utf16()) {
+    // `ucol_strcollUTF8` needs valid UTF-8, so substitute U+FFFD for a
+    // lone surrogate; the fallback compares the real UTF-16 units.
+    let a_text = wtf8_to_icu_text(a);
+    let b_text = wtf8_to_icu_text(b);
+    let codepoint_fallback = || match wtf8_decode_utf16(a).cmp(&wtf8_decode_utf16(b)) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
@@ -367,10 +369,10 @@ fn intl_collator_compare_search(
     let result = unsafe {
         (icu.strcoll_utf8)(
             collator,
-            a.as_ptr().cast::<c_char>(),
-            a.len() as c_int,
-            b.as_ptr().cast::<c_char>(),
-            b.len() as c_int,
+            a_text.as_ptr().cast::<c_char>(),
+            a_text.len() as c_int,
+            b_text.as_ptr().cast::<c_char>(),
+            b_text.len() as c_int,
             &mut status,
         )
     };
@@ -581,7 +583,7 @@ fn datetime_skeleton(options: &serde_json::Value) -> String {
             (_, "h12") => 'h',
             (_, "h23") => 'H',
             (_, "h24") => 'k',
-            _ => 'h',
+            _ => 'j',
         };
         skeleton.push(letter);
         if hour == "2-digit" {
@@ -593,6 +595,26 @@ fn datetime_skeleton(options: &serde_json::Value) -> String {
     }
     if let Some(second) = get("second") {
         skeleton.push_str(if second == "2-digit" { "ss" } else { "s" });
+    }
+    if let Some(digits) = options.get("fractionalSecondDigits").and_then(|value| value.as_u64()) {
+        skeleton.push_str(&"S".repeat(digits.min(3) as usize));
+    }
+    if let Some(day_period) = get("dayPeriod") {
+        skeleton.push_str(match day_period {
+            "long" => "BBBB",
+            "narrow" => "BBBBB",
+            _ => "B",
+        });
+    }
+    if let Some(zone_name) = get("timeZoneName") {
+        skeleton.push_str(match zone_name {
+            "long" => "zzzz",
+            "shortOffset" => "O",
+            "longOffset" => "OOOO",
+            "shortGeneric" => "v",
+            "longGeneric" => "vvvv",
+            _ => "z",
+        });
     }
     skeleton
 }
@@ -608,7 +630,8 @@ fn datetime_field_type(field: c_int) -> Option<&'static str> {
         7 => "second",
         8 => "fractionalSecond",
         9 => "weekday",
-        14 => "dayPeriod",
+        14 | 35 | 36 => "dayPeriod",
+        17 | 23 | 24 | 29 | 31 | 32 | 33 => "timeZoneName",
         _ => return None,
     })
 }
@@ -620,10 +643,34 @@ fn skeleton_field_type(letter: u16) -> Option<&'static str> {
         'M' | 'L' => Some("month"),
         'd' => Some("day"),
         'E' | 'c' => Some("weekday"),
-        'h' | 'H' | 'K' | 'k' => Some("hour"),
+        'h' | 'H' | 'K' | 'k' | 'j' => Some("hour"),
         'm' => Some("minute"),
         's' => Some("second"),
         _ => None,
+    }
+}
+
+fn finish_datetime_parts(
+    parts: &mut Vec<serde_json::Value>, cursor: usize, text: &[u16], skeleton: &[u16],
+) {
+    // Classify a fieldless single-field pattern before the literal tail
+    // consumes it. A multi-field pattern must remain literal without spans.
+    if parts.is_empty() && cursor == 0 && !text.is_empty() {
+        if let Some(kind) = skeleton.first().and_then(|letter| skeleton_field_type(*letter)) {
+            if skeleton.iter().all(|letter| skeleton_field_type(*letter) == Some(kind)) {
+                parts.push(serde_json::json!({
+                    "type": kind,
+                    "value": String::from_utf16_lossy(text),
+                }));
+                return;
+            }
+        }
+    }
+    if cursor < text.len() {
+        parts.push(serde_json::json!({
+            "type": "literal",
+            "value": String::from_utf16_lossy(&text[cursor..]),
+        }));
     }
 }
 
@@ -778,23 +825,7 @@ fn intl_datetime_narrow_icu4c_inner(
         }
         cursor = cursor.max(end);
     }
-    if cursor < text.len() {
-        parts.push(serde_json::json!({
-            "type": "literal",
-            "value": String::from_utf16_lossy(&text[cursor..]),
-        }));
-    }
-    // ICU's field-position iterator reports nothing for a pattern that is
-    // a single bare field (`{month:'narrow'}` -> `"LLLLL"`), so those
-    // would otherwise end up empty; the whole text is that one field.
-    if parts.is_empty() && !text.is_empty() {
-        if let Some(kind) = skeleton.first().and_then(|letter| skeleton_field_type(*letter)) {
-            parts.push(serde_json::json!({
-                "type": kind,
-                "value": String::from_utf16_lossy(text),
-            }));
-        }
-    }
+    finish_datetime_parts(&mut parts, cursor, text, &skeleton);
     unsafe {
         fpi_close(iterator);
         date_close(formatter);
@@ -1066,57 +1097,56 @@ fn formatted_value_to_parts(
         return None;
     }
 
-    let spans: Vec<(usize, usize, &'static str)> = positions
-        .iter()
+    formatted_positions_to_parts(text, &positions, target_category, span_category, map)
+}
+
+fn formatted_positions_to_parts(
+    text: &[u16], positions: &[(c_int, c_int, usize, usize)],
+    target_category: c_int, span_category: c_int,
+    map: impl Fn(c_int, &str) -> Option<&'static str>,
+) -> Option<Vec<serde_json::Value>> {
+    if positions.iter().any(|(_, _, begin, end)| begin > end || *end > text.len()) {
+        return None;
+    }
+    let spans: Vec<_> = positions.iter()
         .filter(|(category, _, _, _)| *category == span_category)
         .filter_map(|(_, field, begin, end)| match field {
             0 => Some((*begin, *end, "startRange")),
             1 => Some((*begin, *end, "endRange")),
             _ => None,
-        })
-        .collect();
-    let source_for = |begin: usize, end: usize| {
-        spans
-            .iter()
-            .find(|(span_begin, span_end, _)| *span_begin <= begin && end <= *span_end)
-            .map_or("shared", |(_, _, source)| *source)
-    };
-
-    let mut fields: Vec<&(c_int, c_int, usize, usize)> = positions
-        .iter()
+        }).collect();
+    let fields: Vec<_> = positions.iter()
         .filter(|(category, _, _, _)| *category == target_category)
-        .collect();
-    fields.sort_by_key(|(_, _, begin, _)| *begin);
-
-    let mut parts = Vec::new();
-    let mut cursor = 0_usize;
-    for (_, field, begin, end) in fields {
-        let (begin, end) = (*begin, (*end).min(text.len()));
-        if begin > cursor {
-            parts.push(serde_json::json!({
-                "type": "literal",
-                "value": String::from_utf16_lossy(&text[cursor..begin]),
-                "source": source_for(cursor, begin),
-            }));
-        }
-        if end > begin {
-            let value = String::from_utf16_lossy(&text[begin..end]);
-            if let Some(kind) = map(*field, &value) {
-                parts.push(serde_json::json!({
-                    "type": kind,
-                    "value": value,
-                    "source": source_for(begin, end),
-                }));
-            }
-        }
-        cursor = cursor.max(end);
+        .filter_map(|(_, field, begin, end)| {
+            map(*field, &String::from_utf16_lossy(&text[*begin..*end]))
+                .map(|kind| (kind, *begin, *end))
+        }).collect();
+    // Integer spans can contain grouping spans. Partition at every boundary
+    // and choose the innermost mapped field, rather than emitting overlaps.
+    let mut boundaries = vec![0, text.len()];
+    for (_, _, begin, end) in positions {
+        boundaries.extend([*begin, *end]);
     }
-    if cursor < text.len() {
-        parts.push(serde_json::json!({
-            "type": "literal",
-            "value": String::from_utf16_lossy(&text[cursor..]),
-            "source": source_for(cursor, text.len()),
-        }));
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    // ponytail: scan ICU's short field list per interval; index it if formats become large.
+    for interval in boundaries.windows(2) {
+        let (begin, end) = (interval[0], interval[1]);
+        let kind = fields.iter().filter(|(_, start, stop)| *start <= begin && end <= *stop)
+            .min_by_key(|(_, start, stop)| *stop - *start)
+            .map_or("literal", |(kind, _, _)| *kind);
+        let source = spans.iter().find(|(start, stop, _)| *start <= begin && end <= *stop)
+            .map_or("shared", |(_, _, source)| *source);
+        let value = String::from_utf16_lossy(&text[begin..end]);
+        if let Some(previous) = parts.last_mut().filter(|previous|
+            previous["type"].as_str() == Some(kind) && previous["source"].as_str() == Some(source))
+        {
+            let combined = format!("{}{}", previous["value"].as_str().unwrap(), value);
+            previous["value"] = serde_json::Value::String(combined);
+        } else {
+            parts.push(serde_json::json!({"type":kind, "value":value, "source":source}));
+        }
     }
     Some(parts)
 }
@@ -1324,4 +1354,44 @@ fn intl_number_range_parts_icu4c_inner(
         unsafe { close(formatter) };
     }
     output
+}
+
+#[cfg(test)]
+mod parts_regression_tests {
+    use super::*;
+
+    #[test]
+    fn nested_range_fields_partition_each_character_once() {
+        let text = utf16("1,234–5,678");
+        let fields = [(2, 0, 0, 5), (2, 6, 1, 2), (2, 0, 6, 11),
+            (2, 6, 7, 8), (4098, 0, 0, 5), (4098, 1, 6, 11)];
+        let parts = formatted_positions_to_parts(&text, &fields, 2, 4098, number_field_type).unwrap();
+        let joined: String = parts.iter().map(|part| part["value"].as_str().unwrap()).collect();
+        assert_eq!(joined, "1,234–5,678");
+        let kinds: Vec<_> = parts.iter().map(|part| part["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["integer", "group", "integer", "literal", "integer", "group", "integer"]);
+        assert_eq!(parts[0]["source"], "startRange");
+        assert_eq!(parts[3]["source"], "shared");
+        assert_eq!(parts[6]["source"], "endRange");
+        assert!(formatted_positions_to_parts(&text, &[(2, 0, 0, 99)], 2, 4098,
+            number_field_type).is_none());
+    }
+
+
+    #[test]
+    fn unspecified_hour_cycle_uses_locale_skeleton() {
+        assert_eq!(datetime_skeleton(&serde_json::json!({"hour":"numeric"})), "j");
+        assert_eq!(datetime_skeleton(&serde_json::json!({"hour":"numeric","hour12":true})), "h");
+        assert_eq!(datetime_skeleton(&serde_json::json!({"hour":"numeric","hourCycle":"h23"})), "H");
+    }
+
+    #[test]
+    fn fieldless_single_month_is_classified_before_literal_tail() {
+        let mut parts = Vec::new();
+        finish_datetime_parts(&mut parts, 0, &utf16("M"), &utf16("LLLLL"));
+        assert_eq!(parts, vec![serde_json::json!({"type":"month","value":"M"})]);
+        let mut parts = Vec::new();
+        finish_datetime_parts(&mut parts, 0, &utf16("M 1"), &utf16("Md"));
+        assert_eq!(parts, vec![serde_json::json!({"type":"literal","value":"M 1"})]);
+    }
 }

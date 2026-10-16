@@ -25,6 +25,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Like `compile_single_arg_call`, but for a function whose one
     /// argument is an array/tuple *handle* that the callee itself expects
     /// as a raw `[length][elem...]` buffer -- unwraps it first.
+    #[allow(dead_code)]
     fn compile_single_array_arg_call(
         &mut self,
         fn_name: &str,
@@ -85,7 +86,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let left = self.compile_expr(left)?.into_pointer_value();
         let right = self.compile_expr(right)?.into_pointer_value();
-        let strlen = self.module.get_function("strlen").unwrap();
+        let strlen = self.module.get_function("thaw_string_byte_length").unwrap();
         let left_len = self
             .builder
             .build_call(strlen, &[left.into()], "left_len")
@@ -167,6 +168,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(terminator, self.context.i8_type().const_zero())
             .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_string_register").unwrap(),
+            &[allocation.into(), total.into()], "register_concat_length").map_err(|error| error.to_string())?;
         Ok(allocation.into())
     }
 

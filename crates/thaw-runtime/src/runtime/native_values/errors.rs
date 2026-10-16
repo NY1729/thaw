@@ -11,7 +11,7 @@
 ///
 /// A user class extending `Error`/etc. (see `lower/module/classes.rs`) tags
 /// with its *full* identity chain instead of just its own name (e.g.
-/// `Sub$MyError$Error` for `class Sub extends MyError extends Error`, see
+/// `Sub\u{1f}MyError\u{1f}Error` for `class Sub extends MyError extends Error`, see
 /// `lower/expressions/coercions.rs`'s `coerce_primitive_to_string`), so
 /// `instanceof` on an intermediate ancestor still matches; `.name` only ever
 /// reports the first (most-derived) segment, matching how real JavaScript's
@@ -45,6 +45,31 @@ const ERROR_SUPPRESSED_ERROR_MARKER: char = '\u{6}';
 /// A `SuppressedError`'s `.suppressed` sub-error tag.
 const ERROR_SUPPRESSED_MARKER: char = '\u{7}';
 
+fn framed_error(message: &str) -> Option<thaw_arena::error_wire::ErrorFrame<'_>> {
+    thaw_arena::error_wire::parse_tagged(message.as_bytes())
+}
+
+fn metadata_suffix(message: &str) -> &str {
+    if let Some(frame) = framed_error(message) {
+        return std::str::from_utf8(frame.suffix).unwrap_or("");
+    }
+    message
+}
+
+/// Length-frame a structured error message without changing the pointer ABI.
+/// # Safety
+/// Both pointers must reference live native strings.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+    if name.is_null() || message.is_null() { return std::ptr::null(); }
+    let name = unsafe { wtf8_bytes(name) };
+    let message = unsafe { wtf8_bytes(message) };
+    thaw_arena::error_wire::encode_tagged(name, message, None)
+        .and_then(|bytes| arena_wtf8(&bytes))
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+
 /// Drops a `SuppressedError`'s trailing `.error`/`.suppressed` sub-tags
 /// (and anything after them) so `.message`/`.cause`/`.code`/`.name` read
 /// only the real fields. Nested sub-error tags carry `\u{1}`-`\u{5}`, never
@@ -55,34 +80,60 @@ fn strip_suppressed_segments(message: &str) -> &str {
         .map_or(message, |value| value.0)
 }
 
-fn split_error_tag(message: &str) -> (&str, &str) {
-    let message = strip_suppressed_segments(message);
-    let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
-        // No leading tag: a plain message, possibly with a *trailing*
-        // `\u{1}name\u{1}message` segment a labeled rejection appends (see
-        // thaw-quickjs's `describe_promise_exception`), plus an optional
-        // `\u{5}` property bag. Keep only the text before either.
-        let body = message.split_once(ERROR_PROPS_MARKER).map_or(message, |value| value.0);
-        let body = body.split_once(ERROR_TAG_MARKER).map_or(body, |value| value.0);
-        return ("Error", body);
+fn split_once_error_marker(message: &[u8], marker: u8) -> Option<(&[u8], &[u8])> {
+    let index = message.iter().position(|&byte| byte == marker)?;
+    Some((&message[..index], &message[index + 1..]))
+}
+
+// The markers are ASCII bytes, so splitting raw WTF-8 also preserves lone
+// surrogate sequences and embedded NULs in the message body.
+fn split_error_tag_bytes(message: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(frame) = thaw_arena::error_wire::parse_tagged(message) {
+        return (frame.chain, frame.display);
+    }
+    let message = split_once_error_marker(message, ERROR_SUPPRESSED_ERROR_MARKER as u8)
+        .map_or(message, |value| value.0);
+    let Some(rest) = message.strip_prefix(&[ERROR_TAG_MARKER as u8]) else {
+        // Untagged rejections may still have trailing identity/property tags.
+        let body = split_once_error_marker(message, ERROR_PROPS_MARKER as u8)
+            .map_or(message, |value| value.0);
+        let body = split_once_error_marker(body, ERROR_TAG_MARKER as u8)
+            .map_or(body, |value| value.0);
+        return (b"Error", body);
     };
-    let (name, body) = rest
-        .split_once(ERROR_TAG_MARKER)
-        .unwrap_or(("Error", message));
-    let body = body
-        .split_once(ERROR_PROPS_MARKER)
+    let (name, body) = split_once_error_marker(rest, ERROR_TAG_MARKER as u8)
+        .unwrap_or((b"Error", message));
+    let body = split_once_error_marker(body, ERROR_PROPS_MARKER as u8)
         .map_or(body, |value| value.0);
-    let body = body
-        .split_once(ERROR_NAME_OVERRIDE_MARKER)
+    let body = split_once_error_marker(body, ERROR_NAME_OVERRIDE_MARKER as u8)
         .map_or(body, |value| value.0);
-    let body = body.split_once(ERROR_CAUSE_MARKER).map_or(body, |value| value.0);
-    (name, body.split_once(ERROR_CODE_MARKER).map_or(body, |value| value.0))
+    let body = split_once_error_marker(body, ERROR_CAUSE_MARKER as u8)
+        .map_or(body, |value| value.0);
+    (name, split_once_error_marker(body, ERROR_CODE_MARKER as u8)
+        .map_or(body, |value| value.0))
+}
+
+fn split_error_tag(message: &str) -> (&str, &str) {
+    let (name, body) = split_error_tag_bytes(message.as_bytes());
+    // ASCII markers cannot split a UTF-8 code point in a valid `str`.
+    (std::str::from_utf8(name).unwrap(), std::str::from_utf8(body).unwrap())
+}
+
+// Native class errors carry a versioned ancestry chain. Legacy tagged
+// errors from older/external bridges still use '$'; the explicit version
+// prefix keeps a legal class name containing '$' unambiguous.
+fn error_ancestry(chain: &str) -> std::str::Split<'_, char> {
+    if let Some(versioned) = chain.strip_prefix('\u{1e}') {
+        versioned.split('\u{1f}')
+    } else {
+        chain.split('$')
+    }
 }
 
 /// The runtime `.name` override embedded after the message, if any --
 /// see `ERROR_NAME_OVERRIDE_MARKER`.
 fn split_error_name_override(message: &str) -> Option<&str> {
-    let message = strip_suppressed_segments(message);
+    let message = strip_suppressed_segments(metadata_suffix(message));
     let (_, after) = message.split_once(ERROR_NAME_OVERRIDE_MARKER)?;
     let after = after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0);
     let after = after.split_once(ERROR_CAUSE_MARKER).map_or(after, |value| value.0);
@@ -97,18 +148,18 @@ fn resolved_error_name(message: &str) -> String {
         return name.to_string();
     }
     let (chain, _) = split_error_tag(message);
-    chain.split('$').next().unwrap_or(chain).to_string()
+    error_ancestry(chain).next().unwrap_or(chain).to_string()
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
-    let message = strip_suppressed_segments(message);
+    let message = strip_suppressed_segments(metadata_suffix(message));
     let after = message.split_once(ERROR_CAUSE_MARKER)?.1;
     let after = after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0);
     Some(after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0))
 }
 
 fn split_error_code(message: &str) -> Option<&str> {
-    let message = strip_suppressed_segments(message);
+    let message = strip_suppressed_segments(metadata_suffix(message));
     message
         .split_once(ERROR_CODE_MARKER)
         .map(|value| value.1.split_once(ERROR_PROPS_MARKER).map_or(value.1, |props| props.0))
@@ -116,7 +167,7 @@ fn split_error_code(message: &str) -> Option<&str> {
 
 /// A `SuppressedError`'s `.error` sub-error tag, or `None`.
 fn split_suppressed_error(message: &str) -> Option<&str> {
-    let after = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let after = metadata_suffix(message).split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
     if let Some((error, _)) = split_length_prefixed(after) {
         return Some(error);
     }
@@ -132,7 +183,7 @@ fn split_suppressed_error(message: &str) -> Option<&str> {
 
 /// A `SuppressedError`'s `.suppressed` sub-error tag, or `None`.
 fn split_suppressed(message: &str) -> Option<&str> {
-    let after_error = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let after_error = metadata_suffix(message).split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
     if let Some((_, suppressed)) = split_length_prefixed(after_error) {
         return Some(suppressed);
     }
@@ -166,11 +217,12 @@ pub unsafe extern "C" fn thaw_error_suppress(
     let error = unsafe { CStr::from_ptr(error) }.to_string_lossy();
     let suppressed = unsafe { CStr::from_ptr(suppressed) }.to_string_lossy();
     let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let tagged = format!(
-        "{ERROR_TAG_MARKER}SuppressedError{ERROR_TAG_MARKER}{message}{ERROR_SUPPRESSED_ERROR_MARKER}{}:{error}{suppressed}",
-        error.len()
-    );
-    arena_c_string(&tagged).map_or(std::ptr::null(), |value| value.cast())
+    let Some(mut tagged) = thaw_arena::error_wire::encode_tagged(
+        b"SuppressedError", message.as_bytes(), None,
+    ) else { return std::ptr::null(); };
+    tagged.push(ERROR_SUPPRESSED_ERROR_MARKER as u8);
+    tagged.extend_from_slice(format!("{}:{error}{suppressed}", error.len()).as_bytes());
+    arena_wtf8(&tagged).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// Reads a caught error's own custom property from the trailing
@@ -182,7 +234,7 @@ pub unsafe extern "C" fn thaw_error_suppress(
 /// yields `undefined`, matching an absent property). Strings are returned
 /// without JSON quoting.
 fn error_property(message: &str, name: &str) -> Option<String> {
-    let bag = message.split_once(ERROR_PROPS_MARKER)?.1;
+    let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
     let value: serde_json::Value = serde_json::from_str(bag).ok()?;
     let value = value.as_object()?.get(name)?;
     Some(match value {
@@ -190,6 +242,13 @@ fn error_property(message: &str, name: &str) -> Option<String> {
         serde_json::Value::Null => return None,
         other => other.to_string(),
     })
+}
+
+fn error_property_json(message: &str, name: &str) -> Option<String> {
+    let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
+    let value: serde_json::Value = serde_json::from_str(bag).ok()?;
+    let value = value.as_object()?.get(name)?;
+    serde_json::to_string(value).ok()
 }
 
 /// # Safety
@@ -208,6 +267,27 @@ pub unsafe extern "C" fn thaw_error_property(
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     match error_property(&text, &name) {
+        Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Reads a legacy framed error property's JSON representation. Missing keys
+/// return null; present values, including null, retain their JSON type.
+///
+/// # Safety
+/// `message` and `name` must be null or valid, NUL-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_property_json(
+    message: *const c_char,
+    name: *const c_char,
+) -> *const c_char {
+    if message.is_null() || name.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    match error_property_json(&text, &name) {
         Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
         None => std::ptr::null(),
     }
@@ -238,9 +318,9 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     if message.is_null() {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let (_, body) = split_error_tag(&text);
-    arena_c_string(body).map_or(std::ptr::null(), |value| value.cast())
+    let bytes = unsafe { wtf8_bytes(message) };
+    let (_, body) = split_error_tag_bytes(bytes);
+    arena_wtf8(body).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// # Safety
@@ -263,7 +343,12 @@ pub unsafe extern "C" fn thaw_error_code(message: *const c_char) -> *const c_cha
         return std::ptr::null();
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    arena_c_string(split_error_code(&text).unwrap_or("undefined"))
+    // A JS error crossing the boundary carries its own `code` (`ENOENT`,
+    // `Z_DATA_ERROR`) in the `\u{5}<json>` property bag, not a `\u{3}` tag.
+    let code = split_error_code(&text)
+        .map(str::to_owned)
+        .or_else(|| error_property(&text, "code"));
+    arena_c_string(code.as_deref().unwrap_or("undefined"))
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -313,7 +398,9 @@ pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const 
     }
     let (_, body) = split_error_tag(&text);
     let name = resolved_error_name(&text);
-    let rendered = if body.is_empty() {
+    let rendered = if name.is_empty() {
+        body.to_string()
+    } else if body.is_empty() {
         name
     } else {
         format!("{name}: {body}")
@@ -347,7 +434,9 @@ pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_ch
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let (_, body) = split_error_tag(&text);
     let name = resolved_error_name(&text);
-    let rendered = if body.is_empty() {
+    let rendered = if name.is_empty() {
+        body.to_string()
+    } else if body.is_empty() {
         name
     } else {
         format!("{name}: {body}")
@@ -357,7 +446,7 @@ pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_ch
 
 /// Whether `message`'s tagged identity chain includes `class_name`. Untagged
 /// values are primitive throws, not Error instances. A multi-level chain
-/// (`Sub$MyError$Error`) matches any ancestor's name, not just the most-derived
+/// (`Sub\u{1f}MyError\u{1f}Error`) matches any ancestor's name, not just the most-derived
 /// one.
 ///
 /// # Safety
@@ -376,7 +465,7 @@ pub unsafe extern "C" fn thaw_error_is_instance(
         return false;
     }
     let (chain, _) = split_error_tag(&text);
-    class_name == "Error" || chain.split('$').any(|name| name == class_name)
+    class_name == "Error" || error_ancestry(chain).any(|name| name == class_name)
 }
 
 /// `Error.isError(value)` for a caught/tagged error string: true when the
@@ -528,13 +617,23 @@ mod error_native_tests {
 
     #[test]
     fn a_multi_level_identity_chain_matches_any_ancestor_but_names_only_the_leaf() {
-        let tagged = "\u{1}Sub$MyError$Error\u{1}deep failure";
+        let tagged = "\u{1}\u{1e}Sub\u{1f}MyError\u{1f}Error\u{1}deep failure";
         assert_eq!(call_name(tagged), "Sub");
         assert_eq!(call_message(tagged), "deep failure");
         assert!(call_is_instance(tagged, "Sub"));
         assert!(call_is_instance(tagged, "MyError"));
         assert!(call_is_instance(tagged, "Error"));
         assert!(!call_is_instance(tagged, "TypeError"));
+    }
+
+    #[test]
+    fn dollar_sign_in_versioned_error_class_name_is_not_an_ancestor_separator() {
+        let tagged = "\u{1}\u{1e}Leaf\u{1f}Base$Name\u{1f}Error\u{1}failure";
+        assert_eq!(call_name(tagged), "Leaf");
+        assert!(call_is_instance(tagged, "Base$Name"));
+        assert!(!call_is_instance(tagged, "Base"));
+        let legacy = "\u{1}Leaf$Base$Error\u{1}failure";
+        assert!(call_is_instance(legacy, "Base"));
     }
 
     #[test]
@@ -568,17 +667,23 @@ mod error_native_tests {
         // the *static*, compile-time-derived identity chain (which
         // `instanceof` still uses unchanged -- an override never
         // affects `thaw_error_is_instance`).
-        let tagged = "\u{1}MyError$Error\u{1}oops\u{4}MyError";
+        let tagged = "\u{1}\u{1e}MyError\u{1f}Error\u{1}oops\u{4}MyError";
         assert_eq!(call_name(tagged), "MyError");
         assert_eq!(call_message(tagged), "oops");
         assert_eq!(call_stack(tagged), "MyError: oops");
         assert_eq!(call_to_string(tagged), "MyError: oops");
+        let empty_name = "\u{1}\u{1e}MyError\u{1f}Error\u{1}oops\u{4}";
+        assert_eq!(call_name(empty_name), "");
+        assert_eq!(call_message(empty_name), "oops");
+        assert_eq!(call_to_string(empty_name), "oops");
+        assert_eq!(call_stack(empty_name), "oops");
+        assert_eq!(call_to_string("\u{1}Error\u{1}\u{4}"), "");
         assert!(call_is_instance(tagged, "MyError"));
         assert!(call_is_instance(tagged, "Error"));
 
         // No override present -- falls back to the identity chain's
         // most-derived segment, exactly like before this marker existed.
-        let unoverridden = "\u{1}MyError$Error\u{1}oops";
+        let unoverridden = "\u{1}\u{1e}MyError\u{1f}Error\u{1}oops";
         assert_eq!(call_name(unoverridden), "MyError");
         assert_eq!(call_stack(unoverridden), "MyError: oops");
     }
@@ -639,6 +744,51 @@ mod error_native_tests {
         assert_eq!(call_suppressed(&outer), "\u{1}RangeError\u{1}third");
         assert_eq!(call_suppressed_error(&inner), "\u{1}Error\u{1}first");
         assert_eq!(call_suppressed(&inner), "\u{1}TypeError\u{1}second");
+    }
+
+    #[test]
+    fn error_message_preserves_wtf8_surrogates_and_embedded_nul() {
+        let body = b"high\xed\xa0\x80\0low\xed\xb0\x80";
+        for source in [
+            body.to_vec(),
+            [b"\x01TypeError\x01".as_slice(), body, b"\x03ERR_TEST"].concat(),
+        ] {
+            let source = arena_wtf8(&source).unwrap();
+            let result = unsafe { thaw_error_message(source.cast()) };
+            assert!(!result.is_null());
+            assert_eq!(unsafe { wtf8_bytes(result) }, body);
+        }
+        assert_eq!(call_message("\u{1}TypeError\u{1}plain\u{3}ERR_TEST"), "plain");
+        assert_eq!(call_message("plain"), "plain");
+    }
+
+    #[test]
+    fn legacy_error_property_json_preserves_types_and_null() {
+        let source = "legacy\u{5}{\"status\":418,\"expose\":true,\"payload\":{\"id\":9},\"explicitNull\":null}";
+        assert_eq!(error_property_json(source, "status").as_deref(), Some("418"));
+        assert_eq!(error_property_json(source, "expose").as_deref(), Some("true"));
+        assert_eq!(error_property_json(source, "payload").as_deref(), Some("{\"id\":9}"));
+        assert_eq!(error_property_json(source, "explicitNull").as_deref(), Some("null"));
+        assert_eq!(error_property_json(source, "missing"), None);
+    }
+
+    #[test]
+    fn framed_error_message_keeps_control_text_before_real_suffix() {
+        let body = "first\u{2}second\u{3}third\u{4}fourth\u{5}fifth\u{6}sixth";
+        let name = c"TypeError";
+        let body_arg = thaw_arena::arena_string(body.as_bytes());
+        let framed = unsafe { thaw_error_frame(name.as_ptr(), body_arg) };
+        assert!(!framed.is_null());
+        let mut wire = unsafe { wtf8_bytes(framed) }.to_vec();
+        wire.extend_from_slice(b"\x02real cause\x03REAL_CODE\x05{\"status\":418}");
+        let source = arena_wtf8(&wire).unwrap();
+        let result = unsafe { thaw_error_message(source.cast()) };
+        assert_eq!(unsafe { wtf8_bytes(result) }, body.as_bytes());
+        let source = unsafe { CStr::from_ptr(source.cast()) }.to_string_lossy();
+        assert_eq!(resolved_error_name(&source), "TypeError");
+        assert_eq!(split_error_cause(&source), Some("real cause"));
+        assert_eq!(split_error_code(&source), Some("REAL_CODE"));
+        assert_eq!(error_property(&source, "status"), Some("418".into()));
     }
 
     #[test]

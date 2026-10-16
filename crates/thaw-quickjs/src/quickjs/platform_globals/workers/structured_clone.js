@@ -1,26 +1,52 @@
-  globalThis.__thaw_worker_encode = value => {
+  const uncloneable = globalThis.__thaw_uncloneable_objects
+    || (globalThis.__thaw_uncloneable_objects = new WeakSet());
+  globalThis.__thaw_worker_encode = (value, transferPortIds) => {
     const seen = new Map(), nodes = [];
     const encode = input => {
+      if (((typeof input === 'object' && input !== null) || typeof input === 'function')
+          && isCloneUncloneable(uncloneable, input)) {
+        throw new DOMException('Object is marked as uncloneable', 'DataCloneError');
+      }
+      if (input !== null && typeof input === 'object' && isUnsupportedCloneObject(input)) {
+        throw new DOMException('value cannot be cloned', 'DataCloneError');
+      }
       if (input === undefined) return { p: 'undefined' };
-      if (typeof input === 'number' && !Number.isFinite(input)) return { p: String(input) };
+      if (typeof input === 'number' && (!Number.isFinite(input) || Object.is(input, -0))) return { p: String(input === 0 ? '-0' : input) };
       if (typeof input === 'bigint') return { p: 'bigint', v: String(input) };
+      if (typeof input === 'symbol') throw new DOMException('value cannot be cloned', 'DataCloneError');
       if (input === null || (typeof input !== 'object' && typeof input !== 'function')) return { v: input };
       if (seen.has(input)) return { r: seen.get(input) };
       if (typeof input === 'function') throw new DOMException('value cannot be cloned', 'DataCloneError');
       const id = nodes.length; seen.set(input, id); nodes.push(null);
       let node;
-      if (Array.isArray(input)) node = { t: 'Array', v: input.map(encode) };
-      else if (input instanceof Date) node = { t: 'Date', v: input.getTime() };
-      else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags, i: input.lastIndex };
+      if (Array.isArray(input)) {
+        const length = input.length, entries = [];
+        for (let index = 0; index < length; index++) {
+          if (Object.prototype.hasOwnProperty.call(input, index)) entries.push([index, encode(input[index])]);
+        }
+        node = { t: 'Array', l: length, v: entries };
+      }
+      else if (input instanceof Date) node = { t: 'Date', v: encode(input.getTime()) };
+      else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags };
       else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, entry => [encode(entry[0]), encode(entry[1])]) };
       else if (input instanceof Set) node = { t: 'Set', v: Array.from(input, encode) };
       else if (typeof globalThis.MessagePort === 'function' && input instanceof globalThis.MessagePort) {
-        if (!input.__thawHostPortId) throw new DOMException('MessagePort requires a transfer list', 'DataCloneError');
-        node = { t: 'MessagePort', v: String(input.__thawHostPortId) };
+        const stagedId = transferPortIds && transferPortIds.get(input);
+        const portId = stagedId === undefined ? input.__thawHostPortId : stagedId;
+        if (!portId) throw new DOMException('MessagePort requires a transfer list', 'DataCloneError');
+        node = { t: 'MessagePort', v: String(portId) };
       }
       else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
+      else if (typeof SharedArrayBuffer === 'function' && input instanceof SharedArrayBuffer) node = { t: 'SharedArrayBuffer', v: globalThis.__thaw_sab_serialize(input) };
       else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
-      else node = { t: 'Object', v: Object.keys(input).map(key => [key, encode(input[key])]) };
+      else {
+        const blobSnapshot = blobFileCloneSnapshot(input);
+        const values = blobSnapshot
+          ? Object.keys(blobSnapshot).map(key => [key, encode(blobSnapshot[key])])
+          : [];
+        for (const key of Object.keys(input)) values.push([key, encode(input[key])]);
+        node = { t: 'Object', v: values };
+      }
       nodes[id] = node; return { r: id };
     };
     return JSON.stringify({ root: encode(value), nodes });
@@ -30,6 +56,7 @@
     const primitive = item => {
       if ('r' in item) return values[item.r];
       if (item.p === 'undefined') return undefined;
+      if (item.p === '-0') return -0;
       if (item.p === 'NaN') return NaN;
       if (item.p === 'Infinity') return Infinity;
       if (item.p === '-Infinity') return -Infinity;
@@ -37,9 +64,9 @@
       return item.v;
     };
     graph.nodes.forEach((node, id) => {
-      if (node.t === 'Array') values[id] = [];
-      else if (node.t === 'Date') values[id] = new Date(node.v);
-      else if (node.t === 'RegExp') { values[id] = new RegExp(node.s, node.f); values[id].lastIndex = node.i; }
+      if (node.t === 'Array') values[id] = new Array(node.l);
+      else if (node.t === 'Date') values[id] = new Date(typeof node.v === 'object' && node.v !== null ? primitive(node.v) : node.v);
+      else if (node.t === 'RegExp') values[id] = new RegExp(node.s, node.f);
       else if (node.t === 'Map') values[id] = new Map();
       else if (node.t === 'Set') values[id] = new Set();
       else if (node.t === 'MessagePort') {
@@ -47,6 +74,7 @@
         values[id] = globalThis.__thaw_create_worker_port(node.v);
       }
       else if (node.t === 'ArrayBuffer') { const bytes = new Uint8Array(node.v.length / 2); for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16); values[id] = bytes.buffer; }
+      else if (node.t === 'SharedArrayBuffer') values[id] = globalThis.__thaw_sab_deserialize(node.v);
       else if (node.t === 'Object') values[id] = {};
     });
     const decode = primitive;
@@ -55,7 +83,7 @@
       else if (node.t === 'TypedArray') values[id] = new globalThis[node.c](decode(node.b), node.o, node.l);
     });
     graph.nodes.forEach((node, id) => {
-      if (node.t === 'Array') node.v.forEach(item => values[id].push(decode(item)));
+      if (node.t === 'Array') node.v.forEach(entry => { values[id][entry[0]] = decode(entry[1]); });
       else if (node.t === 'Map') node.v.forEach(entry => values[id].set(decode(entry[0]), decode(entry[1])));
       else if (node.t === 'Set') node.v.forEach(item => values[id].add(decode(item)));
       else if (node.t === 'Object') node.v.forEach(entry => { values[id][entry[0]] = decode(entry[1]); });

@@ -1,0 +1,1570 @@
+{
+  "cases": [
+    {
+      "group": "Object",
+      "name": "Object.assign",
+      "expect": "matched",
+      "source": "function main(): void { const t: any = {a:1}; console.log(JSON.stringify(Object.assign(t,{b:2}))); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.assign-overwrite",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.assign({a:1,b:2},{b:3,c:4}))); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = Object.create(null); o.a = 1; console.log(o.a); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-inherited-get",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-inherited-in",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); console.log(\"x\" in o, \"y\" in o); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-chain",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); const c: any = Object.create(o); console.log(c.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-hasOwn-own-only",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); console.log(Object.hasOwn(o,\"x\"), Object.hasOwn(o,\"nope\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.setPrototypeOf-inherited-get",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = {}; Object.setPrototypeOf(o,p); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-class-instance",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } function main(): void { console.log(Object.getPrototypeOf(new A()) === A.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-class-stable",
+      "expect": "matched",
+      "source": "class A {} function main(): void { console.log(Object.getPrototypeOf(new A()) === Object.getPrototypeOf(new A())); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-subclass-instance",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } class B extends A { y: number = 2; } function main(): void { const b: B = new B(); console.log(Object.getPrototypeOf(b) === B.prototype, Object.getPrototypeOf(b) === A.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-instance-variable",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } function main(): void { const a: A = new A(); console.log(Object.getPrototypeOf(a) === A.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-present",
+      "expect": "matched",
+      "source": "class A { speak(): string { return \"hi\"; } } function main(): void { console.log(typeof (A.prototype as any).speak); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-call",
+      "expect": "matched",
+      "source": "class A { speak(): string { return \"hi\"; } } function main(): void { console.log((A.prototype as any).speak()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-constructor-identity",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } function main(): void { console.log(A.prototype.constructor === A); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-via-any",
+      "expect": "matched",
+      "source": "class A { greet(): string { return \"hello\"; } } function main(): void { const p: any = A.prototype; console.log(typeof p.greet); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-inherited-method-call",
+      "expect": "matched",
+      "source": "class A { greet(): string { return \"hello\"; } } function main(): void { const p: any = A.prototype; const o: any = Object.create(p); console.log(o.greet()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-dynamic-new",
+      "expect": "matched",
+      "source": "class A { name: string = \"a\"; } function main(): void { const x: any = new (A as any)(); console.log(typeof x, x.name); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-dynamic-new-args",
+      "expect": "matched",
+      "source": "class A { name: string; constructor(n: string) { this.name = n; } } function main(): void { const x: any = new (A as any)(\"z\"); console.log(x.name); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-calls-native",
+      "expect": "matched",
+      "source": "function helper(): string { return \"native\"; } class A { m(): string { return helper(); } } function main(): void { const o: any = new (A as any)(); console.log(o.m()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-this-read",
+      "expect": "matched",
+      "source": "class A { name: string = \"a\"; greet(): string { return \"hi \" + this.name; } } function main(): void { const o: any = new (A as any)(); console.log(o.greet()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-arg",
+      "expect": "matched",
+      "source": "class A { add(x: number): number { return x + 1; } } function main(): void { const o: any = new (A as any)(); console.log(o.add(10)); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-method-this-mutation",
+      "expect": "matched",
+      "source": "class Counter { count: number = 0; bump(): number { this.count = this.count + 1; return this.count; } } function main(): void { const o: any = new (Counter as any)(); console.log(o.bump(), o.bump(), o.count); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-method-void-mutation",
+      "expect": "matched",
+      "source": "class A { label: string = \"\"; set(n: string): void { this.label = n; } } function main(): void { const o: any = new (A as any)(); o.set(\"x\"); console.log(o.label); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-method-untouched-field-identity",
+      "expect": "matched",
+      "source": "class A { obj: { v: number } = { v: 1 }; cb: () => number = () => 41; touch(): void {} } function main(): void { const o: any = new (A as any)(); const beforeObj = o.obj; const beforeCb = o.cb; o.touch(); console.log(beforeObj === o.obj, beforeCb === o.cb, o.cb()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-method-nested-call-mutation",
+      "expect": "matched",
+      "source": "class A { count: number = 0; inc(): void { this.count = this.count + 1; } touch(): void { this.inc(); } } function main(): void { const o: any = new (A as any)(); o.touch(); o.touch(); console.log(o.count); }"
+    },
+    {
+      "group": "Object",
+      "name": "optional-strict-equality",
+      "expect": "matched",
+      "source": "function main(): void { const a: { v: number } | undefined = { v: 1 }; const b: { v: number } | undefined = a; const c: { v: number } | undefined = { v: 1 }; console.log(a === b, a === c); }"
+    },
+    {
+      "group": "Object",
+      "name": "nullish-strict-equality-kinds",
+      "expect": "matched",
+      "source": "function main(): void { const n: number | null | undefined = null; const u: number | null | undefined = undefined; console.log(n === u, n === null, u === undefined); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-optional-field-identity",
+      "expect": "matched",
+      "source": "class A { o?: { v: number } = { v: 1 }; setO(): void { this.o = { v: 2 }; } touch(): void {} } function main(): void { const a: any = new (A as any)(); const before = a.o; a.touch(); console.log(before === a.o); a.setO(); console.log(a.o.v); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-union-field-bridge",
+      "expect": "matched",
+      "source": "class A { u: number | string = \"x\"; setU(): void { this.u = 7; } touch(): void {} } function main(): void { const a: any = new (A as any)(); const before = a.u; a.touch(); console.log(before === a.u, typeof a.u); a.setU(); console.log(a.u); }"
+    },
+    {
+      "group": "Object",
+      "name": "union-field-method-read",
+      "expect": "matched",
+      "source": "class A { u: number | string = 1; echo(): string { return \"\" + this.u; } } function main(): void { const a = new A(); console.log(a.echo()); }"
+    },
+    {
+      "group": "Object",
+      "name": "union-array-member-decode",
+      "expect": "matched",
+      "source": "class A { u: number[] | string = [1, 2]; setU(): void { this.u = \"x\"; } touch(): void {} } function main(): void { const a: any = new (A as any)(); console.log(JSON.stringify(a.u)); a.setU(); console.log(typeof a.u, a.u); }"
+    },
+    {
+      "group": "Object",
+      "name": "array-isarray-dynamic-field",
+      "expect": "matched",
+      "source": "class A { u: number[] = [1, 2]; } function main(): void { const a: any = new (A as any)(); console.log(Array.isArray(a.u), JSON.stringify(a.u)); }"
+    },
+    {
+      "group": "Object",
+      "name": "array-isarray-union-field",
+      "expect": "matched",
+      "source": "class A { u: number[] | string = [1, 2]; } function main(): void { const a: any = new (A as any)(); console.log(Array.isArray(a.u)); }"
+    },
+    {
+      "group": "Object",
+      "name": "builtin-prototype-typeof",
+      "expect": "matched",
+      "source": "function main(): void { console.log(typeof Object.prototype, typeof Function.prototype, typeof ArrayBuffer.prototype, typeof Date.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "builtin-prototype-hasownproperty",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.prototype.hasOwnProperty.call({ a: 1 }, \"a\"), Object.prototype.hasOwnProperty.call({ a: 1 }, \"b\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "builtin-prototype-array-map",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Array.prototype.map.call([1, 2, 3], (x: number) => x * 2))); }"
+    },
+    {
+      "group": "Object",
+      "name": "array-join-dynamic",
+      "expect": "matched",
+      "source": "function main(): void { const a: any = [10, 20]; console.log(a.join(\"-\")); console.log(Array.prototype.map.call([1, 2, 3], (x: number) => x * 2).join(\",\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "constructor-function",
+      "expect": "matched",
+      "source": "function Point(x: number, y: number) { this.x = x; this.y = y; } Point.prototype.norm = function (): number { return this.x + this.y; }; Point.origin = function (): any { return new Point(0, 0); }; function main(): void { const p = new Point(1, 2); console.log(p instanceof Point, p.norm(), Point.origin().x); }"
+    },
+    {
+      "group": "Object",
+      "name": "uninitialized-global",
+      "expect": "matched",
+      "source": "var makeIterable; makeIterable = function (x: any): any { return x + 1; }; function main(): void { if (makeIterable) { console.log(makeIterable(5)); } }"
+    },
+    {
+      "group": "Object",
+      "name": "object-defineproperty-dynamic-key",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = {}; const k = \"x\"; Object.defineProperty(o, k, { value: 7, enumerable: true }); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "constructor-prototype-replacement",
+      "expect": "matched",
+      "source": "var Con = function () {}; Con.prototype = { greet: function (): string { return \"hi\"; }, tag: \"T\" }; function main(): void { const c = new Con(); console.log(c.greet(), c.tag, c instanceof Con); }"
+    },
+    {
+      "group": "Object",
+      "name": "function-arguments-object",
+      "expect": "matched",
+      "source": "function f(a: any, b: any): string { return String(arguments[0]) + String(arguments[1]) + String(arguments.length); } function main(): void { console.log(f(7, 8)); }"
+    },
+    {
+      "group": "Object",
+      "name": "function-arity-omitted",
+      "expect": "matched",
+      "source": "function f(a: any, b: any, c: any, d: any): string { return String(a) + String(d); } function main(): void { console.log(f(1, 2, 3)); }"
+    },
+    {
+      "group": "Object",
+      "name": "constructor-function-expression",
+      "expect": "matched",
+      "source": "var Point = function (x: number, y: number) { this.x = x; this.y = y; }; Point.prototype.norm = function (): number { return this.x + this.y; }; function main(): void { const p = new Point(1, 2); console.log(p instanceof Point, p.norm()); }"
+    },
+    {
+      "group": "Object",
+      "name": "builtin-constructor-value",
+      "expect": "matched",
+      "source": "function main(): void { console.log(typeof TypeError, typeof Array, typeof Object); }"
+    },
+    {
+      "group": "Object",
+      "name": "function-namespace",
+      "expect": "matched",
+      "source": "function check(cond: boolean, msg: any): void { if (!cond) { throw \"fail: \" + msg; } } check.ok = function (v: any): boolean { return v === true; }; function main(): void { check(true, \"x\"); console.log(check.ok(true)); }"
+    },
+    {
+      "group": "Object",
+      "name": "function-namespace-alias",
+      "expect": "matched",
+      "source": "function greet(): string { return \"hi\"; } function run(): void {} run.hello = greet; function main(): void { console.log(run.hello()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-name",
+      "expect": "matched",
+      "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.defineProperty",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.entries",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.entries({a:1,b:2}))); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.entries-order",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.entries({b:1,a:2,2:3,1:4}))); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.freeze",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = {a:1}; Object.freeze(o); let ok: boolean = true; try { o.a = 2; } catch (e) { ok = false; } console.log(Object.isFrozen(o), o.a, ok); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.fromEntries",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = Object.fromEntries([[\"a\",1],[\"b\",2]]); console.log(JSON.stringify(o)); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.fromEntries-overwrite",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.fromEntries([[\"a\",1],[\"a\",2]]))); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getOwnPropertyDescriptors",
+      "expect": "matched",
+      "source": "function main(): void { const d = Object.getOwnPropertyDescriptors({a:1}); console.log(d.a.value); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getOwnPropertyNames",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.getOwnPropertyNames({a:1,b:2}).join(\",\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getOwnPropertyNames-order",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.getOwnPropertyNames({b:1,a:2}).join(\",\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.groupBy",
+      "expect": "matched",
+      "source": "function main(): void { const g: any = Object.groupBy([1,2,3,4],(x: number): string => x % 2 === 0 ? \"even\" : \"odd\"); console.log(JSON.stringify(g)); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.hasOwn",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = {a:1}; console.log(Object.hasOwn(o,\"a\"), Object.hasOwn(o,\"b\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.is",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.is(NaN,NaN), Object.is(0,-0)); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.keys",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.keys({a:1,b:2}).join(\",\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.values",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.values({a:1,b:2}).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.at",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].at(-1), [1,2,3].at(0)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.fill-copyWithin",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1,2,3,4]; a.fill(0,1,3); console.log(a.join(\",\"), [1,2,3,4].copyWithin(0,2).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.fill-negative",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3,4].fill(0,-2).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.filter",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3,4].filter((x: number): boolean => x % 2 === 0).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.find",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].find((x: number): boolean => x>1), [1,2,3].findIndex((x: number): boolean => x>1)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.findLast",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3,4].findLast((x: number): boolean => x < 4), [1,2,3,4].findLastIndex((x: number): boolean => x < 4)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.flat",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[][] = [[1,2],[3,4]]; console.log(a.flat().join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.flat-infinity",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[][] = [[1,2],[3,4]]; console.log(a.flat(Infinity).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.flatMap",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2].flatMap((x: number): number[] => [x,x]).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.from",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.from(\"abc\").join(\",\"), Array.from([1,2],(x: number): number => x+1).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.from-map",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.from([1,2,3],(x: number): number => x*x).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.includes",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].includes(2), [1,2,3].includes(9)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.includes-nan",
+      "expect": "matched",
+      "source": "function main(): void { console.log([NaN].includes(NaN), [1,2,3].includes(NaN as any)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.isArray",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.isArray([]), Array.isArray({})); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.join-holes",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1,,3]; console.log(a.join(\"-\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.join-indexOf",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].join(\"-\"), [1,2,3].indexOf(2), [1,2,3].lastIndexOf(3)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.map",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].map((x: number): number => x*2).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.of",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.of(1,2,3).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.of-empty",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.of<number>().length, Array.of(1).length); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.push-pop-shift-unshift",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1]; a.push(2); a.unshift(0); console.log(a.join(\",\"), a.pop(), a.shift(), a.join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.reduce",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].reduce((a: number, b: number): number => a+b, 0)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.reduceRight",
+      "expect": "matched",
+      "source": "function main(): void { console.log([\"a\",\"b\",\"c\"].reduceRight((acc: string, x: string): string => acc + x, \"\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.slice-splice",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1,2,3,4]; console.log(a.slice(1,3).join(\",\"), JSON.stringify(a.splice(1,2))); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.some-every",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].some((x: number): boolean => x>2), [1,2,3].every((x: number): boolean => x>0)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.sort",
+      "expect": "matched",
+      "source": "function main(): void { console.log([3,1,2].sort((a: number,b: number): number => a-b).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.splice-insert",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1,2,3]; a.splice(1,0,9,8); console.log(a.join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.toReversed",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].toReversed().join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.toSorted",
+      "expect": "matched",
+      "source": "function main(): void { console.log([3,1,2].toSorted((a: number,b: number): number => a-b).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.toSpliced",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3,4].toSpliced(1,2,9).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.with",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].with(1,9).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.with-negative",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].with(-1,9).join(\",\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.at",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".at(-1), \"abc\".includes(\"b\"), \"abc\".startsWith(\"a\"), \"abc\".endsWith(\"c\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.at-out-of-range",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".at(9), \"abc\".at(-9)); }"
+    },
+    {
+      "group": "String",
+      "name": "String.charCodeAt",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"A\".charCodeAt(0), \"abc\".codePointAt(0)); }"
+    },
+    {
+      "group": "String",
+      "name": "String.codePointAt-astral",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"\\u{1F600}\".codePointAt(0)); }"
+    },
+    {
+      "group": "String",
+      "name": "String.fromCharCode",
+      "expect": "matched",
+      "source": "function main(): void { console.log(String.fromCharCode(72,105), String.fromCodePoint(0x1F600).length); }"
+    },
+    {
+      "group": "String",
+      "name": "String.isWellFormed",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".isWellFormed(), \"\\ud800\".isWellFormed()); }"
+    },
+    {
+      "group": "String",
+      "name": "String.localeCompare",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a\".localeCompare(\"b\") < 0, \"b\".localeCompare(\"a\") > 0, \"a\".localeCompare(\"a\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.match",
+      "expect": "matched",
+      "source": "function main(): void { const m: any = \"a1b2\".match(/[0-9]/g); console.log(m[0], m[1]); }"
+    },
+    {
+      "group": "String",
+      "name": "String.matchAll",
+      "expect": "matched",
+      "source": "function main(): void { let out: string[] = []; for (const m of \"a1b2\".matchAll(/([0-9])/g)) out.push(m[1]); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.matchAll-index",
+      "expect": "matched",
+      "source": "function main(): void { const out: string[] = []; for (const m of \"a1b2\".matchAll(/\\d/g)) out.push(String(m.index)); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.normalize",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"e\\u0301\".normalize(\"NFC\") === \"\\u00e9\"); }"
+    },
+    {
+      "group": "String",
+      "name": "String.normalize-NFKD",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"\u00e9\".normalize(\"NFKD\").length); }"
+    },
+    {
+      "group": "String",
+      "name": "String.pad-noop",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abcd\".padStart(2,\"x\"), \"abcd\".padEnd(2,\"x\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.padStart",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"5\".padStart(3,\"0\"), \"5\".padEnd(3,\"0\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.raw",
+      "expect": "matched",
+      "source": "function main(): void { console.log(String.raw`a\\nb`); }"
+    },
+    {
+      "group": "String",
+      "name": "String.repeat-trim",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"ab\".repeat(3), \"  x  \".trim()); }"
+    },
+    {
+      "group": "String",
+      "name": "String.repeat-zero",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(\"ab\".repeat(0))); }"
+    },
+    {
+      "group": "String",
+      "name": "String.replace",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"aaa\".replace(\"a\",\"b\"), \"aaa\".replaceAll(\"a\",\"b\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.replace-dollar-amp",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".replace(\"b\",\"[$&]\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.search",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abcdef\".search(/cd/)); }"
+    },
+    {
+      "group": "String",
+      "name": "String.slice",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abcdef\".slice(1,4), \"abcdef\".substring(1,4)); }"
+    },
+    {
+      "group": "String",
+      "name": "String.split",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a,b,c\".split(\",\").join(\"|\")); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.constants",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number.MAX_SAFE_INTEGER, Number.EPSILON > 0); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.isInteger",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number.isInteger(1), Number.isInteger(1.5), Number.isSafeInteger(9007199254740991)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.isInteger-edge",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number.isInteger(-0), Number.isInteger(1.0), Number.isInteger(NaN)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.isNaN-isFinite",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number.isNaN(NaN), Number.isFinite(1), Number.isFinite(Infinity)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.parse-hex",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number(\"0x10\"), Number(\"  42  \"), Number(\"\")); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.parseInt-parseFloat",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number.parseInt(\"42px\"), Number.parseFloat(\"3.14x\")); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.toFixed",
+      "expect": "matched",
+      "source": "function main(): void { console.log((1.5).toFixed(1), (2.345).toFixed(2)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.toFixed-round",
+      "expect": "matched",
+      "source": "function main(): void { console.log((2.5).toFixed(0), (2.05).toFixed(1), (1.005).toFixed(2)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.toPrecision-toExponential",
+      "expect": "matched",
+      "source": "function main(): void { console.log((123.456).toPrecision(4), (123.456).toExponential(2)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.toString-radix",
+      "expect": "matched",
+      "source": "function main(): void { console.log((255).toString(16), (5).toString(2)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.fround",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.fround(1.5), Math.fround(0.1)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.hypot-imul-clz32",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.hypot(3,4), Math.imul(3,4), Math.clz32(1)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.max-empty",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.max(), Math.min()); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.min-max-round",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.min(3,1,2), Math.max(3,1,2), Math.round(2.5), Math.round(-2.5)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.pow-fractional",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.pow(9,0.5), Math.pow(8,1/3)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.pow-sqrt-cbrt",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.pow(2,10), Math.sqrt(16), Math.cbrt(27)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.round-negative-half",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.round(-0.5), Math.round(-1.5)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.sign-trunc-floor-ceil",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.sign(-3), Math.trunc(2.9), Math.floor(-2.1), Math.ceil(2.1)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.sign-zero",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.sign(-0), 1 / Math.sign(-0)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.trig-log",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.sin(0), Math.cos(0), Math.atan2(1,1).toFixed(4), Math.log(Math.E).toFixed(4)); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.parse-duplicate-keys",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(JSON.parse('{\"a\":1,\"a\":2}'))); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.parse-whitespace",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(JSON.parse('  [ 1 , 2 ]  '))); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.parse.reviver",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = JSON.parse(\"{\\\"a\\\":1}\",(k: string,v: any): any => typeof v === \"number\" ? v*2 : v); console.log(o.a); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.rawJSON",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({n: JSON.rawJSON(\"12345678901234567890\")})); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.stringify",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({a:1,b:[2,3],c:\"x\"})); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.stringify-nested",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({a:[1,{b:2}],c:null})); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.stringify-number-precision",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(0.1), JSON.stringify(1e21), JSON.stringify(-0)); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.stringify.replacer",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({a:1,b:2},[\"a\"])); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.stringify.space",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({a:1},null,2)); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.toJSON",
+      "expect": "matched",
+      "source": "function main(): void { const o = {toJSON(): number { return 7; }}; console.log(JSON.stringify(o)); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.UTC-overflow",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Date.UTC(2024,12,0), Date.UTC(2024,0,32)); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.UTC-parse",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Date.UTC(2024,0,1), Date.parse(\"2024-01-01T00:00:00.000Z\")); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.compare",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Date(0) < new Date(1), new Date(0).getTime() === 0); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.getDay",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Date(Date.UTC(2024,0,15)).getUTCDay()); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.getTime-toISOString",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Date(0).getTime(), new Date(0).toISOString()); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.getUTC",
+      "expect": "matched",
+      "source": "function main(): void { const d: Date = new Date(Date.UTC(2024,0,15,10,30,0)); console.log(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours()); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.invalid-toJSON",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({d: new Date(\"nope\")})); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.setFullYear-month",
+      "expect": "matched",
+      "source": "function main(): void { const d: Date = new Date(Date.UTC(2020,0,31)); d.setUTCMonth(1); console.log(d.toISOString()); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.setUTCFullYear",
+      "expect": "matched",
+      "source": "function main(): void { const d: Date = new Date(0); d.setUTCFullYear(2000); console.log(d.getUTCFullYear()); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.toJSON",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({d: new Date(0)})); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.backreference",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/(a)\\1/.test(\"aa\"), /(a)\\1/.test(\"ab\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.case-insensitive",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/abc/i.test(\"ABC\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.global-flags",
+      "expect": "matched",
+      "source": "function main(): void { const r: RegExp = /ab/gi; console.log(r.global, r.ignoreCase, r.source); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.lastIndex-global",
+      "expect": "matched",
+      "source": "function main(): void { const r: RegExp = /a/g; console.log(r.exec(\"aa\")!.index, r.lastIndex, r.exec(\"aa\")!.index); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.matchAll.groups",
+      "expect": "matched",
+      "source": "function main(): void { const m = /(?<y>\\d{4})-(?<m>\\d{2})/.exec(\"2024-01\"); console.log(m.groups.y, m.groups.m); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.replace-groups",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"2024-01\".replace(/(?<y>\\d{4})-(?<m>\\d{2})/,\"$<m>/$<y>\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.replace.fn",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a1b2\".replace(/[0-9]/g,(s: string): string => String(Number(s)*2))); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.split-capture",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a1b2\".split(/(\\d)/).join(\"|\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.sticky",
+      "expect": "matched",
+      "source": "function main(): void { const r: RegExp = /a/y; console.log(r.test(\"ab\"), r.lastIndex, r.test(\"ab\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.test-exec",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/a+/.test(\"aaa\"), /a(b)/.exec(\"ab\")![1]); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.unicode",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/\\u{1F600}/u.test(\"\\u{1F600}\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.unicode-property",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/\\p{Letter}/u.test(\"a\"), /\\p{Number}/u.test(\"1\")); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.basic",
+      "expect": "matched",
+      "source": "function main(): void { const m: Map<string, number> = new Map<string, number>(); m.set(\"a\",1); console.log(m.get(\"a\"), m.has(\"a\"), m.size); m.delete(\"a\"); console.log(m.has(\"a\")); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.clear",
+      "expect": "matched",
+      "source": "function main(): void { const e: [number, number][] = [[1,1]]; const m: Map<number, number> = new Map<number, number>(e); m.clear(); console.log(m.size); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.forEach",
+      "expect": "matched",
+      "source": "function main(): void { const m: Map<string, number> = new Map([[\"a\",1],[\"b\",2]]); const out: string[] = []; m.forEach((v: number, k: string): void => { out.push(k+v); }); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.groupBy",
+      "expect": "matched",
+      "source": "function main(): void { const g: any = Map.groupBy([1,2,3,4],(x: number): string => x % 2 === 0 ? \"e\" : \"o\"); const e: any = g.get(\"e\"); console.log([...g.keys()].join(\",\"), e[0], e[1]); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.iteration",
+      "expect": "matched",
+      "source": "function main(): void { const m: Map<string, number> = new Map([[\"a\",1],[\"b\",2]]); const out: string[] = []; for (const [k,v] of m) out.push(k+\":\"+v); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.keys-values-entries",
+      "expect": "matched",
+      "source": "function main(): void { const m: Map<string, number> = new Map([[\"a\",1]]); console.log([...m.keys()].join(\",\"), [...m.values()].join(\",\"), JSON.stringify([...m.entries()])); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.basic",
+      "expect": "matched",
+      "source": "function main(): void { const s: Set<number> = new Set([1,2,2,3]); console.log(s.size, s.has(2)); s.delete(2); console.log(s.has(2)); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.dedupe",
+      "expect": "matched",
+      "source": "function main(): void { console.log([...new Set([1,1,2,3,3])].join(\",\")); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.delete-size",
+      "expect": "matched",
+      "source": "function main(): void { const s: Set<number> = new Set([1,2,3]); s.delete(2); console.log(s.size, [...s].join(\",\")); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.difference",
+      "expect": "matched",
+      "source": "function main(): void { const a: Set<number> = new Set([1,2,3]); const b: Set<number> = new Set([2]); console.log([...a.difference(b)].join(\",\"), [...a.symmetricDifference(b)].sort().join(\",\")); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.iteration",
+      "expect": "matched",
+      "source": "function main(): void { const s: Set<string> = new Set([\"a\",\"b\"]); const out: string[] = []; for (const v of s) out.push(v); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.relations",
+      "expect": "matched",
+      "source": "function main(): void { const a: Set<number> = new Set([1,2]); const b: Set<number> = new Set([1,2,3]); console.log(a.isSubsetOf(b), b.isSupersetOf(a), a.isDisjointFrom(new Set([9]))); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.union-intersection",
+      "expect": "matched",
+      "source": "function main(): void { const a: Set<number> = new Set([1,2,3]); const b: Set<number> = new Set([2,3,4]); console.log([...a.union(b)].sort().join(\",\"), [...a.intersection(b)].sort().join(\",\")); }"
+    },
+    {
+      "group": "WeakMap",
+      "name": "WeakMap.basic",
+      "expect": "matched",
+      "source": "function main(): void { const o: object = {}; const m: WeakMap<object, number> = new WeakMap<object, number>(); m.set(o,1); console.log(m.get(o), m.has(o)); m.delete(o); console.log(m.has(o)); }"
+    },
+    {
+      "group": "WeakSet",
+      "name": "WeakSet.basic",
+      "expect": "matched",
+      "source": "function main(): void { const o: object = {}; const s: WeakSet<object> = new WeakSet<object>(); s.add(o); console.log(s.has(o)); s.delete(o); console.log(s.has(o)); }"
+    },
+    {
+      "group": "Error",
+      "name": "AggregateError",
+      "expect": "matched",
+      "source": "function main(): void { const e = new AggregateError([new Error(\"a\"), new Error(\"b\")],\"agg\"); console.log(e.message, e.errors.length); }"
+    },
+    {
+      "group": "Error",
+      "name": "Error.any-null-access",
+      "expect": "matched",
+      "source": "function main(): void { const z: any = null; try { z.x; console.log(\"no-throw\"); } catch (e: any) { console.log(\"threw\"); } }"
+    },
+    {
+      "group": "Error",
+      "name": "Error.basic",
+      "expect": "matched",
+      "source": "function main(): void { const e: Error = new Error(\"boom\"); console.log(e.message, e.name); }"
+    },
+    {
+      "group": "Error",
+      "name": "Error.subtypes",
+      "expect": "matched",
+      "source": "function main(): void { const z: { a: number } | null = null; try { z.a; } catch (e: any) { console.log(e instanceof TypeError, e.name); } const r: RangeError = new RangeError(\"r\"); console.log(r.name); }"
+    },
+    {
+      "group": "Symbol",
+      "name": "Symbol.basic",
+      "expect": "matched",
+      "source": "function main(): void { const s: symbol = Symbol(\"desc\"); console.log(typeof s, s.description, Symbol(\"x\") !== Symbol(\"x\")); }"
+    },
+    {
+      "group": "Symbol",
+      "name": "Symbol.for-keyFor",
+      "expect": "matched",
+      "source": "function main(): void { const s: symbol = Symbol.for(\"k\"); console.log(Symbol.keyFor(s), s === Symbol.for(\"k\")); }"
+    },
+    {
+      "group": "Symbol",
+      "name": "Symbol.iterator",
+      "expect": "matched",
+      "source": "function main(): void { const it: Iterable<number> = { [Symbol.iterator](): Iterator<number> { let i: number = 0; return { next(): IteratorResult<number> { return i < 3 ? { value: i++, done: false } : { value: 0, done: true }; } }; } }; console.log([...it].join(\",\")); }"
+    },
+    {
+      "group": "BigInt",
+      "name": "BigInt.arithmetic",
+      "expect": "matched",
+      "source": "function main(): void { const a: bigint = 9007199254740993n; console.log((a + 1n).toString(), (10n / 3n).toString(), (10n % 3n).toString()); }"
+    },
+    {
+      "group": "BigInt",
+      "name": "BigInt.asIntN",
+      "expect": "matched",
+      "source": "function main(): void { console.log(BigInt.asIntN(8, 255n), BigInt.asUintN(8, -1n)); }"
+    },
+    {
+      "group": "BigInt",
+      "name": "BigInt.asUintN-neg",
+      "expect": "matched",
+      "source": "function main(): void { console.log(BigInt.asUintN(8, -1n), BigInt.asIntN(8, 200n)); }"
+    },
+    {
+      "group": "BigInt",
+      "name": "BigInt.compare",
+      "expect": "matched",
+      "source": "function main(): void { console.log(2n > 1n, 1n === 1n); }"
+    },
+    {
+      "group": "BigInt",
+      "name": "BigInt.toString-radix",
+      "expect": "matched",
+      "source": "function main(): void { console.log((255n).toString(16), (5n).toString(2)); }"
+    },
+    {
+      "group": "ArrayBuffer",
+      "name": "ArrayBuffer.byteLength-slice",
+      "expect": "matched",
+      "source": "function main(): void { const b: ArrayBuffer = new ArrayBuffer(8); const s: ArrayBuffer = b.slice(2,5); console.log(b.byteLength, s.byteLength); }"
+    },
+    {
+      "group": "SharedArrayBuffer",
+      "name": "SharedArrayBuffer.byteLength",
+      "expect": "matched",
+      "source": "function main(): void { const b: SharedArrayBuffer = new SharedArrayBuffer(16); console.log(b.byteLength, b.slice(4).byteLength); }"
+    },
+    {
+      "group": "DataView",
+      "name": "DataView.float",
+      "expect": "matched",
+      "source": "function main(): void { const d: DataView = new DataView(new ArrayBuffer(8)); d.setFloat64(0,3.14); console.log(d.getFloat64(0)); }"
+    },
+    {
+      "group": "DataView",
+      "name": "DataView.integers",
+      "expect": "matched",
+      "source": "function main(): void { const d: DataView = new DataView(new ArrayBuffer(8)); d.setUint8(0,255); d.setInt16(1,-2); d.setUint32(3,4000000000); console.log(d.getUint8(0), d.getInt16(1), d.getUint32(3)); }"
+    },
+    {
+      "group": "Uint8Array",
+      "name": "Uint8Array.from",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Uint8Array.from([1,2,3]).join(\",\")); }"
+    },
+    {
+      "group": "Uint8Array",
+      "name": "Uint8Array.index-set",
+      "expect": "matched",
+      "source": "function main(): void { const a: Uint8Array = new Uint8Array(4); a[0] = 255; a[1] = 1; a[2] = 2; console.log(a[0], a[1], a[2], a.length); }"
+    },
+    {
+      "group": "Uint8Array",
+      "name": "Uint8Array.subarray",
+      "expect": "matched",
+      "source": "function main(): void { const a: Uint8Array = new Uint8Array([1,2,3,4]); console.log(a.subarray(1,3).join(\",\")); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Float32Array",
+      "expect": "matched",
+      "source": "function main(): void { const a: Float32Array = new Float32Array(2); a[0] = 1.5; console.log(a[0]); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Float64Array",
+      "expect": "matched",
+      "source": "function main(): void { const a: Float64Array = new Float64Array(2); a[0] = 1.5; console.log(a[0]); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Int16Array",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int16Array = new Int16Array(2); a[0] = -5; console.log(a[0]); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Int32Array",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array(4); a[0] = 5; console.log(a[0], a.length); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Int32Array.from",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array([1,2,3]); console.log(a[0], a[1], a[2]); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Int8Array",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int8Array = new Int8Array(2); a[0] = 3; console.log(a[0]); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Uint32Array",
+      "expect": "matched",
+      "source": "function main(): void { const a: Uint32Array = new Uint32Array(2); a[0] = 7; console.log(a[0]); }"
+    },
+    {
+      "group": "TypedArray",
+      "name": "Uint8ClampedArray",
+      "expect": "matched",
+      "source": "function main(): void { const a: Uint8ClampedArray = new Uint8ClampedArray(2); a[0] = 3; console.log(a[0]); }"
+    },
+    {
+      "group": "Atomics",
+      "name": "Atomics.add",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); console.log(Atomics.add(a,0,1)); }"
+    },
+    {
+      "group": "Atomics",
+      "name": "Atomics.compareExchange",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,5); console.log(Atomics.compareExchange(a,0,5,9), Atomics.load(a,0)); }"
+    },
+    {
+      "group": "Atomics",
+      "name": "Atomics.exchange",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,5); console.log(Atomics.exchange(a,0,7), Atomics.load(a,0)); }"
+    },
+    {
+      "group": "Atomics",
+      "name": "Atomics.load-store",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(8)); console.log(Atomics.store(a,0,42), Atomics.load(a,0)); }"
+    },
+    {
+      "group": "Atomics",
+      "name": "Atomics.sub",
+      "expect": "matched",
+      "source": "function main(): void { const a: Int32Array = new Int32Array(new SharedArrayBuffer(4)); Atomics.store(a,0,10); console.log(Atomics.sub(a,0,3), Atomics.load(a,0)); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.all",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const r: number[] = await Promise.all([Promise.resolve(1), Promise.resolve(2)]); console.log(r.join(\",\")); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.allSettled",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const r = await Promise.allSettled([Promise.resolve(1), Promise.reject(new Error(\"x\"))]); console.log(r[0].status, r[1].status); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.catch",
+      "expect": "matched",
+      "source": "function main(): void { new Promise<number>((_resolve: (v: number) => void, reject: (e: Error) => void): void => reject(new Error(\"e\"))).catch((e: Error): number => { console.log(e.message); return 0; }); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.finally",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let seen = false; const r: number = await Promise.resolve(5).finally((): void => { seen = true; }); console.log(r, seen); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.race",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const r: number = await Promise.race([Promise.resolve(1), Promise.resolve(2)]); console.log(r); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.then",
+      "expect": "matched",
+      "source": "function main(): void { new Promise<number>((resolve: (v: number) => void): void => resolve(1)).then((v: number): void => { console.log(v); }); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.then-chain",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const r: number = await Promise.resolve(1).then((x: number): number => x + 1).then((x: number): number => x * 10); console.log(r); }"
+    },
+    {
+      "group": "Promise",
+      "name": "async-await",
+      "expect": "matched",
+      "source": "async function f(x: number): Promise<number> { return x*2; } async function main(): Promise<void> { console.log(await f(21)); }"
+    },
+    {
+      "group": "Iterator",
+      "name": "Iterator.from",
+      "expect": "matched",
+      "source": "function main(): void { const it = Iterator.from([1,2,3]); console.log(it.next().value, it.next().value); }"
+    },
+    {
+      "group": "Iterator",
+      "name": "for-of-iterable",
+      "expect": "matched",
+      "source": "function main(): void { const out: number[] = []; for (const v of [1,2,3]) out.push(v); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "Generator",
+      "name": "Generator.for-of",
+      "expect": "matched",
+      "source": "function* g(): Generator<number> { for (let i: number = 0; i < 3; i++) yield i; } function main(): void { console.log([...g()].join(\",\")); }"
+    },
+    {
+      "group": "Generator",
+      "name": "Generator.next",
+      "expect": "matched",
+      "source": "function* g(): Generator<number> { yield 1; yield 2; return 3; } function main(): void { const it: Generator<number> = g(); console.log(it.next().value, it.next().value, it.next().value); }"
+    },
+    {
+      "group": "Generator",
+      "name": "Generator.yield-delegation",
+      "expect": "matched",
+      "source": "function* inner(): Generator<number> { yield 2; yield 3; } function* outer(): Generator<number> { yield 1; yield* inner(); } function main(): void { console.log([...outer()].join(\",\")); }"
+    },
+    {
+      "group": "AsyncGenerator",
+      "name": "AsyncGenerator",
+      "expect": "matched",
+      "source": "async function* g(): AsyncGenerator<number> { yield 1; yield 2; } async function main(): Promise<void> { const out: number[] = []; for await (const v of g()) out.push(v); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "structuredClone",
+      "name": "structuredClone.object",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = {a:1,b:[2,3],c:{d:\"x\"}}; const c: any = structuredClone(o); console.log(JSON.stringify(c), c !== o, c.b !== o.b); }"
+    },
+    {
+      "group": "structuredClone",
+      "name": "structuredClone.typed",
+      "expect": "matched",
+      "source": "function main(): void { const a: Uint8Array = new Uint8Array([1,2,3]); const c: Uint8Array = structuredClone(a) as Uint8Array; console.log(c.join(\",\")); }"
+    },
+    {
+      "group": "FinalizationRegistry",
+      "name": "FinalizationRegistry.basic",
+      "expect": "matched",
+      "source": "function main(): void { const r = new FinalizationRegistry((v: object): void => {}); const token: object = {}; r.register({}, token); console.log(r.unregister(token)); }"
+    },
+    {
+      "group": "global",
+      "name": "global.constants",
+      "expect": "matched",
+      "source": "function main(): void { console.log(NaN !== NaN, Infinity > 1e308, typeof undefined); }"
+    },
+    {
+      "group": "global",
+      "name": "global.encodeURI",
+      "expect": "matched",
+      "source": "function main(): void { console.log(encodeURI(\"a b/c\"), decodeURI(\"a%20b\")); }"
+    },
+    {
+      "group": "global",
+      "name": "global.encodeURIComponent",
+      "expect": "matched",
+      "source": "function main(): void { console.log(encodeURIComponent(\"a b/c\"), decodeURIComponent(\"a%20b%2Fc\")); }"
+    },
+    {
+      "group": "global",
+      "name": "global.isNaN-isFinite",
+      "expect": "matched",
+      "source": "function main(): void { console.log(isNaN(NaN), isFinite(1), isFinite(Infinity)); }"
+    },
+    {
+      "group": "global",
+      "name": "global.parseInt",
+      "expect": "matched",
+      "source": "function main(): void { console.log(parseInt(\"42px\"), parseFloat(\"3.14x\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.Collator",
+      "expect": "matched",
+      "source": "function main(): void { const c = new Intl.Collator(\"en\"); console.log([\"b\",\"a\",\"c\"].sort((x: string,y: string): number => c.compare(x,y)).join(\",\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DateTimeFormat",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.DateTimeFormat(\"en-US\",{timeZone:\"UTC\",year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).format(new Date(Date.UTC(2024,0,15)))); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DateTimeFormat.de-month",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.DateTimeFormat(\"de-DE\",{timeZone:\"UTC\",year:\"numeric\",month:\"long\",day:\"numeric\"}).format(new Date(Date.UTC(2024,0,15)))); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DateTimeFormat.weekday",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.DateTimeFormat(\"en-US\",{timeZone:\"UTC\",weekday:\"long\"}).format(new Date(Date.UTC(2024,0,15)))); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DisplayNames",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Intl.DisplayNames([\"en\"],{type:\"region\"}); console.log(d.of(\"US\"), d.of(\"JP\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DisplayNames.language",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Intl.DisplayNames([\"en\"],{type:\"language\"}); console.log(d.of(\"de\"), d.of(\"fr\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.ListFormat",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.ListFormat(\"en-US\",{style:\"long\",type:\"conjunction\"}).format([\"a\",\"b\",\"c\"])); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.ListFormat.disjunction",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.ListFormat(\"en-US\",{style:\"short\",type:\"disjunction\"}).format([\"a\",\"b\",\"c\"])); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.Locale",
+      "expect": "matched",
+      "source": "function main(): void { const l = new Intl.Locale(\"en-US\"); console.log(l.language, l.region, l.toString()); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en-US\").format(1234567.89)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat.decimals",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en-US\",{minimumFractionDigits:2,maximumFractionDigits:2}).format(1.5)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat.grouping",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"de-DE\").format(1234567.89)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat.percent",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en-US\",{style:\"percent\"}).format(0.25)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.PluralRules",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.PluralRules(\"en-US\").select(1), new Intl.PluralRules(\"en-US\").select(2)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.PluralRules.ordinal",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.PluralRules(\"en-US\",{type:\"ordinal\"}).select(1), new Intl.PluralRules(\"en-US\",{type:\"ordinal\"}).select(2)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.RelativeTimeFormat",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.RelativeTimeFormat(\"en-US\",{numeric:\"always\"}).format(-1,\"day\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.RelativeTimeFormat.auto",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.RelativeTimeFormat(\"en-US\",{numeric:\"auto\"}).format(-1,\"day\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.Segmenter",
+      "expect": "matched",
+      "source": "function main(): void { const s = new Intl.Segmenter(\"en\",{granularity:\"word\"}); const out: string[] = []; for (const seg of s.segment(\"a b c\")) out.push(seg.segment); console.log(out.join(\"|\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.getCanonicalLocales",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Intl.getCanonicalLocales(\"EN-us\")[0]); }"
+    },
+    {
+      "group": "Function",
+      "name": "Function.ctor",
+      "expect": "matched",
+      "source": "function main(): void { const f: any = new Function(\"a\",\"b\",\"return a+b\"); console.log(f(1,2)); }"
+    },
+    {
+      "group": "eval",
+      "name": "eval",
+      "expect": "matched",
+      "source": "function main(): void { console.log(eval(\"1+1\")); }"
+    },
+    {
+      "group": "WeakRef",
+      "name": "WeakRef",
+      "expect": "matched",
+      "source": "function main(): void { const o: object = {}; const r: WeakRef<object> = new WeakRef(o); console.log(r.deref() === o); }"
+    },
+    {
+      "group": "Proxy",
+      "name": "Proxy.trap",
+      "expect": "matched",
+      "source": "function main(): void { const target: Record<string, number> = { a: 1 }; const proxy = new Proxy(target, { get(obj: Record<string, number>, prop: string): number { return prop in obj ? obj[prop] : -1; }, set(obj: Record<string, number>, prop: string, value: number): boolean { obj[prop] = value * 2; return true; }, has(obj: Record<string, number>, prop: string): boolean { return prop === 'a' || prop in obj; } }); proxy.b = 5; console.log(proxy.a, proxy.missing, proxy.b, 'a' in proxy, 'z' in proxy); }"
+    },
+    {
+      "group": "Reflect",
+      "name": "Reflect.get",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Reflect.get({a:1},\"a\"), Reflect.has({a:1},\"a\")); }"
+    }
+  ]
+}

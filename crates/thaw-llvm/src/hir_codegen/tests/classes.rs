@@ -1,3 +1,583 @@
+
+#[test]
+fn mixed_json_add_respects_literal_optional_string_and_operand_order() {
+    let source = r#"
+        class Hook {
+            [Symbol.toPrimitive](hint: string): any {
+                order += "P";
+                return "H";
+            }
+        }
+        let order: string = "";
+        function rhs(): number { order += "R"; return 1; }
+        function optional(present: boolean): string | undefined {
+            if (present) return "S";
+            return undefined;
+        }
+        function nullable(present: boolean): string | null {
+            if (present) return "N";
+            return null;
+        }
+        function choose(present: boolean): string | number {
+            if (present) return "Q";
+            return 2;
+        }
+        function chooseSymbol(present: boolean): symbol | number {
+            if (present) return Symbol("tag");
+            return 2;
+        }
+        function chooseBigString(text: boolean): bigint | string {
+            if (text) return "B";
+            return 2n;
+        }
+        function main(): void {
+            const literal: "L" = "L";
+            const value: any = 4;
+            console.log(literal + value, value + literal, literal + 1n);
+            try { console.log(literal + Symbol("x")); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(value + optional(true), optional(true) + value,
+                value + optional(false), optional(false) + value);
+            console.log(value + nullable(true), nullable(true) + value,
+                value + nullable(false), nullable(false) + value);
+            console.log(value + choose(true), value + choose(false),
+                choose(true) + value, choose(false) + value);
+            console.log(optional(true) + 1n, 1n + optional(true));
+            try { console.log(optional(false) + 1n); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(1n + optional(false)); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(value + Symbol("right")); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(Symbol("left") + value); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(value + chooseSymbol(true)); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(value + chooseSymbol(false));
+            console.log(chooseBigString(false) + chooseBigString(false) === 4n);
+            console.log(chooseBigString(true) + chooseBigString(false));
+            try { console.log(chooseBigString(false) + 4); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(new Hook() + rhs(), order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "mixed_json_add_literal_optional_order"),
+        "L4 4L L1\ntrue\n4S S4 NaN NaN\n4N N4 4 4\n4Q 6 Q4 6\nS1 1S\ntrue\ntrue\ntrue\ntrue\ntrue\n6\ntrue\nB2\ntrue\nH1 RP\n");
+}
+
+#[test]
+fn normalized_constructor_static_writes_keep_time_and_optional_storage() {
+    let source = r#"
+        let order: string = "";
+        let phase: number = 0;
+        function Box() { this.value = 0; }
+        let before: boolean = Box.count === undefined;
+        let beforeLabel: boolean = Box.label === undefined;
+        function rhs(): number { order += "R"; return phase; }
+        order += "A";
+        phase = 4;
+        Box.effect = rhs();
+        order += "B";
+        Box.count = phase + 0;
+        Box.count = phase + 1;
+        let old: number = Box.count++;
+        Box.count += 1;
+        let updated: number = ++Box.count;
+        Box.label = "x";
+        Box.label += 1;
+        function main(): void {
+            console.log(before, beforeLabel, order, old, updated, Box.count, Box.label);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "normalized_constructor_static_order"),
+        "true true ARB 5 8 8 x1\n");
+}
+
+#[test]
+fn normalized_constructor_mixed_json_static_add_uses_runtime_primitive() {
+    let source = r#"
+        function Box() { this.value = 0; }
+        let order: string = "";
+        function rhs(): number { order += "R"; return 2; }
+        Box.mixed = "a";
+        let joined: any = Box.mixed += rhs();
+        Box.mixed = 1;
+        let added: any = Box.mixed += rhs();
+        function suffix(): string { order += "S"; return "x"; }
+        let stringJoined: any = Box.mixed += suffix();
+        const left: any = "z";
+        const right: any = 4;
+        const staticLeft: string = "L";
+        function main(): void {
+            console.log(joined, added, stringJoined, Box.mixed,
+                left + 2, right + 2, right + "x", "x" + right,
+                staticLeft + right, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "normalized_mixed_json_static_add"),
+        "a2 3 3x 3x z2 6 4x x4 L4 RRS\n");
+}
+#[test]
+fn normalized_json_static_add_preserves_live_js_operand_order() {
+    let source = r#"
+        function Box() { this.value = 0; }
+        Box.mixed = "a";
+        Box.mixed = 1;
+        function main(): void {
+            const loaded: boolean = loadScript("globalThis.liveAddText = 'x'; globalThis.liveAddNumber = 2;");
+            const text: JsValue = getDynamicValue("liveAddText");
+            const number: JsValue = getDynamicValue("liveAddNumber");
+            const native: any = 1;
+            console.log(loaded, native + text, text + native);
+            const withText: any = Box.mixed += text;
+            Box.mixed = 2;
+            const withNumber: any = Box.mixed += number;
+            console.log(withText, withNumber, Box.mixed);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "normalized_json_live_add"),
+        "true 1x x1\n1x 4 4\n");
+}
+
+#[test]
+fn native_instance_accessor_update_orders_receiver_getter_setter_and_result() {
+    let source = r#"
+        let order = "";
+        let stored = 3;
+        let gets = 0;
+        let sets = 0;
+        let receivers = 0;
+        class Box {
+            get value(): number { gets++; order += "G"; return stored; }
+            set value(next: number) { sets++; order += "S"; stored = next * 10; }
+            lower(): number { return --this.value; }
+        }
+        function make(): Box { receivers++; order += "R"; return new Box(); }
+        function main(): void {
+            console.log(++make().value, receivers, gets, sets, order, stored);
+            order = "";
+            const box = new Box();
+            console.log(box["value"]--, gets, sets, order, stored);
+            order = "";
+            console.log(box.lower(), gets, sets, order, stored);
+            Object.freeze(box);
+            order = "";
+            console.log(++box.value, gets, sets, order, stored);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_instance_accessor_update"),
+        "4 1 1 1 RGS 40\n40 2 2 GS 390\n389 3 3 GS 3890\n3891 4 4 GS 38910\n");
+}
+
+#[test]
+fn inherited_and_super_instance_accessor_updates_use_the_nearest_descriptor() {
+    let source = r#"
+        let order = "";
+        class Base {
+            stored: number;
+            constructor() { this.stored = 2; }
+            get value(): number { order += "G"; return this.stored; }
+            set value(next: number) { order += "S"; this.stored = next; }
+        }
+        class Derived extends Base {
+            constructor() { super(); }
+            step(): number { return ++super.value; }
+            stepPost(): number { return super.value--; }
+        }
+        function main(): void {
+            const derived = new Derived();
+            console.log(derived.value++, derived.stored, order);
+            order = "";
+            console.log(derived.step(), derived.stored, order);
+            order = "";
+            console.log(derived.stepPost(), derived.stored, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "inherited_super_accessor_update"),
+        "2 3 GS\n4 4 GS\n4 3 GS\n");
+}
+
+#[test]
+fn super_accessor_ignores_an_instance_field_with_the_same_name() {
+    let source = r#"
+        class Grand {
+            stored: number;
+            constructor() { this.stored = 2; }
+            get value(): number { return this.stored; }
+            set value(next: number) { this.stored = next; }
+        }
+        class Base extends Grand {
+            value: number;
+            constructor() { super(); this.value = 100; }
+        }
+        class Derived extends Base {
+            constructor() { super(); }
+            step(): number { return ++super.value; }
+            setBase(): number { super.value = 7; return super.value; }
+        }
+        function main(): void {
+            const derived = new Derived();
+            console.log(derived.value++, derived.value, derived.stored);
+            console.log(derived.step(), derived.value, derived.stored);
+            console.log(derived.setBase(), derived.value, derived.stored);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "super_accessor_shadowed_field"),
+        "100 101 2\n3 101 3\n7 101 7\n");
+}
+
+#[test]
+fn throwing_class_accessor_setter_prevents_update_result() {
+    let source = r#"
+        let order = "";
+        class Box {
+            get value(): number { order += "G"; return 1; }
+            set value(next: number) { order += "S"; throw new Error("blocked"); }
+        }
+        function main(): void {
+            try { const result = ++new Box().value; console.log(result); }
+            catch (error) { console.log(order); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "throwing_class_accessor_update"), "GS\n");
+}
+
+#[test]
+fn class_method_calls_require_allocated_identity_after_argument_effects() {
+    let source = r#"
+        let effects = 0;
+        class Base {
+            add(value: number): number { return value + 1; }
+        }
+        class Derived extends Base {}
+        class DefaultRest {
+            total(base: number = 3, ...values: number[]): number { return base + values.length; }
+        }
+        class OwnShadow extends Base {
+            add: (value: number) => number;
+            constructor() { super(); this.add = (value: number): number => value + 20; }
+        }
+        class VoidBox { hit(value: number): void { voidEffects += value; } }
+        let voidEffects = 0;
+        let receivers = 0;
+        function argument(): number { effects++; return 4; }
+        function voidArgument(): number { voidEffects++; return 2; }
+        function spread(): [number] { effects++; return [6]; }
+        function make(): Base { receivers++; return new Base(); }
+        function main(): void {
+            console.log(make().add(argument()), new Derived().add(argument()), receivers, effects);
+            const fake = { ["__thaw_class_identity_\u001eBase"]: true } as Base;
+            try { fake.add(argument()); console.log("unexpected"); }
+            catch (error) { console.log("rejected", effects); }
+            try { fake.add(...spread()); console.log("unexpected"); }
+            catch (error) { console.log("spread", effects); }
+            const ordinary = {
+                ["__thaw_class_identity_\u001eBase"]: true,
+                add(value: number): number { return value + 10; }
+            };
+            console.log(ordinary.add(argument()), effects);
+            new VoidBox().hit(voidArgument());
+            console.log("void", voidEffects);
+            console.log("default-rest", new DefaultRest().total(), new DefaultRest().total(4, 5, 6));
+            console.log("own-field", new OwnShadow().add(2));
+            const voidFake = { ["__thaw_class_identity_\u001eVoidBox"]: true } as VoidBox;
+            try { voidFake.hit(voidArgument()); console.log("unexpected"); }
+            catch (error) { console.log("void-rejected", voidEffects); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_method_allocated_identity"),
+        "5 5 1 2\nrejected 3\nspread 4\n14 5\nvoid 3\ndefault-rest 3 6\nown-field 22\nvoid-rejected 4\n");
+}
+
+
+#[test]
+fn copied_class_marker_cannot_dispatch_symbol_tag_getter() {
+    let source = r#"
+        let called = 0;
+        class Tagged {
+            get [Symbol.toStringTag](): string { called++; return "Tagged"; }
+        }
+        function main(): void {
+            const fake = { ["__thaw_class_identity_\u001eTagged"]: true } as Tagged;
+            try { console.log(Object.prototype.toString.call(fake)); }
+            catch (error) { console.log("rejected", called); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "copied_marker_tag_guard"), "rejected 0\n");
+}
+
+#[test]
+fn copied_class_marker_cannot_dispatch_instance_accessors() {
+    let source = r#"
+        let order = "";
+        class Box {
+            get value(): number { order += "G"; return 1; }
+            set value(next: number) { order += "S"; }
+        }
+        function rhs(): number { order += "R"; return 2; }
+        function main(): void {
+            const fake = { ["__thaw_class_identity_\u001eBox"]: true } as Box;
+            try { fake.value = rhs(); console.log("unexpected"); }
+            catch (error) { console.log(order); }
+            order = "";
+            try { ++fake.value; console.log("unexpected"); }
+            catch (error) { console.log(order); }
+            const ordinary = { ["__thaw_class_identity_\u001eBox"]: true, value: 5 };
+            console.log(++ordinary.value, ordinary.value);
+            order = "";
+            ordinary.value = rhs();
+            console.log(ordinary.value, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "copied_marker_accessor_guard"), "R\n\n6 6\n2 R\n");
+}
+
+#[test]
+fn native_instanceof_checks_allocated_identity_not_marker_layout() {
+    let source = r#"
+        class Base {}
+        class Derived extends Base {}
+        const ordinary = { ["__thaw_class_identity_\u001eBase"]: true };
+        function choose(flag: boolean): void {
+            const selected = flag ? ordinary : "text";
+            console.log(selected instanceof Base);
+            if (!(selected instanceof Base)) console.log("not-base");
+        }
+        function main(): void {
+            console.log(new Base() instanceof Base);
+            console.log(new Derived() instanceof Base);
+            console.log(ordinary instanceof Base);
+            choose(true);
+            choose(false);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nominal_instanceof_not_layout"),
+        "true\ntrue\nfalse\nfalse\nnot-base\nfalse\nnot-base\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_uses_the_resolved_property_constructor() {
+    let source = r#"
+        function computedKey(): string {
+            loadScript("dynamicInstanceofKeyCalls++");
+            return "C";
+        }
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofKeyCalls = 0; globalThis.dynamicInstanceofHolder = { C: class DynamicInstanceofClass {} }; globalThis.dynamicInstanceofMember = new dynamicInstanceofHolder.C(); globalThis.dynamicInstanceofOther = {};");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            const member: JsValue = getDynamicValue("dynamicInstanceofMember");
+            const other: JsValue = getDynamicValue("dynamicInstanceofOther");
+            console.log(member instanceof holder.C, other instanceof holder.C, 1 instanceof holder.C);
+            console.log(member instanceof holder[computedKey()], Number(getDynamicValue("dynamicInstanceofKeyCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_property_constructor"),
+        "true false false\ntrue 1\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_evaluates_operands_left_to_right_once() {
+    let source = r#"
+        function left(): JsValue {
+            loadScript("dynamicInstanceofOrder += 'L';");
+            return getDynamicValue("dynamicInstanceofMarker");
+        }
+        function throwingLeft(): JsValue {
+            loadScript("dynamicInstanceofOrder += 'L';");
+            throw getDynamicValue("dynamicInstanceofMarker");
+        }
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofOrder = ''; globalThis.dynamicInstanceofMarker = {}; globalThis.dynamicInstanceofHolder = { get C() { dynamicInstanceofOrder += 'R'; return { [Symbol.hasInstance](value) { dynamicInstanceofOrder += 'H'; return value === dynamicInstanceofMarker; } }; } }; globalThis.dynamicInstanceofThrowingHolder = { get C() { dynamicInstanceofOrder += 'R'; throw dynamicInstanceofMarker; } };");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            console.log(left() instanceof holder.C, String(getDynamicValue("dynamicInstanceofOrder")));
+            loadScript("dynamicInstanceofOrder = '';");
+            const throwingHolder: JsValue = getDynamicValue("dynamicInstanceofThrowingHolder");
+            try { throwingLeft() instanceof throwingHolder.C; console.log("missed left throw"); }
+            catch (error) { console.log(error === getDynamicValue("dynamicInstanceofMarker"), String(getDynamicValue("dynamicInstanceofOrder"))); }
+            loadScript("dynamicInstanceofOrder = '';");
+            try { left() instanceof throwingHolder.C; console.log("missed RHS throw"); }
+            catch (error) { console.log(error === getDynamicValue("dynamicInstanceofMarker"), String(getDynamicValue("dynamicInstanceofOrder"))); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_operand_order_and_throws"),
+        "true LRH\ntrue L\ntrue LR\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_invalid_rhs_uses_native_type_errors() {
+    let source = r#"
+        function isTypeError(holder: JsValue, key: string, value: any): boolean {
+            try { const ignored = value instanceof holder[key]; return false; }
+            catch (error) { return error instanceof TypeError; }
+        }
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofTargets = { nullValue: null, undefinedValue: undefined, numberValue: 3, plainValue: {}, arrowValue: () => {}, badHasInstance: { [Symbol.hasInstance]: 1 } }; globalThis.dynamicInstanceofObject = {};");
+            const targets: JsValue = getDynamicValue("dynamicInstanceofTargets");
+            const object: JsValue = getDynamicValue("dynamicInstanceofObject");
+            console.log(isTypeError(targets, "nullValue", 1), isTypeError(targets, "undefinedValue", 1), isTypeError(targets, "numberValue", 1), isTypeError(targets, "plainValue", 1), isTypeError(targets, "arrowValue", object), isTypeError(targets, "badHasInstance", 1));
+            console.log((1 as any) instanceof targets.arrowValue);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_invalid_rhs_types"),
+        "true true true true true true\nfalse\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_custom_has_instance_keeps_receiver_and_primitive_lhs() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofReads = 0; globalThis.dynamicInstanceofCalls = 0; globalThis.dynamicInstanceofObject = {}; globalThis.dynamicInstanceofOther = {}; globalThis.dynamicInstanceofSawObject = false; globalThis.dynamicInstanceofSawPrimitive = false; globalThis.dynamicInstanceofSawOther = false; globalThis.dynamicInstanceofCustom = {}; Object.defineProperty(dynamicInstanceofCustom, Symbol.hasInstance, { get() { dynamicInstanceofReads++; return function(value) { dynamicInstanceofCalls++; if (this !== dynamicInstanceofCustom) throw new Error('wrong hasInstance receiver'); if (value === dynamicInstanceofObject) { dynamicInstanceofSawObject = true; return { matched: true }; } if (value === 7) { dynamicInstanceofSawPrimitive = true; return 1; } if (value === dynamicInstanceofOther) dynamicInstanceofSawOther = true; return false; }; } }); globalThis.dynamicInstanceofHolder = { C: dynamicInstanceofCustom };");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            const object: JsValue = getDynamicValue("dynamicInstanceofObject");
+            const other: JsValue = getDynamicValue("dynamicInstanceofOther");
+            console.log(object instanceof holder.C, other instanceof holder.C, 7 instanceof holder.C);
+            console.log(Number(getDynamicValue("dynamicInstanceofReads")), Number(getDynamicValue("dynamicInstanceofCalls")), Number(getDynamicValue("dynamicInstanceofSawObject")), Number(getDynamicValue("dynamicInstanceofSawOther")), Number(getDynamicValue("dynamicInstanceofSawPrimitive")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_custom_has_instance"),
+        "true false true\n3 3 1 1 1\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_preserves_getter_and_hook_throws_exactly() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofMarker = {}; globalThis.dynamicInstanceofGetterFailure = {}; Object.defineProperty(dynamicInstanceofGetterFailure, Symbol.hasInstance, { get() { throw dynamicInstanceofMarker; } }); globalThis.dynamicInstanceofGetterUndefined = {}; Object.defineProperty(dynamicInstanceofGetterUndefined, Symbol.hasInstance, { get() { throw undefined; } }); globalThis.dynamicInstanceofHookFailure = { [Symbol.hasInstance]() { throw dynamicInstanceofMarker; } }; globalThis.dynamicInstanceofHookUndefined = { [Symbol.hasInstance]() { throw undefined; } }; globalThis.dynamicInstanceofHolder = { get propertyFailure() { throw dynamicInstanceofMarker; }, getterFailure: dynamicInstanceofGetterFailure, getterUndefined: dynamicInstanceofGetterUndefined, hookFailure: dynamicInstanceofHookFailure, hookUndefined: dynamicInstanceofHookUndefined }; globalThis.dynamicInstanceofValue = {};");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            const value: JsValue = getDynamicValue("dynamicInstanceofValue");
+            let propertyCaught = false;
+            try { value instanceof holder.propertyFailure; }
+            catch (error) { propertyCaught = error === getDynamicValue("dynamicInstanceofMarker"); }
+            let getterCaught = false;
+            try { value instanceof holder.getterFailure; }
+            catch (error) { getterCaught = error === getDynamicValue("dynamicInstanceofMarker"); }
+            let getterUndefinedCaught = false;
+            let getterUndefinedDidThrow = false;
+            try { value instanceof holder.getterUndefined; }
+            catch (error) { getterUndefinedDidThrow = true; getterUndefinedCaught = error === undefined; }
+            let hookCaught = false;
+            try { value instanceof holder.hookFailure; }
+            catch (error) { hookCaught = error === getDynamicValue("dynamicInstanceofMarker"); }
+            let hookUndefinedCaught = false;
+            let hookUndefinedDidThrow = false;
+            try { value instanceof holder.hookUndefined; }
+            catch (error) { hookUndefinedDidThrow = true; hookUndefinedCaught = error === undefined; }
+            console.log(propertyCaught, getterCaught, getterUndefinedDidThrow, getterUndefinedCaught, hookCaught, hookUndefinedDidThrow, hookUndefinedCaught);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_exact_throws"),
+        "true true true true true true true\n"
+    );
+}
+
+#[test]
+fn fixed_object_values_entries_skip_only_runtime_hidden_markers() {
+    let source = r#"
+        class Leaf { value: number; label: string; constructor() { this.value = 3; this.label = "s"; } }
+        const marker = "__thaw_class_identity_\u001eLeaf";
+        let reads = 0;
+        interface Mixed { first: number; second: string; }
+        const mixed: Mixed = {
+            get first(): number { reads++; return 7; },
+            second: "s",
+        };
+        function main(): void {
+            const instance = new Leaf();
+            const alias = instance;
+            console.log(Object.values(alias).length, Object.values(alias).join(","));
+            console.log(Object.entries(instance).length, Object.entries(instance)[0][0]);
+            const ordinary = { ["__thaw_class_identity_\u001eLeaf"]: true, get value(): number { reads++; return 5; } };
+            console.log(Object.values(ordinary).length, Object.entries(ordinary).length);
+            console.log(Object.entries(ordinary)[0][0] === marker);
+            const values = Object.values(mixed);
+            const entries = Object.entries(mixed);
+            console.log(values.length, values[0], values[1], entries.length, entries[0][0], entries[0][1], reads);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "visible_fixed_values_entries"),
+        "2 3,s\n2 value\n2 2\ntrue\n2 7 s 2 first 7 5\n"
+    );
+}
+
+#[test]
+fn hides_only_registered_class_markers_in_read_only_object_queries() {
+    let source = r#"
+        class Leaf { value: number; constructor() { this.value = 3; } }
+        function main(): void {
+            const instance = new Leaf();
+            const alias = instance;
+            const marker = "__thaw_class_identity_\u001eLeaf";
+            console.log(Object.keys(alias).join(","));
+            console.log(Object.getOwnPropertyNames(instance).join(","));
+            console.log(Reflect.ownKeys(instance).join(","));
+            console.log(Object.hasOwn(instance, marker), instance.hasOwnProperty(marker), Reflect.has(instance, marker));
+            console.log(Object.getOwnPropertyDescriptor(instance, "__thaw_class_identity_\u001eLeaf") === undefined);
+            console.log(JSON.stringify(instance));
+            const ordinary = { ["__thaw_class_identity_\u001eLeaf"]: true, value: 5 };
+            console.log(Object.keys(ordinary).length, Object.hasOwn(ordinary, marker));
+            console.log(Object.getOwnPropertyDescriptor(ordinary, "__thaw_class_identity_\u001eLeaf") !== undefined);
+            console.log(JSON.stringify(ordinary).includes("Leaf"));
+            const aggregate = new AggregateError([1], "x");
+            console.log(Object.keys(aggregate).join(","));
+            const suppressed = new SuppressedError("a", "b", "x");
+            console.log(Object.keys(suppressed).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "hidden_class_marker_read_only_queries"),
+        "value\nvalue\nvalue\nfalse false false\ntrue\n{\"value\":3}\n2 true\ntrue\ntrue\nmessage,name,errors\nmessage,name,error,suppressed\n"
+    );
+}
+
+#[test]
+fn compiles_omittable_arguments_beyond_one_mask_word() {
+    let required = (0..64)
+        .map(|index| format!("p{index}: number"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = vec!["1"; 64].join(", ");
+    let source = format!(
+        "function wide({required}, last: number = 7): number {{ return last; }} \
+         function main(): void {{ \
+         console.log(wide({args}), wide({args}, undefined)); \
+         const callable: ({required}, last?: number) => number = wide; \
+         console.log(callable({args})); }}"
+    );
+    assert_eq!(compile_and_run(&source, "wide_optional_function"), "7 7\n7\n");
+
+    let method_required = (0..63)
+        .map(|index| format!("p{index}: number"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let method_args = vec!["1"; 63].join(", ");
+    let source = format!(
+        "let defaultRuns = 0; \
+         function fallback(): number {{ defaultRuns++; return 7; }} \
+         class Base {{ value: number; \
+         constructor({method_required}, last: number = fallback()) {{ this.value = last; }} \
+         method({method_required}, last: number = fallback()): number {{ return last + 2; }} }} \
+         class Middle extends Base {{}} class Derived extends Middle {{}} \
+         function main(): void {{ \
+         const first = new Derived({method_args}); \
+         console.log(first.value, first.method({method_args}), defaultRuns); \
+         const second = new Derived({method_args}, undefined); \
+         console.log(second.value, second.method({method_args}, undefined), defaultRuns); }}"
+    );
+    assert_eq!(compile_and_run(&source, "wide_optional_class"), "7 9 2\n7 9 4\n");
+}
+
 #[test]
 fn compiles_classic_for_loop_over_a_number_array() {
     let source = r#"
@@ -319,7 +899,7 @@ fn compiles_utf16_string_search_methods() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_search"),
-        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n0\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
+        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n5\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
     );
 }
 
@@ -498,7 +1078,7 @@ fn compiles_and_runs_inherited_native_static_class_fields() {
     "#;
     assert_eq!(
         compile_and_run(source, "inherited_native_static_class_fields"),
-        "40\n42\n43\n43\n45\nshared\n10\n45\n11\n"
+        "40\n40\n41\n42\n42\nshared\n10\n40\n11\n"
     );
 }
 
@@ -686,6 +1266,39 @@ fn compiles_and_runs_native_instanceof() {
     assert_eq!(
         compile_and_run(source, "native_instanceof"),
         "true\ntrue\ntrue\nfalse\ntrue\n1\n"
+    );
+}
+
+#[test]
+fn native_method_receiver_keeps_actual_class_through_function_values() {
+    let source = r#"
+        class Base$Name {
+            constructor(public value: number) {}
+            read(): number { return this.value; }
+        }
+        class Derived extends Base$Name {}
+        class Other {
+            constructor(public value: number) {}
+        }
+        function passthrough(read: () => number): () => number { return read; }
+        function main(): void {
+            const method = passthrough(new Base$Name(1).read);
+            const container = { method };
+            console.log(container.method.call(new Derived(42)));
+            console.log(container.method.apply(new Derived(43), []));
+            console.log(container.method.bind(new Derived(44))());
+            for (const receiver of [new Other(99), null, undefined, 7]) {
+                try {
+                    console.log(container.method.call(receiver));
+                } catch (error) {
+                    console.log((error as any).name);
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_method_receiver_identity"),
+        "42\n43\n44\nTypeError\nTypeError\nTypeError\nTypeError\n"
     );
 }
 
@@ -1103,7 +1716,7 @@ fn compiles_uninitialized_optional_native_class_fields() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_uninitialized_optional_fields"),
-        "40\nmissing\nprivate-missing\n41\nuntitled\n2\nready\nprivate-ready\n3\nshared\n40\n"
+        "40\nmissing\nprivate-missing\n41\nuntitled\n2\nready\nprivate-ready\n3\nmissing\n40\n"
     );
 }
 
@@ -1338,7 +1951,7 @@ fn shares_native_generic_class_static_state_across_specializations() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_generic_class_static_state"),
-        "40\nready\n3\n3\n3\n3\nbox\n40\n2\n2\n2\n1\ntwo\n42\n"
+        "40\nready\n3\n3\n3\n3\nbox\n40\n2\n1\n2\n1\ntwo\n42\n"
     );
 }
 
@@ -1835,6 +2448,58 @@ fn compiles_and_runs_getters_on_a_non_identifier_receiver() {
     assert_eq!(
         compile_and_run(source, "getters_on_non_identifier_receiver"),
         "42\n40\n"
+    );
+}
+
+#[test]
+fn static_accessor_prefix_returns_computed_value_before_setter_normalization() {
+    let source = r#"
+        let stored = 0;
+        let reads = 0;
+        let writes = 0;
+        let order = "";
+        function reset(value: number): void {
+            stored = value;
+            reads = 0;
+            writes = 0;
+            order = "";
+        }
+        class Counter {
+            static get value(): number {
+                reads++;
+                order += "G";
+                return stored;
+            }
+            static set value(next: number) {
+                writes++;
+                order += "S";
+                stored = next * 10;
+            }
+            static incrementViaThis(): number { return ++this.value; }
+            static decrementViaThis(): number { return --this.value; }
+        }
+        function main(): void {
+            reset(4);
+            const incremented: number = ++Counter.value;
+            console.log(incremented, stored, reads, writes, order);
+            reset(4);
+            const decremented: number = --Counter.value;
+            console.log(decremented, stored, reads, writes, order);
+            reset(4);
+            const oldIncrement: number = Counter.value++;
+            console.log(oldIncrement, stored, reads, writes, order);
+            reset(4);
+            const oldDecrement: number = Counter.value--;
+            console.log(oldDecrement, stored, reads, writes, order);
+            reset(2);
+            console.log(Counter.incrementViaThis(), stored, reads, writes, order);
+            reset(2);
+            console.log(Counter.decrementViaThis(), stored, reads, writes, order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "static_accessor_prefix_result"),
+        "5 50 1 1 GS\n3 30 1 1 GS\n4 50 1 1 GS\n4 30 1 1 GS\n3 30 1 1 GS\n1 10 1 1 GS\n"
     );
 }
 
@@ -2579,4 +3244,762 @@ fn custom_symbol_iterator_with_a_discriminated_iterator_result() {
         compile_and_run(source, "custom_symbol_iterator_discriminated_result"),
         "1\n2\n3\n4\n"
     );
+}
+
+#[test]
+fn non_arrow_function_expression_forwards_json_receiver() {
+    let source = r#"
+        function main(): void {
+            const add: (delta: number) => number = function(this: Json, delta: number): number {
+                return Number(this["base"]) + delta;
+            };
+            const holder: Json = { base: 7 };
+            console.log(add.call(holder, 3));
+            const other: Json = { base: 10 };
+            const bound = add.bind(other);
+            console.log(bound(2));
+            const plain = function(delta: number): number { return delta + 1; };
+            console.log(plain(4));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_json_this"), "10\n12\n5\n");
+}
+
+#[test]
+fn nested_non_arrow_receiver_does_not_capture_outer_this() {
+    let source = r#"
+        function main(): void {
+            const outer = function(this: Json): number {
+                const lexical = (): number => Number(this["base"]);
+                const inner = function(this: Json): number { return Number(this["base"]); };
+                const innerHolder: Json = { base: 20 };
+                return inner.call(innerHolder) + lexical();
+            };
+            const outerHolder: Json = { base: 3 };
+            console.log(outer.call(outerHolder));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_non_arrow_receivers"), "23\n");
+}
+
+#[test]
+fn non_arrow_function_expression_generator_keeps_this_receiver() {
+    let source = r#"
+        function main(): void {
+            const make = function*(this: Json, increment: number): Generator<number, void, undefined> {
+                yield Number(this["base"]) + increment;
+            };
+            const holder: Json = { base: 7 };
+            const iterator = make.call(holder, 3);
+            console.log(iterator.next().value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_generator_this"), "10\n");
+}
+
+#[test]
+fn non_arrow_function_expression_validates_native_class_receiver() {
+    let source = r#"
+        class Base { value: number; constructor(value: number) { this.value = value; } }
+        class Derived extends Base { constructor(value: number) { super(value); } }
+        class Other { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const read = function(this: Base): number { return this.value; };
+            console.log(read.call(new Base(3)));
+            console.log(read.call(new Derived(4)));
+            try { read.call(new Other(5) as Base); } catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_native_this"), "3\n4\nTypeError\n");
+}
+
+#[test]
+fn generic_non_arrow_function_infers_this_for_call_apply_and_bind() {
+    let source = r#"
+        function main(): void {
+            const choose = function<T>(this: T, value: T): T { return this; };
+            const alias = choose;
+            console.log(alias.call(7, 7));
+            console.log(alias.apply(8, [8] as [number]));
+            const bound = alias.bind(9);
+            console.log(bound(9));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_non_arrow_this"), "7\n8\n9\n");
+}
+
+#[test]
+fn generic_non_arrow_scoped_alias_and_empty_operations() {
+    let source = r#"
+        function main(): void {
+            const choose = function<T>(this: T): T { return this; };
+            {
+                const choose = function<T>(this: T, value: T): T { return value; };
+                console.log(choose.call(3, 4));
+            }
+            console.log(choose.call(5));
+            console.log(typeof choose.call());
+            console.log(typeof choose.apply());
+            console.log(typeof choose.bind()());
+            console.log(choose.apply(6));
+            console.log(choose.apply(7, null));
+            console.log(choose.apply(8, undefined));
+            let effects = 0;
+            function missing(): null { effects++; return null; }
+            console.log(choose.apply(9, missing()));
+            console.log(effects);
+            const order: string[] = [];
+            function receiver(): number { order.push("receiver"); return 10; }
+            function tuple(): [] { order.push("tuple"); return []; }
+            function extra(): number { order.push("extra"); return 1; }
+            function absent(): null { order.push("null"); return null; }
+            console.log(choose.apply(receiver(), tuple(), extra()));
+            console.log(order.join(","));
+            order.length = 0;
+            console.log(choose.apply(receiver(), absent(), extra()));
+            console.log(order.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_this_scoped_empty"),
+        "4\n5\nundefined\nundefined\nundefined\n6\n7\n8\n9\n1\n10\nreceiver,tuple,extra\n10\nreceiver,null,extra\n");
+}
+
+#[test]
+fn generic_non_arrow_optional_this_operations() {
+    let source = r#"
+        function main(): void {
+            const choose = function<T>(this: T, value?: T): T { return this; };
+            console.log(choose.call(7));
+            console.log(choose.apply(8, null));
+            console.log(choose.apply(9, undefined));
+            const bound = choose.bind(10);
+            console.log(bound());
+            console.log(bound(10));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_this_optional"), "7\n8\n9\n10\n10\n");
+}
+
+#[test]
+fn generic_non_arrow_rest_this_operations() {
+    let source = r#"
+        function main(): void {
+            const count = function<T>(this: T, ...values: T[]): number {
+                return values.length;
+            };
+            console.log(count.call(7, 7, 7));
+            console.log(count.apply(8, [8, 8] as [number, number]));
+            const bound = count.bind(9);
+            console.log(bound(9, 9));
+        const partial = count.bind(10, 10);
+        console.log(partial(10));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_this_rest"), "2\n2\n2\n2\n");
+}
+
+#[test]
+fn generic_non_arrow_apply_runtime_nullish_tuple() {
+    let source = r#"
+        function main(): void {
+            const order: string[] = [];
+            const choose = function<T>(this: T, value?: T): T {
+                order.push("body");
+                return this;
+            };
+            function receiver(): number { order.push("receiver"); return 7; }
+            function maybe(mode: number): [number] | null | undefined {
+                order.push("tuple");
+                if (mode === 0) return null;
+                if (mode === 1) return undefined;
+                return [7] as [number];
+            }
+            function extra(): number { order.push("extra"); return 0; }
+            function spreadExtra(): [number, number] { order.push("spread"); return [1, 2]; }
+            console.log(choose.apply(receiver(), maybe(0), extra()));
+            console.log(choose.apply(receiver(), maybe(1), extra()));
+            console.log(choose.apply(receiver(), maybe(2), extra()));
+            console.log(choose.apply(receiver(), maybe(0), ...spreadExtra()));
+            console.log(order.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_this_nullish_tuple"),
+        "7\n7\n7\n7\nreceiver,tuple,extra,body,receiver,tuple,extra,body,receiver,tuple,extra,body,receiver,tuple,spread,body\n");
+}
+
+#[test]
+fn non_arrow_nullable_and_disjoint_union_receivers() {
+    let source = r#"
+        function main(): void {
+            const optional = function(this: number | undefined): string { return typeof this; };
+            const nullable = function(this: number | null): string { return typeof this; };
+            const nullish = function(this: number | null | undefined): string { return typeof this; };
+            const choice = function(this: number | string): string { return typeof this; };
+            const jsonOptional = function(this: Json | undefined): string { return typeof this; };
+            console.log(optional(), optional.call(5), optional.call(undefined));
+            try { console.log(nullable()); } catch (error) { console.log("TypeError"); }
+            console.log(nullable.call(null), nullable.call(6));
+            console.log(nullish(), nullish.call(null), nullish.call(7));
+            try { console.log(choice()); } catch (error) { console.log("TypeError"); }
+            console.log(choice.call(8), choice.call("x"));
+            console.log(jsonOptional(), jsonOptional.call({ value: 1 } as Json));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_nullable_union_receiver"),
+        "undefined number undefined\nTypeError\nobject number\nundefined object number\nTypeError\nnumber string\nundefined object\n");
+}
+
+
+#[test]
+fn non_arrow_receiver_union_routes_json_and_number_by_producer_kind() {
+    let source = r#"
+        function main(): void {
+            const kind = function(this: Json | number): string { return typeof this; };
+            const holder: Json = { value: 7 };
+            console.log(kind.call(3), kind.call(holder));
+            const broad = function(this: Json | string): string { return typeof this; };
+            console.log(broad.call("text"), broad.call(holder));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_union_json_number"),
+        "number object\nstring object\n");
+}
+
+#[test]
+fn non_arrow_receiver_union_checks_each_native_class_identity() {
+    let source = r#"
+        class Base { value: number; constructor(value: number) { this.value = value; } }
+        class Derived extends Base { constructor(value: number) { super(value); } }
+        class Other { value: number; constructor(value: number) { this.value = value; } }
+        class Stranger { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const pair = function(this: Base | Other): string { return typeof this; };
+            console.log(pair.call(new Base(1)), pair.call(new Other(2)));
+            try { pair.call(new Stranger(3) as Base); }
+            catch (error) { console.log("TypeError"); }
+            const inherited = function(this: Base | Derived): string { return typeof this; };
+            console.log(inherited.call(new Base(4)), inherited.call(new Derived(5)));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_union_classes"),
+        "object object\nTypeError\nobject object\n");
+}
+
+#[test]
+fn non_arrow_string_literal_this_uses_string_receiver_abi() {
+    let source = r#"
+        function main(): void {
+            const echo = function(this: "open"): string { return this; };
+            console.log(echo.call("open"));
+            try { echo.call("closed" as "open"); }
+            catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_literal_this"), "open\nTypeError\n");
+}
+#[test]
+fn non_arrow_same_tag_string_union_selects_literal_and_fallback() {
+    let source = r#"
+        type Choice<T> = "open" | T;
+        type Plain = "open" | "closed";
+        function main(): void {
+            const exact = function(this: "open" | "closed"): string { return typeof this; };
+            console.log(exact.call("open"), exact.call("closed"));
+            try { exact.call("other" as "open"); }
+            catch (error) { console.log("TypeError"); }
+            const wide = function(this: string | "open"): string { return typeof this; };
+            console.log(wide.call("open"), wide.call("other"));
+            const json = function(this: Json | "open"): string { return typeof this; };
+            console.log(json.call("open"), json.call("other"));
+            const genericAlias = function(this: Choice<"closed">): string { return typeof this; };
+            console.log(genericAlias.call("open"), genericAlias.call("closed"));
+            const nestedAlias = function(this: Choice<Choice<"closed">>): string { return typeof this; };
+            console.log(nestedAlias.call("open"), nestedAlias.call("closed"));
+            const plainAlias = function(this: Plain): string { return typeof this; };
+            console.log(plainAlias.call("open"), plainAlias.call("closed"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_string_union"),
+        "string string\nTypeError\nstring string\nstring string\nstring string\nstring string\nstring string\n");
+}
+
+#[test]
+fn non_arrow_nested_receiver_wrappers_use_leaf_envelope() {
+    let source = r#"
+        type Maybe<T> = T | undefined;
+        class Carrier { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const branch = function(this: Maybe<number> | string): string { return typeof this; };
+            console.log(branch(), branch.call(3), branch.call("x"));
+            const overlap = function(this: (number | undefined) | number): string { return typeof this; };
+            console.log(overlap(), overlap.call(5));
+            const nullish = function(this: (number | null) | undefined): string { return typeof this; };
+            console.log(nullish(), nullish.call(null), nullish.call(6));
+            const native = function(this: (Carrier | undefined) | string): string { return typeof this; };
+            console.log(native(), native.call(new Carrier(1)), native.call("x"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_nested_receivers"),
+        "undefined number string\nundefined number\nundefined object number\nundefined object string\n");
+}
+
+#[test]
+fn prefix_property_updates_bind_receiver_and_key_once() {
+    let source = r#"
+        let receiverCalls = 0;
+        const left = { value: 4 };
+        const right = { value: 40 };
+        function pick(): { value: number } {
+            receiverCalls++;
+            return receiverCalls === 1 ? left : right;
+        }
+        let dictionaryCalls = 0;
+        let keyCalls = 0;
+        let order = "";
+        const first: Record<string, number> = { value: 7 };
+        const second: Record<string, number> = { value: 70 };
+        function pickDictionary(): Record<string, number> {
+            dictionaryCalls++;
+            order += "R";
+            return dictionaryCalls === 1 ? first : second;
+        }
+        function pickKey(): string {
+            keyCalls++;
+            order += "K";
+            return "value";
+        }
+        let getterCalls = 0;
+        let setterCalls = 0;
+        let stored = 3;
+        interface Box { value: number; }
+        const box: Box = {
+            get value(): number { getterCalls++; order += "G"; return stored; },
+            set value(next: number) { setterCalls++; order += "S"; stored = next * 10; },
+        };
+        let boxCalls = 0;
+        function pickBox(): Box { boxCalls++; order += "B"; return box; }
+        function main(): void {
+            console.log(++pick().value, receiverCalls, left.value, right.value);
+            console.log(++pickDictionary()[pickKey()], dictionaryCalls, keyCalls, order, first.value, second.value);
+            order = "";
+            console.log(++pickBox().value, boxCalls, getterCalls, setterCalls, order, stored);
+            console.log(--left["value"], left.value);
+            console.log(left.value++, left.value);
+            const frozen = Object.freeze({ value: 9 });
+            try { ++frozen.value; console.log("unexpected"); }
+            catch (error) { console.log(error instanceof TypeError, frozen.value); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "prefix_property_target_once"),
+        "5 1 5 40\n8 1 1 RK 8 70\n4 1 1 1 BGS 40\n4 4\n4 5\ntrue 9\n"
+    );
+}
+
+#[test]
+fn descriptor_maps_skip_hidden_class_markers_but_keep_same_named_user_fields() {
+    let source = r#"
+        class Leaf { value: number; constructor() { this.value = 3; } }
+        let reads = 0;
+        function main(): void {
+            const marker = "__thaw_class_identity_\u001eLeaf";
+            const instance = new Leaf();
+            const alias = instance;
+            const hidden = Object.getOwnPropertyDescriptors(alias);
+            console.log(Object.keys(hidden).join(","), Object.getOwnPropertyNames(hidden).join(","));
+            console.log(Reflect.ownKeys(hidden).length, Object.values(hidden).length, Object.entries(hidden).length);
+            console.log(Object.hasOwn(hidden, marker), Object.getOwnPropertyDescriptor(hidden, "__thaw_class_identity_\u001eLeaf") === undefined);
+            console.log(hidden.value.value, JSON.stringify(hidden).includes("__thaw_class_identity_\\u001eLeaf"), hidden instanceof Leaf);
+            const ordinary = {
+                ["__thaw_class_identity_\u001eLeaf"]: true,
+                get value(): number { reads++; return 5; },
+            };
+            const visible = Object.getOwnPropertyDescriptors(ordinary);
+            console.log(Object.keys(visible).length, Reflect.ownKeys(visible).length, Object.values(visible).length, Object.entries(visible).length);
+            console.log(Object.hasOwn(visible, marker), Object.getOwnPropertyDescriptor(visible, "__thaw_class_identity_\u001eLeaf") !== undefined);
+            console.log(JSON.stringify(visible).includes("__thaw_class_identity_\\u001eLeaf"), typeof visible.value.get, reads);
+            console.log(visible.value.get.call(ordinary), reads);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_marker_descriptor_map_visibility"),
+        "value value\n1 1 1\nfalse true\n3 false false\n2 2 2 2\ntrue true\ntrue function 0\n5 1\n");
+}
+
+#[test]
+fn hidden_class_marker_reveals_only_after_successful_public_data_write() {
+    let source = r#"
+        class Leaf { value: number; constructor() { this.value = 3; } }
+        class WithSetter {
+            stored: number;
+            constructor() { this.stored = 1; }
+            set value(next: number) { this.stored = next; }
+        }
+        function main(): void {
+            const key = "__thaw_class_identity_\u001eLeaf";
+            const direct = new Leaf();
+            console.log(Object.hasOwn(direct, key), direct instanceof Leaf);
+            direct["__thaw_class_identity_\u001eLeaf"] = true;
+            console.log(Object.hasOwn(direct, key), Object.values(direct).length, direct instanceof Leaf);
+            const reflected = new Leaf();
+            console.log(Reflect.set(reflected, "__thaw_class_identity_\u001eLeaf", true), Object.hasOwn(reflected, key));
+            const defined = new Leaf();
+            Object.defineProperty(defined, "__thaw_class_identity_\u001eLeaf", { value: true });
+            console.log(Object.hasOwn(defined, key));
+            const many = new Leaf();
+            Object.defineProperties(many, { "__thaw_class_identity_\u001eLeaf": { value: true } });
+            console.log(Object.hasOwn(many, key));
+            const prevented = new Leaf();
+            Object.preventExtensions(prevented);
+            let rhs = 0;
+            try { prevented["__thaw_class_identity_\u001eLeaf"] = (rhs++, true); }
+            catch (error) { console.log("blocked", rhs); }
+            console.log(Object.hasOwn(prevented, key), Object.keys(prevented).length);
+            const sealed = new Leaf();
+            Object.seal(sealed);
+            try { Object.defineProperty(sealed, "__thaw_class_identity_\u001eLeaf", { value: true }); }
+            catch (error) { console.log("sealed"); }
+            console.log(Object.hasOwn(sealed, key));
+            const blockedReflect = new Leaf();
+            Object.preventExtensions(blockedReflect);
+            let reflectTargets = 0;
+            let reflectValues = 0;
+            console.log(Reflect.set((reflectTargets++, blockedReflect), "__thaw_class_identity_\u001eLeaf", (reflectValues++, true)), reflectTargets, reflectValues, Object.hasOwn(blockedReflect, key));
+            const blockedDefine = new Leaf();
+            Object.preventExtensions(blockedDefine);
+            let defineTargets = 0;
+            let defineValues = 0;
+            console.log(Reflect.defineProperty((defineTargets++, blockedDefine), "__thaw_class_identity_\u001eLeaf", { value: (defineValues++, true) }), defineTargets, defineValues, Object.hasOwn(blockedDefine, key));
+            const frozenDefine = new Leaf();
+            Object.freeze(frozenDefine);
+            console.log(Reflect.defineProperty(frozenDefine, "__thaw_class_identity_\u001eLeaf", { value: true }), Object.hasOwn(frozenDefine, key));
+            Object.preventExtensions(direct);
+            direct["__thaw_class_identity_\u001eLeaf"] = false;
+            console.log(Object.hasOwn(direct, key), direct["__thaw_class_identity_\u001eLeaf"] === false);
+            console.log(Reflect.set(direct, "__thaw_class_identity_\u001eLeaf", true), Reflect.defineProperty(direct, "__thaw_class_identity_\u001eLeaf", { value: false }), Object.hasOwn(direct, key));
+            const ordinary = { ["__thaw_class_identity_\u001eLeaf"]: true, value: 1 };
+            Object.preventExtensions(ordinary);
+            ordinary["__thaw_class_identity_\u001eLeaf"] = false;
+            console.log(Object.hasOwn(ordinary, key), ordinary["__thaw_class_identity_\u001eLeaf"] === false);
+            const frozen = new Leaf();
+            Object.freeze(frozen);
+            try { frozen["__thaw_class_identity_\u001eLeaf"] = true; }
+            catch (error) { console.log("frozen"); }
+            console.log(Object.hasOwn(frozen, key));
+            console.log(Reflect.set(frozen, "__thaw_class_identity_\u001eLeaf", true), Object.hasOwn(frozen, key));
+            const setter = new WithSetter();
+            setter.value = 7;
+            console.log(setter.stored, Object.keys(setter).length);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_marker_public_write_reveal"),
+        "false true\ntrue 2 true\ntrue true\ntrue\ntrue\nblocked 1\nfalse 1\nsealed\nfalse\nfalse 1 1 false\nfalse 1 1 false\nfalse false\ntrue true\ntrue true true\ntrue true\nfrozen\nfalse\nfalse false\n7 1\n");
+}
+
+#[test]
+fn fixed_marker_copy_keeps_runtime_own_key_insertion_order() {
+    let source = r#"
+        class A {}
+        function main(): void {
+            const marker = "__thaw_class_identity_\u001eA";
+            const plain = { ["__thaw_class_identity_\u001eA"]: true };
+            const later = { ...new A(), x: 1, ...plain };
+            const earlier = { ...plain, x: 1, ...new A() };
+            const laterKeys = Object.keys(later);
+            const earlierKeys = Object.keys(earlier);
+            console.log(laterKeys.length, laterKeys[0] === "x", laterKeys[1] === marker);
+            console.log(earlierKeys.length, earlierKeys[0] === marker, earlierKeys[1] === "x");
+            const values = Object.values(later);
+            const entries = Object.entries(later);
+            console.log(values.length, values[0], values[1], entries[0][0] === "x");
+            const names = Object.getOwnPropertyNames(later);
+            const own = Reflect.ownKeys(later);
+            const descriptors = Object.getOwnPropertyDescriptors(later);
+            console.log(names[0] === "x", own[0] === "x", Object.keys(descriptors)[0] === "x");
+            const copied = structuredClone(later);
+            const nested = { ...later };
+            const { x, ...rest } = later;
+            console.log(Object.keys(copied)[0] === "x", Object.keys(nested)[0] === "x",
+                Object.keys(rest).length, Object.keys(rest)[0] === marker);
+            const json = JSON.stringify(later);
+            console.log(json.indexOf("\"x\"") < json.indexOf("__thaw_class_identity_"));
+            const holder = { fire: () => 0 };
+            const revealed = {
+                ...new A(),
+                get first(): number {
+                    holder.fire();
+                    return 3;
+                }
+            };
+            holder.fire = () => {
+                Object.defineProperty(revealed, marker, { value: true });
+                return 0;
+            };
+            const snap = { ...revealed };
+            console.log(Object.keys(snap).length, Object.keys(snap)[0] === "first",
+                Object.hasOwn(snap, marker), Object.hasOwn(revealed, marker));
+            let effects = 0;
+            function first(): number { effects++; return 1; }
+            const overwritten = { ...new A(), x: first(), x: "last" };
+            const accessor = {
+                ...new A(),
+                set value(next: number) { effects += 100; },
+                value: 3,
+            };
+            console.log(effects, overwritten.x, Object.keys(overwritten)[0] === "x",
+                accessor.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "fixed_marker_copy_order"),
+        "2 true true\n2 true true\n2 1 true true\ntrue true true\ntrue true 1 true\ntrue\n1 true false true\n1 last true 3\n");
+}
+
+#[test]
+fn fixed_marker_copy_preserves_order_across_awaited_field() {
+    let source = r#"
+        class A {}
+        async function next(): Promise<number> { return 1; }
+        async function main(): Promise<void> {
+            const plain = { ["__thaw_class_identity_\u001eA"]: true };
+            const copied = { ...new A(), x: await next(), ...plain };
+            const keys = Object.keys(copied);
+            console.log(keys.length, keys[0] === "x",
+                keys[1] === "__thaw_class_identity_\u001eA", copied.x);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "fixed_marker_copy_awaited_field"),
+        "2 true true 1\n");
+}
+
+#[test]
+fn non_arrow_implicit_json_receiver_preserves_bigint_scalar() {
+    let source = r#"
+        function main(): void {
+            const echo = function(): Json { return this; };
+            const zero = echo.call(0n);
+            const large = echo.call(9007199254740993n);
+            console.log(typeof zero, Boolean(zero), String(zero));
+            console.log(typeof large, String(large), large === echo.call(9007199254740993n));
+            try { console.log(JSON.stringify(large)); }
+            catch (error) { console.log("TypeError"); }
+            const nested: Json = { value: large };
+            try { console.log(JSON.stringify(nested)); }
+            catch (error) { console.log("TypeError"); }
+            try { console.log(JSON.stringify(nested, ["value"])); }
+            catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_bigint_this"),
+        "bigint false 0\nbigint 9007199254740993 true\nTypeError\nTypeError\nTypeError\n");
+}
+
+#[test]
+fn non_arrow_json_receiver_tracks_live_constructor_and_returned_alias() {
+    let source = r#"
+        class Holder { static value: number = 7; }
+        function main(): void {
+            const read = function(this: Json): number { return Number(this["value"]); };
+            const identity = function(this: Json): Json { return this; };
+            const alias = identity.call(Holder);
+            console.log(read.call(Holder));
+            console.log(Number(alias["value"]));
+            console.log(read.call(Holder));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_live_constructor_this"), "7\n7\n7\n");
+}
+
+#[test]
+fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
+    let source = r#"
+        function __thaw_module_init(): void {}
+        function main(): void {
+            // The receiver must be read: a `this: Json` parameter the body
+            // never touches is dropped and no owned Json receiver exists.
+            const read = function(this: Json): number { return typeof this === "number" ? 1 : 0; };
+            console.log(read.call(3));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "json_receiver_arena_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
+
+#[test]
+fn native_callback_registration_enables_exception_arena_tracing_before_module_init() {
+    let source = r#"
+        function __thaw_module_init(): void {}
+        function main(): void {
+            const callback: () => number = (): number => 73;
+            const handle: JsValue = registerNativeCallback(callback);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_callback_exception_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_js_register_native_callback(")), "{ir}");
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
+
+#[test]
+fn typed_js_function_origin_enables_tracing_before_module_init() {
+    let source = r#"
+        declare function __thaw_typed_js_72657475726e43616c6c6261636b(): {
+            callback: () => number;
+            later: number;
+        };
+        function __thaw_module_init(): void {}
+        function main(): void {
+            const result = __thaw_typed_js_72657475726e43616c6c6261636b();
+            console.log(result.later);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_function_origin_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("call i64 @thaw_json_callback_origin_acquire("), "{ir}");
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
+
+#[test]
+fn optional_void_callable_adapter_preserves_calls_and_void_returns() {
+    let source = r#"
+        function emit(value: number = 7): void { console.log(value); }
+        function main(): void {
+            const callback: (value?: number) => void = emit;
+            callback();
+            callback(3);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "optional_void_callable_adapter"), "7\n3\n");
+}
+
+#[test]
+fn object_setter_assignment_evaluates_receiver_once_and_returns_assigned_value() {
+    let source = r#"
+        let calls = 0;
+        let effects = "";
+        let stored = 0;
+        const box = {
+            get value(): number { effects += "G"; return stored; },
+            set value(next: number) { effects += "S"; stored = next * 10; }
+        };
+        function pick() { calls++; effects += "R"; return box; }
+        function rhs(): number { effects += "V"; return 7; }
+        function rawRhs(): any { return "7"; }
+        function main(): void {
+            const assigned = (pick().value = rhs());
+            console.log(assigned, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const compound = (pick().value += rhs());
+            console.log(compound, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const logical = (pick().value &&= rhs());
+            console.log(logical, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const postfix = pick().value++;
+            console.log(postfix, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const prefix = ++pick().value;
+            console.log(prefix, calls, effects, stored);
+            stored = 0;
+            const raw = (pick().value = rawRhs());
+            console.log(typeof raw, stored);
+            let setterCalls = 0;
+            let receivedNaN = false;
+            const writeOnly = {
+                set value(next: number) { setterCalls++; receivedNaN = Number.isNaN(next); }
+            };
+            const old = writeOnly.value++;
+            const next = ++writeOnly.value;
+            console.log(Number.isNaN(old), Number.isNaN(next), setterCalls, receivedNaN);
+            const nullish = (writeOnly.value ??= 3);
+            const orValue = (writeOnly.value ||= 4);
+            const andValue = (writeOnly.value &&= rhs());
+            console.log(nullish, orValue, typeof andValue, setterCalls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "object_setter_assignment_result"),
+        "7 1 RVS 70\n77 1 RGVS 770\n7 1 RGVS 70\n70 1 RGS 710\n711 1 RGS 7110\nstring 70\ntrue true 2 true\n3 4 undefined 4\n");
+}
+
+#[test]
+fn class_setter_assignment_result_survives_parameter_mutation_and_early_return() {
+    let source = r#"
+        let stored = 0;
+        class Base {
+            set value(next: number) { if (next < 0) return; next += 1; stored = next; }
+            static set current(next: number) { if (next < 0) return; next += 2; stored = next; }
+        }
+        class Derived extends Base {
+            write(next: number): number { return super.value = next; }
+            static write(next: number): number { return super.current = next; }
+        }
+        function main(): void {
+            const box = new Derived();
+            console.log(box.value = 7, stored);
+            console.log(box.value = -1, stored);
+            console.log(Base.current = 7, stored);
+            console.log(Base.current = -1, stored);
+            console.log(box.write(7), stored);
+            console.log(Derived.write(7), stored);
+            function raw(): any { return "7"; }
+            const instanceRaw = (box.value = raw());
+            const staticRaw = (Base.current = raw());
+            console.log(typeof instanceRaw, typeof staticRaw, stored);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_setter_original_rhs"),
+        "7 8\n-1 8\n7 9\n-1 9\n7 8\n7 9\nstring string 9\n");
+}
+
+#[test]
+fn legacy_decorator_factories_evaluate_forward_and_apply_backward_per_target() {
+    let source = r#"
+        function member(tag: string): (target: JsValue, key: string) => void {
+            console.log("eval", tag);
+            return function(target: JsValue, key: string): void { console.log("apply", tag, key); };
+        }
+        function owner(tag: string): (target: JsValue) => void {
+            console.log("eval", tag);
+            return function(target: JsValue): void { console.log("apply", tag); };
+        }
+        @owner("C1")
+        @owner("C2")
+        class C {
+            static { console.log("static"); }
+            @member("M1")
+            @member("M2")
+            method(): void {}
+        }
+        function main(): void { console.log("main"); }
+    "#;
+    assert_eq!(compile_and_run(source, "legacy_decorator_composition_order"),
+        "static\neval M1\neval M2\napply M2 method\napply M1 method\neval C1\neval C2\napply C2\napply C1\nmain\n");
 }

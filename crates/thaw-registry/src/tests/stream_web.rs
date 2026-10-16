@@ -10,7 +10,7 @@ fn fs_read_and_write_streams_integrate_with_node_streams() {
     let empty_node_modules = temp_registry("builtin_fs_streams_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreams = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -41,7 +41,7 @@ fn fs_streams_use_incremental_positioned_host_io() {
     let empty_node_modules = temp_registry("builtin_fs_incremental_streams_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIncrementalFsStreams = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -68,13 +68,13 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
     let dir = temp_registry("builtin_fs_stream_backpressure");
     fs::write(
             dir.join("index.js"),
-            "var fs = require('node:fs'); module.exports = async function (root) { var path = root + '/queued.txt', directPath = root + '/direct.txt', events = [], writer = fs.createWriteStream(path, { highWaterMark: 3 }); writer.on('drain', function() { events.push('drain'); }); writer.on('finish', function() { events.push('finish'); }); var first = writer.write('ab', function() { events.push('first'); }), second = writer.write('cd', function() { events.push('second'); }), beforeDrain = fs.readFileSync(path, 'utf8'); var finished = new Promise(function(resolve, reject) { writer.on('error', reject); writer.on('finish', resolve); }); writer.end('ef', function() { events.push('end'); }); await finished; await new Promise(function(resolve) { queueMicrotask(resolve); }); var direct = new fs.WriteStream(directPath, { highWaterMark: 1 }), directResult = direct.write('x'); var directFinished = new Promise(function(resolve, reject) { direct.on('error', reject); direct.on('finish', resolve); }); direct.end(); await directFinished; return [first, second, beforeDrain, writer.writableLength, writer.writableHighWaterMark, events, fs.readFileSync(path, 'utf8'), directResult, direct.writableHighWaterMark, fs.readFileSync(directPath, 'utf8')]; };",
+            "var fs = require('node:fs'); module.exports = async function (root) { var path = root + '/queued.txt', directPath = root + '/direct.txt', events = [], writer = fs.createWriteStream(path, { highWaterMark: 3 }); writer.on('drain', function() { events.push('drain'); }); writer.on('finish', function() { events.push('finish'); }); var first = writer.write('ab', function() { events.push('first'); }), second = writer.write('cd', function() { events.push('second'); }), beforeDrain; try { beforeDrain = fs.readFileSync(path, 'utf8'); } catch (error) { beforeDrain = 'ERR:' + error.code; } var finished = new Promise(function(resolve, reject) { writer.on('error', reject); writer.on('finish', resolve); }); writer.end('ef', function() { events.push('end'); }); await finished; await new Promise(function(resolve) { queueMicrotask(resolve); }); var direct = new fs.WriteStream(directPath, { highWaterMark: 1 }), directResult = direct.write('x'); var directFinished = new Promise(function(resolve, reject) { direct.on('error', reject); direct.on('finish', resolve); }); direct.end(); await directFinished; return [first, second, beforeDrain, writer.writableLength, writer.writableHighWaterMark, events, fs.readFileSync(path, 'utf8'), directResult, direct.writableHighWaterMark, fs.readFileSync(directPath, 'utf8')]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_fs_stream_backpressure_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamBackpressure = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -90,7 +90,9 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,false,"ab",0,3,["first","drain","second","end","finish"],"abcdef",false,1,"x"]"#
+        // Node 22.22.2 (same script): the file is opened asynchronously, so the synchronous read right
+        // after write() fails with ENOENT; no 'drain' is emitted once end() was called.
+        r#"[true,false,"ERR:ENOENT",0,3,["first","second","end","finish"],"abcdef",false,1,"x"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -410,7 +412,7 @@ fn byob_supports_dataview_alignment_and_request_lifecycle() {
     let dir = temp_registry("builtin_readable_stream_byob_views");
     fs::write(
             dir.join("index.js"),
-            "module.exports = async function () { var dataInfo, dataStream = new ReadableStream({ type: 'bytes', pull: function(controller) { var request = controller.byobRequest; dataInfo = [request.view.constructor.name, request.view.byteLength]; request.view[0] = 3; request.respond(1); controller.close(); } }), dataResult = await dataStream.getReader({ mode: 'byob' }).read(new DataView(new ArrayBuffer(4))), calls = 0, closeCode, viewCode, staleRequest, typed = new ReadableStream({ type: 'bytes', pull: function(controller) { calls++; var request = controller.byobRequest; staleRequest = request; if (calls === 1) { try { request.respondWithNewView(new Uint8Array(request.view.buffer, request.view.byteOffset + 1, 1)); } catch (error) { viewCode = error.code; } request.view[0] = 1; request.respond(1); try { controller.close(); } catch (error) { closeCode = error.code; } } else { request.view[0] = 2; request.respond(1); controller.close(); } } }), typedResult = await typed.getReader({ mode: 'byob' }).read(new Uint16Array(2)), staleCode; try { staleRequest.respond(0); } catch (error) { staleCode = error.code; } return [dataInfo, dataResult.value.constructor.name, dataResult.value.byteLength, dataResult.value.getUint8(0), calls, typedResult.value.constructor.name, typedResult.value.length, Array.from(new Uint8Array(typedResult.value.buffer, typedResult.value.byteOffset, typedResult.value.byteLength)), viewCode, closeCode, staleCode]; };",
+            "module.exports = async function () { var dataInfo, dataStream = new ReadableStream({ type: 'bytes', pull: function(controller) { var request = controller.byobRequest; dataInfo = [request.view.constructor.name, request.view.byteLength]; request.view[0] = 3; request.respond(1); controller.close(); } }), dataResult = await dataStream.getReader({ mode: 'byob' }).read(new DataView(new ArrayBuffer(4))), calls = 0, viewCode, staleRequest, typed = new ReadableStream({ type: 'bytes', pull: function(controller) { calls++; var request = controller.byobRequest; staleRequest = request; if (calls === 1) { try { request.respondWithNewView(new Uint8Array(request.view.buffer, request.view.byteOffset + 1, 1)); } catch (error) { viewCode = error.code; } request.view[0] = 1; request.respond(1); } else { request.view[0] = 2; request.respond(1); } } }), typedResult = await typed.getReader({ mode: 'byob' }).read(new Uint16Array(2)), staleCode; try { staleRequest.respond(0); } catch (error) { staleCode = error.code; } var closeCode, partialRead, partialStream = new ReadableStream({ type: 'bytes', pull: function(controller) { var request = controller.byobRequest; request.view[0] = 1; request.respond(1); try { controller.close(); } catch (error) { closeCode = error.code; } } }); try { await partialStream.getReader({ mode: 'byob' }).read(new Uint16Array(2)); partialRead = 'resolved'; } catch (error) { partialRead = error.code; } return [dataInfo, dataResult.value.constructor.name, dataResult.value.byteLength, dataResult.value.getUint8(0), calls, typedResult.value.constructor.name, typedResult.value.length, Array.from(new Uint8Array(typedResult.value.buffer, typedResult.value.byteOffset, typedResult.value.byteLength)), viewCode, closeCode, staleCode, partialRead]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_readable_stream_byob_views_modules");
@@ -429,7 +431,7 @@ fn byob_supports_dataview_alignment_and_request_lifecycle() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[["Uint8Array",4],"DataView",1,3,2,"Uint16Array",1,[1,2],"ERR_INVALID_ARG_VALUE","ERR_INVALID_STATE","ERR_INVALID_STATE"]"#
+        r#"[["Uint8Array",4],"DataView",1,3,2,"Uint16Array",1,[1,2],"ERR_INVALID_ARG_VALUE","ERR_INVALID_STATE","ERR_INVALID_STATE","ERR_INVALID_STATE"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1066,3 +1068,321 @@ fn stream_construct_hooks_gate_io_and_propagate_failures() {
 }
 
 
+
+
+#[test]
+fn readable_stream_from_keeps_iterator_method_and_async_chunk_identity() {
+    // Unrun: an async iterator's unresolved Promise must remain a chunk.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_from_iterator_identity");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var invalid = [], syncLookups = 0;
+      for (var value of [false, 0, '']) { var bad = { [Symbol.asyncIterator]: value, get [Symbol.iterator]() { syncLookups++; return function () { return [1][Symbol.iterator](); }; } }; try { ReadableStream.from(bad); } catch (error) { invalid.push(error.name); } }
+      var pending = new Promise(function () {}), nextGets = 0, calls = 0, receiverCorrect = false;
+      var iterator = { get next() { nextGets++; return function () { receiverCorrect = this === iterator; calls++; return Promise.resolve(calls === 1 ? { value: pending, done: false } : { done: true }); }; }, [Symbol.asyncIterator]() { return this; } };
+      var stream = ReadableStream.from(iterator); Object.defineProperty(iterator, 'next', { value: function () { throw new Error('replacement next'); } });
+      var reader = stream.getReader(), first = await reader.read(), finished = await reader.read();
+      var sync = ReadableStream.from([Promise.resolve(7)]).getReader(), resolved = await sync.read();
+      return [invalid, syncLookups, nextGets, receiverCorrect, first.value === pending, finished.done, resolved.value];
+    };"#).unwrap();
+    let modules = temp_registry("stream_from_iterator_identity_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIteratorIdentity = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseIteratorIdentity").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],0,1,true,true,true,7]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+
+#[test]
+fn text_decoder_stream_exposes_the_settings_acquired_by_its_decoder() {
+    // Unrun regression: changing getters must be read once, and fatal decoding must agree.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("decoder_stream_option_getters");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var fatalReads = 0, bomReads = 0, decoder = new TextDecoderStream('utf-8', {
+        get fatal() { return ++fatalReads === 1; }, get ignoreBOM() { return ++bomReads === 1; }
+      }), reader = decoder.readable.getReader(), writer = decoder.writable.getWriter();
+      var read = reader.read(), outcomes = await Promise.allSettled([writer.write(new Uint8Array([255])), read]);
+      return [fatalReads, bomReads, decoder.fatal, decoder.ignoreBOM, outcomes.map(function (outcome) { return [outcome.status, outcome.reason && outcome.reason.name]; })];
+    };"#).unwrap();
+    let modules = temp_registry("decoder_stream_option_getters_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDecoderSettings = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseDecoderSettings").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[1,1,true,true,[["rejected","TypeError"],["rejected","TypeError"]]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+
+#[test]
+fn stream_size_strategies_validate_and_capture_the_size_function_once() {
+    // Unrun regression for both consumers of the shared size validation.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_size_validation");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var errors = []; for (var constructor of [ReadableStream, WritableStream]) for (var size of [null, 0, false, 'size']) { try { new constructor({}, { size: size }); } catch (error) { errors.push(error.name); } }
+      var readableGets = 0, writableGets = 0, controller, measured = [];
+      var readable = new ReadableStream({ start(value) { controller = value; } }, { highWaterMark: 4, get size() { readableGets++; return readableGets === 1 ? function (chunk) { return chunk.length; } : null; } });
+      controller.enqueue('xx'); var remaining = controller.desiredSize;
+      var writable = new WritableStream({}, { get size() { writableGets++; return writableGets === 1 ? function (chunk) { measured.push(chunk); return 1; } : null; } }), writer = writable.getWriter(); await writer.write(3); await writer.close();
+      return [errors, readableGets, writableGets, remaining, measured];
+    };"#).unwrap();
+    let modules = temp_registry("stream_size_validation_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSizeValidation = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseSizeValidation").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"],1,1,2,[3]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn binary_transform_streams_enforce_buffer_sources() {
+    // Unrun: pending reads let transform errors reach both sides without backpressure.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("binary_transform_buffer_sources");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      async function reject(stream, chunk) {
+        var reader = stream.readable.getReader(), writer = stream.writable.getWriter();
+        var read = reader.read(), outcomes = await Promise.allSettled([writer.write(chunk), read]);
+        return outcomes.map(function (outcome) { return outcome.status === 'rejected' && outcome.reason.name === 'TypeError'; });
+      }
+      var errors = [];
+      for (var create of [function () { return new TextDecoderStream(); }, function () { return new CompressionStream('gzip'); }, function () { return new DecompressionStream('gzip'); }]) errors.push(await reject(create(), [65]));
+      var bytes = new Uint8Array([0, 65, 66, 0]), decoder = new TextDecoderStream(), reader = decoder.readable.getReader(), writer = decoder.writable.getWriter(), read = reader.read();
+      await writer.write(new DataView(bytes.buffer, 1, 2)); var text = (await read).value; await writer.close();
+      var shared = null;
+      if (typeof SharedArrayBuffer === 'function') {
+        var buffer = new SharedArrayBuffer(2); new Uint8Array(buffer).set([67, 68]);
+        decoder = new TextDecoderStream(); reader = decoder.readable.getReader(); writer = decoder.writable.getWriter(); read = reader.read();
+        await writer.write(buffer); var decoded = (await read).value; await writer.close();
+        shared = [decoded, await reject(new CompressionStream('gzip'), buffer), await reject(new DecompressionStream('gzip'), new Uint8Array(buffer))];
+      }
+      return [errors, text, shared];
+    };"#).unwrap();
+    let modules = temp_registry("binary_transform_buffer_sources_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBinaryTransforms = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseBinaryTransforms").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert!(result == r#"[[[true,true],[true,true],[true,true]],"AB",null]"# || result == r#"[[[true,true],[true,true],[true,true]],"AB",["CD",[true,true],[true,true]]]"#, "{result}");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn text_encoders_reject_symbols_and_use_string_conversion_hint() {
+    // Unrun regression for all public text encoder conversion boundaries.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("text_encoder_symbol_conversion");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var encoder = new TextEncoder(), errors = [];
+      for (var invoke of [function () { encoder.encode(Symbol('x')); }, function () { encoder.encodeInto(Symbol('x'), new Uint8Array(10)); }, function () { encoder.encode(Object(Symbol('x'))); }]) { try { invoke(); } catch (error) { errors.push(error.name); } }
+      var hints = [], value = { [Symbol.toPrimitive](hint) { hints.push(hint); return 'A'; } }, bytes = encoder.encode(value), into = new Uint8Array(1); encoder.encodeInto(value, into);
+      var stream = new TextEncoderStream(), reader = stream.readable.getReader(), writer = stream.writable.getWriter(), read = reader.read();
+      var outcomes = await Promise.allSettled([writer.write(Symbol('x')), read]);
+      return [errors, hints, Array.from(bytes), Array.from(into), outcomes.map(function (outcome) { return outcome.status === 'rejected' && outcome.reason.name === 'TypeError'; })];
+    };"#).unwrap();
+    let modules = temp_registry("text_encoder_symbol_conversion_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEncoderConversion = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseEncoderConversion").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],["string","string"],[65],[65],[true,true]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn transform_stream_preserves_inherited_readable_size_strategy() {
+    // Unrun regression: inherited size counts bytes instead of chunks.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("transform_inherited_size");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var controller, stream = new TransformStream({ start(value) { controller = value; } }, {}, new ByteLengthQueuingStrategy({ highWaterMark: 4 })), writer = stream.writable.getWriter();
+      await writer.write(new Uint8Array(3)); var remaining = controller.desiredSize; await writer.close();
+      var marks = 0, sizes = 0, otherController, strategy = Object.create({ get highWaterMark() { marks++; return 4; }, get size() { sizes++; return function (chunk) { return chunk.length; }; } });
+      var other = new TransformStream({ start(value) { otherController = value; } }, {}, strategy), otherWriter = other.writable.getWriter();
+      await otherWriter.write('xx'); var otherRemaining = otherController.desiredSize; await otherWriter.close();
+      return [remaining, otherRemaining, marks, sizes];
+    };"#).unwrap();
+    let modules = temp_registry("transform_inherited_size_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseInheritedSize = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseInheritedSize").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[1,2,1,1]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn readable_stream_from_advances_only_for_read_requests() {
+    // Unrun regression for construction and post-read prefetch.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_from_demand");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var calls = 0, iterator = { next() { calls++; return { value: calls, done: false }; }, [Symbol.iterator]() { return this; } }, stream = ReadableStream.from(iterator);
+      async function drainJobs() { for (var i = 0; i < 12; i++) await Promise.resolve(); }
+      await drainJobs(); var before = calls, reader = stream.getReader(), first = await reader.read();
+      await drainJobs(); var after = calls, second = await reader.read(); await drainJobs(); var final = calls; await reader.cancel();
+      return [before, first.value, after, second.value, final];
+    };"#).unwrap();
+    let modules = temp_registry("stream_from_demand_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamDemand = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseStreamDemand").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[0,1,1,2,2]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn stream_async_iterator_releases_locks_and_forwards_return_reason() {
+    // Unrun regression for normal/error/cancel-error/preventCancel endings.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_iterator_release");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var normal = new ReadableStream({ start(c) { c.enqueue(1); c.close(); } }), it = normal.values();
+      var first = await it.next(), end = await it.next(), again = await it.next();
+      var failure = new Error('read'), failed = new ReadableStream({ start(c) { c.error(failure); } }), failedIt = failed.values(), readFailure;
+      try { await failedIt.next(); } catch (error) { readFailure = error === failure; }
+      var reason = { reason: true }, seen, cancelError = new Error('cancel'), cancelled = new ReadableStream({ cancel(value) { seen = value; throw cancelError; } }), cancelIt = cancelled.values(), cancellation;
+      try { await cancelIt.return(reason); } catch (error) { cancellation = error === cancelError; }
+      var cancelledAgain = await cancelIt.next(), calls = 0, kept = new ReadableStream({ start(c) { c.enqueue(2); }, cancel() { calls++; } }), options = { preventCancel: true }, keptIt = kept.values(options); options.preventCancel = false;
+      var returned = await keptIt.return(reason), keptReader = kept.getReader(), retained = await keptReader.read(); keptReader.releaseLock();
+      return [first.value, end.done, again.done, normal.locked, readFailure, failed.locked, seen === reason, cancellation, cancelled.locked, cancelledAgain.done, returned.value === reason, returned.done, retained.value, calls];
+    };"#).unwrap();
+    let modules = temp_registry("stream_iterator_release_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIteratorRelease = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseIteratorRelease").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[1,true,true,false,true,false,true,true,false,true,true,true,2,0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn readable_cancellation_closes_before_source_failure() {
+    // Unrun regression for synchronous throws and rejected cancellation.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("readable_cancel_failure");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var results = [];
+      for (var asynchronous of [false, true]) {
+        var failure = new Error('cancel'), reason = { reason: true }, received;
+        var stream = new ReadableStream({ cancel(value) { received = value; if (asynchronous) return Promise.reject(failure); throw failure; } }), reader = stream.getReader(), pending = reader.read(), closed = reader.closed;
+        var cancellation = reader.cancel(reason), calledSynchronously = received === reason, outcomes = await Promise.allSettled([pending, closed, cancellation]);
+        var later = await reader.read();
+        results.push([outcomes[0].status, outcomes[0].value.done, outcomes[1].status, outcomes[2].status, outcomes[2].reason === failure, received === reason, later.done, calledSynchronously]);
+        reader.releaseLock();
+      }
+      return results;
+    };"#).unwrap();
+    let modules = temp_registry("readable_cancel_failure_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCancelFailure = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseCancelFailure").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["fulfilled",true,"fulfilled","rejected",true,true,true,true],["fulfilled",true,"fulfilled","rejected",true,true,true,true]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn web_writer_write_discards_sink_fulfillment_values() {
+    // Unrun regression: both immediate and asynchronous sink values are private.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("web_write_result");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var seen = [], results = [];
+      for (var asynchronous of [false, true]) {
+        var writer = new WritableStream({ write(chunk) { seen.push(chunk); return asynchronous ? Promise.resolve(42) : 42; } }).getWriter();
+        results.push(await writer.write('chunk') === undefined);
+        await writer.close(); writer.releaseLock();
+      }
+      return [results, seen];
+    };"#).unwrap();
+    let modules = temp_registry("web_write_result_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWriteResult = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseWriteResult").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,true],["chunk","chunk"]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn web_pipe_through_respects_prevent_abort() {
+    // Unrun regression: pipeThrough observes failure without changing the output.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("web_pipe_through_prevent_abort");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var failure = new Error('source'), source = new ReadableStream({ start(controller) { controller.error(failure); } }), transform = new TransformStream();
+      var output = source.pipeThrough(transform, { preventAbort: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      var reader = output.getReader(), writer = transform.writable.getWriter(), read = reader.read(), write = writer.write('after');
+      var outcomes = await Promise.allSettled([read, write]);
+      var first = outcomes[0].status === 'fulfilled' && outcomes[0].value.value === 'after';
+      await writer.close(); reader.releaseLock(); writer.releaseLock();
+      var normal = new ReadableStream({ start(controller) { controller.error(failure); } }).pipeThrough(new TransformStream()).getReader(), error;
+      try { await normal.read(); } catch (caught) { error = caught; }
+      normal.releaseLock();
+      return [first, outcomes[1].status, error === failure];
+    };"#).unwrap();
+    let modules = temp_registry("web_pipe_through_prevent_abort_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePipeThroughOptions = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exercisePipeThroughOptions").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,"fulfilled",true]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn transform_start_errors_reach_both_streams() {
+    // Unrun regression: start sees a controller attached to both streams.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("transform_start_binding");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var results = [];
+      for (var terminate of [false, true]) {
+        var failure = new Error('start'), stream = new TransformStream({ start(controller) { if (terminate) controller.terminate(); else controller.error(failure); } });
+        var reader = stream.readable.getReader(), writer = stream.writable.getWriter();
+        var outcomes = await Promise.allSettled([reader.read(), writer.closed, writer.write('value')]);
+        results.push([outcomes[0].status, terminate ? outcomes[0].value.done : outcomes[0].reason === failure, outcomes[1].status, outcomes[2].status, outcomes[1].reason === outcomes[2].reason]);
+        reader.releaseLock(); writer.releaseLock();
+      }
+      return results;
+    };"#).unwrap();
+    let modules = temp_registry("transform_start_binding_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTransformStart = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseTransformStart").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["rejected",true,"rejected","rejected",true],["fulfilled",true,"rejected","rejected",true]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}

@@ -303,12 +303,12 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function mutatesObject(): number;\nexport declare function roundTripsObject(): number;\nexport declare function passesNativeHandle(value: number): number;\nexport declare function prototypeRoundTrip(value: number): number;\nexport declare function watchObject(): number;\nexport declare function collectObjects(): number;\nexport declare function finalizedObjects(): number;\n",
+        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function mutatesObject(): number;\nexport declare function roundTripsObject(): number;\nexport declare function passesNativeHandle(value: number): number;\nexport declare function prototypeRoundTrip(value: number): number;\nexport declare function watchObject(): number;\nexport declare function collectObjects(): number;\nexport declare function finalizedObjects(): number;\nexport declare function watchMultiple(): number;\nexport declare function collectMultiple(): Promise<number>;\nexport declare function multipleFinalized(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "const native = require.addon(); native.Box.prototype.read = function() { return this.get(); }; native.Box.prototype.mark = function(value) { return value + 1; }; module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).read(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.mutatesObject = () => { const object = { value: 1 }; native.mutate(object); return object.value; }; module.exports.roundTripsObject = () => { const object = { value: 1 }; native.objectValue(object); object.value = 9; return native.objectValue(object); }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get(); module.exports.prototypeRoundTrip = value => new native.Box(value).self().callMark(); const watcher = new native.Box(0); module.exports.watchObject = () => { watcher.watch({ value: 1 }, function() { this.marked = 41; }); return 1; }; module.exports.collectObjects = async () => { for (let index = 0; index < 4; index++) { __thaw_gc(); await Promise.resolve(); } return 1; }; module.exports.finalizedObjects = () => watcher.finalized() + watcher.marked;",
+        "const native = require.addon(); native.Box.prototype.read = function() { return this.get(); }; native.Box.prototype.mark = function(value) { return value + 1; }; module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).read(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.mutatesObject = () => { const object = { value: 1 }; native.mutate(object); return object.value; }; module.exports.roundTripsObject = () => { const object = { value: 1 }; native.objectValue(object); object.value = 9; return native.objectValue(object); }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get(); module.exports.prototypeRoundTrip = value => new native.Box(value).self().callMark(); const watcher = new native.Box(0); module.exports.watchObject = () => { watcher.watch({ value: 1 }, function() { this.marked = 41; }); return 1; }; module.exports.collectObjects = async () => { for (let index = 0; index < 4; index++) { __thaw_gc(); await Promise.resolve(); } return 1; }; module.exports.finalizedObjects = () => watcher.finalized() + watcher.marked; const watchResults = {}; module.exports.watchMultiple = () => { const receiverA = {}, receiverB = {}; watcher.watchControl({}, receiverA, function() { watchResults.a = this.marked = 12; }); watcher.watchControl({}, receiverB, function() { watchResults.b = this.marked = 30; }); return 1; }; module.exports.collectMultiple = async () => { for (let index = 0; index < 4; index++) { __thaw_gc(); await Promise.resolve(); } return 1; }; module.exports.multipleFinalized = () => watcher.controlFinalized() + watchResults.a + watchResults.b;",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -318,6 +318,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
             #include <stddef.h>
             #include <stdlib.h>
             typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef void* napi_ref; typedef void* napi_handle_scope;
             typedef int napi_status;
             typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
             typedef struct { const char* utf8name; napi_value name; napi_callback method; napi_callback getter; napi_callback setter; napi_value value; unsigned attributes; void* data; } napi_property_descriptor;
@@ -335,10 +336,55 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
             extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
             extern napi_status napi_unwrap(napi_env, napi_value, void**);
             extern napi_status napi_add_finalizer(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
-            static double finalized_objects; static napi_value watched_callback, watched_receiver;
+            extern napi_status node_api_post_finalizer(napi_env, void (*)(napi_env,void*,void*), void*, void*);
+            extern napi_status napi_create_reference(napi_env, napi_value, unsigned, napi_ref*);
+            extern napi_status napi_get_reference_value(napi_env, napi_ref, napi_value*);
+            extern napi_status napi_delete_reference(napi_env, napi_ref);
+            extern napi_status napi_open_handle_scope(napi_env, napi_handle_scope*);
+            extern napi_status napi_close_handle_scope(napi_env, napi_handle_scope);
+            extern napi_status napi_throw_error(napi_env, const char*, const char*);
+            typedef struct { napi_ref receiver; napi_ref callback; double *completed; } watch_state;
+            static double finalized_objects, multiple_finalized_objects;
+            static void finalize_object(napi_env env, void* data, void* hint);
+            static napi_status register_watch(napi_env env, napi_value target, napi_value receiver,
+                                              napi_value callback, double *completed) {
+                watch_state *state = calloc(1, sizeof(*state));
+                if (!state) return 1;
+                napi_status status = napi_create_reference(env, receiver, 1, &state->receiver);
+                if (status == 0) status = napi_create_reference(env, callback, 1, &state->callback);
+                if (status != 0) {
+                    if (state->receiver) (void)napi_delete_reference(env, state->receiver);
+                    free(state); return status;
+                }
+                state->completed = completed;
+                status = napi_add_finalizer(env, target, state, finalize_object, 0, 0);
+                if (status != 0) {
+                    (void)napi_delete_reference(env, state->receiver);
+                    (void)napi_delete_reference(env, state->callback);
+                    free(state);
+                }
+                return status;
+            }
+            static void finish_watch(napi_env env, void* data, void* hint) {
+                watch_state *state = data; napi_handle_scope scope = 0;
+                napi_value receiver = 0, callback = 0, result = 0; napi_status status;
+                (void)hint;
+                status = napi_open_handle_scope(env, &scope);
+                if (status == 0) status = napi_get_reference_value(env, state->receiver, &receiver);
+                if (status == 0) status = napi_get_reference_value(env, state->callback, &callback);
+                if (status == 0) status = napi_call_function(env, receiver, callback, 0, 0, &result);
+                if (scope && napi_close_handle_scope(env, scope) != 0 && status == 0) status = 1;
+                if (napi_delete_reference(env, state->receiver) != 0 && status == 0) status = 1;
+                if (napi_delete_reference(env, state->callback) != 0 && status == 0) status = 1;
+                if (status == 0) (*state->completed)++;
+                free(state);
+            }
             static void finalize_object(napi_env env, void* data, void* hint) {
-                napi_value result; (void)data; (void)hint; finalized_objects++;
-                napi_call_function(env, watched_receiver, watched_callback, 0, 0, &result);
+                if (node_api_post_finalizer(env, finish_watch, data, hint) != 0) {
+                    // Do not silently strand per-watch references after an impossible post failure.
+                    // N-API/JavaScript cleanup is forbidden on the GC finalizer path.
+                    abort();
+                }
             }
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2], result; double left, right;
@@ -391,30 +437,49 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
                 napi_call_function(env, self, mark, 1, &value, &result); return result;
             }
             static napi_value box_watch(napi_env env, napi_callback_info info) {
-                size_t argc = 2; napi_value args[2], result;
-                napi_get_cb_info(env, info, &argc, args, &watched_receiver, 0);
-                watched_callback = args[1];
-                napi_add_finalizer(env, args[0], 0, finalize_object, 0, 0);
-                napi_get_undefined(env, &result); return result;
+                size_t argc = 2; napi_value args[2], self, result;
+                if (napi_get_cb_info(env, info, &argc, args, &self, 0) != 0 || argc < 2 ||
+                    register_watch(env, args[0], self, args[1], &finalized_objects) != 0) {
+                    napi_throw_error(env, "ERR_WATCH", "unable to register finalizer watch"); return 0;
+                }
+                if (napi_get_undefined(env, &result) != 0) return 0;
+                return result;
+            }
+            static napi_value box_watch_control(napi_env env, napi_callback_info info) {
+                size_t argc = 3; napi_value args[3], result;
+                if (napi_get_cb_info(env, info, &argc, args, 0, 0) != 0 || argc < 3 ||
+                    register_watch(env, args[0], args[1], args[2], &multiple_finalized_objects) != 0) {
+                    napi_throw_error(env, "ERR_WATCH", "unable to register control finalizer watch"); return 0;
+                }
+                if (napi_get_undefined(env, &result) != 0) return 0;
+                return result;
             }
             static napi_value box_finalized(napi_env env, napi_callback_info info) {
                 napi_value result; (void)info;
-                napi_create_double(env, finalized_objects, &result); return result;
+                if (napi_create_double(env, finalized_objects, &result) != 0) return 0;
+                return result;
+            }
+            static napi_value box_control_finalized(napi_env env, napi_callback_info info) {
+                napi_value result; (void)info;
+                if (napi_create_double(env, multiple_finalized_objects, &result) != 0) return 0;
+                return result;
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-                napi_value fn, constructor; napi_property_descriptor properties[5] = {
+                napi_value fn, constructor; napi_property_descriptor properties[7] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
                     { "self", 0, box_self, 0, 0, 0, 0, 0 },
                     { "callMark", 0, box_call_mark, 0, 0, 0, 0, 0 },
                     { "watch", 0, box_watch, 0, 0, 0, 0, 0 },
-                    { "finalized", 0, box_finalized, 0, 0, 0, 0, 0 }
+                    { "finalized", 0, box_finalized, 0, 0, 0, 0, 0 },
+                    { "watchControl", 0, box_watch_control, 0, 0, 0, 0, 0 },
+                    { "controlFinalized", 0, box_control_finalized, 0, 0, 0, 0, 0 }
                 };
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
                 napi_create_function(env, "invoke", 6, invoke, 0, &fn); napi_set_named_property(env, exports, "invoke", fn);
                 napi_create_function(env, "same", 4, same, 0, &fn); napi_set_named_property(env, exports, "same", fn);
                 napi_create_function(env, "objectValue", 11, object_value, 0, &fn); napi_set_named_property(env, exports, "objectValue", fn);
                 napi_create_function(env, "mutate", 6, mutate, 0, &fn); napi_set_named_property(env, exports, "mutate", fn);
-                napi_define_class(env, "Box", 3, box_new, 0, 5, properties, &constructor);
+                napi_define_class(env, "Box", 3, box_new, 0, sizeof(properties) / sizeof(properties[0]), properties, &constructor);
                 napi_set_named_property(env, exports, "Box", constructor); return exports;
             }
         "#,
@@ -432,7 +497,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, mutatesObject, roundTripsObject, passesNativeHandle, prototypeRoundTrip, watchObject, collectObjects, finalizedObjects } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(mutatesObject()); console.log(roundTripsObject()); console.log(passesNativeHandle(42)); console.log(prototypeRoundTrip(42)); watchObject(); collectObjects(); collectObjects(); console.log(finalizedObjects()); }\n",
+        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, mutatesObject, roundTripsObject, passesNativeHandle, prototypeRoundTrip, watchObject, collectObjects, finalizedObjects, watchMultiple, collectMultiple, multipleFinalized } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(mutatesObject()); console.log(roundTripsObject()); console.log(passesNativeHandle(42)); console.log(prototypeRoundTrip(42)); watchObject(); collectObjects(); collectObjects(); console.log(finalizedObjects()); watchMultiple(); collectMultiple(); collectMultiple(); console.log(multipleFinalized()); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -445,7 +510,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n42\n42\ntrue\n42\n42\n9\n42\n43\n42\n"
+        "42\n42\n42\ntrue\n42\n42\n9\n42\n43\n42\n44\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -815,3 +880,170 @@ fn native_callback_returning_a_function_keeps_it_callable() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+// Proposed thaw-cli/src/tests/native_addons/local_napi.rs integration test.
+// UNRUN: requires the separate Worker native-addon rehydration unit plus the
+// aggregate owner-thread poll/shutdown unit. It exercises an actual .node
+// addon, not a simulated Rust Env.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the separately pending native-addon Worker rehydration unit"]
+fn native_addon_async_and_tsfn_complete_in_worker_before_natural_exit() {
+    let dir = std::env::temp_dir().join(format!("thaw-worker-napi-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("worker-native");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"),
+        "export declare function schedule(asyncDone: (value: number) => void, threadDone: (value: number) => void): void;\n")
+        .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        #include <stdlib.h>
+        typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+        typedef void* napi_async_work; typedef void* napi_threadsafe_function;
+        typedef int napi_status;
+        typedef void (*napi_async_execute_callback)(napi_env, void*);
+        typedef void (*napi_async_complete_callback)(napi_env, napi_status, void*);
+        typedef void (*napi_threadsafe_function_call_js)(napi_env, napi_value, void*, void*);
+        extern napi_status napi_get_cb_info(napi_env,napi_callback_info,size_t*,napi_value*,napi_value*,void**);
+        extern napi_status napi_get_undefined(napi_env,napi_value*);
+        extern napi_status napi_create_double(napi_env,double,napi_value*);
+        extern napi_status napi_call_function(napi_env,napi_value,napi_value,size_t,const napi_value*,napi_value*);
+        extern napi_status napi_create_function(napi_env,const char*,size_t,napi_value(*)(napi_env,napi_callback_info),void*,napi_value*);
+        extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+        extern napi_status napi_create_async_work(napi_env,napi_value,napi_value,napi_async_execute_callback,napi_async_complete_callback,void*,napi_async_work*);
+        extern napi_status napi_queue_async_work(napi_env,napi_async_work);
+        extern napi_status napi_delete_async_work(napi_env,napi_async_work);
+        extern napi_status napi_create_threadsafe_function(napi_env,napi_value,napi_value,napi_value,size_t,size_t,void*,void*,void*,napi_threadsafe_function_call_js,napi_threadsafe_function*);
+        extern napi_status napi_call_threadsafe_function(napi_threadsafe_function,void*,int);
+        extern napi_status napi_release_threadsafe_function(napi_threadsafe_function,int);
+        struct request { napi_value async_done; napi_threadsafe_function thread_done; napi_async_work work; };
+        static void deliver_thread(napi_env env,napi_value callback,void* context,void* data) {
+            (void)context; (void)data;
+            napi_value self,value,ignored;
+            napi_get_undefined(env,&self); napi_create_double(env,2,&value);
+            napi_call_function(env,self,callback,1,&value,&ignored);
+        }
+        static void execute(napi_env env,void* raw) {
+            (void)env;
+            struct request* request = raw;
+            napi_call_threadsafe_function(request->thread_done,NULL,0);
+            napi_release_threadsafe_function(request->thread_done,0);
+        }
+        static void complete(napi_env env,napi_status status,void* raw) {
+            struct request* request = raw;
+            napi_value self,value,ignored;
+            napi_get_undefined(env,&self); napi_create_double(env,status == 0 ? 1 : -1,&value);
+            napi_call_function(env,self,request->async_done,1,&value,&ignored);
+            napi_delete_async_work(env,request->work);
+            free(request);
+        }
+        static napi_value schedule(napi_env env,napi_callback_info info) {
+            napi_value args[2],result;
+            size_t argc = 2;
+            struct request* request = calloc(1,sizeof(*request));
+            napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+            request->async_done = args[0];
+            napi_create_threadsafe_function(env,args[1],NULL,NULL,0,1,NULL,NULL,NULL,deliver_thread,&request->thread_done);
+            napi_create_async_work(env,NULL,NULL,execute,complete,request,&request->work);
+            napi_queue_async_work(env,request->work);
+            napi_get_undefined(env,&result);
+            return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env,napi_value exports) {
+            napi_value fn;
+            napi_create_function(env,"schedule",8,schedule,NULL,&fn);
+            napi_set_named_property(env,exports,"schedule",fn);
+            return exports;
+        }
+    "#).unwrap();
+    assert!(Command::new("cc").args(["-shared", "-fPIC"])
+        .arg(&addon_c).arg("-o").arg(package.join("native.node"))
+        .status().unwrap().success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(&source, r#"
+        import { schedule } from 'worker-native';
+        import { Worker } from 'node:worker_threads';
+        async function main(): Promise<void> {
+            // Keep the package in the bundle; the Worker must independently
+            // rehydrate its addon rather than sharing main's Env or Host.
+            if (typeof schedule !== 'function') throw new Error('missing addon');
+            const worker = new Worker("var wt=require('node:worker_threads'), addon=require('worker-native'), seen=[]; function done(kind,value){ seen.push(kind+value); if(seen.length===2){ wt.parentPort.postMessage(seen.sort().join(',')); wt.parentPort.close(); } } addon.schedule(v=>done('async',v),v=>done('tsfn',v));", { eval: true });
+            const events: string[] = [];
+            await new Promise<void>((resolve,reject) => {
+                worker.on('message', value => events.push(String(value)));
+                worker.on('error', reject);
+                worker.on('exit', code => { events.push('exit'+code); resolve(); });
+            });
+            console.log(events.join('|'));
+        }
+    "#).unwrap();
+    build(&source,&output,&[],&[],&[],&registry,&[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "async1,tsfn2|exit0\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// Unlike the unit-level pointer-injection check, this executes from the
+// generated process main thread and proves the loader's actual default-loop
+// receipt keeps libuv mapped and drives both the timer and its close callback.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_main_default_uv_loop_timer_progresses_through_close() {
+    let dir = std::env::temp_dir().join(format!("thaw-main-uv-addon-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("main-uv-native");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"),
+        "export declare function schedule(): void;\n").unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+        typedef int napi_status;
+        extern napi_status napi_get_undefined(napi_env,napi_value*);
+        extern napi_status napi_create_function(napi_env,const char*,size_t,napi_value(*)(napi_env,napi_callback_info),void*,napi_value*);
+        extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+        extern void* uv_default_loop(void);
+        extern size_t uv_handle_size(int);
+        extern int uv_timer_init(void*,void*);
+        extern int uv_timer_start(void*,void (*)(void*),unsigned long long,unsigned long long);
+        extern void uv_close(void*,void (*)(void*));
+        static void closed(void* handle) { puts("main-default-loop-closed"); fflush(stdout); free(handle); }
+        static void fired(void* handle) { puts("main-default-loop-fired"); fflush(stdout); uv_close(handle,closed); }
+        static napi_value schedule(napi_env env,napi_callback_info info) {
+            (void)info;
+            void* timer = calloc(1,uv_handle_size(13));
+            if (!timer) abort();
+            if (uv_timer_init(uv_default_loop(),timer) != 0 || uv_timer_start(timer,fired,1,0) != 0) abort();
+            napi_value result; napi_get_undefined(env,&result); return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env,napi_value exports) {
+            napi_value fn;
+            napi_create_function(env,"schedule",8,schedule,NULL,&fn);
+            napi_set_named_property(env,exports,"schedule",fn);
+            return exports;
+        }
+    "#).unwrap();
+    assert!(Command::new("cc").args(["-shared", "-fPIC"])
+        .arg(&addon_c).arg("-o").arg(package.join("native.node"))
+        .status().unwrap().success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(&source,
+        "import { schedule } from 'main-uv-native'; function main(): void { schedule(); }\n")
+        .unwrap();
+    build(&source,&output,&[],&[],&[],&registry,&[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout),
+        "main-default-loop-fired\nmain-default-loop-closed\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

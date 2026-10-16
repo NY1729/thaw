@@ -40,6 +40,24 @@ extern "C" fn take_call_error() -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn has_call_error() -> u64 {
+    u64::from(!CALL_ERROR.with(Cell::get).is_null())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_return_if_call_error(code: &mut Vec<u8>, depth: u8) -> Option<()> {
+    emit_spill(code, depth);
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&(has_call_error as *const () as u64).to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]);
+    emit_restore(code, depth);
+    code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+    let no_error = emit_near_jump(code, 0x84);
+    code.extend_from_slice(&[0x66, 0x0f, 0xef, 0xc0, 0xc3]);
+    patch_near_jump(code, no_error)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn uncaught_string_throw(value: f64) -> f64 {
     CALL_ERROR.with(|error| error.set(value.to_bits() as usize as *const c_char));
     0.0
@@ -251,9 +269,10 @@ fn emit_binary_call(code: &mut Vec<u8>, function: u64, left: u8) {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_binary_call_reversed(code: &mut Vec<u8>, function: u64, left: u8) {
     emit_spill(code, left);
-    code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x04 | (left << 3), 0x24]);
+    // Slots below `left` hold live registers; the next slot is free.
+    code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x44 | (left << 3), 0x24, left * 8]);
     emit_move(code, 0, left + 1);
-    code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x0c, 0x24]);
+    code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x4c, 0x24, left * 8]);
     code.extend_from_slice(&[0x48, 0xb8]);
     code.extend_from_slice(&function.to_le_bytes());
     code.extend_from_slice(&[0xff, 0xd0]);
@@ -314,6 +333,7 @@ fn emit_compare(code: &mut Vec<u8>, left: u8, right: u8, operation: CompareOp) {
 
 struct Code {
     memory: *mut libc::c_void,
+    mapped_size: usize,
     globals: *const JitGlobals,
 }
 
@@ -322,7 +342,7 @@ unsafe impl Sync for Code {}
 
 impl Drop for Code {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.memory, page_size()) };
+        unsafe { libc::munmap(self.memory, self.mapped_size) };
     }
 }
 
@@ -332,6 +352,64 @@ fn page_size() -> usize {
         size as usize
     } else {
         4096
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn mapped_code_size(bytes_len: usize) -> Option<usize> {
+    let page = page_size();
+    bytes_len.max(1).checked_add(page - 1)?.checked_div(page)?.checked_mul(page)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn map_executable_code(bytes: &[u8]) -> Result<(*mut libc::c_void, usize), *const c_char> {
+    let size = mapped_code_size(bytes.len()).ok_or_else(|| ALLOCATION_FAILED.as_ptr().cast())?;
+    let memory = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if memory == libc::MAP_FAILED {
+        return Err(ALLOCATION_FAILED.as_ptr().cast());
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), memory.cast(), bytes.len());
+        if libc::mprotect(memory, size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+            libc::munmap(memory, size);
+            return Err(ALLOCATION_FAILED.as_ptr().cast());
+        }
+    }
+    Ok((memory, size))
+}
+
+#[cfg(all(test, target_arch = "x86_64", target_family = "unix"))]
+mod executable_mapping_tests {
+    use super::*;
+
+    // Unrun regression: the byte just past one page must be inside the
+    // mapped, executable span, and Code's destructor receives that span.
+    #[test]
+    fn generated_code_can_cross_a_page_boundary() {
+        let page = page_size();
+        let bytes = vec![0xc3; page + 1];
+        let (memory, mapped_size) = map_executable_code(&bytes).unwrap();
+        assert_eq!(mapped_size, page * 2);
+        assert_eq!(unsafe { *memory.cast::<u8>().add(page) }, 0xc3);
+        drop(Code {
+            memory,
+            mapped_size,
+            globals: ptr::null(),
+        });
+    }
+
+    #[test]
+    fn mapping_size_overflow_fails_before_allocation() {
+        assert!(mapped_code_size(usize::MAX).is_none());
     }
 }
 
@@ -369,27 +447,7 @@ fn compile(
     let bytes = program
         .machine_code()
         .ok_or_else(|| INVALID_SYMBOL.as_ptr().cast())?;
-    let size = page_size();
-    let memory = unsafe {
-        libc::mmap(
-            ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    if memory == libc::MAP_FAILED {
-        return Err(ALLOCATION_FAILED.as_ptr().cast());
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), memory.cast(), bytes.len());
-        if libc::mprotect(memory, size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-            libc::munmap(memory, size);
-            return Err(ALLOCATION_FAILED.as_ptr().cast());
-        }
-    }
+    let (memory, mapped_size) = map_executable_code(&bytes)?;
     let globals_ptr = {
         let mut globals = globals_cache()
             .lock()
@@ -408,6 +466,7 @@ fn compile(
         symbol.to_owned(),
         Code {
             memory,
+            mapped_size,
             globals: globals_ptr,
         },
     );
@@ -552,10 +611,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_globals = JIT_GLOBALS.with(|slot| slot.replace(globals));
     let previous_dynamic_values =
         DYNAMIC_VALUES.with(|values| std::mem::take(&mut *values.borrow_mut()));
-    let mut value = function(args);
-    if program.returns_tagged_array() && value.to_bits() & ARRAY_RESULT_TAG != 0 {
-        value = f64::from_bits(value.to_bits() & !ARRAY_RESULT_TAG);
-    }
+    let value = function(args);
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
     let absence = CALL_ABSENCE.with(|state| state.replace(previous_absence));

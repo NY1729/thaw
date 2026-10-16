@@ -63,6 +63,23 @@ fn lower_callable_default_wrappers(
                 .push(params[0].name.clone());
         }
         let mut body = Vec::new();
+        // A later default expression may name a binding destructured out of an
+        // earlier supplied parameter (`({ x }, y = x)`): bind those first.
+        for (index, pattern) in patterns.iter().enumerate().take(arity) {
+            let parameter = &params[receiver_count + index];
+            let destructured = match pattern {
+                Pat::Assign(default) => default.left.as_ref(),
+                other => other,
+            };
+            if matches!(destructured, Pat::Object(_) | Pat::Array(_)) {
+                lowerer.lower_binding_pattern(
+                    destructured,
+                    HirExpr::Var(parameter.name.clone()),
+                    &parameter.ty,
+                    &mut body,
+                )?;
+            }
+        }
         for (index, pattern) in patterns.iter().enumerate().skip(arity) {
             let parameter = &params[receiver_count + index];
             let value = match pattern {
@@ -103,6 +120,16 @@ fn lower_callable_default_wrappers(
                 .entry(parameter.name.clone())
                 .or_default()
                 .push(parameter.name.clone());
+            if let Pat::Assign(default) = pattern {
+                if matches!(default.left.as_ref(), Pat::Object(_) | Pat::Array(_)) {
+                    lowerer.lower_binding_pattern(
+                        default.left.as_ref(),
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut body,
+                    )?;
+                }
+            }
         }
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(symbol.to_string())),
@@ -168,7 +195,7 @@ fn lower_callable_omitted_parameter_wrappers(
             .iter()
             .enumerate()
             .filter_map(|(index, parameter)| {
-                (mask & (1usize << index) == 0).then_some(parameter.clone())
+                (!mask.contains(index)).then_some(parameter.clone())
             })
             .collect::<Vec<_>>();
         let mut lowerer = FnLowerer::new(
@@ -200,7 +227,7 @@ fn lower_callable_omitted_parameter_wrappers(
         for (index, pattern) in patterns.iter().enumerate() {
             let parameter_index = receiver_count + index;
             let parameter = &params[parameter_index];
-            if mask & (1usize << parameter_index) == 0 {
+            if !mask.contains(parameter_index) {
                 lowerer
                     .scope
                     .insert(parameter.name.clone(), parameter.ty.clone());
@@ -209,6 +236,19 @@ fn lower_callable_omitted_parameter_wrappers(
                     .entry(parameter.name.clone())
                     .or_default()
                     .push(parameter.name.clone());
+                // Later defaults may name bindings destructured from this parameter.
+                let destructured = match pattern {
+                    Pat::Assign(default) => default.left.as_ref(),
+                    other => other,
+                };
+                if matches!(destructured, Pat::Object(_) | Pat::Array(_)) {
+                    lowerer.lower_binding_pattern(
+                        destructured,
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut body,
+                    )?;
+                }
                 continue;
             }
             let value = match pattern {
@@ -245,6 +285,16 @@ fn lower_callable_omitted_parameter_wrappers(
                 .entry(parameter.name.clone())
                 .or_default()
                 .push(parameter.name.clone());
+            if let Pat::Assign(default) = pattern {
+                if matches!(default.left.as_ref(), Pat::Object(_) | Pat::Array(_)) {
+                    lowerer.lower_binding_pattern(
+                        default.left.as_ref(),
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut body,
+                    )?;
+                }
+            }
         }
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(symbol.to_string())),
@@ -265,7 +315,7 @@ fn lower_callable_omitted_parameter_wrappers(
             body.push(HirStmt::Return(Some(call)));
         }
         wrappers.push(HirFunction {
-            name: omitted_parameter_symbol(symbol, mask),
+            name: omitted_parameter_symbol(symbol, &mask),
             params: wrapper_params,
             ret: ret.clone(),
             is_async,
@@ -363,6 +413,7 @@ fn lower_class_constructor(
         .push(this_name.clone());
     for parameter in &initializer_params {
         lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+        lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
         lowerer
             .scope
             .insert(parameter.name.clone(), parameter.ty.clone());
@@ -522,7 +573,7 @@ fn lower_class_constructor(
             HirStmt::Let(
                 this_name.clone(),
                 instance_type.clone(),
-                HirExpr::ObjectAlloc(instance_type.clone()),
+                HirExpr::ClassAlloc(instance_type.clone()),
             ),
             HirStmt::Return(Some(HirExpr::Call(
                 Box::new(HirExpr::Var(initializer_symbol.clone())),
@@ -635,7 +686,7 @@ fn lower_class_constructor(
                         HirStmt::Let(
                             wrapper_this.clone(),
                             instance_type.clone(),
-                            HirExpr::ObjectAlloc(instance_type.clone()),
+                            HirExpr::ClassAlloc(instance_type.clone()),
                         ),
                         HirStmt::Return(Some(HirExpr::Call(
                             Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
@@ -671,79 +722,77 @@ fn lower_class_constructor(
                     body,
                 });
             }
-            if params.len() <= 16 {
-                for mask in 1usize..(1usize << params.len()) {
-                    let derived_constructor_wrapper =
-                        omitted_parameter_symbol(&constructor_symbol, mask);
-                    let initializer_mask = mask << 1;
-                    let derived_initializer_wrapper =
-                        omitted_parameter_symbol(&initializer_symbol, initializer_mask);
-                    if !signatures.contains_key(&derived_constructor_wrapper)
-                        || !signatures.contains_key(&derived_initializer_wrapper)
-                    {
-                        continue;
-                    }
-                    let wrapper_params = params
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, parameter)| {
-                            (mask & (1usize << index) == 0).then_some(parameter.clone())
-                        })
-                        .collect::<Vec<_>>();
-                    let wrapper_this = "__thaw_this".to_string();
-                    let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
-                    initialize_args.extend(
-                        wrapper_params
-                            .iter()
-                            .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                    );
-                    functions.push(HirFunction {
-                        name: derived_constructor_wrapper,
-                        params: wrapper_params.clone(),
-                        ret: instance_type.clone(),
-                        is_async: false,
-                        body: vec![
-                            HirStmt::Let(
-                                wrapper_this.clone(),
-                                instance_type.clone(),
-                                HirExpr::ObjectAlloc(instance_type.clone()),
-                            ),
-                            HirStmt::Return(Some(HirExpr::Call(
-                                Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
-                                initialize_args,
-                            ))),
-                        ],
-                    });
-
-                    let mut initializer_params = vec![HirParam {
-                        name: wrapper_this.clone(),
-                        ty: instance_type.clone(),
-                    }];
-                    initializer_params.extend(wrapper_params);
-                    let base_initializer_wrapper = omitted_parameter_symbol(
-                        &class_initializer_symbol(base.sym.as_ref()),
-                        initializer_mask,
-                    );
-                    let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
-                    base_args.extend(
-                        initializer_params[1..]
-                            .iter()
-                            .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                    );
-                    let mut body = vec![HirStmt::Expr(HirExpr::Call(
-                        Box::new(HirExpr::Var(base_initializer_wrapper)),
-                        base_args,
-                    ))];
-                    body.extend(implicit_own_initializers.iter().cloned());
-                    body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
-                    functions.push(HirFunction {
-                        name: derived_initializer_wrapper,
-                        params: initializer_params,
-                        ret: instance_type.clone(),
-                        is_async: false,
-                        body,
-                    });
+            for mask in omitted_parameter_masks_in_signatures(signatures, &constructor_symbol) {
+                let derived_constructor_wrapper =
+                    omitted_parameter_symbol(&constructor_symbol, &mask);
+                let initializer_mask = mask.offset_by(1);
+                let derived_initializer_wrapper =
+                    omitted_parameter_symbol(&initializer_symbol, &initializer_mask);
+                if !signatures.contains_key(&derived_constructor_wrapper)
+                    || !signatures.contains_key(&derived_initializer_wrapper)
+                {
+                    continue;
                 }
+                let wrapper_params = params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| {
+                        (!mask.contains(index)).then_some(parameter.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let wrapper_this = "__thaw_this".to_string();
+                let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
+                initialize_args.extend(
+                    wrapper_params
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                functions.push(HirFunction {
+                    name: derived_constructor_wrapper,
+                    params: wrapper_params.clone(),
+                    ret: instance_type.clone(),
+                    is_async: false,
+                    body: vec![
+                        HirStmt::Let(
+                            wrapper_this.clone(),
+                            instance_type.clone(),
+                            HirExpr::ClassAlloc(instance_type.clone()),
+                        ),
+                        HirStmt::Return(Some(HirExpr::Call(
+                            Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
+                            initialize_args,
+                        ))),
+                    ],
+                });
+
+                let mut initializer_params = vec![HirParam {
+                    name: wrapper_this.clone(),
+                    ty: instance_type.clone(),
+                }];
+                initializer_params.extend(wrapper_params);
+                let base_initializer_wrapper = omitted_parameter_symbol(
+                    &class_initializer_symbol(base.sym.as_ref()),
+                    &initializer_mask,
+                );
+                let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
+                base_args.extend(
+                    initializer_params[1..]
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                let mut body = vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(base_initializer_wrapper)),
+                    base_args,
+                ))];
+                body.extend(implicit_own_initializers.iter().cloned());
+                body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
+                functions.push(HirFunction {
+                    name: derived_initializer_wrapper,
+                    params: initializer_params,
+                    ret: instance_type.clone(),
+                    is_async: false,
+                    body,
+                });
             }
         }
     }
@@ -836,6 +885,8 @@ fn lower_class_methods(
         }
         for parameter in &params {
             lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+            lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
+        lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
             lowerer
                 .scope
                 .insert(parameter.name.clone(), parameter.ty.clone());
@@ -896,11 +947,6 @@ fn lower_class_methods(
         } else {
             signature.ret.clone()
         };
-        if method.kind == MethodKind::Setter {
-            lowered_body.push(HirStmt::Return(Some(HirExpr::Var(
-                params.last().expect("setter value parameter").name.clone(),
-            ))));
-        }
         functions.push(HirFunction {
             name: symbol.clone(),
             params: params.clone(),
@@ -1144,6 +1190,7 @@ fn lower_fn_decl(
     let promise_rejection_callback = name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX);
     for (index, (source, param)) in func.params.iter().zip(runtime_params).enumerate() {
         lowerer.mark_array_parameter(&param.name, &param.ty);
+        lowerer.mark_declared_nullable_parameter(&param.name, &param.ty);
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
@@ -1232,6 +1279,11 @@ fn lower_fn_decl(
         }
     }
     let mut body = Vec::new();
+    if promise_rejection_callback {
+        if let Some(binding) = runtime_params.first() {
+            body.extend(lowerer.snapshot_promise_rejection(&binding.name));
+        }
+    }
     for (source, param) in func.params.iter().zip(runtime_params) {
         if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
             lowerer.lower_binding_pattern(
@@ -1358,6 +1410,10 @@ fn lower_function_statements(
             .any(|finalizer| generator_statements_emit_value(finalizer, &values));
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
+        let mut close_generator = HirStmt::Expr(HirExpr::Assign(
+            "__thaw_generator_initialized".into(),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+        ));
         if let Some((entry, locals, state_machine)) =
             lower_generator_state_machine(
                 &lowered_generator_body,
@@ -1375,6 +1431,9 @@ fn lower_function_statements(
                 &forced_return,
             )
         {
+            close_generator = HirStmt::Expr(HirExpr::Assign(
+                state.clone(), Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+            ));
             lowerer.scope.insert(state.clone(), HirType::F64);
             lowerer
                 .scope
@@ -1447,20 +1506,95 @@ fn lower_function_statements(
                     Box::new(HirExpr::Lit(HirLit::Bool(true))),
                 )),
                 HirStmt::Try(
-                    inject_finally_before_exits(
+                    lowerer.inject_finally_before_exits(
                         generator_body,
                         std::slice::from_ref(&clear_running),
                         false,
-                    ),
+                        1,
+                    )?,
                     reentry_error.clone(),
                     vec![
                         clear_running.clone(),
+                        close_generator.clone(),
                         HirStmt::Throw(HirExpr::Var(reentry_error.clone())),
                     ],
                     Some(reentry_error.clone()),
                 ),
                 clear_running,
             ];
+        } else {
+            let uncaught_error = "__thaw_generator_uncaught_error".to_string();
+            lowerer.scope.insert(uncaught_error.clone(), HirType::Str);
+            generator_body = vec![HirStmt::Try(
+                generator_body,
+                uncaught_error.clone(),
+                vec![close_generator, HirStmt::Throw(HirExpr::Var(uncaught_error.clone()))],
+                Some(uncaught_error),
+            )];
+            if generator_suspends {
+                // Requests queue: a `next()` issued while an earlier request is
+                // suspended in an `await` waits for its turn (ticket/serving).
+                let next_ticket = "__thaw_async_generator_next_ticket".to_string();
+                let serving = "__thaw_async_generator_serving".to_string();
+                let ticket = "__thaw_async_generator_ticket".to_string();
+                let queue_error = "__thaw_async_generator_queue_error".to_string();
+                for name in [&next_ticket, &serving] {
+                    lowerer.scope.insert(name.clone(), HirType::F64);
+                    body.push(HirStmt::Let(name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))));
+                }
+                lowerer.scope.insert(ticket.clone(), HirType::F64);
+                lowerer.scope.insert(queue_error.clone(), HirType::Str);
+                let var = |name: &String| Box::new(HirExpr::Var(name.clone()));
+                let plus_one = || HirExpr::BinOp(
+                    BinOp::Add, var(&ticket), Box::new(HirExpr::Lit(HirLit::F64(1.0))));
+                let advance = HirStmt::Expr(HirExpr::Assign(serving.clone(), Box::new(plus_one())));
+                let turn = HirExpr::PromiseNew(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam {
+                            name: "__thaw_async_generator_turn_resolve".into(),
+                            ty: HirType::Function(Vec::new(), Box::new(HirType::Void)),
+                        }],
+                        HirType::Void,
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_async_generator_turn_resolve".into())),
+                            Vec::new(),
+                        )),
+                    )),
+                    HirType::Void,
+                    false,
+                    false,
+                );
+                generator_body = vec![
+                    HirStmt::Let(ticket.clone(), HirType::F64, HirExpr::Var(next_ticket.clone())),
+                    HirStmt::Expr(HirExpr::Assign(
+                        next_ticket.clone(),
+                        Box::new(plus_one()),
+                    )),
+                    HirStmt::While(
+                        HirExpr::BinOp(BinOp::Lt, var(&serving), var(&ticket)),
+                        vec![HirStmt::Expr(HirExpr::Await(Box::new(turn)))],
+                    ),
+                    // A fresh result array per request: an earlier request's
+                    // consumer may not have drained the previous one yet.
+                    HirStmt::Expr(HirExpr::Assign(
+                        "__thaw_generator_values".to_string(),
+                        Box::new(HirExpr::ArrayLit(Vec::new())),
+                    )),
+                    HirStmt::Try(
+                        lowerer.inject_finally_before_exits(
+                            generator_body,
+                            std::slice::from_ref(&advance),
+                            false,
+                            1,
+                        )?,
+                        queue_error.clone(),
+                        vec![advance.clone(), HirStmt::Throw(HirExpr::Var(queue_error.clone()))],
+                        Some(queue_error.clone()),
+                    ),
+                    advance,
+                ];
+            }
         }
         let generator_body = HirExpr::Block(generator_body);
         let mut referenced = BTreeSet::new();

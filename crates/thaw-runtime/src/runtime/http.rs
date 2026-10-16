@@ -24,6 +24,7 @@ struct AsyncHttpGet {
     path: String,
     redirects: usize,
     resolution: Option<SharedDnsResolution>,
+    remaining_addresses: Vec<SocketAddr>,
 }
 
 type SharedDnsResolution = Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>;
@@ -44,9 +45,13 @@ fn parse_http_url(url: &str) -> Result<(bool, String, u16, String), String> {
     } else {
         return Err("async fetch URL must use http:// or https://".to_string());
     };
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, format!("/{path}")),
-        None => (rest, "/".to_string()),
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let suffix = &rest[authority_end..];
+    let path = if suffix.starts_with('/') {
+        suffix.to_string()
+    } else {
+        format!("/{suffix}")
     };
     if authority.is_empty() {
         return Err("HTTP URL is missing a host".to_string());
@@ -77,7 +82,7 @@ fn parse_http_url(url: &str) -> Result<(bool, String, u16, String), String> {
         .split_once('#')
         .map(|(path, _)| path.to_string())
         .unwrap_or(path);
-    Ok((tls, host, port, path))
+    Ok((tls, host, port, normalize_http_path(&path)))
 }
 
 fn tls_client_config() -> Arc<ClientConfig> {
@@ -161,18 +166,44 @@ fn open_nonblocking_socket(address: SocketAddr) -> Result<RawFd, String> {
 
 type DnsResult = Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>;
 
+fn notify_dns_completion(write_fd: RawFd) -> std::io::Result<()> {
+    let byte = [1u8];
+    let sent = unsafe {
+        libc::send(
+            write_fd,
+            byte.as_ptr().cast(),
+            byte.len(),
+            libc::MSG_NOSIGNAL,
+        )
+    };
+    let result = if sent == byte.len() as isize {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    };
+    unsafe { libc::close(write_fd) };
+    result
+}
+
 fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), String> {
-    let mut pipe = [-1; 2];
-    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
+    let mut ends = [-1; 2];
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+            ends.as_mut_ptr(),
+        )
+    } != 0 {
         return Err(format!(
-            "creating DNS completion pipe: {}",
+            "creating DNS completion socket pair: {}",
             std::io::Error::last_os_error()
         ));
     }
     let result = Arc::new(Mutex::new(None));
     let worker_result = result.clone();
-    let read_fd = pipe[0];
-    let write_fd = pipe[1];
+    let read_fd = ends[0];
+    let write_fd = ends[1];
     let spawn = thread::Builder::new()
         .name("thaw-dns".to_string())
         .spawn(move || {
@@ -190,11 +221,7 @@ fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), S
             *worker_result
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolved);
-            let byte = [1u8];
-            unsafe {
-                libc::write(write_fd, byte.as_ptr().cast(), byte.len());
-                libc::close(write_fd);
-            }
+            let _ = notify_dns_completion(write_fd);
         });
     if let Err(error) = spawn {
         unsafe {
@@ -204,6 +231,31 @@ fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), S
         return Err(format!("starting DNS resolver: {error}"));
     }
     Ok((read_fd, result))
+}
+
+fn schedule_next_http_connection(
+    task: *mut AsyncHttpGet,
+    mut last_error: Option<String>,
+) -> Result<(), String> {
+    loop {
+        if http_deadline_expired(task) {
+            return Err(HTTP_DEADLINE_ERROR.to_string());
+        }
+        let Some(address) = (unsafe { (*task).remaining_addresses.pop() }) else {
+            return Err(last_error.unwrap_or_else(|| "DNS returned no usable address".to_string()));
+        };
+        match open_nonblocking_socket(address) {
+            Ok(fd) => {
+                unsafe {
+                    (*task).fd = fd;
+                    (*task).state = AsyncHttpState::Connecting;
+                }
+                schedule_async_http(task, THAW_FD_WRITABLE);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
 }
 
 struct NonblockingSocket(RawFd);
@@ -241,12 +293,29 @@ impl Write for NonblockingSocket {
     }
 }
 
+const HTTP_DEADLINE_ERROR: &str = "HTTP operation timed out";
+
+fn http_deadline_expired(task: *mut AsyncHttpGet) -> bool {
+    Instant::now() >= unsafe { (*task).deadline }
+}
+
+fn expire_async_http(task: *mut AsyncHttpGet) -> bool {
+    if !http_deadline_expired(task) {
+        return false;
+    }
+    async_http_error(task, HTTP_DEADLINE_ERROR.to_string());
+    true
+}
+
 fn flush_tls(task: *mut AsyncHttpGet) -> Result<bool, String> {
     let fd = unsafe { (*task).fd };
-    let tls = unsafe { (*task).tls.as_mut().expect("TLS state is present") };
     let mut socket = NonblockingSocket(fd);
-    while tls.wants_write() {
-        match tls.write_tls(&mut socket) {
+    while unsafe { (*task).tls.as_ref().expect("TLS state is present").wants_write() } {
+        if http_deadline_expired(task) {
+            return Err(HTTP_DEADLINE_ERROR.to_string());
+        }
+        let write = unsafe { (*task).tls.as_mut().unwrap().write_tls(&mut socket) };
+        match write {
             Ok(0) => return Err("TLS socket closed while writing".to_string()),
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
@@ -256,18 +325,58 @@ fn flush_tls(task: *mut AsyncHttpGet) -> Result<bool, String> {
     Ok(true)
 }
 
-fn read_tls_records(task: *mut AsyncHttpGet) -> Result<bool, String> {
+#[derive(Clone, Copy)]
+enum TlsReadOutcome {
+    Pending,
+    Eof,
+    Completed,
+}
+
+fn read_tls_records(
+    task: *mut AsyncHttpGet,
+    complete_response: bool,
+) -> Result<TlsReadOutcome, String> {
     let fd = unsafe { (*task).fd };
-    let tls = unsafe { (*task).tls.as_mut().expect("TLS state is present") };
     let mut socket = NonblockingSocket(fd);
+    let mut plaintext = [0u8; 8192];
     loop {
-        match tls.read_tls(&mut socket) {
-            Ok(0) => return Ok(true),
+        if http_deadline_expired(task) {
+            return Err(HTTP_DEADLINE_ERROR.to_string());
+        }
+        // rustls bounds its incoming plaintext buffer. Empty the reader before
+        // reading another TLS record, including data received with the handshake.
+        loop {
+            if http_deadline_expired(task) {
+                return Err(HTTP_DEADLINE_ERROR.to_string());
+            }
+            let read = unsafe { (*task).tls.as_mut().unwrap().reader().read(&mut plaintext) };
+            match read {
+                Ok(0) => return Ok(TlsReadOutcome::Eof),
+                Ok(read) => {
+                    unsafe { &mut (*task).response }.extend_from_slice(&plaintext[..read]);
+                    if complete_response && complete_async_http_if_ready(task, false) {
+                        return Ok(TlsReadOutcome::Completed);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(TlsReadOutcome::Eof);
+                }
+                Err(error) => {
+                    return Err(format!("reading decrypted HTTP response: {error}"));
+                }
+            }
+        }
+        let read = unsafe { (*task).tls.as_mut().expect("TLS state is present").read_tls(&mut socket) };
+        match read {
+            Ok(0) => return Ok(TlsReadOutcome::Eof),
             Ok(_) => {
-                tls.process_new_packets()
+                unsafe { (*task).tls.as_mut().unwrap().process_new_packets() }
                     .map_err(|error| format!("processing TLS records: {error}"))?;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(TlsReadOutcome::Pending);
+            }
             Err(error) => return Err(format!("reading TLS records: {error}")),
         }
     }
@@ -292,18 +401,11 @@ fn tls_interests(task: *mut AsyncHttpGet) -> u8 {
 fn async_http_error(task: *mut AsyncHttpGet, message: String) {
     let task = unsafe { Box::from_raw(task) };
     let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
-    thaw_promise_reject(task.completion, error);
+    reject_native_text(task.completion, error);
 }
 
 fn arena_c_string(value: &str) -> Option<*const u8> {
-    let value = CString::new(value).ok()?;
-    let bytes = value.as_bytes_with_nul();
-    let destination = thaw_arena::thaw_arena_alloc(bytes.len(), 1);
-    if destination.is_null() {
-        return None;
-    }
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len()) };
-    Some(destination)
+    arena_wtf8(value.as_bytes())
 }
 
 fn arena_pointer_slot(value: *const u8) -> Option<*const u8> {
@@ -332,43 +434,67 @@ fn http_authority(use_tls: bool, host: &str, port: u16) -> String {
 }
 
 fn normalize_http_path(path: &str) -> String {
-    let (path, suffix) = path
+    let (mut input, suffix) = path
         .find(['?', '#'])
         .map(|index| (&path[..index], &path[index..]))
         .unwrap_or((path, ""));
-    let mut parts = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
+    let mut output = String::new();
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix("../").or_else(|| input.strip_prefix("./")) {
+            input = rest;
+        } else if input.starts_with("/./") || input == "/." {
+            input = &input[2..];
+            if input.is_empty() {
+                input = "/";
             }
-            part => parts.push(part),
+        } else if input.starts_with("/../") || input == "/.." {
+            input = &input[3..];
+            if input.is_empty() {
+                input = "/";
+            }
+            output.truncate(output.rfind('/').unwrap_or(0));
+        } else if input == "." || input == ".." {
+            input = "";
+        } else {
+            let end = if let Some(rest) = input.strip_prefix('/') {
+                rest.find('/').map(|index| index + 1).unwrap_or(input.len())
+            } else {
+                input.find('/').unwrap_or(input.len())
+            };
+            output.push_str(&input[..end]);
+            input = &input[end..];
         }
     }
-    format!("/{}{suffix}", parts.join("/"))
+    format!("{output}{suffix}")
 }
 
-fn redirect_url(task: &AsyncHttpGet, location: &str) -> Result<String, String> {
+fn redirect_url(
+    use_tls: bool,
+    host: &str,
+    port: u16,
+    current_path: &str,
+    location: &str,
+) -> Result<String, String> {
     if location.starts_with("http://") || location.starts_with("https://") {
         return Ok(location.to_string());
     }
-    let scheme = if task.use_tls { "https" } else { "http" };
+    let scheme = if use_tls { "https" } else { "http" };
     if location.starts_with("//") {
         return Ok(format!("{scheme}:{location}"));
     }
-    let authority = http_authority(task.use_tls, &task.host, task.port);
+    let authority = http_authority(use_tls, host, port);
+    let path_without_query = current_path.split('?').next().unwrap_or(current_path);
     let path = if location.starts_with('/') {
         normalize_http_path(location)
-    } else if location.starts_with('?') || location.starts_with('#') {
-        let base = task
-            .path
-            .find(['?', '#'])
-            .map(|index| &task.path[..index])
-            .unwrap_or(&task.path);
-        format!("{base}{location}")
+    } else if location.starts_with('?') {
+        format!("{path_without_query}{location}")
+    } else if location.starts_with('#') || location.is_empty() {
+        format!("{current_path}{location}")
     } else {
-        let directory = task.path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let directory = path_without_query
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or("");
         normalize_http_path(&format!("{directory}/{location}"))
     };
     Ok(format!("{scheme}://{authority}{path}"))
@@ -379,7 +505,13 @@ fn restart_async_http(task: *mut AsyncHttpGet, location: &str) -> Result<(), Str
     if task_ref.redirects >= 10 {
         return Err("HTTP redirect limit exceeded (10)".to_string());
     }
-    let target = redirect_url(task_ref, location)?;
+    let target = redirect_url(
+        task_ref.use_tls,
+        &task_ref.host,
+        task_ref.port,
+        &task_ref.path,
+        location,
+    )?;
     let (use_tls, host, port, path) = parse_http_url(&target)?;
     let tls = if use_tls {
         let server_name = ServerName::try_from(host.clone())
@@ -409,6 +541,7 @@ fn restart_async_http(task: *mut AsyncHttpGet, location: &str) -> Result<(), Str
     task_ref.path = path;
     task_ref.redirects += 1;
     task_ref.resolution = Some(resolution);
+    task_ref.remaining_addresses.clear();
     schedule_async_http(task, THAW_FD_READABLE);
     Ok(())
 }
@@ -440,10 +573,13 @@ fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
             .map_err(|_| format!("invalid chunk size `{size_text}`"))?;
         cursor = line_end + 2;
         if size == 0 {
-            if body.len() < cursor + 2 {
+            let terminator_end = cursor
+                .checked_add(2)
+                .ok_or("chunk size overflows address space")?;
+            if body.len() < terminator_end {
                 return Ok(None);
             }
-            if &body[cursor..cursor + 2] == b"\r\n" {
+            if &body[cursor..terminator_end] == b"\r\n" {
                 return Ok(Some(decoded));
             }
             return if find_bytes(&body[cursor..], b"\r\n\r\n").is_some() {
@@ -455,94 +591,107 @@ fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
         let chunk_end = cursor
             .checked_add(size)
             .ok_or("chunk size overflows address space")?;
-        if body.len() < chunk_end + 2 {
+        let terminator_end = chunk_end
+            .checked_add(2)
+            .ok_or("chunk size overflows address space")?;
+        if body.len() < terminator_end {
             return Ok(None);
         }
-        if &body[chunk_end..chunk_end + 2] != b"\r\n" {
+        if &body[chunk_end..terminator_end] != b"\r\n" {
             return Err("chunk data is missing its CRLF terminator".to_string());
         }
         decoded.extend_from_slice(&body[cursor..chunk_end]);
-        cursor = chunk_end + 2;
+        cursor = terminator_end;
     }
 }
 
 fn parse_http_response(response: &[u8], eof: bool) -> Result<Option<ParsedHttpResponse>, String> {
-    let Some(header_end) = find_bytes(response, b"\r\n\r\n") else {
-        return if eof {
-            Err("malformed HTTP response (incomplete headers)".to_string())
-        } else {
-            Ok(None)
-        };
-    };
-    let head = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| "HTTP response headers are not valid UTF-8")?;
-    let mut lines = head.lines();
-    let status = lines
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or("malformed HTTP status line")?;
-    let mut content_length = None;
-    let mut chunked = false;
-    let mut location = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            return Err(format!("malformed HTTP header `{line}`"));
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| "invalid Content-Length header")?,
-            );
-        }
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            && value
-                .split(',')
-                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
-        {
-            chunked = true;
-        }
-        if name.eq_ignore_ascii_case("location") {
-            location = Some(value.trim().to_string());
-        }
-    }
-    let body = &response[header_end + 4..];
-    if chunked {
-        return decode_chunked(body).map(|body| {
-            body.map(|body| ParsedHttpResponse {
-                status,
-                body,
-                location,
-            })
-        });
-    }
-    if let Some(length) = content_length {
-        if body.len() < length {
+    let mut response = response;
+    loop {
+        let Some(header_end) = find_bytes(response, b"\r\n\r\n") else {
             return if eof {
-                Err(format!(
-                    "HTTP body ended after {} bytes, expected {length}",
-                    body.len()
-                ))
+                Err("malformed HTTP response (incomplete headers)".to_string())
             } else {
                 Ok(None)
             };
+        };
+        let head = std::str::from_utf8(&response[..header_end])
+            .map_err(|_| "HTTP response headers are not valid UTF-8")?;
+        let mut lines = head.lines();
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse::<u16>().ok())
+            .ok_or("malformed HTTP status line")?;
+        let mut content_length = None;
+        let mut chunked = false;
+        let mut location = None;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                return Err(format!("malformed HTTP header `{line}`"));
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "invalid Content-Length header")?,
+                );
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+            {
+                chunked = true;
+            }
+            if name.eq_ignore_ascii_case("location") {
+                location = Some(value.trim().to_string());
+            }
         }
-        return Ok(Some(ParsedHttpResponse {
-            status,
-            body: body[..length].to_vec(),
-            location,
-        }));
-    }
-    if eof {
-        Ok(Some(ParsedHttpResponse {
-            status,
-            body: body.to_vec(),
-            location,
-        }))
-    } else {
-        Ok(None)
+        let body = &response[header_end + 4..];
+        if (100..200).contains(&status) {
+            if status == 101 {
+                return Err("HTTP protocol upgrade is not supported by async fetch".to_string());
+            }
+            response = body;
+            continue;
+        }
+        if chunked {
+            return decode_chunked(body).map(|body| {
+                body.map(|body| ParsedHttpResponse {
+                    status,
+                    body,
+                    location,
+                })
+            });
+        }
+        if let Some(length) = content_length {
+            if body.len() < length {
+                return if eof {
+                    Err(format!(
+                        "HTTP body ended after {} bytes, expected {length}",
+                        body.len()
+                    ))
+                } else {
+                    Ok(None)
+                };
+            }
+            return Ok(Some(ParsedHttpResponse {
+                status,
+                body: body[..length].to_vec(),
+                location,
+            }));
+        }
+        return if eof {
+            Ok(Some(ParsedHttpResponse {
+                status,
+                body: body.to_vec(),
+                location,
+            }))
+        } else {
+            Ok(None)
+        };
     }
 }
 
@@ -561,7 +710,7 @@ fn async_http_finish(task: *mut AsyncHttpGet, response: ParsedHttpResponse) {
         let message = format!("HTTP request failed with status {}", response.status);
         drop(task);
         let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
-        thaw_promise_reject(completion, error);
+        reject_native_text(completion, error);
         return;
     }
     let body = std::str::from_utf8(&response.body)
@@ -574,13 +723,13 @@ fn async_http_finish(task: *mut AsyncHttpGet, response: ParsedHttpResponse) {
             if let Some(result_slot) = arena_pointer_slot(body) {
                 thaw_promise_resolve(completion, result_slot);
             } else {
-                thaw_promise_reject(completion, INVALID_FD_ERROR.as_ptr());
+                reject_native_text(completion, INVALID_FD_ERROR.as_ptr());
             }
         }
         Err(_) => {
             let error = arena_c_string("HTTP body contains a NUL byte")
                 .unwrap_or(INVALID_FD_ERROR.as_ptr());
-            thaw_promise_reject(completion, error);
+            reject_native_text(completion, error);
         }
     }
 }
@@ -595,7 +744,13 @@ fn schedule_async_http(task: *mut AsyncHttpGet, interests: u8) {
 }
 
 fn complete_async_http_if_ready(task: *mut AsyncHttpGet, eof: bool) -> bool {
+    if expire_async_http(task) {
+        return true;
+    }
     let parsed = unsafe { parse_http_response(&(*task).response, eof) };
+    if expire_async_http(task) {
+        return true;
+    }
     match parsed {
         Ok(Some(response)) => {
             async_http_finish(task, response);
@@ -622,8 +777,14 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
         );
         return;
     }
+    if expire_async_http(task) {
+        return;
+    }
 
     loop {
+        if expire_async_http(task) {
+            return;
+        }
         match unsafe { (*task).state } {
             AsyncHttpState::Resolving => {
                 let mut byte = [0u8; 1];
@@ -652,29 +813,12 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                         return;
                     }
                 };
-                let mut last_error = None;
-                let mut socket = None;
-                for address in addresses {
-                    match open_nonblocking_socket(address) {
-                        Ok(fd) => {
-                            socket = Some(fd);
-                            break;
-                        }
-                        Err(error) => last_error = Some(error),
-                    }
-                }
-                let Some(fd) = socket else {
-                    async_http_error(
-                        task,
-                        last_error.unwrap_or_else(|| "DNS returned no usable address".to_string()),
-                    );
-                    return;
-                };
                 unsafe {
-                    (*task).fd = fd;
-                    (*task).state = AsyncHttpState::Connecting;
+                    (*task).remaining_addresses = addresses.into_iter().rev().collect();
                 }
-                schedule_async_http(task, THAW_FD_WRITABLE);
+                if let Err(error) = schedule_next_http_connection(task, None) {
+                    async_http_error(task, error);
+                }
                 return;
             }
             AsyncHttpState::Connecting => {
@@ -695,10 +839,20 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     } else {
                         std::io::Error::last_os_error()
                     };
-                    async_http_error(task, format!("connecting HTTP socket: {error}"));
+                    unsafe {
+                        libc::close((*task).fd);
+                        (*task).fd = -1;
+                    }
+                    if let Err(error) = schedule_next_http_connection(
+                        task,
+                        Some(format!("connecting HTTP socket: {error}")),
+                    ) {
+                        async_http_error(task, error);
+                    }
                     return;
                 }
                 unsafe {
+                    (*task).remaining_addresses.clear();
                     (*task).state = if (*task).tls.is_some() {
                         AsyncHttpState::TlsHandshaking
                     } else {
@@ -711,14 +865,14 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     async_http_error(task, error);
                     return;
                 }
-                let eof = match read_tls_records(task) {
-                    Ok(eof) => eof,
+                let outcome = match read_tls_records(task, false) {
+                    Ok(outcome) => outcome,
                     Err(error) => {
                         async_http_error(task, error);
                         return;
                     }
                 };
-                if eof {
+                if matches!(outcome, TlsReadOutcome::Eof) {
                     async_http_error(task, "TLS peer closed during handshake".to_string());
                     return;
                 }
@@ -731,12 +885,18 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
             }
             AsyncHttpState::Writing => {
                 if unsafe { (*task).tls.is_some() } {
-                    let task_ref = unsafe { &mut *task };
-                    while task_ref.written < task_ref.request.len() {
-                        let remaining = &task_ref.request[task_ref.written..];
-                        match task_ref.tls.as_mut().unwrap().writer().write(remaining) {
+                    while unsafe { (*task).written < (*task).request.len() } {
+                        if expire_async_http(task) {
+                            return;
+                        }
+                        let write = {
+                            let task_ref = unsafe { &mut *task };
+                            let remaining = &task_ref.request[task_ref.written..];
+                            task_ref.tls.as_mut().unwrap().writer().write(remaining)
+                        };
+                        match write {
                             Ok(0) => break,
-                            Ok(written) => task_ref.written += written,
+                            Ok(written) => unsafe { (*task).written += written },
                             Err(error) => {
                                 async_http_error(task, format!("buffering TLS request: {error}"));
                                 return;
@@ -757,19 +917,24 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     schedule_async_http(task, tls_interests(task));
                     return;
                 }
-                let task_ref = unsafe { &mut *task };
-                while task_ref.written < task_ref.request.len() {
-                    let remaining = &task_ref.request[task_ref.written..];
-                    let written = unsafe {
-                        libc::send(
-                            task_ref.fd,
-                            remaining.as_ptr().cast(),
-                            remaining.len(),
-                            libc::MSG_NOSIGNAL,
-                        )
+                while unsafe { (*task).written < (*task).request.len() } {
+                    if expire_async_http(task) {
+                        return;
+                    }
+                    let written = {
+                        let task_ref = unsafe { &*task };
+                        let remaining = &task_ref.request[task_ref.written..];
+                        unsafe {
+                            libc::send(
+                                task_ref.fd,
+                                remaining.as_ptr().cast(),
+                                remaining.len(),
+                                libc::MSG_NOSIGNAL,
+                            )
+                        }
                     };
                     if written > 0 {
-                        task_ref.written += written as usize;
+                        unsafe { (*task).written += written as usize };
                         continue;
                     }
                     let error = std::io::Error::last_os_error();
@@ -780,7 +945,7 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     }
                     return;
                 }
-                task_ref.state = AsyncHttpState::Reading;
+                unsafe { (*task).state = AsyncHttpState::Reading };
             }
             AsyncHttpState::Reading => {
                 if unsafe { (*task).tls.is_some() } {
@@ -788,47 +953,17 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                         async_http_error(task, error);
                         return;
                     }
-                    let eof = match read_tls_records(task) {
-                        Ok(eof) => eof,
+                    let outcome = match read_tls_records(task, true) {
+                        Ok(outcome) => outcome,
                         Err(error) => {
                             async_http_error(task, error);
                             return;
                         }
                     };
-                    let mut plaintext = [0u8; 8192];
-                    loop {
-                        let read =
-                            unsafe { (*task).tls.as_mut().unwrap().reader().read(&mut plaintext) };
-                        match read {
-                            Ok(0) => break,
-                            Ok(read) => {
-                                unsafe { &mut (*task).response }
-                                    .extend_from_slice(&plaintext[..read]);
-                                if complete_async_http_if_ready(task, false) {
-                                    return;
-                                }
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                                if complete_async_http_if_ready(task, true) {
-                                    return;
-                                }
-                                async_http_error(
-                                    task,
-                                    "TLS peer closed before the HTTP response completed"
-                                        .to_string(),
-                                );
-                                return;
-                            }
-                            Err(error) => {
-                                async_http_error(
-                                    task,
-                                    format!("reading decrypted HTTP response: {error}"),
-                                );
-                                return;
-                            }
-                        }
+                    if matches!(outcome, TlsReadOutcome::Completed) {
+                        return;
                     }
+                    let eof = matches!(outcome, TlsReadOutcome::Eof);
                     if complete_async_http_if_ready(task, eof) {
                         return;
                     }
@@ -844,6 +979,9 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                 }
                 let mut buffer = [0u8; 8192];
                 loop {
+                    if expire_async_http(task) {
+                        return;
+                    }
                     let read = unsafe {
                         libc::recv((*task).fd, buffer.as_mut_ptr().cast(), buffer.len(), 0)
                     };
@@ -938,15 +1076,15 @@ fn thaw_http_get_async_with_config(
             path,
             redirects: 0,
             resolution: Some(resolution),
+            remaining_addresses: Vec::new(),
         })))
     })();
     match start {
         Ok(task) => schedule_async_http(task, THAW_FD_READABLE),
         Err(message) => {
             let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
-            thaw_promise_reject(completion, error);
+            reject_native_text(completion, error);
         }
     }
     completion
 }
-

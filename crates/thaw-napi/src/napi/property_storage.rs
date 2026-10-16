@@ -24,7 +24,7 @@ unsafe fn host_property_for_owner(
     owner: usize,
     key: &PropertyKey,
 ) -> Option<NapiValue> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.host_properties.get(&owner)?.get(key).copied())
         .or_else(|| {
             HOST.with(|host| {
@@ -32,6 +32,7 @@ unsafe fn host_property_for_owner(
                 host.module_envs
                     .iter()
                     .chain(host.pending_call_envs.iter())
+                    .filter(|candidate| !candidate.finalized)
                     .find_map(|candidate| candidate.host_properties.get(&owner)?.get(key).copied())
             })
         })
@@ -39,13 +40,13 @@ unsafe fn host_property_for_owner(
 
 unsafe fn host_property_keys_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
     let mut keys = env
-        .as_ref()
+        .as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.host_properties.get(&owner))
         .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     HOST.with(|host| {
         let host = host.borrow();
-        for candidate in host.module_envs.iter().chain(host.pending_call_envs.iter()) {
+        for candidate in host.module_envs.iter().chain(host.pending_call_envs.iter()).filter(|candidate| !candidate.finalized) {
             if let Some(properties) = candidate.host_properties.get(&owner) {
                 keys.extend(properties.keys().cloned());
             }
@@ -55,7 +56,7 @@ unsafe fn host_property_keys_for_owner(env: NapiEnv, owner: usize) -> Vec<Proper
 }
 
 unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey) -> usize {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.property_order.get(&owner))
         .and_then(|order| order.iter().position(|candidate| candidate == key))
         .or_else(|| {
@@ -64,6 +65,7 @@ unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey
                 host.module_envs
                     .iter()
                     .chain(host.pending_call_envs.iter())
+                    .filter(|candidate| !candidate.finalized)
                     .find_map(|candidate| {
                         candidate
                             .property_order
@@ -77,7 +79,7 @@ unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey
 }
 
 unsafe fn error_name_for_owner(env: NapiEnv, owner: usize) -> Option<String> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.error_names.get(&owner).cloned())
         .or_else(|| {
             HOST.with(|host| {
@@ -85,6 +87,7 @@ unsafe fn error_name_for_owner(env: NapiEnv, owner: usize) -> Option<String> {
                 host.module_envs
                     .iter()
                     .chain(host.pending_call_envs.iter())
+                    .filter(|candidate| !candidate.finalized)
                     .find_map(|candidate| candidate.error_names.get(&owner).cloned())
             })
         })
@@ -444,27 +447,13 @@ unsafe fn set_own_property(
         if matches!(value_ref(object), Ok(Value::Array(_)))
             && matches!(key, PropertyKey::String(name) if name == "length")
         {
-            let number = match value_ref(value).and_then(number_for_typedarray) {
-                Ok(number)
-                    if number.is_finite()
-                        && number >= 0.0
-                        && number <= u32::MAX as f64
-                        && number.fract() == 0.0 =>
-                {
-                    number as usize
-                }
-                _ => {
-                    let error = env.alloc(Value::Error("invalid array length".into()));
-                    env.exception = Some(error);
-                    return NAPI_PENDING_EXCEPTION;
-                }
-            };
-            let Some(Value::Array(values)) = object.as_mut() else {
-                unreachable!();
-            };
-            values.resize(number, None);
-            return NAPI_OK;
+            // Callers route length through set_array_length so removed
+            // accessor roots can be dropped after the Env mutation borrow.
+            return NAPI_GENERIC_FAILURE;
         }
+        return NAPI_GENERIC_FAILURE;
+    }
+    if array_index_exceeds_readonly_length_in_env(env, object, key) {
         return NAPI_GENERIC_FAILURE;
     }
     match object.as_mut() {
@@ -530,6 +519,122 @@ unsafe fn set_own_property(
         _ => return NAPI_OBJECT_EXPECTED,
     }
     NAPI_OK
+}
+
+unsafe fn is_array_length_property(object: NapiValue, key: &PropertyKey) -> bool {
+    matches!(value_ref(object), Ok(Value::Array(_)))
+        && matches!(key, PropertyKey::String(name) if name == "length")
+}
+
+unsafe fn extend_array_for_own_index(object: NapiValue, key: &PropertyKey) {
+    if let (Some(index), Some(Value::Array(values))) = (property_array_index(key), object.as_mut()) {
+        if values.len() <= index {
+            values.resize(index + 1, None);
+        }
+    }
+}
+
+unsafe fn array_index_exceeds_readonly_length(
+    env: NapiEnv, object: NapiValue, key: &PropertyKey,
+) -> bool {
+    let (Some(index), Ok(Value::Array(values))) = (property_array_index(key), value_ref(object))
+        else { return false };
+    index >= values.len()
+        && property_attributes_for(env, object as usize,
+            &PropertyKey::String("length".into())) & NAPI_WRITABLE == 0
+}
+
+// set_own_property already holds an exclusive Env reference. Inspect that
+// Env directly instead of rebuilding a shared reference to it from its raw
+// pointer. Cross-Env objects still use the same Host fallback as
+// property_attributes_for, excluding the currently borrowed Env.
+unsafe fn array_index_exceeds_readonly_length_in_env(
+    env: &Env, object: NapiValue, key: &PropertyKey,
+) -> bool {
+    let (Some(index), Ok(Value::Array(values))) = (property_array_index(key), value_ref(object))
+        else { return false };
+    if index < values.len() { return false; }
+    let length_key = PropertyKey::String("length".into());
+    let stored = env.property_attributes.get(&(object as usize, length_key.clone())).copied()
+        .or_else(|| HOST.with(|host| {
+            host.borrow().module_envs.iter()
+                .filter(|candidate| !std::ptr::eq(
+                    std::ptr::addr_of!(***candidate), env as *const Env)
+                    && !candidate.finalized)
+                .find_map(|candidate| candidate.property_attributes
+                    .get(&(object as usize, length_key.clone())).copied())
+        }));
+    stored.unwrap_or(NAPI_WRITABLE) & NAPI_WRITABLE == 0
+}
+
+// ArraySetLength must remove configurable indexed properties in descending
+// order and stop above the first nonconfigurable index. Dropping an accessor
+// can run a QuickJS finalizer, so the removed roots leave the Env borrow
+// before their final strong reference is released.
+unsafe fn set_array_length(
+    env: NapiEnv, object: NapiValue, value: NapiValue, make_readonly: bool,
+) -> NapiStatus {
+    let number = match value_ref(value).and_then(number_for_typedarray) {
+        Ok(number) if number.is_finite() && number >= 0.0
+            && number <= u32::MAX as f64 && number.fract() == 0.0 => number as usize,
+        _ => {
+            let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+            let error = owner.alloc(Value::Error("invalid array length".into()));
+            owner.exception = Some(error);
+            return NAPI_PENDING_EXCEPTION;
+        }
+    };
+    let old_length = match value_ref(object) {
+        Ok(Value::Array(values)) => values.len(),
+        _ => return NAPI_OBJECT_EXPECTED,
+    };
+    let (status, removed) = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+        let identity = object as usize;
+        let mut removed = Vec::new();
+        let mut final_length = number;
+        let mut status = NAPI_OK;
+        for index in (number..old_length).rev() {
+            let key = PropertyKey::String(index.to_string());
+            let data = matches!(value_ref(object), Ok(Value::Array(values))
+                if values.get(index).is_some_and(Option::is_some));
+            let accessor = owner.accessors.contains_key(&(identity, key.clone()));
+            let hosted = owner.host_properties.get(&identity)
+                .is_some_and(|properties| properties.contains_key(&key));
+            if data || accessor || hosted {
+                let flags = owner.property_attributes.get(&(identity, key.clone()))
+                    .copied().unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+                if owner.sealed_objects.contains(&identity) || flags & NAPI_CONFIGURABLE == 0 {
+                    final_length = index + 1;
+                    status = NAPI_GENERIC_FAILURE;
+                    break;
+                }
+            }
+            if let Some(Value::Array(values)) = object.as_mut() {
+                values[index] = None;
+            }
+            if let Some(accessor) = owner.accessors.remove(&(identity, key.clone())) {
+                removed.push(accessor);
+            }
+            if let Some(properties) = owner.host_properties.get_mut(&identity) {
+                properties.remove(&key);
+            }
+            owner.property_attributes.remove(&(identity, key.clone()));
+            remove_property_order(owner, identity, &key);
+        }
+        if let Some(Value::Array(values)) = object.as_mut() {
+            values.resize(final_length, None);
+        }
+        // A removed accessor's final root can reenter on drop. Publish the
+        // requested readonly transition before releasing any such root.
+        if make_readonly {
+            owner.property_attributes.insert((identity,
+                PropertyKey::String("length".into())), 0);
+        }
+        (status, removed)
+    };
+    drop(removed);
+    status
 }
 
 unsafe fn uint8_from_value(value: NapiValue) -> Result<u8, NapiStatus> {
@@ -614,26 +719,28 @@ unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &PropertyKey) -> 
 }
 
 unsafe fn accessor_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey) -> Option<Accessor> {
-    env.as_ref()
-        .and_then(|env| env.accessors.get(&(owner, key.clone())).copied())
+    env.as_ref().filter(|env| !env.finalized)
+        .and_then(|env| env.accessors.get(&(owner, key.clone())).cloned())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
-                    .find_map(|module_env| module_env.accessors.get(&(owner, key.clone())).copied())
+                    .filter(|module_env| !module_env.finalized)
+                    .find_map(|module_env| module_env.accessors.get(&(owner, key.clone())).cloned())
             })
         })
 }
 
 unsafe fn prototype_for_owner(env: NapiEnv, owner: usize) -> Option<usize> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.prototypes.get(&owner).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.prototypes.get(&owner).copied())
             })
         })
@@ -641,7 +748,7 @@ unsafe fn prototype_for_owner(env: NapiEnv, owner: usize) -> Option<usize> {
 
 unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
     let mut keys = env
-        .as_ref()
+        .as_ref().filter(|env| !env.finalized)
         .map(|env| {
             env.accessors
                 .keys()
@@ -651,7 +758,7 @@ unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
         })
         .unwrap_or_default();
     HOST.with(|host| {
-        for module_env in &host.borrow().module_envs {
+        for module_env in host.borrow().module_envs.iter().filter(|env| !env.finalized) {
             keys.extend(
                 module_env
                     .accessors
@@ -665,45 +772,54 @@ unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
 }
 
 unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey) -> u32 {
-    if let Some(attributes) = intrinsic_property_attributes(owner as NapiValue, key) {
-        return attributes;
-    }
-    env.as_ref()
+    let stored = env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.property_attributes.get(&(owner, key.clone())).copied())
         .or_else(|| {
             HOST.with(|host| {
-                host.borrow().module_envs.iter().find_map(|module_env| {
+                host.borrow().module_envs.iter().filter(|env| !env.finalized).find_map(|module_env| {
                     module_env
                         .property_attributes
                         .get(&(owner, key.clone()))
                         .copied()
                 })
             })
-        })
-        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
+        });
+    if let Some(intrinsic) = intrinsic_property_attributes(owner as NapiValue, key) {
+        // Array length is intrinsically nonenumerable and nonconfigurable,
+        // but its writable bit can transition to false through a descriptor
+        // or Object.freeze. Its explicit state must outlive a proxy shadow.
+        if matches!(value_ref(owner as NapiValue), Ok(Value::Array(_)))
+            && matches!(key, PropertyKey::String(name) if name == "length") {
+            return stored.unwrap_or(intrinsic) & NAPI_WRITABLE;
+        }
+        return intrinsic;
+    }
+    stored.unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
 }
 
 unsafe fn symbol_for(env: NapiEnv, id: u64) -> Option<NapiValue> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.symbols.get(&id).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.symbols.get(&id).copied())
             })
         })
 }
 
 unsafe fn type_tag_for(env: NapiEnv, object: NapiValue) -> Option<NapiTypeTag> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.type_tags.get(&(object as usize)).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.type_tags.get(&(object as usize)).copied())
             })
         })
@@ -760,6 +876,134 @@ unsafe fn write_value(out: *mut NapiValue, value: NapiValue) -> NapiStatus {
     NAPI_OK
 }
 
+#[derive(Clone, Copy)]
+enum ScopedValueRoot {
+    None,
+    Scope { scope: usize, value: usize, generation: u64 },
+    Unscoped { value: usize, generation: u64 },
+}
+
+// A native handle returned from an existing property/cache/reference is a
+// new handle in the recipient's scope, even when its Value allocation came
+// from a scope that has already closed. This is the same ownership record
+// Env::alloc gives freshly allocated values.
+// The registered environment, other than `env`, that currently owns `value`.
+unsafe fn live_foreign_value_owner(env: NapiEnv, value: NapiValue) -> Option<NapiEnv> {
+    HOST.try_with(|host| {
+        let host = host.borrow();
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
+            .map(|owner| &**owner as *const Env as NapiEnv)
+            .find(|owner| *owner != env && owner.as_ref().is_some_and(|owner|
+                !owner.finalized && owner.values.contains(&value)
+                    && !owner.finalized_handles.contains(&(value as usize))))
+    }).ok().flatten()
+}
+
+unsafe fn root_existing_value(env: NapiEnv, value: NapiValue) -> Result<ScopedValueRoot, NapiStatus> {
+    if value.is_null() { return Ok(ScopedValueRoot::None); }
+    let owner = env_mut(env).map_err(|_| NAPI_INVALID_ARG)?;
+    if !owner.values.contains(&value) {
+        // A value owned by another loaded environment stays rooted by that
+        // owner; this environment has nothing of its own to root.
+        return if live_foreign_value_owner(env, value).is_some() { Ok(ScopedValueRoot::None) }
+            else { Err(NAPI_INVALID_ARG) };
+    }
+    if owner.finalized_handles.contains(&(value as usize)) {
+        return Err(NAPI_INVALID_ARG);
+    }
+    let generation = *owner.value_generations.get(&(value as usize))
+        .ok_or(NAPI_INVALID_ARG)?;
+    if let Some(scope) = owner.active_handle_scopes.last().copied() {
+        if (*scope).values.contains(&(value, generation)) { return Ok(ScopedValueRoot::None); }
+        (*scope).values.push((value, generation));
+        Ok(ScopedValueRoot::Scope { scope: scope as usize, value: value as usize, generation })
+    } else if owner.rooted_scope_escapes.insert(value as usize) {
+        Ok(ScopedValueRoot::Unscoped { value: value as usize, generation })
+    } else {
+        Ok(ScopedValueRoot::None)
+    }
+}
+
+unsafe fn rollback_existing_value_root(env: NapiEnv, acquisition: ScopedValueRoot) {
+    let Ok(owner) = env_mut(env) else { return; };
+    match acquisition {
+        ScopedValueRoot::None => {},
+        ScopedValueRoot::Scope { scope, value, generation } => {
+            if owner.active_handle_scopes.iter().any(|candidate| *candidate as usize == scope) {
+                let entries = &mut (*(scope as *mut HandleScope)).values;
+                if let Some(index) = entries.iter().rposition(|entry|
+                    *entry == (value as NapiValue, generation)) {
+                    entries.remove(index);
+                }
+            }
+        }
+        ScopedValueRoot::Unscoped { value, generation } => {
+            if owner.value_generations.get(&value) == Some(&generation) {
+                owner.rooted_scope_escapes.remove(&value);
+            }
+        }
+    }
+}
+
+unsafe fn prepare_scoped_value(
+    env: NapiEnv, value: NapiValue,
+) -> Result<ScopedValueRoot, NapiStatus> {
+    let recipient_scope = env_mut(env).map_err(|_| NAPI_INVALID_ARG)?
+        .active_handle_scopes.last().copied();
+    let root = root_existing_value(env, value)?;
+    #[cfg(feature = "quickjs")]
+    if !value.is_null() {
+        let local_symbol = env.as_ref().and_then(|owner| {
+            let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };
+            owner.js_origin_symbol_ids.contains(id).then_some((*id,
+                owner.value_generations.get(&(value as usize)).copied()?))
+        });
+        if let Some((id, generation)) = local_symbol {
+            let _dispatch = ForeignCallbackGuard::new();
+            sync_js_origin_symbol_pins(env);
+            let pinned = env.as_ref().is_some_and(|owner|
+                owner.js_pinned_symbol_ids.contains(&id)
+                    && owner.symbols.get(&id) == Some(&value)
+                    && owner.value_generations.get(&(value as usize)) == Some(&generation)
+                    && owner.active_handle_scopes.last().copied() == recipient_scope
+                    && match recipient_scope {
+                        Some(scope) => (*scope).values.contains(&(value, generation)),
+                        None => owner.rooted_scope_escapes.contains(&(value as usize)),
+                    });
+            if !pinned {
+                rollback_existing_value_root(env, root);
+                return Err(NAPI_GENERIC_FAILURE);
+            }
+        }
+    }
+    Ok(root)
+}
+
+unsafe fn write_scoped_value(env: NapiEnv, out: *mut NapiValue, value: NapiValue) -> NapiStatus {
+    if out.is_null() { return NAPI_INVALID_ARG; }
+    if let Err(status) = prepare_scoped_value(env, value) { return status; }
+    *out = value;
+    NAPI_OK
+}
+
+// Multiple callback-info outputs are published together. A later local
+// Symbol pin may reenter native code after an earlier output was prepared.
+unsafe fn prepared_scoped_values_still_rooted(
+    env: NapiEnv, recipient_scope: Option<*mut HandleScope>,
+    values: &[(NapiValue, u64)],
+) -> bool {
+    env.as_ref().is_some_and(|owner|
+        owner.active_handle_scopes.last().copied() == recipient_scope
+            && values.iter().all(|(value, generation)|
+                owner.values.contains(value)
+                    && !owner.finalized_handles.contains(&(*value as usize))
+                    && owner.value_generations.get(&(*value as usize)) == Some(generation)
+                    && match recipient_scope {
+                        Some(scope) => (*scope).values.contains(&(*value, *generation)),
+                        None => owner.rooted_scope_escapes.contains(&(*value as usize)),
+                    }))
+}
+
 unsafe fn write_callback_value(env: NapiEnv, out: *mut NapiValue, value: NapiValue) -> NapiStatus {
     if out.is_null() {
         return NAPI_INVALID_ARG;
@@ -770,6 +1014,5 @@ unsafe fn write_callback_value(env: NapiEnv, out: *mut NapiValue, value: NapiVal
     if !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
-    write_value(out, value)
+    write_scoped_value(env, out, value)
 }
-

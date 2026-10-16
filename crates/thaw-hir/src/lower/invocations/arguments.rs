@@ -12,7 +12,15 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, true)
+        self.lower_native_spread_values_impl(arguments, label, &[], None, true, false)
+    }
+
+    fn lower_error_constructor_arguments(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, &[], None, false, true)
     }
 
     fn lower_native_spread_values_with_expected(
@@ -22,7 +30,7 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, expected, rest, false)
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, false, false)
     }
 
     fn lower_native_spread_values_impl(
@@ -32,6 +40,7 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
         array_reads: bool,
+        snapshot_expanded_values: bool,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
         let lowered = arguments
             .iter()
@@ -43,8 +52,7 @@ impl<'a> FnLowerer<'a> {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let preserve_order = arguments.iter().any(|argument| argument.spread.is_some())
-            || lowered.iter().any(contains_await);
+        // Every argument must be evaluated before wrappers can omit it or reuse it.
         let mut bindings = Vec::new();
         let mut values = Vec::new();
         for (argument, value) in arguments.iter().zip(lowered) {
@@ -53,15 +61,25 @@ impl<'a> FnLowerer<'a> {
             } else {
                 value
             };
-            if !preserve_order {
-                values.push(value);
-                continue;
-            }
             if argument.spread.is_none() {
-                let ty = self.infer_expr_type(&value)?;
+                // A literal has no side effects or ordering, so wrappers that need a
+                // static literal (Temporal calendars/units, `.flat(2)`) can still see it.
+                if !snapshot_expanded_values && matches!(value, HirExpr::Lit(_)) {
+                    values.push(value);
+                    continue;
+                }
+                // `infer_expr_type` erases `Bytes` to `Array(F64)`; keep it so a bound
+                // `Buffer` argument still reads as one (`Buffer.isBuffer`, hex/utf8 methods).
+                let ty = match self.infer_expr_type_inner(&value) {
+                    Ok(HirType::Bytes) if !snapshot_expanded_values => HirType::Bytes,
+                    _ => self.infer_expr_type(&value)?,
+                };
                 let name = format!("__thaw_native_arg_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
+                if matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value) {
+                    self.fresh_object_bindings.insert(name.clone());
+                }
                 bindings.push((name.clone(), ty, value));
                 values.push(HirExpr::Var(name));
                 continue;
@@ -73,7 +91,7 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         element
                     };
-                    if matches!(element, HirExpr::Lit(_)) {
+                    if !snapshot_expanded_values && matches!(element, HirExpr::Lit(_)) {
                         values.push(element);
                         continue;
                     }
@@ -97,13 +115,28 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(name.clone(), source_type.clone());
             bindings.push((name.clone(), source_type, value));
-            values.extend(elements.into_iter().enumerate().map(|(index, ty)| {
-                HirExpr::TypedIndex(
-                    Box::new(HirExpr::Var(name.clone())),
-                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                    ty,
-                )
-            }));
+            if snapshot_expanded_values {
+                for (index, ty) in elements.into_iter().enumerate() {
+                    let element = HirExpr::TypedIndex(
+                        Box::new(HirExpr::Var(name.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ty.clone(),
+                    );
+                    let element_name = format!("__thaw_native_arg_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(element_name.clone(), ty.clone());
+                    bindings.push((element_name.clone(), ty, element));
+                    values.push(HirExpr::Var(element_name));
+                }
+            } else {
+                values.extend(elements.into_iter().enumerate().map(|(index, ty)| {
+                    HirExpr::TypedIndex(
+                        Box::new(HirExpr::Var(name.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ty,
+                    )
+                }));
+            }
         }
         Ok((values, bindings))
     }
@@ -127,28 +160,25 @@ impl<'a> FnLowerer<'a> {
         });
         let logical_param_count =
             signature.params.len() - usize::from(signature.native_rest.is_some());
-        if logical_param_count < usize::BITS as usize
-            && arguments.len() + receiver_count <= logical_param_count
-        {
-            let mut omitted_mask = 0usize;
+        if arguments.len() + receiver_count <= logical_param_count {
+            let mut omitted_mask = HirOptionalMask::default();
             for index in receiver_count..logical_param_count {
                 let omitted = match arguments.get(index - receiver_count) {
                     None => true,
                     Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
                 };
                 if omitted {
-                    omitted_mask |= 1usize << index;
+                    omitted_mask.insert(index);
                 }
             }
-            let wrapper = omitted_parameter_symbol(symbol, omitted_mask);
-            if omitted_mask != 0 {
+            let wrapper = omitted_parameter_symbol(symbol, &omitted_mask);
+            if !omitted_mask.is_empty() {
                 if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
                     arguments = arguments
                         .into_iter()
                         .enumerate()
                         .filter_map(|(index, argument)| {
-                            (omitted_mask & (1usize << (index + receiver_count)) == 0)
-                                .then_some(argument)
+                            (!omitted_mask.contains(index + receiver_count)).then_some(argument)
                         })
                         .collect();
                     *symbol = wrapper;

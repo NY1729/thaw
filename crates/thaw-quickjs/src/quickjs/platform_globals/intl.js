@@ -56,8 +56,80 @@
     return parts.length === 2 && parts.every(part => INTL_SANCTIONED_UNITS.has(part));
   }
 
+  const INTL_LOCALE_TAGS = new WeakMap();
+
+  function intlRequestedLocale(locales, fallback = 'en-US') {
+    if (locales === undefined) return fallback;
+    if (locales === null) throw new TypeError('Invalid locales list');
+    const localeObject = typeof locales === 'string' || INTL_LOCALE_TAGS.has(locales)
+      ? [locales] : Object(locales);
+    const numericLength = +localeObject.length;
+    const length = Number.isNaN(numericLength) || numericLength <= 0 ? 0
+      : Math.min(Math.trunc(numericLength), Number.MAX_SAFE_INTEGER);
+    const canonical = [];
+    const seen = new Set();
+    for (let index = 0; index < length; index++) {
+      if (!(index in localeObject)) continue;
+      const candidate = localeObject[index];
+      if (typeof candidate !== 'string' &&
+          (candidate === null || (typeof candidate !== 'object' && typeof candidate !== 'function'))) {
+        throw new TypeError('Locale list elements must be strings or objects');
+      }
+      const tag = INTL_LOCALE_TAGS.has(candidate) ? INTL_LOCALE_TAGS.get(candidate) : `${candidate}`;
+      if (typeof __thaw_intl_locale_parse === 'function') {
+        const parsed = JSON.parse(__thaw_intl_locale_parse(tag));
+        if (!parsed.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        if (!seen.has(parsed.tag)) {
+          seen.add(parsed.tag);
+          canonical.push(parsed);
+        }
+      } else {
+        if (!seen.has(tag)) {
+          seen.add(tag);
+          canonical.push({ tag });
+        }
+      }
+    }
+    for (const parsed of canonical) {
+      if (typeof __thaw_intl_locale_resolve === 'function') {
+        const resolved = JSON.parse(__thaw_intl_locale_resolve(parsed.tag));
+        if (resolved.valid && resolved.language === parsed.language) return parsed.tag;
+      } else {
+        return parsed.tag;
+      }
+    }
+    return fallback;
+  }
+
   function intlZonedParts(timeZone, epochMs) {
-    return JSON.parse(__thaw_intl_zoned_parts(String(timeZone), Number(epochMs)));
+    const zone = String(timeZone);
+    const value = Number(epochMs);
+    const native = JSON.parse(__thaw_intl_zoned_parts(zone, value));
+    if (native.valid || !Number.isFinite(value) || Math.abs(value) > 8640000000000000) return native;
+    const match = /^([+-])([0-9]{2}):([0-9]{2})$/.exec(zone);
+    if (zone !== 'UTC' && (!match || Number(match[2]) > 23 || Number(match[3]) > 59)) return native;
+    const offsetMinutes = match ? (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3])) : 0;
+    const millis = Math.trunc(value);
+    const local = millis + offsetMinutes * 60000;
+    const days = Math.floor(local / 86400000);
+    const time = local - days * 86400000;
+    const z = days + 719468;
+    const era = Math.floor(z / 146097);
+    const doe = z - era * 146097;
+    const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+    const y = yoe + era * 400;
+    const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+    const mp = Math.floor((5 * doy + 2) / 153);
+    const day = doy - Math.floor((153 * mp + 2) / 5) + 1;
+    const month = mp < 10 ? mp + 3 : mp - 9;
+    return {
+      valid: true, year: y + (month <= 2 ? 1 : 0), month, day,
+      hour: Math.floor(time / 3600000), minute: Math.floor(time / 60000) % 60,
+      second: Math.floor(time / 1000) % 60, millisecond: time % 1000,
+      weekday: ((days + 3) % 7 + 7) % 7 + 1, offsetMinutes,
+      abbreviation: zone === 'UTC' ? 'UTC' : `GMT${zone}`, dst: false,
+      timeZone: zone, timestampMs: millis, longName: null, longGenericName: null,
+    };
   }
 
   function intlPad(value, width) {
@@ -70,7 +142,12 @@
   // (`shared`/`startRange`/`endRange`). Used only when the opt-in ICU4C
   // backend isn't available, where the exact locale range pattern isn't
   // accessible.
-  function intlPartitionRange(startParts, endParts) {
+  // Number parts that form the digits of one value: ICU never splits them between the shared and the per-endpoint text
+  // (`1,234,567–1,234,999`, not `1,234,567–999`).
+  const INTL_NUMERIC_PART_TYPES = new Set(['integer', 'group', 'decimal', 'fraction', 'minusSign', 'plusSign',
+    'exponentSeparator', 'exponentMinusSign', 'exponentInteger', 'compact']);
+
+  function intlPartitionRange(startParts, endParts, keepNumbersWhole) {
     const equal = (a, b) => a.type === b.type && a.value === b.value;
     let prefix = 0;
     while (prefix < startParts.length && prefix < endParts.length && equal(startParts[prefix], endParts[prefix])) {
@@ -83,6 +160,15 @@
       equal(startParts[startParts.length - 1 - suffix], endParts[endParts.length - 1 - suffix])
     ) {
       suffix += 1;
+    }
+    if (keepNumbersWhole) {
+      const numeric = part => INTL_NUMERIC_PART_TYPES.has(part.type);
+      const firstNumeric = startParts.findIndex(numeric);
+      if (firstNumeric >= 0 && prefix > firstNumeric) prefix = firstNumeric;
+      let lastNumeric = -1;
+      startParts.forEach((part, index) => { if (numeric(part)) lastNumeric = index; });
+      const keepFrom = startParts.length - suffix;
+      if (lastNumeric >= 0 && keepFrom <= lastNumeric) suffix = Math.max(0, startParts.length - 1 - lastNumeric);
     }
     return {
       shared: startParts.slice(0, prefix),
@@ -149,6 +235,29 @@
     return intlOffsetString(zoned.offsetMinutes, false);
   }
 
+  // CLDR flexible day periods (`B` / ECMA-402 `dayPeriod`): "in the afternoon",
+  // "noon", ... ICU4X ships only AM/PM names, so the per-locale rule runs and
+  // names are generated from Node's ICU (the ECMA-402 oracle) for the curated
+  // locales: `[minuteOfDay, name]` runs per width (a string value aliases an
+  // earlier width) plus the exact `noon`/`midnight` names. ICU's rule: noon /
+  // midnight apply only when every displayed time field is zero.
+  // ponytail: regenerate with the node generator when the curated list grows.
+  const INTL_FLEXIBLE_DAY_PERIODS = {"en-US":{"narrow":[[0,"in the morning"],[720,"in the afternoon"],[1080,"in the evening"],[1260,"at night"]],"short":"narrow","long":"narrow","noon":{"narrow":"n","short":"noon","long":"noon"}},"en-GB":{"narrow":[[0,"in the morning"],[720,"in the afternoon"],[1080,"in the evening"],[1260,"at night"]],"short":"narrow","long":"narrow","noon":{"narrow":"n","short":"noon","long":"noon"}},"es":{"narrow":[[0,"de la madrugada"],[360,"de la mañana"],[720,"de la tarde"],[1200,"de la noche"]],"short":"narrow","long":"narrow","noon":{"narrow":"del mediodía","short":"del mediodía","long":"del mediodía"}},"es-419":{"narrow":[[0,"de la madrugada"],[360,"de la mañana"],[720,"de la tarde"],[1200,"de la noche"]],"short":"narrow","long":"narrow","noon":{"narrow":"del mediodía","short":"del mediodía","long":"del mediodía"}},"fr":{"narrow":[[0,"matin"],[240,"mat."],[720,"ap.m."],[1080,"soir"]],"short":[[0,"matin"],[720,"après-midi"],[1080,"soir"]],"long":[[0,"du matin"],[720,"de l’après-midi"],[1080,"du soir"]],"noon":{"narrow":"midi","short":"midi","long":"midi"}},"de":{"narrow":[[0,"nachts"],[300,"morgens"],[600,"vorm."],[720,"mittags"],[780,"nachm."],[1080,"abends"]],"short":"narrow","long":[[0,"nachts"],[300,"morgens"],[600,"vormittags"],[720,"mittags"],[780,"nachmittags"],[1080,"abends"]]},"it":{"narrow":[[0,"di notte"],[360,"di mattina"],[720,"di pomeriggio"],[1080,"di sera"]],"short":"narrow","long":[[0,"di notte"],[360,"di mattina"],[720,"del pomeriggio"],[1080,"di sera"]],"noon":{"narrow":"mezzogiorno","short":"mezzogiorno","long":"mezzogiorno"}},"pt":{"narrow":[[0,"da madrugada"],[360,"da manhã"],[720,"da tarde"],[1140,"da noite"]],"short":"narrow","long":"narrow","noon":{"narrow":"meio-dia","short":"meio-dia","long":"meio-dia"}},"pt-BR":{"narrow":[[0,"da madrugada"],[360,"da manhã"],[720,"da tarde"],[1140,"da noite"]],"short":"narrow","long":"narrow","noon":{"narrow":"meio-dia","short":"meio-dia","long":"meio-dia"}},"nl":{"narrow":[[0,"’s nachts"],[360,"’s ochtends"],[720,"’s middags"],[1080,"’s avonds"]],"short":"narrow","long":"narrow"},"sv":{"narrow":[[0,"på natten"],[300,"på morg."],[600,"på förm."],[720,"på efterm."],[1080,"på kvällen"]],"short":"narrow","long":[[0,"på natten"],[300,"på morgonen"],[600,"på förmiddagen"],[720,"på eftermiddagen"],[1080,"på kvällen"]]},"pl":{"narrow":[[0,"w nocy"],[360,"rano"],[600,"przed poł."],[720,"po poł."],[1080,"wiecz."],[1260,"w nocy"]],"short":[[0,"w nocy"],[360,"rano"],[600,"przed południem"],[720,"po południu"],[1080,"wieczorem"],[1260,"w nocy"]],"long":"short","noon":{"narrow":"w poł.","short":"w południe","long":"w południe"}},"ru":{"narrow":[[0,"ночи"],[240,"утра"],[720,"дня"],[1080,"веч."],[1320,"ночи"]],"short":[[0,"ночи"],[240,"утра"],[720,"дня"],[1080,"вечера"],[1320,"ночи"]],"long":"short","noon":{"narrow":"полд.","short":"полд.","long":"полдень"}},"uk":{"narrow":[[0,"ночі"],[240,"ранку"],[720,"дня"],[1080,"вечора"]],"short":"narrow","long":"narrow"},"tr":{"narrow":[[0,"gece"],[360,"sabah"],[660,"öğleden önce"],[720,"öğleden sonra"],[1080,"akşamüstü"],[1140,"akşam"],[1260,"gece"]],"short":"narrow","long":"narrow","noon":{"narrow":"ö","short":"öğle","long":"öğle"}},"ar":{"narrow":[[0,"منتصف الليل"],[60,"ليلاً"],[180,"فجرًا"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"short":[[0,"في المساء"],[60,"ليلاً"],[180,"فجرًا"],[360,"ص"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"long":[[0,"في المساء"],[60,"ليلاً"],[180,"في الصباح"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]]},"ar-SA":{"narrow":[[0,"منتصف الليل"],[60,"ليلاً"],[180,"فجرًا"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"short":[[0,"في المساء"],[60,"ل"],[180,"فجرًا"],[360,"ص"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"long":[[0,"في المساء"],[60,"ليلاً"],[180,"في الصباح"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]]},"he":{"narrow":[[0,"בלילה"],[180,"לפנות בוקר"],[360,"בבוקר"],[720,"בצהריים"],[960,"אחה״צ"],[1080,"בערב"],[1320,"בלילה"]],"short":[[0,"לילה"],[180,"לפנות בוקר"],[360,"בוקר"],[720,"צהריים"],[960,"אחר הצהריים"],[1080,"ערב"],[1320,"לילה"]],"long":[[0,"בלילה"],[180,"לפנות בוקר"],[360,"בבוקר"],[720,"בצהריים"],[960,"אחר הצהריים"],[1080,"בערב"],[1320,"בלילה"]]},"hi":{"narrow":[[0,"रात"],[240,"सुबह"],[720,"दोपहर"],[960,"शाम"],[1200,"रात"]],"short":"narrow","long":"narrow"},"bn":{"narrow":[[0,"রাত্রি"],[240,"ভোর"],[360,"সকাল"],[720,"দুপুর"],[960,"বিকাল"],[1080,"সন্ধ্যা"],[1200,"রাত্রি"]],"short":"narrow","long":[[0,"রাত্রিবেলায়"],[240,"ভোরবেলায়"],[360,"সকালবেলায়"],[720,"দুপুরবেলায়"],[960,"বিকাল"],[1080,"সন্ধ্যাবেলায়"],[1200,"রাত্রিবেলায়"]]},"ja":{"narrow":[[0,"夜中"],[240,"朝"],[720,"昼"],[960,"夕方"],[1140,"夜"],[1380,"夜中"]],"short":"narrow","long":"narrow","noon":{"narrow":"正午","short":"正午","long":"正午"}},"ko":{"narrow":[[0,"밤"],[180,"아침"],[360,"오전"],[720,"오후"],[1080,"저녁"],[1260,"밤"]],"short":"narrow","long":"narrow","noon":{"narrow":"정오","short":"정오","long":"정오"}},"zh-Hans":{"narrow":[[0,"凌晨"],[300,"早上"],[480,"上午"],[720,"中午"],[780,"下午"],[1140,"晚上"]],"short":"narrow","long":[[0,"凌晨"],[300,"清晨"],[480,"上午"],[720,"中午"],[780,"下午"],[1140,"晚上"]]},"zh-Hant":{"narrow":[[0,"凌晨"],[300,"清晨"],[480,"上午"],[720,"中午"],[780,"下午"],[1140,"晚上"]],"short":"narrow","long":"narrow"},"th":{"narrow":[[0,"กลางคืน"],[360,"เช้า"],[720,"เที่ยง"],[780,"บ่าย"],[960,"เย็น"],[1080,"ค่ำ"],[1260,"กลางคืน"]],"short":[[0,"กลางคืน"],[360,"ในตอนเช้า"],[720,"ในตอนบ่าย"],[780,"บ่าย"],[960,"ในตอนเย็น"],[1080,"ค่ำ"],[1260,"กลางคืน"]],"long":"short","noon":{"short":"เที่ยง","long":"เที่ยง"}},"vi":{"narrow":[[0,"đêm"],[240,"sáng"],[720,"chiều"],[1080,"tối"],[1260,"đêm"]],"short":"narrow","long":"narrow","noon":{"narrow":"tr","short":"TR","long":"trưa"}},"id":{"narrow":[[0,"pagi"],[600,"siang"],[900,"sore"],[1080,"malam"]],"short":"narrow","long":"narrow","noon":{"narrow":"tengah hari","short":"tengah hari","long":"tengah hari"}},"ms":{"narrow":[[0,"pagi"],[720,"tengah hari"],[840,"petang"],[1140,"malam"]],"short":"narrow","long":[[0,"tengah malam"],[60,"pagi"],[720,"tengah hari"],[840,"petang"],[1140,"malam"]]},"fil":{"narrow":[[0,"ng umaga"],[360,"madaling-araw"],[720,"ng hapon"],[960,"ng gabi"]],"short":"narrow","long":"narrow","noon":{"narrow":"tanghaling-tapat","short":"tanghaling-tapat","long":"tanghaling-tapat"}},"el":{"narrow":[[0,"βράδυ"],[240,"πρωί"],[720,"μεσημ."],[1020,"απόγ."],[1200,"βράδυ"]],"short":"narrow","long":[[0,"το βράδυ"],[240,"το πρωί"],[720,"το μεσημέρι"],[1020,"το απόγευμα"],[1200,"το βράδυ"]]},"ro":{"narrow":[[0,"noaptea"],[300,"dimineața"],[720,"după-amiaza"],[1080,"seara"],[1320,"noaptea"]],"short":"narrow","long":"narrow","noon":{"narrow":"amiază","short":"amiază","long":"la amiază"}},"cs":{"narrow":[[0,"n."],[240,"r."],[540,"d."],[720,"o."],[1080,"v."],[1320,"n."]],"short":[[0,"v n."],[240,"r."],[540,"dop."],[720,"odp."],[1080,"več."],[1320,"v n."]],"long":[[0,"v noci"],[240,"ráno"],[540,"dopoledne"],[720,"odpoledne"],[1080,"večer"],[1320,"v noci"]],"noon":{"narrow":"pol.","short":"pol.","long":"poledne"}},"hu":{"narrow":[[0,"éjjel"],[240,"hajnal"],[360,"reggel"],[540,"de."],[720,"délután"],[1080,"este"],[1260,"éjjel"]],"short":[[0,"éjjel"],[240,"hajnal"],[360,"reggel"],[540,"de."],[720,"du."],[1080,"este"],[1260,"éjjel"]],"long":[[0,"éjjel"],[240,"hajnal"],[360,"reggel"],[540,"délelőtt"],[720,"délután"],[1080,"este"],[1260,"éjjel"]],"noon":{"narrow":"dél","short":"dél","long":"dél"}},"da":{"narrow":[[0,"om natten"],[300,"om morgenen"],[600,"om formiddagen"],[720,"om eftermiddagen"],[1080,"om aftenen"]],"short":"narrow","long":"narrow"},"fi":{"narrow":[[0,"yöllä"],[300,"aamulla"],[600,"ap."],[720,"ip."],[1080,"illalla"],[1380,"yöllä"]],"short":[[0,"yöllä"],[300,"aamulla"],[600,"aamup."],[720,"iltap."],[1080,"illalla"],[1380,"yöllä"]],"long":[[0,"yöllä"],[300,"aamulla"],[600,"aamupäivällä"],[720,"iltapäivällä"],[1080,"illalla"],[1380,"yöllä"]],"noon":{"narrow":"kp.","short":"keskip.","long":"keskipäivällä"}},"nb":{"narrow":[[0,"nt."],[360,"mg."],[600,"fm."],[720,"em."],[1080,"kv."]],"short":[[0,"natt"],[360,"morg."],[600,"form."],[720,"etterm."],[1080,"kveld"]],"long":[[0,"på natten"],[360,"på morgenen"],[600,"på formiddagen"],[720,"på ettermiddagen"],[1080,"på kvelden"]]},"ca":{"narrow":[[0,"matinada"],[360,"matí"],[720,"migdia"],[780,"tarda"],[1140,"vespre"],[1260,"nit"]],"short":"narrow","long":"narrow"},"hr":{"narrow":[[0,"noću"],[240,"ujutro"],[720,"popodne"],[1080,"navečer"],[1260,"noću"]],"short":"narrow","long":[[0,"noću"],[240,"ujutro"],[720,"poslije podne"],[1080,"navečer"],[1260,"noću"]],"noon":{"narrow":"podne","short":"podne","long":"podne"}},"sk":{"narrow":[[0,"v n."],[240,"ráno"],[540,"dop."],[720,"pop."],[1080,"več."],[1320,"v n."]],"short":[[0,"v noci"],[240,"ráno"],[540,"dopol."],[720,"popol."],[1080,"večer"],[1320,"v noci"]],"long":[[0,"v noci"],[240,"ráno"],[540,"dopoludnia"],[720,"popoludní"],[1080,"večer"],[1320,"v noci"]],"noon":{"narrow":"nap.","short":"napol.","long":"napoludnie"}},"bg":{"narrow":[[0,"през нощта"],[240,"сутринта"],[660,"на обяд"],[840,"следобед"],[1080,"вечерта"],[1320,"през нощта"]],"short":"narrow","long":"narrow"},"fa":{"narrow":[[0,"نیمه‌شب"],[60,"بامداد"],[240,"صبح"],[720,"ظهر"],[780,"عصر"],[1140,"شب"]],"short":"narrow","long":[[0,"نیمه‌شب"],[60,"بامداد"],[240,"صبح"],[720,"بعدازظهر"],[780,"عصر"],[1140,"شب"]]}};
+
+  function intlFlexibleDayPeriodName(locale, width, zoned, hasMinute, hasSecond) {
+    const entry = INTL_FLEXIBLE_DAY_PERIODS[locale];
+    if (!entry || !entry[width]) return null;
+    const exact = (!hasMinute || zoned.minute === 0) && (!hasSecond || zoned.second === 0);
+    if (exact && zoned.hour === 12 && entry.noon && entry.noon[width]) return entry.noon[width];
+    if (exact && zoned.hour === 0 && entry.midnight && entry.midnight[width]) return entry.midnight[width];
+    let runs = entry[width];
+    if (typeof runs === 'string') runs = entry[runs];
+    const minuteOfDay = zoned.hour * 60 + zoned.minute;
+    let name = null;
+    for (const run of runs) { if (run[0] <= minuteOfDay) name = run[1]; else break; }
+    return name;
+  }
+
   function intlHourParts(hourCycle, hour24) {
     // Real Intl's own quirk (confirmed against real Node): a
     // `hourCycle` of `'h23'`/`'h24'` always zero-pads the hour even
@@ -172,10 +281,10 @@
   function intlIntegerOption(value, fallback, min, max) {
     if (value === undefined) return fallback;
     const n = Number(value);
-    if (!Number.isInteger(n) || n < min || n > max) {
+    if (!Number.isFinite(n) || n < min || n > max) {
       throw new RangeError(`Invalid value: ${String(value)}`);
     }
-    return n;
+    return Math.floor(n);
   }
 
   // Real `Intl.NumberFormat`'s `useGrouping` accepts a boolean (legacy)
@@ -203,6 +312,47 @@
     'ceil', 'floor', 'expand', 'trunc',
     'halfCeil', 'halfFloor', 'halfTrunc', 'halfEven', 'halfExpand',
   ];
+
+  function intlIncrementDecimal(digits) {
+    let index = digits.length - 1;
+    while (index >= 0 && digits[index] === '9') index--;
+    return index < 0 ? `1${'0'.repeat(digits.length)}`
+      : `${digits.slice(0, index)}${String.fromCharCode(digits.charCodeAt(index) + 1)}${'0'.repeat(digits.length - index - 1)}`;
+  }
+
+  function intlNativeRangeInputFits(value) {
+    if (typeof value === 'bigint') return value.toString().length <= 32000;
+    if (typeof value !== 'string') return true;
+    if (value.length > 32000) return false;
+    const exponent = /[eE]([+-]?\d+)$/.exec(value);
+    return !exponent || (BigInt(exponent[1]) >= -32000n && BigInt(exponent[1]) <= 32000n);
+  }
+
+  // Round an ASCII coefficient without constructing 10 ** discardedPlaces.
+  // Only the guard digit, sticky bit, sign, and retained parity affect the
+  // nine supported rounding modes, even for a very long input.
+  function intlRoundDecimalDigits(digits, discardedPlaces, negative, mode) {
+    if (discardedPlaces <= 0n) return digits;
+    const length = BigInt(digits.length);
+    const kept = discardedPlaces >= length ? '0' : digits.slice(0, digits.length - Number(discardedPlaces));
+    const guardIndex = discardedPlaces > length ? -1 : digits.length - Number(discardedPlaces);
+    const guard = guardIndex < 0 ? 0 : Number(digits[guardIndex]);
+    const sticky = guardIndex < 0 ? digits !== '0' : /[1-9]/.test(digits.slice(guardIndex + 1));
+    const nonzero = guard !== 0 || sticky;
+    const aboveHalf = guard > 5 || (guard === 5 && sticky);
+    const tie = guard === 5 && !sticky;
+    const increment = nonzero && (
+      mode === 'expand' ||
+      (mode === 'ceil' && !negative) ||
+      (mode === 'floor' && negative) ||
+      (mode === 'halfExpand' && (aboveHalf || tie)) ||
+      (mode === 'halfTrunc' && aboveHalf) ||
+      (mode === 'halfEven' && (aboveHalf || (tie && Number(kept[kept.length - 1]) % 2 !== 0))) ||
+      (mode === 'halfCeil' && (aboveHalf || (tie && !negative))) ||
+      (mode === 'halfFloor' && (aboveHalf || (tie && negative)))
+    );
+    return increment ? intlIncrementDecimal(kept) : kept;
+  }
 
   // Rounds a *signed* value to the nearest multiple of `increment` under
   // the requested ECMA-402 `roundingMode` (default `halfExpand`).
@@ -289,6 +439,7 @@
       hour: ['numeric', '2-digit'],
       minute: ['numeric', '2-digit'],
       second: ['numeric', '2-digit'],
+      dayPeriod: ['narrow', 'short', 'long'],
       timeZoneName: ['long', 'short', 'shortOffset', 'longOffset', 'shortGeneric', 'longGeneric'],
     };
     for (const [key, values] of Object.entries(allowed)) {
@@ -317,13 +468,14 @@
       // carries (confirmed against real Node), the same precedence
       // `Intl.Locale`'s constructor already implements above -- reuse
       // its tag-rewriting approach rather than duplicating it.
-      const localeTag = String(locale === undefined ? 'en-US' : locale);
+      const localeTag = intlRequestedLocale(locale);
       this.locale = this._useRealLocaleData
         ? (opts.calendar !== undefined || opts.numberingSystem !== undefined
             ? new Locale(localeTag, { calendar: opts.calendar, numberingSystem: opts.numberingSystem }).toString()
             : localeTag)
         : 'en-US';
       this._timeZone = opts.timeZone ? String(opts.timeZone) : 'UTC';
+      this.format = this.format.bind(this);
       // Eager validation -- real Intl throws a `RangeError` for an
       // unrecognized `timeZone` at construction time, which is exactly
       // what real luxon's own `IANAZone.isValidZone` relies on (a
@@ -339,6 +491,7 @@
       this._hour = opts.hour;
       this._minute = opts.minute;
       this._second = opts.second;
+      this._dayPeriod = opts.dayPeriod;
       this._timeZoneName = opts.timeZoneName;
       this._fractionalSecondDigits = opts.fractionalSecondDigits === undefined
         ? undefined
@@ -352,7 +505,7 @@
       this._dateStyle = opts.dateStyle;
       this._timeStyle = opts.timeStyle;
       if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
-        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'fractionalSecondDigits'].some(key => opts[key] !== undefined)) {
+        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'dayPeriod', 'fractionalSecondDigits'].some(key => opts[key] !== undefined)) {
           throw new TypeError('dateStyle/timeStyle can not be used with individual field options');
         }
         for (const [key, value] of [['dateStyle', this._dateStyle], ['timeStyle', this._timeStyle]]) {
@@ -397,7 +550,8 @@
         this._weekday !== undefined || this._year !== undefined ||
         this._month !== undefined || this._day !== undefined ||
         this._hour !== undefined || this._minute !== undefined ||
-        this._second !== undefined || this._fractionalSecondDigits !== undefined;
+        this._second !== undefined || this._dayPeriod !== undefined ||
+        this._fractionalSecondDigits !== undefined;
       if (!hasAnyField) {
         this._year = 'numeric';
         this._month = 'numeric';
@@ -424,16 +578,25 @@
         }
         this._hourCycle = opts.hourCycle;
       } else {
-        this._hourCycle = 'h12';
+        const resolved = this._useRealLocaleData && typeof __thaw_intl_datetime_resolved_options === 'function'
+          ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
+        this._hourCycle = resolved && resolved.hourCycle ? resolved.hourCycle : 'h12';
       }
+      // ICU's flexible day period (`B`) exists only in 12-hour patterns: under a
+      // 24-hour cycle `dayPeriod` has no effect once an hour is shown (Node's
+      // resolvedOptions drops it too).
+      if (this._dayPeriod !== undefined && this._hour !== undefined &&
+          (this._hourCycle === 'h23' || this._hourCycle === 'h24')) this._dayPeriod = undefined;
       intlValidateDateTimeFields(opts);
     }
 
     resolvedOptions() {
+      const resolvedLocale = this._useRealLocaleData && typeof __thaw_intl_datetime_resolved_options === 'function'
+        ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
       const result = {
         locale: this.locale,
-        calendar: 'gregory',
-        numberingSystem: 'latn',
+        calendar: resolvedLocale && resolvedLocale.calendar ? resolvedLocale.calendar : 'gregory',
+        numberingSystem: resolvedLocale && resolvedLocale.numberingSystem ? resolvedLocale.numberingSystem : 'latn',
         timeZone: this._timeZone,
       };
       if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
@@ -457,20 +620,34 @@
       }
       if (this._minute) result.minute = this._minute;
       if (this._second) result.second = this._second;
+      if (this._dayPeriod) result.dayPeriod = this._dayPeriod;
       if (this._fractionalSecondDigits !== undefined) result.fractionalSecondDigits = this._fractionalSecondDigits;
       if (this._timeZoneName) result.timeZoneName = this._timeZoneName;
       return result;
     }
 
     formatToParts(date) {
+      if (typeof date === 'bigint') throw new TypeError('Cannot convert BigInt to number');
       const epochMs = date === undefined ? Date.now() : Number(date);
       const zoned = intlZonedParts(this._timeZone, epochMs);
       if (!zoned.valid) {
         throw new RangeError('Invalid time value');
       }
-      return this._useRealLocaleData
+      const parts = this._useRealLocaleData
         ? this._formatToPartsRealLocale(zoned)
         : this._formatToPartsEnglishFastPath(zoned);
+      return this._dayPeriod === undefined ? parts : this._withFlexibleDayPeriod(parts, zoned);
+    }
+
+    // Swap the AM/PM-style `dayPeriod` part for the locale's flexible name; a
+    // bare `{ dayPeriod }` request renders only that name.
+    _withFlexibleDayPeriod(parts, zoned) {
+      const name = intlFlexibleDayPeriodName(
+        this.locale, this._dayPeriod, zoned,
+        this._minute !== undefined, this._second !== undefined || this._fractionalSecondDigits !== undefined);
+      if (name === null) return parts;
+      if (!parts.length) return [{ type: 'dayPeriod', value: name }];
+      return parts.map(part => part.type === 'dayPeriod' ? { type: 'dayPeriod', value: name } : part);
     }
 
     // Real per-locale month/weekday/era/day-period names, field
@@ -498,8 +675,10 @@
       // whose separator differs per locale) can use the skeleton native;
       // a bare minute is not zero-padded even for `'2-digit'` (Node:
       // `{minute:'2-digit'}` -> `"5"`), which `_formatTimeOnlyParts` handles.
-      const skeletonTimeOnly =
-        !hasDateFields && !this._hour && this._minute !== undefined && this._second !== undefined;
+      const skeletonTimeOnly = !hasDateFields && !this._hour && (
+        (this._minute !== undefined && this._second !== undefined) ||
+        (this._dayPeriod !== undefined && (this._minute !== undefined || this._second !== undefined))
+      );
       const options = {
         weekday: this._weekday,
         era: this._era,
@@ -509,6 +688,7 @@
         hour: this._hour,
         minute: this._minute,
         second: this._second,
+        dayPeriod: this._dayPeriod,
         hour12: this._explicitHour12,
         hourCycle: this._explicitHourCycle,
       };
@@ -518,8 +698,51 @@
       // Only when the opt-in backend is compiled in; otherwise the ICU4X
       // path below degrades narrow to short.
       let parts = null;
+      let fractionHandled = false;
+      const periodFractionOnly = !hasDateFields && !this._hour && !this._minute && !this._second &&
+        this._dayPeriod !== undefined && this._fractionalSecondDigits !== undefined;
+      if (periodFractionOnly && typeof __thaw_intl_datetime_narrow_icu4c !== 'function' &&
+          typeof __thaw_intl_datetime_skeleton_parts === 'function') {
+        // Bh is the curated locale's flexible-period/hour pattern. Use its
+        // field order and interfield whitespace, but never show its hour or
+        // hour-unit suffix (Uhr, 時, 시, etc.) as fractional seconds.
+        const probe = { ...options, hour: 'numeric', hour12: true, hourCycle: 'h12' };
+        const template = JSON.parse(__thaw_intl_datetime_skeleton_parts(
+          this.locale, JSON.stringify(probe), JSON.stringify(zoned)));
+        const hour = template.findIndex(part => part.type === 'hour');
+        const period = template.findIndex(part => part.type === 'dayPeriod');
+        const fields = template.filter(part => part.type !== 'literal');
+        const first = Math.min(hour, period);
+        const last = Math.max(hour, period);
+        const middle = template.slice(first + 1, last);
+        const suffix = template.slice(last + 1);
+        const between = middle.map(part => part.value).join('');
+        const after = suffix.map(part => part.value).join('');
+        // Exactly the nine Bh shapes in the generated curated CLDR table.
+        // Unknown hour-unit literals must not be copied or silently erased.
+        // ponytail: if curated Bh expands, use a native B+fraction pattern
+        // rather than growing this literal list indefinitely.
+        const knownShape = hour < period
+          ? after === '' && [' ', ' Uhr ', ' giờ ', ' ч. '].includes(between)
+          : (between === ' ' && (after === '' || after === '시')) ||
+            (between === '' && (after === '時' || after === '时'));
+        if (hour >= 0 && period >= 0 && fields.length === 2 && first === 0 &&
+            middle.every(part => part.type === 'literal') &&
+            suffix.every(part => part.type === 'literal') && knownShape) {
+          const boundary = hour < period ? between.match(/\s+$/u) : between.match(/^\s+/u);
+          const fraction = intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits);
+          const rendered = [...fraction].map(digit => String(__thaw_intl_number_format(this.locale, digit, false))).join('');
+          const fractional = { type: 'fractionalSecond', value: rendered };
+          const literal = boundary ? [{ type: 'literal', value: boundary[0] }] : [];
+          parts = hour < period
+            ? [fractional, ...literal, template[period]]
+            : [template[period], ...literal, fractional];
+          fractionHandled = true;
+        }
+      }
       if (
-        (this._month === 'narrow' || this._weekday === 'narrow') &&
+        parts === null &&
+        (this._month === 'narrow' || this._weekday === 'narrow' || this._dayPeriod !== undefined) &&
         typeof __thaw_intl_datetime_narrow_icu4c === 'function'
       ) {
         const icuParts = JSON.parse(
@@ -580,11 +803,13 @@
         // ICU4X calendar-period patterns do (`ja` `{year,month:'numeric'}`
         // -> `"2024/07"`, Node `"2024/7"`) -- strip a single leading zero.
         // Not year (4-digit) nor hour (h23/h24 genuinely pad, per above).
+        // A minute/second next to a larger unit is part of an `hm`/`ms`/`hms`
+        // pattern and stays two digits.
         const numericUnpadFor = {
           month: this._month,
           day: this._day,
-          minute: this._minute,
-          second: this._second,
+          minute: this._hour ? undefined : this._minute,
+          second: this._hour || this._minute ? undefined : this._second,
         };
         for (const part of parts) {
           if (numericUnpadFor[part.type] === 'numeric' && /^0\d$/.test(part.value)) {
@@ -597,20 +822,24 @@
       // 0-23), so its midnight hour comes back as `0`/`00`; real
       // ECMA-402 `hourCycle: 'h24'` renders that same instant as `24`
       // (the one instant where the two cycles differ).
-      if (this._hourCycle === 'h24') {
+      if (this._hourCycle === 'h24' && zoned.hour === 0) {
         for (const part of parts) {
-          if (part.type === 'hour' && /^0+$/.test(part.value)) part.value = '24';
+          if (part.type === 'hour') {
+            part.value = String(__thaw_intl_number_format(this.locale, '24', false));
+          }
         }
       }
-      if (this._fractionalSecondDigits !== undefined) {
+      if (this._fractionalSecondDigits !== undefined && !fractionHandled) {
         const fraction = intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits);
         const render = text => this._useRealLocaleData
           ? String(__thaw_intl_number_format(this.locale, text, false))
           : text;
         const secondIndex = parts.findIndex(part => part.type === 'second');
         if (secondIndex >= 0) {
-          const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
-          parts[secondIndex].value = render(`${whole}.${fraction}`);
+          const decimal = render('0.1').slice(render('0').length, -render('1').length);
+          parts.splice(secondIndex + 1, 0,
+            { type: 'literal', value: decimal },
+            { type: 'fractionalSecond', value: render(fraction) });
         } else {
           parts.push({ type: 'fractionalSecond', value: render(fraction) });
         }
@@ -650,13 +879,17 @@
       }
       if (this._second) {
         const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
-        fields.push(['second', render(fraction === undefined ? whole : `${whole}.${fraction}`)]);
+        fields.push(['second', render(whole)]);
+        if (fraction !== undefined) {
+          const decimal = render('0.1').slice(render('0').length, -render('1').length);
+          fields.push(['fractionalSecond', render(fraction), decimal]);
+        }
       } else if (fraction !== undefined) {
         fields.push(['fractionalSecond', render(fraction)]);
       }
       const parts = [];
-      fields.forEach(([type, value], index) => {
-        if (index > 0) parts.push({ type: 'literal', value: ':' });
+      fields.forEach(([type, value, separator], index) => {
+        if (index > 0) parts.push({ type: 'literal', value: separator || ':' });
         parts.push({ type, value });
       });
       if (this._timeZoneName) {
@@ -723,18 +956,19 @@
           const padded = this._hour === '2-digit' || padByDefault;
           fields.push(['hour', padded ? intlPad(displayHour, 2) : String(displayHour)]);
         }
-        if (this._minute) fields.push(['minute', this._minute === '2-digit' ? intlPad(zoned.minute, 2) : String(zoned.minute)]);
+        // A minute/second shown next to a larger unit is part of an ICU `hm`/`ms`/`hms` pattern and always has two digits.
+        if (this._minute) fields.push(['minute', this._minute === '2-digit' || this._hour || this._second ? intlPad(zoned.minute, 2) : String(zoned.minute)]);
         if (this._second) {
-          const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
-          const fraction = this._fractionalSecondDigits === undefined
-            ? ''
-            : `.${intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits)}`;
-          fields.push(['second', `${whole}${fraction}`]);
+          const whole = this._second === '2-digit' || this._minute || this._hour ? intlPad(zoned.second, 2) : String(zoned.second);
+          fields.push(['second', whole]);
+          if (this._fractionalSecondDigits !== undefined) {
+            fields.push(['fractionalSecond', intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits), '.']);
+          }
         } else if (this._fractionalSecondDigits !== undefined) {
           fields.push(['fractionalSecond', intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits)]);
         }
-        fields.forEach(([type, value], index) => {
-          if (index > 0) trailing.push({ type: 'literal', value: ':' });
+        fields.forEach(([type, value, separator], index) => {
+          if (index > 0) trailing.push({ type: 'literal', value: separator || ':' });
           trailing.push({ type, value });
         });
         if (dayPeriod) {
@@ -768,7 +1002,8 @@
     // field options were given.
     _effectiveOptions() {
       const hasAny = this._weekday || this._era || this._year || this._month || this._day ||
-        this._hour || this._minute || this._second;
+        this._hour || this._minute || this._second || this._dayPeriod ||
+        this._fractionalSecondDigits !== undefined;
       return {
         weekday: this._weekday,
         era: this._era,
@@ -778,6 +1013,9 @@
         hour: this._hour,
         minute: this._minute,
         second: this._second,
+        dayPeriod: this._dayPeriod,
+        fractionalSecondDigits: this._fractionalSecondDigits,
+        timeZoneName: this._timeZoneName,
         hour12: this._explicitHour12,
         hourCycle: this._explicitHourCycle,
       };
@@ -787,6 +1025,7 @@
     // interval formatter under the opt-in `--icu4c`; without it, a
     // documented approximation joining the two formatted endpoints.
     formatRange(startDate, endDate) {
+      if (typeof startDate === 'bigint' || typeof endDate === 'bigint') throw new TypeError('Cannot convert BigInt to number');
       const startMs = Number(startDate);
       const endMs = Number(endDate);
       if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
@@ -809,11 +1048,11 @@
         );
         if (formatted) return formatted;
       }
-      const startParts = this.formatToParts(startDate);
+      const startParts = this.formatToParts(startMs);
       if (startMs === endMs) return startParts.map(part => part.value).join('');
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         startParts,
-        this.formatToParts(endDate),
+        this.formatToParts(endMs),
       );
       const separator = '\u2009\u2013\u2009';
       return [...shared, ...startMiddle, { value: separator }, ...endMiddle, ...trailing]
@@ -825,6 +1064,7 @@
     // each argument's own fields with a span, giving the real
     // shared/startRange/endRange sources.
     formatRangeToParts(startDate, endDate) {
+      if (typeof startDate === 'bigint' || typeof endDate === 'bigint') throw new TypeError('Cannot convert BigInt to number');
       const startMs = Number(startDate);
       const endMs = Number(endDate);
       if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
@@ -849,13 +1089,13 @@
         );
         if (parts.length) return parts;
       }
-      const startParts = this.formatToParts(startDate);
+      const startParts = this.formatToParts(startMs);
       if (startMs === endMs) {
         return startParts.map(part => ({ ...part, source: 'shared' }));
       }
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         startParts,
-        this.formatToParts(endDate),
+        this.formatToParts(endMs),
       );
       return [
         ...shared.map(part => ({ ...part, source: 'shared' })),
@@ -875,7 +1115,7 @@
       // changes here -- rounding, sign, and `style: 'unit'`'s English
       // forms are locale-independent arithmetic already correct as-is.
       this._useRealLocaleData = typeof __thaw_intl_number_format === 'function';
-      const localeTag = String(locale === undefined ? 'en-US' : locale);
+      const localeTag = intlRequestedLocale(locale);
       // An explicit `numberingSystem` overrides the locale's own default,
       // exactly like `DateTimeFormat`'s `calendar`/`numberingSystem`
       // above (reusing `Intl.Locale`'s own tag rewriting).
@@ -904,8 +1144,28 @@
       }
       this._useGrouping = intlNormalizeUseGrouping(opts.useGrouping);
       this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
-      this._minimumFractionDigits = opts.minimumFractionDigits;
-      this._maximumFractionDigits = opts.maximumFractionDigits;
+      let defaultMinFraction = 0;
+      let defaultMaxFraction = this._style === 'percent' ? 0 : 3;
+      if (this._style === 'currency') {
+        let digits = 2;
+        if (typeof __thaw_intl_currency_fraction_digits === 'function') {
+          const resolved = __thaw_intl_currency_fraction_digits(this._currency);
+          if (resolved !== null && resolved !== undefined) digits = resolved;
+        }
+        defaultMinFraction = digits;
+        defaultMaxFraction = digits;
+      }
+      const minimumFraction = intlIntegerOption(opts.minimumFractionDigits, undefined, 0, 100);
+      const maximumFraction = intlIntegerOption(opts.maximumFractionDigits, undefined, 0, 100);
+      this._minimumFractionDigits = minimumFraction === undefined
+        ? Math.min(defaultMinFraction, maximumFraction === undefined ? defaultMinFraction : maximumFraction)
+        : minimumFraction;
+      this._maximumFractionDigits = maximumFraction === undefined
+        ? Math.max(defaultMaxFraction, this._minimumFractionDigits)
+        : maximumFraction;
+      if (this._maximumFractionDigits < this._minimumFractionDigits) {
+        throw new RangeError('maximumFractionDigits is less than minimumFractionDigits');
+      }
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
       this._minimumSignificantDigits = intlIntegerOption(opts.minimumSignificantDigits, 1, 1, 21);
       this._maximumSignificantDigits = intlIntegerOption(opts.maximumSignificantDigits, Math.max(this._minimumSignificantDigits, 21), this._minimumSignificantDigits, 21);
@@ -931,18 +1191,21 @@
       this._notation = this._style === 'decimal' && requestedNotation !== 'standard'
         ? requestedNotation
         : 'standard';
+      this.format = this.format.bind(this);
     }
 
     // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
     // counts as negative for `auto`/`always` (so `-0` renders `"-0"`)
     // but not for `negative`/`exceptZero` (which treat it as zero).
-    _signFor(number) {
-      const negative = number < 0 || Object.is(number, -0);
+    _signFor(number, exact = null, roundedNonzero = null) {
+      const negative = exact === null ? number < 0 || Object.is(number, -0) : exact.negative;
+      const nonzero = roundedNonzero === null
+        ? (exact === null ? number !== 0 : exact.nonzero) : roundedNonzero;
       switch (this._signDisplay) {
         case 'never': return '';
         case 'always': return negative ? '-' : '+';
-        case 'exceptZero': return number === 0 ? '' : (negative ? '-' : '+');
-        case 'negative': return number < 0 ? '-' : '';
+        case 'exceptZero': return nonzero ? (negative ? '-' : '+') : '';
+        case 'negative': return negative && nonzero ? '-' : '';
         default: return negative ? '-' : '';
       }
     }
@@ -955,7 +1218,13 @@
     // it matches every curated locale whose numbering system is Latin
     // (`en`/`de`/`fr`/`ja`/`ar`/`bn`), where localized exponent symbols
     // aren't available without new data.
-    _formatScientific(number) {
+    _formatScientific(number, original) {
+      const exact = this._exactScientificDigits(original);
+      if (exact !== null) {
+        const render = digits => this._renderDigits(digits, false);
+        return { text: `${render(exact.mantissa)}E${exact.exponent < 0n ? '-' : ''}${render(String(exact.exponent < 0n ? -exact.exponent : exact.exponent))}`,
+          nonzero: exact.nonzero };
+      }
       const magnitude = Math.abs(number);
       const minFrac = this._minimumFractionDigits === undefined ? 0 : this._minimumFractionDigits;
       const maxFrac = this._maximumFractionDigits === undefined ? 3 : this._maximumFractionDigits;
@@ -971,8 +1240,8 @@
         // Rounding the mantissa can carry it up a magnitude (`9.99` ->
         // `10`); pair it with the exponent that produced.
         const roundedMagnitude = Number(rounded);
-        if (roundedMagnitude >= 10) {
-          exponent += this._notation === 'engineering' && roundedMagnitude < 1000 ? 0 : 1;
+        if (roundedMagnitude >= (this._notation === 'engineering' ? 1000 : 10)) {
+          exponent += this._notation === 'engineering' ? 3 : 1;
         }
       }
       const mantissa = magnitude === 0 ? 0 : magnitude / Math.pow(10, exponent);
@@ -982,13 +1251,61 @@
       const render = digits => this._useRealLocaleData
         ? String(__thaw_intl_number_format(this.locale, digits, false))
         : digits;
-      return `${render(mantissaText)}E${exponent < 0 ? '-' : ''}${render(String(Math.abs(exponent)))}`;
+      return { text: `${render(mantissaText)}E${exponent < 0 ? '-' : ''}${render(String(Math.abs(exponent)))}`,
+        nonzero: /[1-9]/.test(mantissaText) };
+    }
+
+    _exactScientificDigits(value) {
+      const text = typeof value === 'bigint' ? value.toString()
+        : typeof value === 'string' ? value.trim()
+        : typeof value === 'number' && Number.isFinite(value) && this._style === 'percent' &&
+            !Number.isFinite(value * 100) ? String(value) : null;
+      if (text === null) return null;
+      const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
+      if (!match) return null;
+      const power = BigInt(match[5] || 0);
+      const coefficient = `${match[2] || '0'}${match[3] === undefined ? match[4] || '' : match[3]}`;
+      const leading = /^0*/.exec(coefficient)[0].length;
+      const significant = coefficient.slice(leading);
+      const exponent10 = significant ? BigInt((match[2] || '0').length - leading - 1) + power +
+        (this._style === 'percent' ? 2n : 0n) : 0n;
+      let exponent = significant && this._notation === 'engineering'
+        ? exponent10 - ((exponent10 % 3n) + 3n) % 3n : exponent10;
+      const width = significant ? Number(exponent10 - exponent + 1n) : 1;
+      const padded = (significant || '0').padEnd(width, '0');
+      const signed = match[1] === '-' ? '-' : '';
+      const raw = `${signed}${padded.slice(0, width)}${padded.length > width ? `.${padded.slice(width)}` : ''}`;
+      // Percent's two decimal places are already reflected in exponent10;
+      // rounding this mantissa must not scale it again, including on carry.
+      let rounded = this._exactStandardDigits(raw, false);
+      if (rounded === null) return null;
+      const carryWidth = this._notation === 'engineering' ? 3 : 1;
+      if (rounded.intPart.length > carryWidth) {
+        exponent += BigInt(carryWidth);
+        const shifted = `${signed}${rounded.intPart.slice(0, -carryWidth)}.${rounded.intPart.slice(-carryWidth)}${rounded.fracPart}`;
+        rounded = this._exactStandardDigits(shifted, false);
+        if (rounded === null) return null;
+      }
+      return { mantissa: rounded.fracPart ? `${rounded.intPart}.${rounded.fracPart}` : rounded.intPart,
+        exponent, negative: signed === '-', nonzero: rounded.nonzero };
+    }
+
+    _exactNotationDigits(value) {
+      // Compact strings retain their 10k ceiling; BigInts match the native
+      // signed decimal input ceiling.
+      if (this._notation === 'compact' &&
+          ((typeof value === 'string' && value.trim().length > 10000) ||
+           (typeof value === 'bigint' && value.toString().length > 32000))) return null;
+      return this._notation === 'scientific' || this._notation === 'engineering'
+        ? this._exactScientificDigits(value) : this._exactStandardDigits(value);
     }
 
     resolvedOptions() {
+      const resolvedLocale = this._useRealLocaleData && typeof __thaw_intl_datetime_resolved_options === 'function'
+        ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
       const result = {
         locale: this.locale,
-        numberingSystem: this._numberingSystem || 'latn',
+        numberingSystem: resolvedLocale && resolvedLocale.numberingSystem ? resolvedLocale.numberingSystem : 'latn',
         style: this._style,
         useGrouping: this._useGrouping,
         minimumIntegerDigits: this._minimumIntegerDigits,
@@ -1025,10 +1342,65 @@
     // The standard-notation digit computation (significant- or
     // fraction-digit rounding, integer zero-padding, effective grouping),
     // shared by `format` and `formatToParts`.
-    _standardDigits(number) {
+    _exactStandardDigits(value, applyPercentScale = true) {
+      const text = typeof value === 'bigint' ? value.toString()
+        : typeof value === 'string' ? value.trim()
+        : typeof value === 'number' && Number.isFinite(value) && this._style === 'percent' &&
+            !Number.isFinite(value * 100) ? String(value) : null;
+      if (text === null) return null;
+      const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
+      if (!match) return null;
+      const exponent = BigInt(match[5] || 0);
+      const fraction = match[3] === undefined ? (match[4] || '') : match[3];
+      let scale = BigInt(fraction.length) - exponent - (applyPercentScale && this._style === 'percent' ? 2n : 0n);
+      let digits = `${match[2] || '0'}${fraction}`.replace(/^0+/, '') || '0';
+      const cut = this._significant
+        ? BigInt(Math.max(0, digits.length - this._maximumSignificantDigits))
+        : scale > BigInt(this._maximumFractionDigits) ? scale - BigInt(this._maximumFractionDigits) : 0n;
+      if (cut > 0n) {
+        digits = intlRoundDecimalDigits(digits, cut, match[1] === '-', this._roundingMode);
+        scale -= cut;
+      }
+      if (this._significant) {
+        if (digits === '0') {
+          scale = BigInt(this._minimumSignificantDigits - 1);
+        } else if (digits.length < this._minimumSignificantDigits) {
+          const padding = this._minimumSignificantDigits - digits.length;
+          digits += '0'.repeat(padding);
+          scale += BigInt(padding);
+        }
+      } else if (digits === '0') {
+        scale = 0n;
+      }
+      let significantDigits = digits.length;
+      // A standard-notation result of this size cannot be materialized as a
+      // JS string. Never turn its finite input into binary64 Infinity.
+      if (scale > BigInt(Number.MAX_SAFE_INTEGER) || scale < -BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new RangeError('Intl numeric output is too large');
+      }
+      const places = Number(scale);
+      const intPart = places < 0 ? digits + '0'.repeat(-places)
+        : places >= digits.length ? '0' : digits.slice(0, -places) || digits;
+      let fracPart = places <= 0 ? '' : places >= digits.length
+        ? '0'.repeat(places - digits.length) + digits : digits.slice(-places);
+      while (fracPart.endsWith('0') && (this._significant
+        ? significantDigits > this._minimumSignificantDigits
+        : fracPart.length > this._minimumFractionDigits)) {
+        fracPart = fracPart.slice(0, -1);
+        significantDigits -= 1;
+      }
+      if (!this._significant) fracPart = fracPart.padEnd(this._minimumFractionDigits, '0');
+      return { intPart, fracPart, negative: match[1] === '-', nonzero: /[1-9]/.test(digits) };
+    }
+
+    _standardDigits(number, original) {
       let intPart;
       let fracPart;
-      if (this._significant) {
+      const exact = this._exactStandardDigits(original);
+      if (exact !== null) {
+        intPart = exact.intPart;
+        fracPart = exact.fracPart;
+      } else if (this._significant) {
         // `ToRawPrecision` -- the requested significant-digit count is
         // what governs the visible digits (and thus the trailing zeros),
         // not `toFixed`'s fraction count.
@@ -1081,29 +1453,40 @@
       const groupDigits = this._useGrouping === false
         ? false
         : this._useGrouping === 'min2' ? intPart.length > 4 : true;
-      return { intPart, fracPart, groupDigits };
+      return { intPart, fracPart, groupDigits, nonzero: /[1-9]/.test(intPart + fracPart) };
     }
 
     format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
-      const sign = this._signFor(number);
+      const exact = this._exactNotationDigits(value);
       if (this._notation === 'compact' && typeof __thaw_intl_compact_number === 'function') {
         // The compact pattern itself chooses the mantissa's precision, so
         // the raw number is passed through rather than `intl.js`'s own
         // rounded digit string. A known divergence: icu4x rounds compact
         // mantissas half-to-even (real ECMA-402 default is `halfExpand`),
         // so an exact tie differs (`1650` -> `1.6K` vs Node's `1.7K`).
-        return String(__thaw_intl_compact_number(this.locale, String(number), this._compactDisplay === 'long'));
+        return String(__thaw_intl_compact_number(this.locale,
+          typeof value === 'bigint' || typeof value === 'string' ? String(value) : String(number),
+          this._compactDisplay === 'long'));
       }
       if (this._notation !== 'standard') {
-        return `${sign}${this._formatScientific(number)}`;
+        const scientific = this._formatScientific(number, value);
+        return `${this._signFor(number, exact,
+          Number.isFinite(number) || exact !== null ? scientific.nonzero : null)}${scientific.text}`;
       }
-      const { intPart, fracPart, groupDigits } = this._standardDigits(number);
+      const { intPart, fracPart, groupDigits, nonzero } = this._standardDigits(number, value);
+      const sign = this._signFor(number, exact,
+        Number.isFinite(number) || exact !== null ? nonzero : null);
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
-        const result = __thaw_intl_percent_format(this.locale, signedDigits);
+        // The cached percent formatter emits no group parts to strip, so an
+        // ungrouped request swaps the grouped core out through the exact-core path.
+        const result = (digits.length > 32000 || !groupDigits) && typeof __thaw_intl_percent_format_large === 'function'
+          ? __thaw_intl_percent_format_large(this.locale, this._styleProbeRepresentative(signedDigits),
+              this._renderDigits(digits, groupDigits), groupDigits)
+          : __thaw_intl_percent_format(this.locale, signedDigits, groupDigits);
         if (result) return result;
       }
       if (this._style === 'currency') {
@@ -1112,23 +1495,29 @@
         const accounting = this._currencySign === 'accounting' && sign === '-';
         const value = accounting ? digits : signedDigits;
         if (typeof __thaw_intl_currency_format === 'function') {
-          const result = __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay);
-          if (result) return accounting ? `(${result})` : result;
+          const result = digits.length > 32000 && typeof __thaw_intl_currency_format_large === 'function'
+            ? __thaw_intl_currency_format_large(this.locale,
+                this._currencyDisplay === 'name' ? this._styleRepresentative(value) : this._styleProbeRepresentative(value),
+                this._renderDigits(digits, groupDigits), this._currency, this._currencyDisplay, groupDigits)
+            : __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay, groupDigits);
+          if (result) {
+            return accounting ? `(${result})` : result;
+          }
         }
         const text = `${this._currency} ${value}`;
         return accounting ? `(${text})` : text;
       }
       if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
-        const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay);
+        const result = digits.length > 32000 && typeof __thaw_intl_unit_format_large === 'function'
+          ? __thaw_intl_unit_format_large(this.locale, this._styleRepresentative(signedDigits),
+              this._renderDigits(digits, groupDigits), this._unit, this._unitDisplay, groupDigits)
+          : __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay, groupDigits);
         if (result) return result;
       }
       // Sign is handled here, not passed to the native call: it's
       // applied identically across every curated locale (confirmed),
       // so there's no need to push it through a locale-data lookup.
-      const rendered = this._useRealLocaleData
-        ? __thaw_intl_number_format(this.locale, digits, groupDigits)
-        : (groupDigits ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
-          (fracPart ? `.${fracPart}` : '');
+      const rendered = this._renderDigits(digits, groupDigits);
       const signed = `${sign}${rendered}`;
       if (this._style === 'percent') return `${signed}%`;
       if (this._style === 'currency') return `${this._currency} ${signed}`;
@@ -1144,13 +1533,93 @@
     }
 
     _renderDigits(text, grouping) {
-      return this._useRealLocaleData
-        ? String(__thaw_intl_number_format(this.locale, text, grouping))
-        : (grouping ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : text);
+      if (!this._useRealLocaleData) {
+        return grouping ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : text;
+      }
+      // fixed_decimal has an i16 magnitude. The common path stays native;
+      // long exact input uses symbols sampled from that same locale.
+      if (text.length <= 32000) return String(__thaw_intl_number_format(this.locale, text, grouping));
+      const { glyphs, group, primary, secondary, decimal } = this._largeLocaleSymbols();
+      const sign = text.startsWith('-') || text.startsWith('+') ? text[0] : '';
+      const unsigned = sign ? text.slice(1) : text;
+      const [integer, fraction] = unsigned.split('.');
+      const localize = digits => [...digits].map(digit => glyphs[digit.charCodeAt(0) - 48]).join('');
+      let whole = localize(integer);
+      if (grouping && group && integer.length > primary) {
+        const pieces = [];
+        let end = integer.length;
+        let width = primary;
+        while (end > width) {
+          pieces.unshift(localize(integer.slice(end - width, end)));
+          end -= width;
+          width = secondary;
+        }
+        pieces.unshift(localize(integer.slice(0, end)));
+        whole = pieces.join(group);
+      }
+      return `${sign}${whole}${fraction === undefined ? '' : decimal + localize(fraction)}`;
+    }
+
+    // icu_plurals only observes the low 18 integer digits, plus a high-
+    // magnitude flag, and the first 18 visible fraction digits. Keep those
+    // operands while asking ICU for the original style's affixes.
+    _styleRepresentative(text) {
+      const sign = text.startsWith('-') || text.startsWith('+') ? text[0] : '';
+      const [integer, fraction = ''] = (sign ? text.slice(1) : text).split('.');
+      const significant = integer.replace(/^0+/, '') || '0';
+      const reduced = significant.length > 18 ? `1${significant.slice(-18)}` : significant;
+      return `${sign}${reduced}${fraction ? `.${fraction.slice(0, 18)}` : ''}`;
+    }
+
+    // Percent and currency symbol/code patterns are independent of numeric
+    // plural category. A fixed high-magnitude pair keeps their first-digit
+    // probe valid even when significant-digit formatting yields 40k leading
+    // fractional zeros and the true value's integer part is zero.
+    _styleProbeRepresentative(text) {
+      const sign = text.startsWith('-') || text.startsWith('+') ? text[0] : '';
+      return `${sign}1${'0'.repeat(18)}`;
+    }
+
+    _largeLocaleSymbols() {
+      if (this._cachedLargeLocaleSymbols) return this._cachedLargeLocaleSymbols;
+      const glyphs = Array.from({ length: 10 }, (_, digit) =>
+        String(__thaw_intl_number_format(this.locale, String(digit), false)));
+      const decimal = String(__thaw_intl_number_format(this.locale, '1.5', false))
+        .slice(glyphs[1].length, -glyphs[5].length);
+      // Some locales leave 1000 ungrouped but group larger numbers. Probe
+      // enough digits to see both primary and secondary group widths, then
+      // count digit glyphs rather than Unicode scalars in each segment.
+      const probe = String(__thaw_intl_number_format(this.locale, '1234567890123', true));
+      let offset = 0;
+      let segment = 0;
+      let group = '';
+      const widths = [];
+      for (const digit of '1234567890123') {
+        const glyph = glyphs[digit.charCodeAt(0) - 48];
+        if (!probe.startsWith(glyph, offset)) {
+          const next = probe.indexOf(glyph, offset);
+          if (next < 0) throw new RangeError('Cannot identify Intl grouping symbols');
+          const separator = probe.slice(offset, next);
+          if (group && separator !== group) throw new RangeError('Inconsistent Intl grouping symbols');
+          group = separator;
+          widths.push(segment);
+          segment = 0;
+          offset = next;
+        }
+        offset += glyph.length;
+        segment++;
+      }
+      if (offset !== probe.length) throw new RangeError('Cannot identify Intl grouping symbols');
+      widths.push(segment);
+      const primary = widths.length > 1 ? widths[widths.length - 1] : 3;
+      const secondary = widths.length > 2 ? widths[widths.length - 2] : primary;
+      this._cachedLargeLocaleSymbols = { glyphs, decimal, group, primary, secondary };
+      return this._cachedLargeLocaleSymbols;
     }
 
     _groupSeparator() {
       if (!this._useRealLocaleData) return ',';
+      if (this._cachedLargeLocaleSymbols) return this._cachedLargeLocaleSymbols.group;
       const probe = String(__thaw_intl_number_format(this.locale, '1000', true));
       return probe.length > 4 ? probe.slice(1, probe.length - 3) : ',';
     }
@@ -1212,8 +1681,7 @@
       return parts;
     }
 
-    _scientificParts(number) {
-      const text = this._formatScientific(number);
+    _scientificParts(text) {
       const separatorIndex = text.indexOf('E');
       const mantissa = text.slice(0, separatorIndex);
       const exponent = text.slice(separatorIndex + 1);
@@ -1299,13 +1767,35 @@
     // `compact` parts; `scientific`/`engineering` emit mantissa +
     // `exponentSeparator`/`exponentInteger` parts.
     formatToParts(value) {
-      const full = this.format(value);
-      const input = Number(value);
-      const number = this._style === 'percent' ? input * 100 : input;
-      if (!Number.isFinite(number)) {
-        return [{ type: 'nan', value: full }];
+      const exact = this._exactNotationDigits(value);
+      const input = exact !== null ? value : Number(value);
+      const full = this.format(input);
+      const number = this._style === 'percent' ? Number(input) * 100 : Number(input);
+      if (!Number.isFinite(number) && exact === null) {
+        const type = Number.isNaN(number) ? 'nan' : 'infinity';
+        const sign = this._signFor(number, exact);
+        const marker = type === 'nan' ? 'NaN' : 'Infinity';
+        const index = full.indexOf(marker);
+        if (index < 0) return [{ type, value: full }];
+        const prefix = full.slice(0, index);
+        const parts = [];
+        const signIndex = sign ? prefix.indexOf(sign) : -1;
+        if (signIndex < 0) parts.push(...this._affixParts(prefix));
+        else {
+          parts.push(...this._affixParts(prefix.slice(0, signIndex)));
+          parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
+          parts.push(...this._affixParts(prefix.slice(signIndex + sign.length)));
+        }
+        parts.push({ type, value: marker });
+        parts.push(...this._affixParts(full.slice(index + marker.length)));
+        return parts;
       }
-      const sign = this._signFor(number);
+      const scientific = this._notation === 'scientific' || this._notation === 'engineering'
+        ? this._formatScientific(number, input) : null;
+      const standardDigits = this._notation === 'standard'
+        ? this._standardDigits(number, input) : null;
+      const sign = this._signFor(number, exact,
+        scientific ? scientific.nonzero : standardDigits ? standardDigits.nonzero : null);
       if (this._notation === 'compact') {
         const parts = [];
         let text = full;
@@ -1319,10 +1809,10 @@
       if (this._notation === 'scientific' || this._notation === 'engineering') {
         const parts = [];
         if (sign) parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
-        parts.push(...this._scientificParts(number));
+        parts.push(...this._scientificParts(scientific.text));
         return parts;
       }
-      const { intPart, fracPart, groupDigits } = this._standardDigits(number);
+      const { intPart, fracPart, groupDigits } = standardDigits;
       const numeric = this._numericParts(intPart, fracPart, groupDigits);
       const core = numeric.map(part => part.value).join('');
       const index = full.indexOf(core);
@@ -1348,6 +1838,8 @@
       const tokens = [];
       if (this._style === 'percent') {
         tokens.push('percent');
+        // The endpoint strings have already been scaled by 100.
+        tokens.push('scale/0.01');
       } else if (this._style === 'currency') {
         tokens.push(`currency/${this._currency}`);
         if (this._currencyDisplay === 'code') tokens.push('unit-width-iso-code');
@@ -1364,6 +1856,7 @@
         tokens.push(this._notation);
       }
       if (this._useGrouping === false) tokens.push('group-off');
+      if (this._minimumIntegerDigits > 1) tokens.push(`integer-width/*${'0'.repeat(this._minimumIntegerDigits)}`);
       if (this._signDisplay === 'always') tokens.push('sign-always');
       else if (this._signDisplay === 'never') tokens.push('sign-never');
       else if (this._signDisplay === 'exceptZero') tokens.push('sign-except-zero');
@@ -1405,13 +1898,20 @@
     formatRange(start, end) {
       const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
       const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
-      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+      const startExact = this._exactNotationDigits(start);
+      const endExact = this._exactNotationDigits(end);
+      if ((!Number.isFinite(startNumber) && startExact === null) ||
+          (!Number.isFinite(endNumber) && endExact === null)) {
         throw new RangeError('Invalid value');
       }
-      if (typeof __thaw_intl_number_range_icu4c === 'function') {
-        const asText = ({ intPart, fracPart }) => (fracPart ? `${intPart}.${fracPart}` : intPart);
-        const startText = asText(this._standardDigits(startNumber));
-        const endText = asText(this._standardDigits(endNumber));
+      const scientific = this._notation === 'scientific' || this._notation === 'engineering';
+      const nativeExact = intlNativeRangeInputFits(start) && intlNativeRangeInputFits(end) &&
+        (!scientific || (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null));
+      if (nativeExact && typeof __thaw_intl_number_range_icu4c === 'function') {
+        const asText = (number, exact, { intPart, fracPart }) =>
+          `${(exact ? exact.negative : number < 0 || Object.is(number, -0)) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
+        const startText = asText(startNumber, startExact, this._standardDigits(startNumber, start));
+        const endText = asText(endNumber, endExact, this._standardDigits(endNumber, end));
         const formatted = __thaw_intl_number_range_icu4c(
           this.locale,
           this._rangeSkeleton(),
@@ -1420,7 +1920,13 @@
         );
         if (formatted) return formatted;
       }
-      if (startNumber === endNumber) return `~${this.format(start)}`;
+      const same = startExact && endExact
+        ? (scientific
+          ? startExact.mantissa === endExact.mantissa && startExact.exponent === endExact.exponent
+          : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
+          this._signFor(startNumber, startExact) === this._signFor(endNumber, endExact)
+        : startNumber === endNumber;
+      if (same) return `~${this.format(start)}`;
       const separator = this._numberRangeSeparator();
       if (!this._rangeSharesAffixes()) {
         return `${this.format(start)}${separator}${this.format(end)}`;
@@ -1428,6 +1934,7 @@
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         this.formatToParts(start),
         this.formatToParts(end),
+        true,
       );
       return [...shared, ...startMiddle, { value: separator }, ...endMiddle, ...trailing]
         .map(part => part.value)
@@ -1456,22 +1963,35 @@
     formatRangeToParts(start, end) {
       const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
       const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
-      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+      const startExact = this._exactNotationDigits(start);
+      const endExact = this._exactNotationDigits(end);
+      if ((!Number.isFinite(startNumber) && startExact === null) ||
+          (!Number.isFinite(endNumber) && endExact === null)) {
         throw new RangeError('Invalid value');
       }
-      if (typeof __thaw_intl_number_range_parts_icu4c === 'function') {
-        const asText = ({ intPart, fracPart }) => (fracPart ? `${intPart}.${fracPart}` : intPart);
+      const scientific = this._notation === 'scientific' || this._notation === 'engineering';
+      const nativeExact = intlNativeRangeInputFits(start) && intlNativeRangeInputFits(end) &&
+        (!scientific || (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null));
+      if (nativeExact && typeof __thaw_intl_number_range_parts_icu4c === 'function') {
+        const asText = (number, exact, { intPart, fracPart }) =>
+          `${(exact ? exact.negative : number < 0 || Object.is(number, -0)) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
         const parts = JSON.parse(
           __thaw_intl_number_range_parts_icu4c(
             this.locale,
             this._rangeSkeleton(),
-            asText(this._standardDigits(startNumber)),
-            asText(this._standardDigits(endNumber)),
+            asText(startNumber, startExact, this._standardDigits(startNumber, start)),
+            asText(endNumber, endExact, this._standardDigits(endNumber, end)),
           ),
         );
         if (parts.length) return parts;
       }
-      if (startNumber === endNumber) {
+      const same = startExact && endExact
+        ? (scientific
+          ? startExact.mantissa === endExact.mantissa && startExact.exponent === endExact.exponent
+          : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
+          this._signFor(startNumber, startExact) === this._signFor(endNumber, endExact)
+        : startNumber === endNumber;
+      if (same) {
         return [
           { type: 'approximatelySign', value: '~', source: 'shared' },
           ...this.formatToParts(start).map(part => ({ ...part, source: 'shared' })),
@@ -1488,6 +2008,7 @@
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         this.formatToParts(start),
         this.formatToParts(end),
+        true,
       );
       return [
         ...shared.map(part => ({ ...part, source: 'shared' })),
@@ -1503,13 +2024,14 @@
     constructor(locale, options) {
       const opts = options || {};
       this._useRealLocaleData = typeof __thaw_intl_list_format === 'function';
-      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
+      this.locale = this._useRealLocaleData ? intlRequestedLocale(locale) : 'en-US';
       this._type = intlEnumOption(opts.type, ['conjunction', 'disjunction', 'unit'], 'conjunction', 'type');
       this._style = intlEnumOption(opts.style, ['long', 'short', 'narrow'], 'long', 'style');
     }
 
     format(list) {
-      const items = Array.from(list, String);
+      const items = Array.from(list);
+      if (items.some(item => typeof item !== 'string')) throw new TypeError('ListFormat items must be strings');
       if (this._useRealLocaleData) {
         const kind = this._type === 'disjunction' ? 'or' : this._type === 'unit' ? 'unit' : 'and';
         return __thaw_intl_list_format(this.locale, kind, this._style, JSON.stringify(items));
@@ -1545,28 +2067,42 @@
         if (tag === undefined || tag === null) {
           throw new TypeError("First argument to Intl.Locale constructor can't be empty or missing");
         }
-        const base = tag instanceof Locale ? tag.toString() : String(tag);
+        const base = INTL_LOCALE_TAGS.has(tag) ? INTL_LOCALE_TAGS.get(tag) : String(tag);
         const opts = options || {};
-        const overrides = [];
-        if (opts.calendar !== undefined) overrides.push(`ca-${opts.calendar}`);
-        if (opts.numberingSystem !== undefined) overrides.push(`nu-${opts.numberingSystem}`);
-        if (opts.collation !== undefined) overrides.push(`co-${opts.collation}`);
-        // A `-u-` Unicode extension always starts a new subtag boundary
-        // right after language/script/region/variants and right before
-        // any `-x-` private-use section -- stripping from the first
-        // `-u-` onward and re-appending is enough for the common case
-        // (a plain tag with at most one `-u-` extension); real Node's
-        // own semantics let explicit options fully replace whatever the
-        // tag itself specified, confirmed against real Node.
-        let effectiveTag = base;
-        if (overrides.length > 0) {
-          const unicodeExtensionStart = effectiveTag.search(/-u(-|$)/);
-          const withoutExtension =
-            unicodeExtensionStart === -1 ? effectiveTag : effectiveTag.slice(0, unicodeExtensionStart);
-          effectiveTag = `${withoutExtension}-u-${overrides.join('-')}`;
+        const original = JSON.parse(__thaw_intl_locale_parse(base));
+        if (!original.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        let effectiveTag = original.tag;
+        const overrides = [['ca', opts.calendar], ['nu', opts.numberingSystem], ['co', opts.collation]]
+          .filter(([, value]) => value !== undefined);
+        if (overrides.length) {
+          const subtags = effectiveTag.split('-');
+          const unicode = subtags.findIndex(part => part === 'u');
+          const end = unicode < 0
+            ? subtags.findIndex((part, index) => index > 0 && part.length === 1 && part > 'u')
+            : subtags.findIndex((part, index) => index > unicode && part.length === 1);
+          const stop = end < 0 ? subtags.length : end;
+          const body = unicode < 0 ? [] : subtags.slice(unicode + 1, stop);
+          const attributes = [];
+          const keywords = new Map();
+          let index = 0;
+          while (index < body.length && body[index].length !== 2) attributes.push(body[index++]);
+          while (index < body.length) {
+            const key = body[index++];
+            const values = [];
+            while (index < body.length && body[index].length !== 2) values.push(body[index++]);
+            keywords.set(key, values.join('-'));
+          }
+          for (const [key, value] of overrides) keywords.set(key, String(value));
+          const updated = ['u', ...attributes, ...[...keywords].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+            .flatMap(([key, value]) => [key, ...(value ? value.split('-') : [])])];
+          subtags.splice(unicode < 0 ? stop : unicode, unicode < 0 ? 0 : stop - unicode, ...updated);
+          effectiveTag = subtags.join('-');
         }
         const parsed = JSON.parse(__thaw_intl_locale_parse(effectiveTag));
         if (!parsed.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        this._tag = parsed.tag;
+        INTL_LOCALE_TAGS.set(this, parsed.tag);
+        this._baseName = parsed.baseName;
         this._language = parsed.language;
         this._script = parsed.script;
         this._region = parsed.region;
@@ -1600,42 +2136,26 @@
       }
 
       get baseName() {
-        let name = this._language;
-        if (this._script) name += `-${this._script}`;
-        if (this._region) name += `-${this._region}`;
-        return name;
+        return this._baseName;
       }
 
       toString() {
-        let name = this.baseName;
-        const extension = [];
-        if (this._calendar) extension.push(`ca-${this._calendar}`);
-        if (this._numberingSystem) extension.push(`nu-${this._numberingSystem}`);
-        if (this._collation) extension.push(`co-${this._collation}`);
-        if (extension.length > 0) name += `-u-${extension.join('-')}`;
-        return name;
+        return this._tag;
       }
 
       // `maximize()`/`minimize()` preserve the original instance's own
       // Unicode extension keywords (confirmed against real Node) --
       // only the language/script/region subtags themselves transform.
       _withTransformedSubtags(transformed) {
-        const result = Object.create(Locale.prototype);
-        result._language = transformed.language;
-        result._script = transformed.script;
-        result._region = transformed.region;
-        result._calendar = this._calendar;
-        result._numberingSystem = this._numberingSystem;
-        result._collation = this._collation;
-        return result;
+        return new Locale(transformed.tag);
       }
 
       maximize() {
-        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_maximize(this.baseName)));
+        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_maximize(this._tag)));
       }
 
       minimize() {
-        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_minimize(this.baseName)));
+        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_minimize(this._tag)));
       }
   }
 
@@ -1650,7 +2170,7 @@
   class PluralRules {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._type = intlEnumOption(opts.type, ['cardinal', 'ordinal'], 'cardinal', 'type');
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
       this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
@@ -1676,8 +2196,9 @@
     }
 
     select(value) {
-      if (typeof __thaw_intl_plural_category !== 'function') return 'other';
-      return __thaw_intl_plural_category(this.locale, this._type, this._operandString(value));
+      const number = Number(value);
+      if (!Number.isFinite(number) || typeof __thaw_intl_plural_category !== 'function') return 'other';
+      return __thaw_intl_plural_category(this.locale, this._type, this._operandString(number));
     }
 
     // `Intl.PluralRules.prototype.selectRange` (ECMA-402) with real
@@ -1732,12 +2253,13 @@
   class Collator {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._sensitivity = intlEnumOption(opts.sensitivity, ['base', 'accent', 'case', 'variant'], 'variant', 'sensitivity');
       this._usage = intlEnumOption(opts.usage, ['sort', 'search'], 'sort', 'usage');
       this._ignorePunctuation = Boolean(opts.ignorePunctuation);
       this._numeric = Boolean(opts.numeric);
       this._caseFirst = intlEnumOption(opts.caseFirst, ['upper', 'lower', 'false'], 'false', 'caseFirst');
+      this.compare = this.compare.bind(this);
     }
 
     compare(a, b) {
@@ -1785,7 +2307,7 @@
   class Segmenter {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._granularity = intlEnumOption(opts.granularity, ['grapheme', 'word', 'sentence'], 'grapheme', 'granularity');
     }
 
@@ -1804,17 +2326,18 @@
       }));
       return {
         [Symbol.iterator]() {
-          return segments[Symbol.iterator]();
+          return segments.map(entry => ({ ...entry }))[Symbol.iterator]();
         },
         // `Segments.prototype.containing(index)` -- real ECMA-402 random
         // access, previously a documented gap. Returns the segment whose
         // `[index, index + segment.length)` range contains `index`, or
         // `undefined` for an out-of-range index.
         containing(index) {
-          const i = Math.trunc(Number(index));
+          const n = Number(index);
+          const i = Number.isNaN(n) ? 0 : Math.trunc(n);
           if (!Number.isFinite(i) || i < 0 || i >= input.length) return undefined;
           for (const entry of segments) {
-            if (entry.index <= i && i < entry.index + entry.segment.length) return entry;
+            if (entry.index <= i && i < entry.index + entry.segment.length) return { ...entry };
           }
           return undefined;
         },
@@ -1826,6 +2349,7 @@
   // deliberately-unstable icu4x dependency in this whole effort
   // (`icu_experimental`, see `intl_relative_time.rs`'s own doc comment).
   const INTL_RELATIVE_TIME_UNITS = {
+    __proto__: null,
     year: 'year', years: 'year',
     quarter: 'quarter', quarters: 'quarter',
     month: 'month', months: 'month',
@@ -1839,7 +2363,10 @@
   class RelativeTimeFormat {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      const localeTag = intlRequestedLocale(locale);
+      const numberingSystem = opts.numberingSystem;
+      this.locale = numberingSystem === undefined
+        ? localeTag : new Locale(localeTag, { numberingSystem }).toString();
       this._style = opts.style === undefined ? 'long' : String(opts.style);
       this._numeric = opts.numeric === undefined ? 'always' : String(opts.numeric);
       if (!['long', 'short', 'narrow'].includes(this._style)) throw new RangeError(`Invalid style: ${this._style}`);
@@ -1857,7 +2384,10 @@
     }
 
     resolvedOptions() {
-      return { locale: this.locale, style: this._style, numeric: this._numeric, numberingSystem: 'latn' };
+      const resolved = typeof __thaw_intl_datetime_resolved_options === 'function'
+        ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
+      return { locale: this.locale, style: this._style, numeric: this._numeric,
+        numberingSystem: resolved && resolved.numberingSystem ? resolved.numberingSystem : 'latn' };
     }
   }
 
@@ -1932,8 +2462,7 @@
   class DisplayNames {
     constructor(locales, options) {
       const opts = options || {};
-      const list = locales === undefined ? [] : (Array.isArray(locales) ? locales : [locales]);
-      this.locale = list.length > 0 ? String(list[0]) : 'en';
+      this.locale = intlRequestedLocale(locales, 'en');
       this._language = primarylanguage(this.locale);
       this._type = opts.type === undefined ? 'language' : String(opts.type);
       this._style = opts.style === undefined ? 'long' : String(opts.style);
@@ -1945,9 +2474,13 @@
 
     of(code) {
       const table = DISPLAY_NAMES_TABLES[this._language][this._type];
-      const value = table === undefined ? undefined : table[String(code)];
+      const raw = String(code);
+      const normalized = this._type === 'region' || this._type === 'currency' ? raw.toUpperCase()
+        : this._type === 'language' ? raw.toLowerCase()
+        : this._type === 'script' ? raw[0].toUpperCase() + raw.slice(1).toLowerCase() : raw;
+      const value = table !== undefined && Object.prototype.hasOwnProperty.call(table, normalized) ? table[normalized] : undefined;
       if (value !== undefined) return value;
-      return this._fallback === 'none' ? undefined : String(code);
+      return this._fallback === 'none' ? undefined : normalized;
     }
 
     resolvedOptions() {
@@ -2009,8 +2542,7 @@
   class DurationFormat {
     constructor(locales, options) {
       const opts = options || {};
-      const list = locales === undefined ? [] : (Array.isArray(locales) ? locales : [locales]);
-      this.locale = list.length > 0 ? String(list[0]) : 'en';
+      this.locale = intlRequestedLocale(locales, 'en');
       this._language = primarylanguage(this.locale);
       this._style = opts.style === undefined ? 'short' : String(opts.style);
       if (!['long', 'short', 'narrow', 'digital'].includes(this._style)) {
@@ -2021,19 +2553,52 @@
     format(duration) {
       const table = DURATION_TABLES[this._language];
       const style = this._style === 'digital' ? 'short' : this._style;
-      const value = duration || {};
-      const parts = [];
+      if (duration === null || (typeof duration !== 'object' && typeof duration !== 'function')) {
+        if (typeof duration === 'string') throw new RangeError('Invalid duration');
+        throw new TypeError('Duration must be an object');
+      }
+      const value = duration;
+      const numbers = {};
+      let supplied = false;
+      let sign = 0;
       for (const unit of DURATION_UNITS) {
         const raw = value[unit];
-        if (raw === undefined || raw === null) continue;
+        if (raw === undefined) continue;
+        supplied = true;
         const number = Number(raw);
-        if (!Number.isFinite(number) || number === 0) continue;
+        if (!Number.isFinite(number) || !Number.isInteger(number)) throw new RangeError(`Invalid duration ${unit}`);
+        if (number !== 0) {
+          if (sign && Math.sign(number) !== sign) throw new RangeError('Duration fields have mixed signs');
+          sign = Math.sign(number);
+        }
+        numbers[unit] = number;
+      }
+      if (!supplied) throw new TypeError('Duration has no fields');
+      const parts = [];
+      for (const unit of DURATION_UNITS) {
+        const number = numbers[unit];
+        if (number === undefined) continue;
+        if (number === 0) continue;
+        if (this._style === 'digital' && ['hours', 'minutes', 'seconds'].includes(unit)) continue;
         let name = table[style][unit];
         // English long form pluralizes a non-unit count ("30 minutes").
         if (this._language === 'en' && style === 'long' && number !== 1) {
           name += 's';
         }
         parts.push(`${number}${table.unit}${name}`);
+      }
+      if (this._style === 'digital') {
+        const hours = Math.abs(numbers.hours || 0);
+        const minutes = Math.abs(numbers.minutes || 0);
+        const seconds = Math.abs(numbers.seconds || 0);
+        if (numbers.hours !== undefined || numbers.minutes !== undefined || numbers.seconds !== undefined) {
+          const fields = numbers.hours !== undefined
+            ? [String(hours), String(minutes).padStart(2, '0'), String(seconds).padStart(2, '0')]
+            : numbers.minutes !== undefined
+              ? [String(minutes), String(seconds).padStart(2, '0')]
+              : [String(seconds)];
+          parts.push(`${sign < 0 ? '-' : ''}${fields.join(':')}`);
+        }
       }
       return parts.join(table.separator);
     }

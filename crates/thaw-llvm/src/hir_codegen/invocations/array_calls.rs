@@ -71,6 +71,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_copy_within"
                 | "__thaw_array_fill"
                 | "__thaw_array_slice"
+                | "__thaw_array_rest"
                 | "__thaw_bytes_slice"
                 | "__thaw_array_to_reversed"
                 | "__thaw_array_push"
@@ -93,12 +94,107 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_index_of"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
+                | "__thaw_bytes_alloc_fill"
                 | "__thaw_bytes_set_from_string"
         );
         if !typed_array_call && !generic_array_call {
             return None;
         }
+        if let Err(error) = self.guard_array_mutation(name, args) {
+            return Some(Err(error));
+        }
         Some(self.compile_array_call(name, args))
+    }
+
+    /// Throws a `TypeError` when a mutating array method targets an array that
+    /// `Object.freeze`/`seal`/`preventExtensions` locked (the object-state
+    /// table is keyed by the array handle). Only programs that call those
+    /// functions pay for the check, and only for a receiver that can be
+    /// evaluated twice without observable effects.
+    pub(super) fn guard_array_mutation(
+        &mut self,
+        name: &str,
+        args: &[HirExpr],
+    ) -> Result<(), String> {
+        if !self.tracks_object_integrity {
+            return Ok(());
+        }
+        let suffix = name.rsplit("_array_").next().unwrap_or(name);
+        // 0: not extensible, 1: sealed, 2: frozen (the table's query codes).
+        let (query, message) = match suffix {
+            "push" | "unshift" | "splice" => (0, "Cannot add property, object is not extensible"),
+            "pop" | "shift" | "pop_optional" | "shift_optional" => {
+                (1, "Cannot delete property of [object Array]")
+            }
+            "reverse" | "copy_within" | "fill" | "sort" => {
+                (2, "Cannot assign to read only property of object '[object Array]'")
+            }
+            _ => return Ok(()),
+        };
+        let Some(receiver) = args.first() else {
+            return Ok(());
+        };
+        if !matches!(self.expr_hir_type(receiver), Some(HirType::Array(_))) {
+            return Ok(());
+        }
+        self.compile_guard_array_state(receiver, query, message)
+    }
+
+    pub(super) fn compile_guard_array_state(
+        &mut self,
+        receiver: &HirExpr,
+        query: u64,
+        message: &str,
+    ) -> Result<(), String> {
+        fn repeatable(expr: &HirExpr) -> bool {
+            match expr {
+                HirExpr::Var(_) => true,
+                HirExpr::PropAccess(object, _, _) => repeatable(object),
+                _ => false,
+            }
+        }
+        if !repeatable(receiver) {
+            return Ok(());
+        }
+        let handle = self.compile_expr(receiver)?;
+        self.compile_guard_array_handle(handle.into_pointer_value(), query, message)
+    }
+
+    pub(super) fn compile_guard_array_handle(
+        &mut self,
+        handle: inkwell::values::PointerValue<'ctx>,
+        query: u64,
+        message: &str,
+    ) -> Result<(), String> {
+        let state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_object_state").unwrap(),
+                &[handle.into(), self.context.i8_type().const_int(query, false).into()],
+                "array_integrity_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_object_state returned no value")?
+            .into_int_value();
+        // Query 0 answers "is extensible"; the others answer "is locked".
+        let blocked = if query == 0 {
+            self.builder.build_not(state, "array_not_extensible")
+                .map_err(|error| error.to_string())?
+        } else {
+            state
+        };
+        let function = self.current_function();
+        let throw = self.context.append_basic_block(function, "array_integrity_blocked");
+        let allowed = self.context.append_basic_block(function, "array_integrity_allowed");
+        self.builder
+            .build_conditional_branch(blocked, throw, allowed)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(throw);
+        self.compile_throw_type_error(message)?;
+        self.builder.position_at_end(allowed);
+        Ok(())
     }
 
     fn compile_array_call(
@@ -362,6 +458,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }
+            "__thaw_bytes_alloc_fill" => {
+                let [size, pattern] = args else {
+                    return Err("Buffer.alloc with a fill expects two operands".into());
+                };
+                let size = self.compile_expr(size)?;
+                let pattern = self.compile_expr(pattern)?.into_pointer_value();
+                let pattern = self.compile_array_data(pattern)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_alloc_fill").unwrap(),
+                        &[size.into(), pattern.into()],
+                        "bytes_alloc_fill",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.alloc returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
             "__thaw_number_array_join"
             | "__thaw_string_array_join"
             | "__thaw_bool_array_join"
@@ -451,7 +568,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let width = self
                     .context
                     .i64_type()
-                    .const_int(array_element_storage_bytes(&element), false);
+                    .const_int(array_element_storage_bytes(&element)?, false);
                 // Mutates the buffer's elements in place and returns the
                 // same pointer -- the expression's own value is still the
                 // original handle (no reallocation, so no new one).
@@ -490,7 +607,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     buffer.into(),
                     self.context
                         .i64_type()
-                        .const_int(array_element_storage_bytes(&element), false)
+                        .const_int(array_element_storage_bytes(&element)?, false)
                         .into(),
                     target.into(),
                     start.into(),
@@ -610,7 +727,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     value_bytes.into(),
                     self.context
                         .i64_type()
-                        .const_int(array_element_storage_bytes(&element), false)
+                        .const_int(array_element_storage_bytes(&element)?, false)
                         .into(),
                     start.into(),
                     end.into(),
@@ -642,7 +759,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // `__thaw_bytes_slice` is `__thaw_array_slice` with a `Bytes`
             // result type (see thaw-hir inference) -- identical codegen:
             // the receiver is bound as an `Array(F64)` either way.
-            "__thaw_array_slice" | "__thaw_bytes_slice" => {
+            "__thaw_array_slice" | "__thaw_array_rest" | "__thaw_bytes_slice" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
                 }
@@ -662,7 +779,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     buffer.into(),
                     self.context
                         .i64_type()
-                        .const_int(array_element_storage_bytes(&element), false)
+                        .const_int(array_element_storage_bytes(&element)?, false)
                         .into(),
                     start.into(),
                     end.into(),
@@ -684,7 +801,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_call(
                         self.module
-                            .get_function("thaw_array_presence_slice")
+                            .get_function(if name == "__thaw_array_rest" {
+                                "thaw_array_presence_rest"
+                            } else {
+                                "thaw_array_presence_slice"
+                            })
                             .unwrap(),
                         &[presence.into(), length.into(), start.into(), end.into()],
                         "array_slice_presence",
@@ -715,7 +836,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let width = self
                     .context
                     .i64_type()
-                    .const_int(array_element_storage_bytes(&element), false);
+                    .const_int(array_element_storage_bytes(&element)?, false);
                 let result = self
                     .builder
                     .build_call(
@@ -776,7 +897,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array push/unshift requires a homogeneous array".to_string());
                 };
                 let i64_type = self.context.i64_type();
-                let width = array_element_storage_bytes(&element);
+                let width = array_element_storage_bytes(&element)?;
                 let handle = self.compile_expr(receiver)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
                 let old_length = self
@@ -860,7 +981,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array pop/shift requires a homogeneous array".to_string());
                 };
                 let i64_type = self.context.i64_type();
-                let width = array_element_storage_bytes(&element);
+                let width = array_element_storage_bytes(&element)?;
                 let handle = self.compile_expr(receiver)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
                 let old_length = self
@@ -1051,7 +1172,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array splice requires a homogeneous array".to_string());
                 };
                 let i64_type = self.context.i64_type();
-                let width = array_element_storage_bytes(&element);
+                let width = array_element_storage_bytes(&element)?;
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
                 let old_len = self
@@ -1296,12 +1417,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
                 let depth = self.compile_expr(depth)?.into_float_value();
                 let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_any_array_flat").unwrap(),
-                        &[buffer.into(), depth.into()],
+                        &[buffer.into(), presence.into(), depth.into()],
                         "array_flat",
                     )
                     .map_err(|error| error.to_string())?
@@ -1364,6 +1486,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("array search returned no value".to_string())?;
+                let result = if name.starts_with("__thaw_any_array_") {
+                    self.compile_check_json_host_error(result, None)?
+                } else {
+                    result
+                };
                 if name.ends_with("_includes") {
                     return self
                         .builder

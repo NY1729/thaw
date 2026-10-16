@@ -317,7 +317,16 @@ impl<'a> FnLowerer<'a> {
                                 }
                             }
                         }
-                        (self.infer_member_receiver_type(&inner_member.obj) == Some(HirType::JsValue))
+                        // A non-builtin method call on a `Json`/`any` receiver is routed to the
+                        // live object like a `JsValue` receiver (see the Json arm in
+                        // `lower_call`), so a call chained off it is also a dynamic value:
+                        // `app.use(a).use(b)` with `app: any` is as chainable as with a
+                        // `JsValue` `app`.
+                        let receiver = self.infer_member_receiver_type(&inner_member.obj);
+                        let live_json_method = receiver == Some(HirType::Json)
+                            && member_property_name(&inner_member.prop)
+                                .is_some_and(|method| !Self::is_native_instance_builtin(&method));
+                        (receiver == Some(HirType::JsValue) || live_json_method)
                             .then_some(HirType::JsValue)
                     }
                     _ => None,
@@ -341,10 +350,10 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let intrinsic = match (property, expected) {
-            ("toString", _) => "callDynamicMethod",
-            (_, Some(HirType::Dynamic)) => "callDynamicMethodHandleRaw",
-            (_, Some(HirType::JsValue)) => "callDynamicMethodHandle",
-            _ => "callDynamicMethod",
+            ("toString", _) => "__thaw_call_selected_dynamic_method",
+            (_, Some(HirType::Dynamic)) => "__thaw_call_selected_dynamic_method_raw",
+            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
+            _ => "__thaw_call_selected_dynamic_method",
         };
         // The receiver must always come back as a genuine handle here,
         // never a JSON-decoded snapshot -- it's about to be fed straight
@@ -359,6 +368,12 @@ impl<'a> FnLowerer<'a> {
         // receiver is itself the *method call* `z.string().min(2)`, which
         // needs this same hint recursively for its own receiver in turn.
         let receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
+        // A `Json` receiver (a live native-owner wrapper) yields its host handle.
+        let receiver = if self.infer_expr_type(&receiver)? == HirType::Json {
+            self.coerce_to_declared(&HirType::JsValue, receiver)?
+        } else {
+            receiver
+        };
         // Each argument gets the same one-shot `JsValue` hint the receiver
         // just did, for the identical reason: an argument that's itself a
         // method call chained off a `JsValue` receiver (`z.string().pipe(
@@ -376,6 +391,11 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|argument| {
                 let value = match argument.expr.as_ref() {
+                    // Preserve a fixed native object until the Json coercion
+                    // can mark its acquired live projection as owned. Forcing
+                    // JsValue here first would route through the generic
+                    // borrowed-handle wrapper and erase that provenance.
+                    Expr::Object(_) => self.lower_expr(&argument.expr)?,
                     Expr::Arrow(arrow) => {
                         let expected_return = if arrow.is_async {
                             HirType::Promise(Box::new(HirType::JsValue))
@@ -396,7 +416,17 @@ impl<'a> FnLowerer<'a> {
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let array = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?;
+        // Preserve the exact owned producer at this ABI boundary. The
+        // generated Array<Json> wrapper otherwise hides which temporary Box
+        // must be dropped after cloning into the call graph.
+        let array = if json_args.iter().any(Self::is_owned_consumed_dynamic_json) {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_argument_array".into())),
+                json_args,
+            )
+        } else {
+            self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?
+        };
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(intrinsic.to_string())),
             vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
@@ -406,6 +436,15 @@ impl<'a> FnLowerer<'a> {
         } else {
             Ok(call)
         }
+    }
+
+    fn is_owned_consumed_dynamic_json(expr: &HirExpr) -> bool {
+        matches!(expr,
+            HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name)
+                    if name == "__thaw_json_from_consumed_dynamic")
+                    && args.len() == 1
+        )
     }
 
     /// Lowers `receiver.property` (a plain property *read*, no call at
@@ -445,92 +484,194 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         callee_name: &str,
         value: HirExpr,
-        mut bindings: Vec<LoweredBinding>,
+        bindings: Vec<LoweredBinding>,
     ) -> Result<HirExpr, String> {
-        let ty = self.infer_expr_type(&value)?;
-        let result = if callee_name == "String" && ty == HirType::Str {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "String" && ty == HirType::Bool {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "String" && ty == HirType::F64 {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "String" && ty == HirType::I64 {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "String" && ty == HirType::Symbol {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_symbol_to_string".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "String" && ty == HirType::JsValue {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_js_handle_to_string".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "String"
-            && matches!(
-                ty,
-                HirType::Array(_)
-                    | HirType::Tuple(_)
-                    | HirType::Object(_)
-                    | HirType::Optional(_)
-            )
-        {
-            self.coerce_primitive_to_string(value)?
-        } else if callee_name == "Boolean" && ty != HirType::Json {
-            let name = format!("__thaw_boolean_value_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            let converted = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
-            bindings.push((name, ty, value));
-            converted
-        } else if callee_name == "Number" && ty == HirType::F64 {
-            value
-        } else if callee_name == "Number" && ty == HirType::Bool {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "Number" && ty == HirType::Str {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
-                vec![value],
-            )
-        } else if callee_name == "Number" && ty == HirType::JsValue {
-            HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("readDynamicValue".to_string())),
-                vec![value],
-            )))
-        } else if callee_name == "Number"
-            && matches!(
-                ty,
-                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
-            )
-        {
-            self.coerce_primitive_to_number(value)?
-        } else if ty != HirType::Json {
-            return Err(format!(
-                "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
-            ));
-        } else {
-            match callee_name {
+        let result = self.lower_primitive_conversion_value(callee_name, value)?;
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    fn lower_primitive_conversion_value(
+        &mut self,
+        callee_name: &str,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+            let value = if callee_name != "BigInt" {
+                self.lower_primitive_array_operand(value)?
+            } else {
+                value
+            };
+            let ty = self.infer_expr_type(&value)?;
+            if callee_name == "String" && ty == HirType::Str {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::Bool {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::F64 {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::I64 {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::Symbol {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_symbol_to_string".into())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::JsValue {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_js_handle_to_string".into())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String"
+                && matches!(
+                    ty,
+                    HirType::Array(_)
+                        | HirType::Tuple(_)
+                        | HirType::Object(_)
+                        | HirType::Optional(_)
+                        | HirType::Nullable(_)
+                        | HirType::Nullish(_)
+                        | HirType::Union(_)
+                        | HirType::Null
+                        | HirType::Undefined
+                )
+            {
+                return self.coerce_primitive_to_string(value);
+            }
+            if callee_name == "Boolean" && ty != HirType::Json {
+                let name = format!("__thaw_boolean_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let converted = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
+                return self.wrap_call_argument_bindings(converted, &[(name, ty, value)]);
+            }
+            if callee_name == "Number" && ty == HirType::F64 {
+                return Ok(value);
+            }
+            if callee_name == "Number" && ty == HirType::Bool {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "Number" && ty == HirType::Str {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "Number" && ty == HirType::JsValue {
+                return self.dynamic_value_to_number(value, "__thaw_number_constructor");
+            }
+            if callee_name == "Number"
+                && matches!(ty, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                    | HirType::Undefined | HirType::Null)
+            {
+                return self.coerce_primitive_to_number(value);
+            }
+            if callee_name == "Number"
+                && matches!(
+                    ty,
+                    HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                )
+            {
+                return self.coerce_primitive_to_number(value);
+            }
+            if callee_name == "BigInt" {
+                // `BigInt(string)` always goes through the real QuickJS
+                // BigInt constructor, string arg or not -- a native `i64`
+                // parse can't tell, at compile time, whether a runtime
+                // string is a small in-range integer, one requiring real
+                // arbitrary precision (`BigInt("999...999")`, far beyond
+                // `i64`), or outright invalid (`BigInt("123abc")`, a real
+                // `SyntaxError`); the previous native fast path silently
+                // truncated/saturated/accepted-with-trailing-garbage all
+                // three instead. `.toString()`/radix conversion on the
+                // resulting value stays exact either way (same as a large
+                // `bigint` literal, which already takes this same path).
+                if ty == HirType::Str {
+                    let constructor = HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                    );
+                    let arguments = self.coerce_to_declared(
+                        &HirType::Json,
+                        HirExpr::ArrayLit(vec![value.clone()]),
+                    )?;
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                        vec![constructor, arguments],
+                    ));
+                }
+                return match ty {
+                    HirType::I64 => Ok(value),
+                    // Real `BigInt(number)` (`NumberToBigInt`) requires an
+                    // *integral* number -- `NaN`/`Infinity`/a fractional
+                    // value all throw `RangeError`, matching `.length =`'s
+                    // own `RangeError`s elsewhere in this file. Previously
+                    // `__thaw_i64_from_number` silently truncated/saturated
+                    // instead (`BigInt(5.5)` gave `5n`, not a thrown error).
+                    HirType::F64 => {
+                        let value_name =
+                            format!("__thaw_bigint_from_number_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(value_name.clone(), HirType::F64);
+                        let is_integer = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_number_is_integer".to_string())),
+                            vec![HirExpr::Var(value_name.clone())],
+                        );
+                        let body = HirExpr::Block(vec![
+                            HirStmt::If(
+                                is_integer,
+                                Vec::new(),
+                                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                    "\u{1}RangeError\u{1}The number cannot be converted to a BigInt because it is not an integer".into(),
+                                )))],
+                            ),
+                            HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_i64_from_number".to_string())),
+                                vec![HirExpr::Var(value_name.clone())],
+                            ))),
+                        ]);
+                        return self.wrap_call_argument_bindings(
+                            body,
+                            &[(value_name, HirType::F64, value)],
+                        );
+                    }
+                    HirType::Bool => Ok(HirExpr::Conditional(
+                        Box::new(value),
+                        Box::new(HirExpr::Lit(HirLit::I64(1))),
+                        Box::new(HirExpr::Lit(HirLit::I64(0))),
+                        HirType::I64,
+                    )),
+                    other => Err(format!("`BigInt` cannot convert a value of type {other:?}")),
+                };
+            }
+            if ty != HirType::Json {
+                return Err(format!(
+                    "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
+                ));
+            }
+            Ok(match callee_name {
                 "Number" => HirExpr::JsonAsNumber(Box::new(value)),
                 "String" => HirExpr::JsonAsString(Box::new(value)),
                 _ => HirExpr::JsonAsBool(Box::new(value)),
-            }
-        };
-        self.wrap_call_argument_bindings(result, &bindings)
+            })
     }
 
 }

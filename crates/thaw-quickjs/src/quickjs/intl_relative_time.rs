@@ -44,7 +44,12 @@ fn intl_relative_time_format(locale_tag: &str, unit: &str, style: &str, numeric:
     let curated_tag = resolve_curated_locale(&locale.id);
     let curated_locale: icu_locale::Locale =
         curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
-    let prefs = icu_experimental::relativetime::RelativeTimeFormatterPreferences::from(&curated_locale);
+    let mut prefs = icu_experimental::relativetime::RelativeTimeFormatterPreferences::from(&curated_locale);
+    // Keep curated relative-time patterns, but honor the requested -u-nu
+    // digits. DecimalFormatter falls back to the locale default when that
+    // numbering system has no digit data.
+    prefs.numbering_system =
+        icu_experimental::relativetime::RelativeTimeFormatterPreferences::from(&locale).numbering_system;
 
     let mut options = RelativeTimeFormatterOptions::default();
     options.numeric = if numeric == "always" {

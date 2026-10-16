@@ -1,3 +1,7 @@
+mod napi_version {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../thaw-napi/src/napi/version.rs"));
+}
+
 /// Where a freshly `add`ed package's declarations/JS entry came from,
 /// inside the fetched package itself -- informational only, since the
 /// scratch directory these were read from is deleted before `add`
@@ -20,7 +24,9 @@ pub struct AddedPackage {
     /// plus every transitive same-install dependency `bundle_commonjs_
     /// package`'s worklist actually walked into (Node builtin polyfills
     /// are not real npm packages and are never included here) -- each
-    /// mapped to the version `npm install` resolved *it* to. Always
+    /// mapped to the version `npm install` resolved *it* to. Unique names
+    /// retain their historical map keys; duplicate installed names use
+    /// node_modules-relative package instance locators. Always
     /// contains at least `package`'s own entry. Written to `lock.json`
     /// only when it has more than that one entry (see this module's
     /// top-level doc comment).
@@ -32,13 +38,36 @@ pub struct AddedPackage {
     pub native_diagnostic: Option<String>,
 }
 
+/// Environment defaults a package needs at run time, e.g. a loader that finds its native library
+/// through an environment variable, where `$self` stands for this executable (it embeds every
+/// native addon). Declared by the package itself (`"thaw": { "runtimeEnv": { NAME: VALUE } }`) or
+/// by thaw's curated data table; the package's own declaration wins.
+fn package_runtime_env(manifest: &serde_json::Value) -> BTreeMap<String, String> {
+    let defaults: BTreeMap<String, BTreeMap<String, String>> =
+        serde_json::from_str(include_str!("runtime-env-defaults.json")).unwrap_or_default();
+    let mut env = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|name| defaults.get(name).cloned())
+        .unwrap_or_default();
+    if let Some(declared) = manifest.pointer("/thaw/runtimeEnv").and_then(serde_json::Value::as_object) {
+        env.extend(declared.iter().filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string()))));
+    }
+    env
+}
+
+// Match a complete target suffix in the package leaf, not a prefix of another
+// architecture or libc variant (for example, arm versus arm64).
+fn optional_dependency_matches_target(name: &str, marker: &str) -> bool {
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    leaf == marker || leaf.strip_suffix(marker).is_some_and(|prefix| prefix.ends_with('-'))
+}
+
 fn select_optional_dependency_executable(
     node_modules_dir: &Path,
     manifest: &serde_json::Value,
 ) -> Result<Option<PathBuf>, String> {
-    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("esbuild") {
-        return Ok(None);
-    }
+    let manifest_name = manifest.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
     let Some(optional) = manifest
         .get("optionalDependencies")
         .and_then(serde_json::Value::as_object)
@@ -53,7 +82,7 @@ fn select_optional_dependency_executable(
     };
     for name in optional
         .keys()
-        .filter(|name| markers.iter().any(|marker| name.contains(marker)))
+        .filter(|name| markers.iter().any(|marker| optional_dependency_matches_target(name, marker)))
     {
         let root = node_modules_dir.join(name);
         if !root.is_dir() {
@@ -67,9 +96,11 @@ fn select_optional_dependency_executable(
             }
             _ => None,
         };
+        // Without a declared `bin`, the conventional location is `bin/<the package's own name>`.
+        let own_name = manifest_name.rsplit('/').next().unwrap_or(manifest_name);
         let path = binary
             .map(|path| root.join(path))
-            .unwrap_or_else(|| root.join("bin").join("esbuild"));
+            .unwrap_or_else(|| root.join("bin").join(own_name));
         if path.is_file() {
             return Ok(Some(path));
         }
@@ -93,6 +124,63 @@ struct SelectedPrebuild {
     platform: String,
     arch: String,
     libc: String,
+}
+
+// A wrong target or unsupported ABI is a candidate mismatch: keep looking
+// through the other bundled, optional, and generated routes. An inspection
+// failure is not a mismatch and must still be reported to the caller.
+fn usable_napi_prebuild(path: &Path) -> Result<bool, String> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if name.starts_with("node.abi") || name.starts_with("electron.abi") {
+        return Ok(false);
+    }
+    // Separate a real read failure from a readable but unrecognized binary.
+    fs::File::open(path)
+        .map_err(|error| format!("failed to read native addon `{}`: {error}", path.display()))?;
+    let args: &[&str] = if cfg!(target_os = "macos") {
+        &["-g"]
+    } else {
+        &["-D", "-g"]
+    };
+    let output = Command::new("nm")
+        .args(args)
+        .arg(path)
+        .output()
+        .map_err(|error| format!("failed to inspect native addon `{}`: {error}", path.display()))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(napi_symbol_suitability(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn napi_symbol_suitability(symbols: &str) -> bool {
+    let mut direct = false;
+    let mut registered = false;
+    let mut node_internal = false;
+    for line in symbols.lines() {
+        let mut fields = line.split_whitespace().rev();
+        let raw_symbol = fields.next().unwrap_or_default()
+            .split('@').next().unwrap_or_default();
+        // Mach-O's nm displays the C linker prefix; ELF's leading `_` is
+        // part of the real dlsym name and must not be discarded.
+        let symbol = if cfg!(target_os = "macos") {
+            raw_symbol.strip_prefix('_').unwrap_or(raw_symbol)
+        } else {
+            raw_symbol
+        };
+        let kind = fields.next().unwrap_or_default();
+        let undefined_function = kind == "U" || kind == "w";
+        let undefined = undefined_function || kind == "v";
+        direct |= (kind == "T" || kind == "W") && symbol == "napi_register_module_v1";
+        registered |= undefined_function && symbol == "napi_module_register";
+        node_internal |= undefined
+            && (symbol == "node_module_register"
+                || symbol.starts_with("_ZN2v8")
+                || symbol.starts_with("_ZN4node")
+                || symbol.starts_with("_ZNK2v8")
+                || symbol.starts_with("_ZNK4node"));
+    }
+    (direct || registered) && !node_internal
 }
 
 fn target_prebuild_components() -> (&'static str, &'static str, &'static str) {
@@ -133,14 +221,18 @@ fn flat_prebuild_file_name(platform: &str, arch: &str, libc: &str) -> String {
     }
 }
 
-fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>, String> {
+fn select_prebuilt_addon_with(
+    package_dir: &Path,
+    diagnostics: &mut Vec<String>,
+    usable: impl Fn(&Path) -> Result<bool, String>,
+) -> Result<Option<SelectedPrebuild>, String> {
     let prebuilds = package_dir.join("prebuilds");
     if !prebuilds.is_dir() {
         return Ok(None);
     }
     let (platform, arch, libc) = target_prebuild_components();
     let flat_path = prebuilds.join(flat_prebuild_file_name(platform, arch, libc));
-    if flat_path.is_file() {
+    if flat_path.is_file() && usable(&flat_path)? {
         let relative_path = flat_path
             .strip_prefix(package_dir)
             .unwrap_or(&flat_path)
@@ -154,11 +246,19 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
             libc: libc.into(),
         }));
     }
+    if flat_path.is_file() {
+        diagnostics.push(format!(
+            "bundled native addon `{}` is not a supported N-API module",
+            flat_path.display()
+        ));
+    }
     let target_dir = prebuilds.join(format!("{platform}-{arch}"));
     if !target_dir.is_dir() {
         let mut available = fs::read_dir(&prebuilds)
             .map_err(|error| format!("failed to inspect `{}`: {error}", prebuilds.display()))?
-            .filter_map(Result::ok)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", prebuilds.display()))?
+            .into_iter()
             .filter(|entry| {
                 entry.path().is_dir()
                     || entry
@@ -185,13 +285,16 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
         } else {
             ""
         };
-        return Err(format!(
+        diagnostics.push(format!(
             "no bundled native addon matches {platform}-{arch}-{libc}; available targets: {targets}{hint}"
         ));
+        return Ok(None);
     }
     let mut candidates = fs::read_dir(&target_dir)
         .map_err(|error| format!("failed to inspect `{}`: {error}", target_dir.display()))?
-        .filter_map(Result::ok)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to inspect `{}`: {error}", target_dir.display()))?
+        .into_iter()
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension()
@@ -211,10 +314,19 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
             .unwrap_or_default();
         (usize::from(!name.starts_with("node.")), name.into_owned())
     });
-    let Some(path) = candidates.into_iter().next() else {
-        return Err(format!(
-            "bundled addons exist for {platform}-{arch}, but none match libc `{libc}`"
+    let mut chosen = None;
+    for path in candidates {
+        if usable(&path)? {
+            chosen = Some(path);
+            break;
+        }
+        diagnostics.push(format!("bundled native addon `{}` is not a supported N-API module", path.display()));
+    }
+    let Some(path) = chosen else {
+        diagnostics.push(format!(
+            "bundled addons exist for {platform}-{arch}, but none support {libc} and the N-API host"
         ));
+        return Ok(None);
     };
     let relative_path = path
         .strip_prefix(package_dir)
@@ -235,9 +347,11 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
     }))
 }
 
-fn select_optional_dependency_addon(
+fn select_optional_dependency_addon_with(
     node_modules_dir: &Path,
     manifest: &serde_json::Value,
+    diagnostics: &mut Vec<String>,
+    usable: impl Fn(&Path) -> Result<bool, String>,
 ) -> Result<Option<SelectedPrebuild>, String> {
     let Some(optional) = manifest
         .get("optionalDependencies")
@@ -273,16 +387,33 @@ fn select_optional_dependency_addon(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("index.js");
         let main_path = dependency_dir.join(main);
-        let path = if main_path
+        let main_is_node = main_path
             .extension()
             .is_some_and(|extension| extension == "node")
-            && main_path.is_file()
-        {
-            Some(main_path)
-        } else {
-            find_node_file(&dependency_dir)?
-        };
-        if let Some(path) = path {
+            && main_path.is_file();
+        let mut paths = find_node_files(&dependency_dir)?;
+        // The package's declared entry is the first choice when usable, but
+        // a legacy Node-ABI main must not conceal a N-API sibling.
+        if main_is_node {
+            paths.retain(|path| path != &main_path);
+            paths.insert(0, main_path.clone());
+        }
+        let mut compatible = Vec::new();
+        for path in paths {
+            if !usable(&path)? {
+                diagnostics.push(format!("optional native addon `{}` is not a supported N-API module", path.display()));
+                continue;
+            }
+            if main_is_node && path == main_path {
+                compatible.push(path);
+                break;
+            }
+            compatible.push(path);
+        }
+        if compatible.len() > 1 {
+            return Err(format!("optional dependency `{name}` contains multiple compatible native addons"));
+        }
+        if let Some(path) = compatible.pop() {
             let relative_path = path
                 .strip_prefix(node_modules_dir)
                 .unwrap_or(&path)
@@ -329,7 +460,7 @@ fn prebuild_install_asset(
         .as_array()?
         .iter()
         .filter_map(serde_json::Value::as_u64)
-        .filter(|version| *version <= 8)
+        .filter(|version| *version <= u64::from(napi_version::SUPPORTED_NAPI_VERSION))
         .max()?;
     let name = manifest.get("name")?.as_str()?;
     let version = manifest.get("version")?.as_str()?;
@@ -345,7 +476,7 @@ fn prebuild_install_asset(
     Some((url, asset, platform.to_string(), arch.to_string()))
 }
 
-fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
+fn find_node_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut directories = vec![root.to_path_buf()];
     let mut matches = Vec::new();
     while let Some(directory) = directories.pop() {
@@ -374,6 +505,11 @@ fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
         }
     }
     matches.sort();
+    Ok(matches)
+}
+
+fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut matches = find_node_files(root)?;
     if matches.len() > 1 {
         return Err(format!(
             "downloaded prebuild contains multiple `.node` files: {}",
@@ -387,25 +523,33 @@ fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(matches.pop())
 }
 
-fn select_generated_addon(
+fn select_generated_addon_with(
     node_modules_dir: &Path,
     package_source: &str,
+    diagnostics: &mut Vec<String>,
+    usable: impl Fn(&Path) -> Result<bool, String>,
 ) -> Result<Option<SelectedPrebuild>, String> {
-    let mut matches = fs::read_dir(node_modules_dir)
+    let roots = fs::read_dir(node_modules_dir)
         .map_err(|error| format!("failed to inspect `{}`: {error}", node_modules_dir.display()))?
-        .filter_map(Result::ok)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to inspect `{}`: {error}", node_modules_dir.display()))?;
+    let mut matches = Vec::new();
+    for entry in roots.into_iter()
         .filter(|entry| {
             entry.path().is_dir()
                 && entry.file_name().to_string_lossy().starts_with('.')
                 && entry.file_name() != ".bin"
                 && package_source.contains(entry.file_name().to_string_lossy().as_ref())
         })
-        .filter_map(|entry| match find_node_file(&entry.path()) {
-            Ok(Some(path)) => Some(Ok(path)),
-            Ok(None) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    {
+        for path in find_node_files(&entry.path())? {
+            if usable(&path)? {
+                matches.push(path);
+            } else {
+                diagnostics.push(format!("generated native addon `{}` is not a supported N-API module", path.display()));
+            }
+        }
+    }
     if matches.len() > 1 {
         return Err("generated packages contain multiple native addons".into());
     }
@@ -420,6 +564,43 @@ fn select_generated_addon(
         arch: arch.to_string(),
         libc: libc.to_string(),
     }))
+}
+
+fn select_installed_addon(
+    package_dir: &Path,
+    node_modules_dir: &Path,
+    manifest: &serde_json::Value,
+    package_source: Option<&str>,
+    diagnostics: &mut Vec<String>,
+) -> Result<Option<SelectedPrebuild>, String> {
+    select_installed_addon_with(
+        package_dir,
+        node_modules_dir,
+        manifest,
+        package_source,
+        diagnostics,
+        usable_napi_prebuild,
+    )
+}
+
+fn select_installed_addon_with(
+    package_dir: &Path,
+    node_modules_dir: &Path,
+    manifest: &serde_json::Value,
+    package_source: Option<&str>,
+    diagnostics: &mut Vec<String>,
+    usable: impl Fn(&Path) -> Result<bool, String>,
+) -> Result<Option<SelectedPrebuild>, String> {
+    if let Some(addon) = select_prebuilt_addon_with(package_dir, diagnostics, &usable)? {
+        return Ok(Some(addon));
+    }
+    if let Some(addon) = select_optional_dependency_addon_with(node_modules_dir, manifest, diagnostics, &usable)? {
+        return Ok(Some(addon));
+    }
+    match package_source {
+        Some(source) => select_generated_addon_with(node_modules_dir, source, diagnostics, usable),
+        None => Ok(None),
+    }
 }
 
 fn platform_shared_libraries(
@@ -439,7 +620,7 @@ fn platform_shared_libraries(
         vec![format!("{platform}-{arch}"), format!("{platform}-{arch}-{libc}")]
     };
     let mut libraries = Vec::new();
-    for name in optional.keys().filter(|name| markers.iter().any(|marker| name.contains(marker))) {
+    for name in optional.keys().filter(|name| markers.iter().any(|marker| optional_dependency_matches_target(name, marker))) {
         let root = node_modules_dir.join(name);
         if !root.is_dir() {
             continue;
@@ -469,9 +650,6 @@ fn download_prebuild_install_addon(
     package_dir: &Path,
     manifest: &serde_json::Value,
 ) -> Result<(), String> {
-    if package_dir.join("prebuilds").is_dir() {
-        return Ok(());
-    }
     let Some((url, asset, _, _)) = prebuild_install_asset(manifest) else {
         return Ok(());
     };

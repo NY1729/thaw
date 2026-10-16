@@ -1,3 +1,95 @@
+fn tls_ca_spec(value: Value<'_>) -> Result<Option<String>, String> {
+    if value.is_undefined() {
+        return Ok(None);
+    }
+    let value = value
+        .as_string()
+        .ok_or_else(|| "CA must be a string".to_string())?;
+    value.to_string().map(Some).map_err(|error| error.to_string())
+}
+
+fn url_snapshot(url: &url::Url) -> String {
+    serde_json::json!({
+        "href": url.as_str(),
+        "protocol": format!("{}:", url.scheme()),
+        "username": url.username(),
+        "password": url.password().unwrap_or(""),
+        "hostname": url.host_str().unwrap_or(""),
+        "port": url.port().map_or(String::new(), |port| port.to_string()),
+        "pathname": url.path(),
+        "search": url.query().filter(|query| !query.is_empty()).map_or(String::new(), |query| format!("?{query}")),
+        "hash": url.fragment().filter(|fragment| !fragment.is_empty()).map_or(String::new(), |fragment| format!("#{fragment}")),
+        "origin": url.origin().ascii_serialization(),
+        "opaque": url.cannot_be_a_base(),
+    }).to_string()
+}
+
+fn host_url_parse(input: String, base: String, has_base: bool) -> String {
+    let result = if has_base {
+        url::Url::parse(&base).and_then(|base| base.join(&input))
+    } else {
+        url::Url::parse(&input)
+    };
+    result.map_or_else(|_| "null".to_owned(), |url| url_snapshot(&url))
+}
+
+fn host_url_set(href: String, property: String, value: String) -> String {
+    let Ok(mut url) = url::Url::parse(&href) else { return "null".to_owned() };
+    let accepted = match property.as_str() {
+        "protocol" => url.set_scheme(value.strip_suffix(':').unwrap_or(&value)).is_ok(),
+        "username" => url.set_username(&value).is_ok(),
+        "password" => url.set_password(Some(&value)).is_ok(),
+        "hostname" => {
+            if value.contains(':') && !(value.starts_with('[') && value.ends_with(']')) { false }
+            else { url.set_host(Some(&value)).is_ok() }
+        },
+        "host" => {
+            if value.bytes().any(|byte| matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'@')) {
+                false
+            } else {
+                let authority = format!("{}://{value}/", url.scheme());
+                if let Ok(parsed) = url::Url::parse(&authority) {
+                    if let Some(host) = parsed.host_str() {
+                        let mut next = url.clone();
+                        let has_port = if value.starts_with('[') {
+                            value.find(']').is_some_and(|end| value.as_bytes().get(end + 1) == Some(&b':'))
+                        } else {
+                            value.contains(':')
+                        };
+                        if next.set_host(Some(host)).is_ok()
+                            && (!has_port || next.set_port(parsed.port()).is_ok()) {
+                            url = next;
+                            true
+                        } else { false }
+                    } else { false }
+                } else { false }
+            }
+        }
+        "port" => {
+            if value.is_empty() { url.set_port(None).is_ok() }
+            else if value.bytes().all(|byte| byte.is_ascii_digit()) {
+                value.parse::<u16>().is_ok_and(|port| url.set_port(Some(port)).is_ok())
+            } else { false }
+        }
+        "pathname" => {
+            if url.cannot_be_a_base() { false }
+            else { url.set_path(&value); true }
+        }
+        "search" => {
+            if value.is_empty() { url.set_query(None); }
+            else { url.set_query(Some(value.strip_prefix('?').unwrap_or(&value))); }
+            true
+        }
+        "hash" => {
+            if value.is_empty() { url.set_fragment(None); }
+            else { url.set_fragment(Some(value.strip_prefix('#').unwrap_or(&value))); }
+            true
+        }
+        _ => false,
+    };
+    if accepted { url_snapshot(&url) } else { "null".to_owned() }
+}
+
 fn cli_eval(arguments: &[String]) -> Option<(usize, Option<&str>)> {
     let index = arguments
         .iter()
@@ -101,14 +193,883 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
     unsafe { rquickjs::qjs::JS_SetSharedArrayBufferFunctions(runtime, &functions) };
 }
 
+// Source graphs and completion promises are owned by the QuickJS context.
+// QuickJS itself owns declared/evaluated modules in its per-runtime cache.
+struct NativeBundleSource<'js> {
+    source: String,
+    unmarked_source: String,
+    imports: std::collections::HashMap<String, String>,
+    sequence: u64,
+    linked: bool,
+    module: Option<rquickjs::Module<'js, rquickjs::module::Declared>>,
+}
+
+struct NativeBundleOpaqueEdge {
+    sequence: u64,
+    importer: String,
+    specifier: String,
+    target: String,
+    factory: String,
+    asynchronous: bool,
+}
+
+struct NativeBundleOriginModule {
+    sequence: u64,
+    owner: String,
+}
+
+struct NativeBundleOwner<'js> {
+    next_sequence: Cell<u64>,
+    sources: RefCell<HashMap<String, NativeBundleSource<'js>>>,
+    markers: RefCell<HashMap<String, String>>,
+    entries: RefCell<HashMap<String, rquickjs::Promise<'js>>>,
+    mixed_callbacks: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+    opaque_edges: RefCell<HashMap<String, NativeBundleOpaqueEdge>>,
+    origin_modules: RefCell<HashMap<String, NativeBundleOriginModule>>,
+    then: Function<'js>,
+    object_is: Function<'js>,
+    array_is_array: Function<'js>,
+}
+
+unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
+    // These module handles belong to this runtime/context. During runtime
+    // teardown rquickjs clears userdata and its opaque JS values before
+    // JS_FreeRuntime; no handle escapes to another runtime.
+    type Changed<'to> = NativeBundleOwner<'to>;
+}
+
+#[cfg(test)]
+#[test]
+fn native_bundle_marker_preserves_source_prefix_and_line_position() {
+    let marker = "thaw-linked:1:first";
+    assert_eq!(native_bundle_marked_source("export const value = 1;", marker),
+        "import \"thaw-linked:1:first\";export const value = 1;");
+    assert_eq!(native_bundle_marked_source("\u{feff}#! /usr/bin/env thaw\nexport const value = 1;", marker),
+        "\u{feff}#! /usr/bin/env thaw\nimport \"thaw-linked:1:first\";export const value = 1;");
+    assert_eq!(native_bundle_marked_source("#! /usr/bin/env thaw", marker),
+        "#! /usr/bin/env thaw\nimport \"thaw-linked:1:first\";");
+}
+
+fn native_bundle_marker(token: &str) -> String {
+    format!("thaw-linked:{token}")
+}
+
+fn native_bundle_marked_source(source: &str, marker: &str) -> String {
+    let import = format!("import {};", serde_json::to_string(marker).expect("marker is serializable"));
+    let bom = if source.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let after_hashbang = if source[bom..].starts_with("#!") {
+        let Some(at) = source[bom..].find('\n') else { return format!("{source}\n{import}"); };
+        bom + at + 1
+    } else { bom };
+    format!("{}{}{}", &source[..after_hashbang], import, &source[after_hashbang..])
+}
+
+struct NativeBundleLinkedMarker;
+
+impl rquickjs::module::ModuleDef for NativeBundleLinkedMarker {
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let marker: String = exports.module().name()?;
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        let token = owner.markers.borrow().get(&marker).cloned()
+            .ok_or_else(|| native_bundle_error("unknown linked marker"))?;
+        let mut sources = owner.sources.borrow_mut();
+        let source = sources.get_mut(&token)
+            .ok_or_else(|| native_bundle_error("missing marked source"))?;
+        source.linked = true;
+        Ok(())
+    }
+}
+
+// A separate module per importer/specifier edge publishes the CJS value at
+// the engine's original dependency evaluation point. The underlying CJS cache
+// still runs a shared target factory only once.
+struct NativeBundleOpaqueShell;
+
+impl rquickjs::module::ModuleDef for NativeBundleOpaqueShell {
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let name: String = exports.module().name()?;
+        let (callback, importer, specifier, target, factory) = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let edges = owner.opaque_edges.borrow();
+            let edge = edges.get(&name)
+                .ok_or_else(|| native_bundle_error("unknown opaque import edge"))?;
+            let callback = owner.mixed_callbacks.borrow().get(&edge.sequence)
+                .map(|callbacks| callbacks.0.clone())
+                .ok_or_else(|| native_bundle_error("missing opaque import callback"))?;
+            (callback, edge.importer.clone(), edge.specifier.clone(),
+                edge.target.clone(), edge.factory.clone())
+        };
+        // Never hold owner or RefCell guards while the CJS factory executes.
+        let _: Value<'js> = callback.call((importer, specifier, target, factory, false))?;
+        Ok(())
+    }
+}
+
+// An asynchronous opaque edge has a JS module shell with top-level await.
+// Its only import is this private capability, bound to the edge by the
+// resolver. A synchronous opaque edge retains NativeBundleOpaqueShell.
+struct NativeBundleOpaqueLoad;
+
+impl rquickjs::module::ModuleDef for NativeBundleOpaqueLoad {
+    fn declare<'js>(decl: &rquickjs::module::Declarations<'js>) -> rquickjs::Result<()> {
+        decl.declare("load")?;
+        Ok(())
+    }
+
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let name: String = exports.module().name()?;
+        let shell = name.strip_suffix("/load")
+            .ok_or_else(|| native_bundle_error("invalid opaque load capability"))?;
+        let (callback, importer, specifier, target, factory) = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let edges = owner.opaque_edges.borrow();
+            let edge = edges.get(shell).filter(|edge| edge.asynchronous)
+                .ok_or_else(|| native_bundle_error("unknown asynchronous opaque edge"))?;
+            let callback = owner.mixed_callbacks.borrow().get(&edge.sequence)
+                .map(|callbacks| callbacks.0.clone())
+                .ok_or_else(|| native_bundle_error("missing opaque import callback"))?;
+            (callback, edge.importer.clone(), edge.specifier.clone(),
+                edge.target.clone(), edge.factory.clone())
+        };
+        let load = Function::new(ctx.clone(), move || -> rquickjs::Result<Value<'js>> {
+            callback.call((importer.clone(), specifier.clone(), target.clone(), factory.clone(), true))
+        })?;
+        exports.export("load", load)?;
+        Ok(())
+    }
+}
+
+struct NativeBundleOriginCapability;
+
+impl rquickjs::module::ModuleDef for NativeBundleOriginCapability {
+    fn declare<'js>(decl: &rquickjs::module::Declarations<'js>) -> rquickjs::Result<()> {
+        decl.declare("origin")?;
+        Ok(())
+    }
+
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let name: String = exports.module().name()?;
+        let (callback, raw_key) = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let origins = owner.origin_modules.borrow();
+            let record = origins.get(&name)
+                .ok_or_else(|| native_bundle_error("unknown origin capability"))?;
+            let callback = owner.mixed_callbacks.borrow().get(&record.sequence)
+                .map(|callbacks| callbacks.1.clone())
+                .ok_or_else(|| native_bundle_error("missing origin callback"))?;
+            (callback, record.owner.clone())
+        };
+        let origin: Value<'js> = callback.call((raw_key,))?;
+        exports.export("origin", origin)?;
+        Ok(())
+    }
+}
+
+fn read_native_bundle_export<'js>(ctx: Ctx<'js>, entry: String, key: String, name: rquickjs::function::Opt<String>) -> rquickjs::Result<Value<'js>> {
+    let module = {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        let entry_source = owner.sources.borrow().get(&entry).map(|source| source.sequence)
+            .ok_or_else(|| native_bundle_error("missing native entry"))?;
+        // Registry origin graphs use canonical raw keys. Keep the old fully
+        // minted form for existing host tests, but never trust its sequence:
+        // the source record below must belong to this bound entry.
+        let key = if key.starts_with("thaw-bundle:") { key }
+            else { format!("thaw-bundle:{entry_source}:{key}") };
+        let sources = owner.sources.borrow();
+        let source = sources.get(&key)
+            .filter(|source| source.sequence == entry_source && source.linked)
+            .ok_or_else(|| native_bundle_error("unlinked or foreign native source"))?;
+        source.module.clone().ok_or_else(|| native_bundle_error("missing native module"))?
+    };
+    // The marker runs after QuickJS has linked this source. An omitted name
+    // returns its cached namespace; a named getter still enforces lexical TDZ.
+    let namespace = module.namespace()?;
+    match name.0 {
+        Some(name) => namespace.get(name),
+        None => Ok(namespace.into_value()),
+    }
+}
+
+fn native_bundle_error(message: &str) -> rquickjs::Error {
+    rquickjs::Error::new_from_js_message("native bundle", "valid bundle", message)
+}
+
+// A computed query/fragment has the same source as its registered base, but
+// it is a distinct ESM instance. Keep its marker, origin and opaque imports
+// distinct while ordinary static dependencies retain their registered keys.
+fn native_bundle_instance_token<'js>(
+    ctx: &Ctx<'js>, sequence: u64, key: &str, factory: &str,
+) -> rquickjs::Result<String> {
+    if key.contains('\0') || factory.contains('\0') {
+        return Err(native_bundle_error("NUL in native module key"));
+    }
+    if key != factory && !key.strip_prefix(factory)
+        .is_some_and(|suffix| suffix.starts_with('?') || suffix.starts_with('#')) {
+        return Err(native_bundle_error("invalid native instance suffix"));
+    }
+    let prefix = format!("thaw-bundle:{sequence}:");
+    let token = format!("{prefix}{key}");
+    let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+        .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+    if let Some(existing) = owner.sources.borrow().get(&token) {
+        return if existing.sequence == sequence { Ok(token) }
+            else { Err(native_bundle_error("foreign native bundle target")) };
+    }
+    if owner.opaque_edges.borrow().contains_key(&token)
+        || owner.origin_modules.borrow().contains_key(&token) {
+        return Err(native_bundle_error("native instance key collision"));
+    }
+    let suffix = key.strip_prefix(factory)
+        .filter(|suffix| suffix.starts_with('?') || suffix.starts_with('#'))
+        .ok_or_else(|| native_bundle_error("uncollected native module instance"))?;
+    if suffix.is_empty() || factory.is_empty() {
+        return Err(native_bundle_error("uncollected native module instance"));
+    }
+    let base = format!("{prefix}{factory}");
+    let (unmarked_source, mut imports) = {
+        let sources = owner.sources.borrow();
+        let source = sources.get(&base)
+            .filter(|source| source.sequence == sequence)
+            .ok_or_else(|| native_bundle_error("foreign native bundle factory"))?;
+        (source.unmarked_source.clone(), source.imports.clone())
+    };
+    let marker = native_bundle_marker(&token);
+    if imports.contains_key(&marker) || owner.markers.borrow().contains_key(&marker) {
+        return Err(native_bundle_error("reserved native instance marker"));
+    }
+    let mut rewrites = HashMap::<String, String>::new();
+    let mut opaque = Vec::<(String, NativeBundleOpaqueEdge)>::new();
+    let mut origins = Vec::<(String, NativeBundleOriginModule)>::new();
+    for (index, target) in imports.values_mut().enumerate() {
+        if let Some(rewritten) = rewrites.get(target) {
+            *target = rewritten.clone();
+            continue;
+        }
+        let original = target.clone();
+        let original_token = format!("{prefix}{original}");
+        let alias = if let Some(edge) = owner.opaque_edges.borrow().get(&original_token) {
+            if edge.sequence != sequence || edge.importer != factory {
+                return Err(native_bundle_error("foreign opaque instance edge"));
+            }
+            let alias = format!("{key}\u{1f}opaque:{index}");
+            opaque.push((format!("{prefix}{alias}"), NativeBundleOpaqueEdge {
+                sequence, importer: key.to_owned(), specifier: edge.specifier.clone(),
+                target: edge.target.clone(), factory: edge.factory.clone(),
+                asynchronous: edge.asynchronous,
+            }));
+            Some(alias)
+        } else if let Some(origin) = owner.origin_modules.borrow().get(&original_token) {
+            if origin.sequence != sequence || origin.owner != factory {
+                return Err(native_bundle_error("foreign native origin capability"));
+            }
+            let alias = format!("{key}\u{1f}origin:{index}");
+            origins.push((format!("{prefix}{alias}"), NativeBundleOriginModule {
+                sequence, owner: key.to_owned(),
+            }));
+            Some(alias)
+        } else {
+            None
+        };
+        if let Some(alias) = alias {
+            rewrites.insert(original, alias.clone());
+            *target = alias;
+        }
+    }
+    let mut planned = std::collections::HashSet::new();
+    for (target, _) in &opaque {
+        if !planned.insert(target.clone()) || !planned.insert(format!("{target}/load")) {
+            return Err(native_bundle_error("native instance edge collision"));
+        }
+    }
+    for (target, _) in &origins {
+        if !planned.insert(target.clone()) {
+            return Err(native_bundle_error("native instance origin collision"));
+        }
+    }
+    if planned.iter().any(|target|
+        owner.sources.borrow().contains_key(target)
+            || owner.opaque_edges.borrow().contains_key(target)
+            || owner.origin_modules.borrow().contains_key(target)) {
+        return Err(native_bundle_error("native instance target collision"));
+    }
+    owner.sources.borrow_mut().insert(token.clone(), NativeBundleSource {
+        source: native_bundle_marked_source(&unmarked_source, &marker),
+        unmarked_source, imports, sequence, linked: false, module: None,
+    });
+    owner.opaque_edges.borrow_mut().extend(opaque);
+    owner.origin_modules.borrow_mut().extend(origins);
+    owner.markers.borrow_mut().insert(marker, token.clone());
+    Ok(token)
+}
+
+fn register_native_bundle<'js>(
+    ctx: Ctx<'js>, payload: String,
+    opaque_load: rquickjs::function::Opt<Function<'js>>,
+    origin_for: rquickjs::function::Opt<Function<'js>>,
+) -> rquickjs::Result<Function<'js>> {
+    if opaque_load.0.is_some() != origin_for.0.is_some() {
+        return Err(native_bundle_error("incomplete mixed bundle callbacks"));
+    }
+    let data: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|_| native_bundle_error("invalid JSON"))?;
+    let main = data.get("main").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| native_bundle_error("missing main"))?;
+    let modules = data.get("modules").and_then(serde_json::Value::as_array)
+        .ok_or_else(|| native_bundle_error("missing modules"))?;
+    let mut records = HashMap::<String, (String, HashMap<String, String>)>::new();
+    for module in modules {
+        let key = module.get("key").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| native_bundle_error("missing module key"))?;
+        if key.contains('\0') { return Err(native_bundle_error("NUL in module key")); }
+        let source = module.get("source").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| native_bundle_error("missing module source"))?;
+        let imports = module.get("imports").and_then(serde_json::Value::as_object)
+            .ok_or_else(|| native_bundle_error("missing module imports"))?;
+        let mut edges = HashMap::new();
+        for (specifier, target) in imports {
+            let target = target.as_str()
+                .ok_or_else(|| native_bundle_error("invalid import target"))?;
+            if specifier.contains('\0') || target.contains('\0') {
+                return Err(native_bundle_error("NUL in import"));
+            }
+            if edges.insert(specifier.clone(), target.to_owned()).is_some() {
+                return Err(native_bundle_error("duplicate import"));
+            }
+        }
+        if records.insert(key.to_owned(), (source.to_owned(), edges)).is_some() {
+            return Err(native_bundle_error("duplicate module key"));
+        }
+    }
+    let mut opaque_keys = std::collections::HashSet::new();
+    if let Some(keys) = data.get("opaqueKeys") {
+        for value in keys.as_array().ok_or_else(|| native_bundle_error("invalid opaque keys"))? {
+            let key = value.as_str().ok_or_else(|| native_bundle_error("invalid opaque key"))?;
+            if key.contains('\0') || records.contains_key(key) || !opaque_keys.insert(key.to_owned()) {
+                return Err(native_bundle_error("duplicate or invalid opaque key"));
+            }
+        }
+    }
+    let mut shells = HashMap::<String, (String, String, String, String, bool)>::new();
+    if let Some(edges) = data.get("opaqueEdges") {
+        for value in edges.as_array().ok_or_else(|| native_bundle_error("invalid opaque edges"))? {
+            let field = |name| value.get(name).and_then(serde_json::Value::as_str)
+                .ok_or_else(|| native_bundle_error("invalid opaque edge"));
+            let key = field("key")?;
+            let importer = field("importer")?;
+            let specifier = field("specifier")?;
+            let target = field("target")?;
+            let factory = field("factory")?;
+            let asynchronous = value.get("asynchronous").and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| native_bundle_error("invalid opaque edge async flag"))?;
+            if [key, importer, specifier, target, factory].iter().any(|part| part.contains('\0'))
+                || records.contains_key(key) || !records.contains_key(importer)
+                || !opaque_keys.contains(target)
+                || shells.insert(key.to_owned(), (importer.to_owned(), specifier.to_owned(),
+                    target.to_owned(), factory.to_owned(), asynchronous)).is_some() {
+                return Err(native_bundle_error("invalid opaque edge target"));
+            }
+        }
+    }
+    let mut origin_modules = HashMap::<String, String>::new();
+    if let Some(origins) = data.get("origins") {
+        for value in origins.as_array().ok_or_else(|| native_bundle_error("invalid origins"))? {
+            let key = value.get("key").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| native_bundle_error("invalid origin key"))?;
+            let owner = value.get("owner").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| native_bundle_error("invalid origin owner"))?;
+            if key.contains('\0') || owner.contains('\0') || records.contains_key(key)
+                || shells.contains_key(key) || !records.contains_key(owner)
+                || origin_modules.insert(key.to_owned(), owner.to_owned()).is_some() {
+                return Err(native_bundle_error("invalid origin module"));
+            }
+        }
+    }
+    if (!shells.is_empty() || !origin_modules.is_empty()) && opaque_load.0.is_none() {
+        return Err(native_bundle_error("mixed bundle needs callbacks"));
+    }
+    if shells.iter().any(|(key, (importer, specifier, _, _, _))|
+        records.get(importer).and_then(|(_, imports)| imports.get(specifier)) != Some(key)) {
+        return Err(native_bundle_error("opaque edge does not match import map"));
+    }
+    if !records.contains_key(main) || records.values().any(|(_, edges)|
+        edges.values().any(|target| !records.contains_key(target)
+            && !shells.contains_key(target) && !origin_modules.contains_key(target))) {
+        return Err(native_bundle_error("missing entry or import target"));
+    }
+    let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+        .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+    let sequence = owner.next_sequence.get().checked_add(1)
+        .ok_or_else(|| native_bundle_error("bundle sequence overflow"))?;
+    let prefix = format!("thaw-bundle:{sequence}:");
+    let token = format!("{prefix}{main}");
+    let marked = records.keys().map(|key| {
+        let token = format!("{prefix}{key}");
+        (native_bundle_marker(&token), token)
+    }).collect::<HashMap<_, _>>();
+    if records.values().any(|(_, edges)| edges.keys().any(|name|
+        marked.contains_key(name))) {
+        return Err(native_bundle_error("reserved marker import"));
+    }
+    // Reserve the name before constructing a QuickJS Function, and release
+    // the userdata guard before that engine call.
+    owner.next_sequence.set(sequence);
+    drop(owner);
+    // Return the bound evaluator itself, not a guessable entry-name string.
+    let bound_token = token.clone();
+    let evaluate = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+        eval_native_entry(ctx, bound_token.clone())
+    })?;
+    let reader_entry = token.clone();
+    let reader = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, name: rquickjs::function::Opt<String>| {
+        read_native_bundle_export(ctx, reader_entry.clone(), key, name)
+    })?;
+    evaluate.prop("readNative", reader)?;
+    let native_sequence = sequence;
+    let native_ready = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, factory: rquickjs::function::Opt<String>| {
+        let factory = factory.0.unwrap_or_else(|| key.clone());
+        let token = native_bundle_instance_token(&ctx, native_sequence, &key, &factory)?;
+        eval_native_entry(ctx, token)
+    })?;
+    evaluate.prop("evalNative", native_ready)?;
+    let sync_sequence = sequence;
+    let native_sync = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, factory: rquickjs::function::Opt<String>| -> rquickjs::Result<Value<'js>> {
+        let factory = factory.0.unwrap_or_else(|| key.clone());
+        let token = native_bundle_instance_token(&ctx, sync_sequence, &key, &factory)?;
+        let ready = eval_native_entry(ctx.clone(), token.clone())?;
+        if ready.state() == rquickjs::promise::PromiseState::Rejected {
+            return ready.result::<Value<'js>>().expect("rejected promise has a result");
+        }
+        let declared = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let sources = owner.sources.borrow();
+            sources.get(&token).and_then(|source| source.module.clone())
+                .ok_or_else(|| native_bundle_error("native module was not declared"))?
+        };
+        // QuickJS returns the cached evaluation promise for a module already
+        // evaluating or evaluated; this does not run the module body twice.
+        let (_, evaluation) = declared.eval()?;
+        match evaluation.state() {
+            rquickjs::promise::PromiseState::Resolved =>
+                read_native_bundle_export(ctx, format!("thaw-bundle:{sync_sequence}:{}", key), key,
+                    rquickjs::function::Opt(None)),
+            rquickjs::promise::PromiseState::Rejected =>
+                evaluation.result::<Value<'js>>().expect("rejected promise has a result"),
+            rquickjs::promise::PromiseState::Pending =>
+                Err(rquickjs::Exception::throw_type(&ctx, "Cannot synchronously require an async module")),
+        }
+    })?;
+    evaluate.prop("evalNativeSync", native_sync)?;
+    let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+        .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+    {
+        let mut sources = owner.sources.borrow_mut();
+        for (key, (source, imports)) in records {
+            let token = format!("{prefix}{key}");
+            sources.insert(token.clone(), NativeBundleSource {
+                source: native_bundle_marked_source(&source, &native_bundle_marker(&token)),
+                unmarked_source: source,
+                imports, sequence, linked: false, module: None,
+            });
+        }
+    }
+    owner.opaque_edges.borrow_mut().extend(shells.into_iter().map(|(key, (importer, specifier, target, factory, asynchronous))| {
+        (format!("{prefix}{key}"), NativeBundleOpaqueEdge {
+            sequence, importer, specifier, target, factory, asynchronous,
+        })
+    }));
+    owner.origin_modules.borrow_mut().extend(origin_modules.into_iter().map(|(key, module_owner)| {
+        (format!("{prefix}{key}"), NativeBundleOriginModule { sequence, owner: module_owner })
+    }));
+    owner.markers.borrow_mut().extend(marked);
+    if let (Some(load), Some(origin)) = (opaque_load.0, origin_for.0) {
+        owner.mixed_callbacks.borrow_mut().insert(sequence, (load, origin));
+    }
+    Ok(evaluate)
+}
+
+fn reject_native_entry_error<'js>(
+    ctx: &Ctx<'js>, reject: &Function<'js>, error: rquickjs::Error,
+) -> rquickjs::Result<()> {
+    if matches!(error, rquickjs::Error::Exception) {
+        reject.call::<_, ()>((ctx.catch(),))
+    } else {
+        reject.call::<_, ()>((error.to_string(),))
+    }
+}
+
+fn eval_native_entry<'js>(ctx: Ctx<'js>, token: String) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let (source, declared_module, intrinsic_then) = {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        if let Some(ready) = owner.entries.borrow().get(&token) {
+            return Ok(ready.clone());
+        }
+        let (source, declared_module) = {
+            let sources = owner.sources.borrow();
+            sources.get(&token).map(|record| (record.source.clone(), record.module.clone()))
+                .ok_or_else(|| native_bundle_error("missing native entry source"))?
+        };
+        (source, declared_module, owner.then.clone())
+    };
+    let (ready, resolve, reject) = rquickjs::Promise::new(&ctx)?;
+    {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        owner.entries.borrow_mut().insert(token.clone(), ready.clone());
+    }
+    // The ready promise is visible to reentrant entry calls before module
+    // evaluation can run user code. Never hold userdata guards across JS calls.
+    let setup = (|| -> rquickjs::Result<()> {
+        let declared = if let Some(module) = declared_module {
+            module
+        } else {
+            rquickjs::Module::declare(ctx.clone(), token.clone(), source)?
+        };
+        {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let mut sources = owner.sources.borrow_mut();
+            sources.get_mut(&token)
+                .ok_or_else(|| native_bundle_error("missing native entry source"))?
+                .module = Some(declared.clone());
+        }
+        let (evaluated, evaluation) = declared.eval()?;
+        // Namespace creation does not read its bindings. Its object can be
+        // retained in a callback without storing a typed Module in userdata.
+        let namespace = evaluated.namespace()?;
+        let fulfillment_reject = reject.clone();
+        let fulfillment_ctx = ctx.clone();
+        let on_fulfilled = Function::new(ctx.clone(), move || -> rquickjs::Result<()> {
+            if let Err(error) = resolve.call::<_, ()>((namespace.clone(),)) {
+                reject_native_entry_error(&fulfillment_ctx, &fulfillment_reject, error)?;
+            }
+            Ok(())
+        })?;
+        let callback_reject = reject.clone();
+        let on_rejected = Function::new(ctx.clone(), move |reason: Value<'js>| -> rquickjs::Result<()> {
+            callback_reject.call((reason,))
+        })?;
+        intrinsic_then.call::<_, Value>((rquickjs::function::This(evaluation.clone()), on_fulfilled, on_rejected))?;
+        Ok(())
+    })();
+    if let Err(error) = setup {
+        // Keep the original JavaScript exception value when one exists.
+        reject_native_entry_error(&ctx, &reject, error)?;
+    }
+    Ok(ready)
+}
+
+struct BundleModuleResolver;
+
+impl rquickjs::loader::Resolver for BundleModuleResolver {
+    fn resolve<'js>(
+        &mut self, ctx: &Ctx<'js>, base: &str, name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
+        let sources = owner.sources.borrow();
+        if let Some(token) = owner.markers.borrow().get(name) {
+            if token == base && sources.contains_key(base) { return Ok(name.to_owned()); }
+            return Err(rquickjs::Error::new_resolving(base, name));
+        }
+        if name.starts_with("thaw-linked:") {
+            return Err(rquickjs::Error::new_resolving(base, name));
+        }
+        if name == "__thaw_private_opaque_load"
+            && owner.opaque_edges.borrow().get(base).is_some_and(|edge| edge.asynchronous) {
+            return Ok(format!("{base}/load"));
+        }
+        let parent = sources.get(base)
+            .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
+        let target = parent.imports.get(name)
+            .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
+        let resolved = format!("thaw-bundle:{}:{target}", parent.sequence);
+        if !sources.contains_key(&resolved)
+            && !owner.opaque_edges.borrow().contains_key(&resolved)
+            && !owner.origin_modules.borrow().contains_key(&resolved) {
+            return Err(rquickjs::Error::new_resolving(base, name));
+        }
+        Ok(resolved)
+    }
+}
+
+struct BundleModuleLoader;
+
+impl rquickjs::loader::Loader for BundleModuleLoader {
+    fn load<'js>(
+        &mut self, ctx: &Ctx<'js>, name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<rquickjs::Module<'js, rquickjs::module::Declared>> {
+        let source = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+            let marker = owner.markers.borrow().contains_key(name);
+            if marker {
+                drop(owner);
+                return rquickjs::Module::declare_def::<NativeBundleLinkedMarker, _>(ctx.clone(), name);
+            }
+            let opaque_async = owner.opaque_edges.borrow().get(name).map(|edge| edge.asynchronous);
+            if let Some(asynchronous) = opaque_async {
+                drop(owner);
+                if asynchronous {
+                    let source = "import { load } from '__thaw_private_opaque_load'; await load(); export {};";
+                    return rquickjs::Module::declare(ctx.clone(), name, source);
+                }
+                return rquickjs::Module::declare_def::<NativeBundleOpaqueShell, _>(ctx.clone(), name);
+            }
+            if let Some(shell) = name.strip_suffix("/load") {
+                let load_capability = owner.opaque_edges.borrow().get(shell)
+                    .is_some_and(|edge| edge.asynchronous);
+                if load_capability {
+                    drop(owner);
+                    return rquickjs::Module::declare_def::<NativeBundleOpaqueLoad, _>(ctx.clone(), name);
+                }
+            }
+            if owner.origin_modules.borrow().contains_key(name) {
+                drop(owner);
+                return rquickjs::Module::declare_def::<NativeBundleOriginCapability, _>(ctx.clone(), name);
+            }
+            let sources = owner.sources.borrow();
+            sources.get(name).map(|record| record.source.clone())
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?
+        };
+        let module = rquickjs::Module::declare(ctx.clone(), name, source)?;
+        {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+            let mut sources = owner.sources.borrow_mut();
+            sources.get_mut(name)
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?
+                .module = Some(module.clone());
+        }
+        Ok(module)
+    }
+}
+
+// These functions and their WeakMap belong to this QuickJS runtime. Keeping
+// them in userdata releases both before JS_FreeRuntime, unlike a separate TLS.
+struct NativeCallbackIdentityBridge<'js> {
+    register: Function<'js>,
+    same: Function<'js>,
+    intern_object: Function<'js>,
+    object_pointer: Function<'js>,
+    object_lookup: Function<'js>,
+    method_lookup: Function<'js>,
+    method_intern: Function<'js>,
+    define_callback_length: Function<'js>,
+}
+
+unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeCallbackIdentityBridge<'js> {
+    type Changed<'to> = NativeCallbackIdentityBridge<'to>;
+}
+
+fn same_native_callback<'js>(ctx: Ctx<'js>, left: Value<'js>, right: Value<'js>) -> bool {
+    let Some(bridge) = ctx.userdata::<NativeCallbackIdentityBridge<'js>>() else {
+        return false;
+    };
+    let same = bridge.same.clone();
+    drop(bridge);
+    same.call((left, right)).unwrap_or(false)
+}
+
+fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    // Capture invocation machinery as well as methods: Function.prototype.call
+    // and WeakMap.prototype methods are user-mutable after initialization.
+    let pair: Array = ctx.eval(r#"(function() {
+        const map = new WeakMap();
+        const apply = Reflect.apply;
+        const objectConstructor = Object;
+        const objectCreate = Object.create;
+        const defineProperty = Object.defineProperty;
+        const set = WeakMap.prototype.set;
+        const get = WeakMap.prototype.get;
+        const has = WeakMap.prototype.has;
+        const objectOwners = new WeakMap();
+        const objectCache = new Map();
+        const methodCache = new Map();
+        const mapGet = Map.prototype.get;
+        const mapSet = Map.prototype.set;
+        const mapDelete = Map.prototype.delete;
+        const WeakReference = WeakRef;
+        const weakDeref = WeakRef.prototype.deref;
+        const Finalizer = FinalizationRegistry;
+        const finalizerRegister = FinalizationRegistry.prototype.register;
+        const stringIndexOf = String.prototype.indexOf;
+        const stringSlice = String.prototype.slice;
+        const arrayPush = Array.prototype.push;
+        const number = Number;
+        const isSafeInteger = Number.isSafeInteger;
+        const layoutSegments = layout => {
+            const fields = [];
+            let cursor = 0;
+            while (cursor < layout.length) {
+                const start = cursor;
+                for (let part = 0; part < 2; part++) {
+                    const colon = apply(stringIndexOf, layout, [':', cursor]);
+                    if (colon < 0) return null;
+                    const bytes = number(apply(stringSlice, layout, [cursor, colon]));
+                    if (!isSafeInteger(bytes) || bytes < 0) return null;
+                    cursor = colon + 1 + bytes * 2;
+                    if (cursor > layout.length) return null;
+                }
+                apply(arrayPush, fields, [apply(stringSlice, layout, [start, cursor])]);
+            }
+            return fields;
+        };
+        const layoutContains = (actual, expected) => {
+            if (actual === expected) return true;
+            const have = layoutSegments(actual);
+            const want = layoutSegments(expected);
+            if (!have || !want) return false;
+            const used = objectCreate(null);
+            for (let desired = 0; desired < want.length; desired++) {
+                let found = false;
+                for (let index = 0; index < have.length; index++) {
+                    if (!used[index] && have[index] === want[desired]) {
+                        used[index] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        };
+        const finalized = new Finalizer(({pointer, weak}) => {
+            if (apply(mapGet, objectCache, [pointer]) === weak)
+                apply(mapDelete, objectCache, [pointer]);
+        });
+        const methodFinalized = new Finalizer(({token, weak}) => {
+            if (apply(mapGet, methodCache, [token]) === weak)
+                apply(mapDelete, methodCache, [token]);
+        });
+        return [
+            (wrapper, token) => apply(set, map, [wrapper, token]),
+            (left, right) => apply(has, map, [left]) &&
+                apply(has, map, [right]) &&
+                apply(get, map, [left]) === apply(get, map, [right]),
+            (pointer, layout, proposed, guardian) => {
+                const cached = apply(mapGet, objectCache, [pointer]);
+                const existing = cached && apply(weakDeref, cached, []);
+                if (existing) {
+                    if (apply(get, objectOwners, [existing]).layout !== layout)
+                        throw new TypeError('native object layout changed while its wrapper is live');
+                    return existing;
+                }
+                const weak = new WeakReference(proposed);
+                apply(set, objectOwners, [proposed, {pointer, layout, guardian}]);
+                apply(mapSet, objectCache, [pointer, weak]);
+                apply(finalizerRegister, finalized, [proposed, {pointer, weak}]);
+                return proposed;
+            },
+            (wrapper, expected) => {
+                const owner = apply(get, objectOwners, [wrapper]);
+                return owner && layoutContains(owner.layout, expected)
+                    ? owner.pointer : '';
+            },
+            (pointer, expected) => {
+                const weak = apply(mapGet, objectCache, [pointer]);
+                const existing = weak && apply(weakDeref, weak, []);
+                const owner = existing && apply(get, objectOwners, [existing]);
+                return owner && layoutContains(owner.layout, expected)
+                    ? existing : undefined;
+            },
+            token => {
+                const weak = apply(mapGet, methodCache, [token]);
+                return weak && apply(weakDeref, weak, []);
+            },
+            (token, proposed) => {
+                const weak = apply(mapGet, methodCache, [token]);
+                const existing = weak && apply(weakDeref, weak, []);
+                if (existing) return existing;
+                const next = new WeakReference(proposed);
+                apply(mapSet, methodCache, [token, next]);
+                apply(finalizerRegister, methodFinalized, [proposed, {token, weak: next}]);
+                return proposed;
+            },
+            (callback, length) => apply(defineProperty, objectConstructor, [callback, 'length', {value: length}]),
+        ];
+    })()"#)?;
+    let register: Function = pair.get(0)?;
+    let same: Function = pair.get(1)?;
+    let intern_object: Function = pair.get(2)?;
+    let object_pointer: Function = pair.get(3)?;
+    let object_lookup: Function = pair.get(4)?;
+    let method_lookup: Function = pair.get(5)?;
+    let method_intern: Function = pair.get(6)?;
+    let define_callback_length: Function = pair.get(7)?;
+    ctx.store_userdata(NativeCallbackIdentityBridge {
+        register, same, intern_object, object_pointer, object_lookup,
+        method_lookup, method_intern, define_callback_length,
+    })
+        .expect("native callback identity bridge userdata is already borrowed");
+    ctx.globals().prop("__thaw_same_native_callback",
+        Function::new(ctx.clone(), same_native_callback)?)?;
+    Ok(())
+}
+
+extern "C" {
+    fn JS_GetAsyncContext(ctx: *mut rquickjs::qjs::JSContext) -> rquickjs::qjs::JSValue;
+    fn JS_SwapAsyncContext(ctx: *mut rquickjs::qjs::JSContext,
+                           next: rquickjs::qjs::JSValue) -> rquickjs::qjs::JSValue;
+}
+
+fn install_async_context_bootstrap<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+    let bridge = Object::new(ctx.clone())?;
+    bridge.set("get", Function::new(ctx.clone(), |ctx: Ctx<'js>| -> Value<'js> {
+        // The C API returns an owned duplicate from this exact runtime.
+        unsafe { Value::from_raw(ctx.clone(), JS_GetAsyncContext(ctx.as_raw().as_ptr())) }
+    })?)?;
+    bridge.set("swap", Function::new(ctx.clone(), |ctx: Ctx<'js>, next: Value<'js>| -> Value<'js> {
+        // Swap duplicates `next` and transfers ownership of the previous slot.
+        unsafe { Value::from_raw(ctx.clone(), JS_SwapAsyncContext(ctx.as_raw().as_ptr(), next.as_raw())) }
+    })?)?;
+    // PLATFORM_GLOBALS captures these functions into its private IIFE. The
+    // temporary property is removed before any user bundle is evaluated.
+    ctx.globals().set("__thaw_async_context_bootstrap", bridge)
+}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
         slot.get_or_insert_with(|| {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
+            runtime.set_loader(BundleModuleResolver, BundleModuleLoader);
+            runtime.set_host_promise_rejection_tracker(Some(Box::new(track_js_promise_rejection)));
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
                 install_shared_array_buffer_functions(&ctx);
+                install_shared_array_buffer_clone_functions(&ctx);
+                let intrinsic_then: Function = ctx.eval("Promise.prototype.then")
+                    .expect("failed to capture intrinsic Promise.then");
+                let intrinsic_object_is: Function = ctx.eval("Object.is")
+                    .expect("failed to capture intrinsic Object.is");
+                let intrinsic_array_is_array: Function = ctx.eval("Array.isArray")
+                    .expect("failed to capture intrinsic Array.isArray");
+                ctx.store_userdata(NativeBundleOwner {
+                    next_sequence: Cell::new(0),
+                    sources: RefCell::new(HashMap::new()),
+                    markers: RefCell::new(HashMap::new()),
+                    entries: RefCell::new(HashMap::new()),
+                    mixed_callbacks: RefCell::new(HashMap::new()),
+                    opaque_edges: RefCell::new(HashMap::new()),
+                    origin_modules: RefCell::new(HashMap::new()),
+                    then: intrinsic_then,
+                    object_is: intrinsic_object_is,
+                    array_is_array: intrinsic_array_is_array,
+                }).expect("native bundle owner userdata is already borrowed");
+                ctx.store_userdata(VmContexts::default()).expect("vm contexts userdata is already borrowed");
+                ctx.globals().prop("__thaw_register_native_bundle",
+                    Function::new(ctx.clone(), register_native_bundle)
+                        .expect("failed to create native bundle registrar"))
+                    .expect("failed to install native bundle registrar");
                 ctx.globals()
                     .set(
                         "__thaw_os_thread_token",
@@ -124,6 +1085,7 @@ fn ensure_context() {
                         .expect("failed to serialize host environment"),
                     )
                     .expect("failed to install host environment");
+                install_process_environment_functions(&ctx);
                 let arguments = std::env::args().collect::<Vec<_>>();
                 let eval = cli_eval(&arguments);
                 let script = cli_script(&arguments);
@@ -156,7 +1118,13 @@ fn ensure_context() {
                         .expect("failed to serialize host exec arguments"),
                     )
                     .expect("failed to install host exec arguments");
+                install_native_callback_identity_bridge(&ctx)
+                    .expect("failed to install native callback identity bridge");
                 install_napi_bridge(&ctx).expect("failed to install N-API bridge");
+                ctx.globals().set("__thaw_url_parse", Function::new(ctx.clone(), host_url_parse)
+                    .expect("failed to create URL parser")).expect("failed to install URL parser");
+                ctx.globals().set("__thaw_url_set", Function::new(ctx.clone(), host_url_set)
+                    .expect("failed to create URL setter")).expect("failed to install URL setter");
                 let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
                 install_shared_environment_functions(&ctx, shared_env)
                     .expect("failed to install shared Worker environment accessors");
@@ -165,28 +1133,67 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_shared_env_init", shared_env_init)
                     .expect("failed to install shared Worker environment initializer");
-                let stdout = Function::new(ctx.clone(), |text: String| {
-                    print!("{text}");
+                let stdout = Function::new(ctx.clone(), |text: crate::Wtf8String| {
+                    print!("{}", crate::wtf8_display(&text.0));
                     let _ = io::stdout().flush();
                 })
                 .expect("failed to create JavaScript stdout writer");
-                let stderr = Function::new(ctx.clone(), |text: String| {
-                    eprint!("{text}");
+                let stderr = Function::new(ctx.clone(), |text: crate::Wtf8String| {
+                    eprint!("{}", crate::wtf8_display(&text.0));
                     let _ = io::stderr().flush();
                 })
                 .expect("failed to create JavaScript stderr writer");
+                let raw_process_write = Function::new(ctx.clone(), |fd: i32, encoded: String| -> rquickjs::Result<()> {
+                    if !matches!(fd, 1 | 2) || !encoded.len().is_multiple_of(2) || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err(rquickjs::Error::new_from_js_message("process stream", "fd 1/2 and valid hex bytes", "invalid raw process output"));
+                    }
+                    let bytes = hex_decode(&encoded);
+                    let result = if fd == 1 {
+                        let mut output = io::stdout().lock();
+                        output.write_all(&bytes).and_then(|()| output.flush())
+                    } else {
+                        let mut output = io::stderr().lock();
+                        output.write_all(&bytes).and_then(|()| output.flush())
+                    };
+                    result.map_err(|error| rquickjs::Error::new_from_js_message("process stream", "writable fd 1/2", error.to_string()))
+                })
+                .expect("failed to create raw process stream writer");
                 ctx.globals()
                     .set("__thaw_console_stdout", stdout)
                     .expect("failed to install JavaScript stdout writer");
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                ctx.globals()
+                    .set("__thaw_process_write_bytes", raw_process_write)
+                    .expect("failed to install raw process stream writer");
+                ctx.globals()
+                    .set("__thaw_tty_set_raw_mode", Function::new(ctx.clone(), |fd: i32, enabled: bool| set_tty_raw_mode(fd, enabled))
+                        .expect("failed to create tty raw mode switch"))
+                    .expect("failed to install tty raw mode switch");
+                ctx.globals()
+                    .set("__thaw_tty_write", Function::new(ctx.clone(), |fd: i32, encoded: String| -> rquickjs::Result<()> {
+                        if fd < 0 || !encoded.len().is_multiple_of(2) || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return Err(rquickjs::Error::new_from_js_message("tty stream", "a descriptor and valid hex bytes", "invalid tty output"));
+                        }
+                        // Anything the process wrote through stdout/stderr must reach the descriptor first.
+                        let _ = io::stdout().flush();
+                        write_fd_bytes(fd, &hex_decode(&encoded))
+                            .map_err(|error| rquickjs::Error::new_from_js_message("tty stream", "a writable descriptor", error.to_string()))
+                    }).expect("failed to create tty descriptor writer"))
+                    .expect("failed to install tty descriptor writer");
                 let stdin_start = Function::new(ctx.clone(), start_host_stdin)
                     .expect("failed to create process stdin starter");
                 let stdin_poll = Function::new(ctx.clone(), poll_host_stdin)
                     .expect("failed to create process stdin poller");
                 let stdin_active = Function::new(ctx.clone(), host_stdin_active)
                     .expect("failed to create process stdin activity probe");
+                ignore_sigpipe();
+                let stdin_set_ref = Function::new(ctx.clone(), set_host_stdin_ref)
+                    .expect("failed to create process stdin ref switch");
+                ctx.globals()
+                    .set("__thaw_process_set_stdin_ref", stdin_set_ref)
+                    .expect("failed to install process stdin ref switch");
                 ctx.globals()
                     .set("__thaw_process_start_stdin", stdin_start)
                     .expect("failed to install process stdin starter");
@@ -219,11 +1226,17 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_process_cwd", cwd)
                     .expect("failed to install process cwd bridge");
-                let chdir = Function::new(ctx.clone(), |path: String| -> rquickjs::Result<()> {
-                    std::env::set_current_dir(path).map_err(|error| {
-                        rquickjs::Error::new_from_js_message("process", "chdir", error.to_string())
+                let chdir =
+                    Function::new(ctx.clone(), |path: crate::Wtf8String| -> rquickjs::Result<()> {
+                        std::env::set_current_dir(String::from_utf8_lossy(&path.0).as_ref())
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "process",
+                                    "chdir",
+                                    error.to_string(),
+                                )
+                            })
                     })
-                })
                 .expect("failed to create process chdir bridge");
                 ctx.globals()
                     .set("__thaw_process_chdir", chdir)
@@ -294,10 +1307,18 @@ fn ensure_context() {
                     .expect("failed to create WebAssembly exported function-reference reader");
                 let wasm_global_function = Function::new(ctx.clone(), wasm_global)
                     .expect("failed to create WebAssembly global accessor");
+                let wasm_global_create_function = Function::new(ctx.clone(), wasm_global_create)
+                    .expect("failed to create WebAssembly global allocator");
+                let wasm_global_retain_function = Function::new(ctx.clone(), wasm_global_retain)
+                    .expect("failed to create WebAssembly global retainer");
                 let wasm_memory_create_function = Function::new(ctx.clone(), wasm_memory_create)
                     .expect("failed to create WebAssembly memory allocator");
                 let wasm_memory_function = Function::new(ctx.clone(), wasm_memory)
                     .expect("failed to create WebAssembly memory accessor");
+                let wasm_table_create_function = Function::new(ctx.clone(), wasm_table_create)
+                    .expect("failed to create WebAssembly table allocator");
+                let wasm_table_retain_function = Function::new(ctx.clone(), wasm_table_retain)
+                    .expect("failed to create WebAssembly table retainer");
                 let wasm_table_function = Function::new(ctx.clone(), wasm_table)
                     .expect("failed to create WebAssembly table accessor");
                 ctx.globals()
@@ -349,11 +1370,23 @@ fn ensure_context() {
                     .set("__thaw_wasm_global", wasm_global_function)
                     .expect("failed to install WebAssembly global accessor");
                 ctx.globals()
+                    .set("__thaw_wasm_global_create", wasm_global_create_function)
+                    .expect("failed to install WebAssembly global allocator");
+                ctx.globals()
+                    .set("__thaw_wasm_global_retain", wasm_global_retain_function)
+                    .expect("failed to install WebAssembly global retainer");
+                ctx.globals()
                     .set("__thaw_wasm_memory_create", wasm_memory_create_function)
                     .expect("failed to install WebAssembly memory allocator");
                 ctx.globals()
                     .set("__thaw_wasm_memory", wasm_memory_function)
                     .expect("failed to install WebAssembly memory accessor");
+                ctx.globals()
+                    .set("__thaw_wasm_table_create", wasm_table_create_function)
+                    .expect("failed to install WebAssembly table allocator");
+                ctx.globals()
+                    .set("__thaw_wasm_table_retain", wasm_table_retain_function)
+                    .expect("failed to install WebAssembly table retainer");
                 ctx.globals()
                     .set("__thaw_wasm_table", wasm_table_function)
                     .expect("failed to install WebAssembly table accessor");
@@ -382,6 +1415,11 @@ fn ensure_context() {
                 let worker_terminate =
                     Function::new(ctx.clone(), |handle: u32| terminate_host_worker(handle))
                         .expect("failed to create Worker terminator");
+                let worker_ref = Function::new(
+                    ctx.clone(),
+                    |handle: u32, refed: bool| set_host_worker_refed(handle, refed),
+                )
+                .expect("failed to create Worker liveness updater");
                 let worker_stdin =
                     Function::new(ctx.clone(), |handle: u32, payload: String, ended: bool| {
                         send_host_worker_stdin(handle, payload, ended)
@@ -411,7 +1449,13 @@ fn ensure_context() {
                     .expect("failed to create Worker port sender");
                 let worker_read_source =
                     Function::new(ctx.clone(), |path: String| -> rquickjs::Result<String> {
-                        std::fs::read_to_string(&path).map_err(|error| {
+                        std::fs::read_to_string(&path).map(|mut source| {
+                            // All worker JSON and package manifest readers share this boundary.
+                            if source.starts_with('\u{feff}') {
+                                source.drain(..'\u{feff}'.len_utf8());
+                            }
+                            source
+                        }).map_err(|error| {
                             rquickjs::Error::new_from_js_message(
                                 "Worker path",
                                 "JavaScript source",
@@ -447,6 +1491,50 @@ fn ensure_context() {
                     kill_host_child(handle, signal)
                 })
                 .expect("failed to create child process killer");
+                for (name, function) in [
+                    (
+                        "__thaw_zlib_async_start",
+                        Function::new(ctx.clone(), zlib_async_start)
+                            .expect("failed to create async zlib starter"),
+                    ),
+                    (
+                        "__thaw_zlib_async_poll",
+                        Function::new(ctx.clone(), zlib_async_poll)
+                            .expect("failed to create async zlib poller"),
+                    ),
+                    (
+                        "__thaw_zlib_async_take",
+                        Function::new(ctx.clone(), zlib_async_take)
+                            .expect("failed to create async zlib result taker"),
+                    ),
+                    (
+                        "__thaw_zlib_active",
+                        Function::new(ctx.clone(), zlib_async_active)
+                            .expect("failed to create async zlib activity probe"),
+                    ),
+                ] {
+                    ctx.globals()
+                        .set(name, function)
+                        .expect("failed to install async zlib function");
+                }
+                // The callback receives its own `Ctx`: capturing a clone here would keep the context alive forever
+                // (a closure stored on the global object that owns the context) and fail JS_FreeRuntime at exit.
+                let async_hooks_promise_hook_switch = Function::new(ctx.clone(), |ctx: Ctx<'_>, enabled: bool| {
+                    set_async_hooks_promise_hook(&ctx, enabled)
+                })
+                .expect("failed to create async_hooks promise hook switch");
+                ctx.globals()
+                    .set("__thaw_async_hooks_promise_hook", async_hooks_promise_hook_switch)
+                    .expect("failed to install async_hooks promise hook switch");
+                let loop_stats = Function::new(ctx.clone(), host_loop_stats)
+                    .expect("failed to create event loop statistics probe");
+                ctx.globals()
+                    .set("__thaw_loop_stats", loop_stats)
+                    .expect("failed to install event loop statistics probe");
+                let child_ref = Function::new(ctx.clone(), |handle: u32, refed: bool| {
+                    set_host_child_ref(handle, refed)
+                })
+                .expect("failed to create child process ref setter");
                 let child_poll = Function::new(ctx.clone(), poll_host_children)
                     .expect("failed to create child process poller");
                 let child_active = Function::new(ctx.clone(), host_children_active)
@@ -460,6 +1548,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_worker_terminate", worker_terminate)
                     .expect("failed to install Worker terminator");
+                ctx.globals()
+                    .set("__thaw_worker_ref", worker_ref)
+                    .expect("failed to install Worker liveness updater");
                 ctx.globals()
                     .set("__thaw_worker_stdin", worker_stdin)
                     .expect("failed to install Worker stdin sender");
@@ -496,6 +1587,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_child_process_kill", child_kill)
                     .expect("failed to install child process killer");
+                ctx.globals()
+                    .set("__thaw_child_process_ref", child_ref)
+                    .expect("failed to install child process ref setter");
                 ctx.globals()
                     .set("__thaw_child_process_poll", child_poll)
                     .expect("failed to install child process poller");
@@ -535,7 +1629,7 @@ fn ensure_context() {
                             &hex_decode(&password),
                             &hex_decode(&salt),
                             iterations,
-                            (length as usize).clamp(10, 64),
+                            length as usize,
                         ))
                     },
                 )
@@ -868,13 +1962,15 @@ fn ensure_context() {
                     ctx.clone(),
                     |operation: String,
                      format: String,
-                     value: String|
+                     value: String,
+                     options: rquickjs::function::Opt<String>|
                      -> rquickjs::Result<String> {
                         let input = hex_decode(&value);
+                        let options = ZlibOptions::parse(options.0.as_deref().unwrap_or(""));
                         let result = if operation == "compress" {
-                            compress_bytes(&format, &input)
+                            compress_bytes_with(&format, &input, &options)
                         } else {
-                            decompress_bytes(&format, &input)
+                            decompress_bytes_with(&format, &input, &options)
                         };
                         result.map(|bytes| hex_encode(&bytes)).map_err(|error| {
                             rquickjs::Error::new_from_js_message(
@@ -886,6 +1982,13 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript compression function");
+                // `vm.Script` / `runInThisContext`: evaluate (or only compile) classic-script source under the caller's
+                // filename so syntax errors and stacks name it, and so script-only grammar (no top-level `return`) applies.
+                let vm_eval = Function::new(ctx.clone(), host_vm_eval)
+                .expect("failed to create JavaScript vm evaluator");
+                let vm_create = Function::new(ctx.clone(), host_vm_create).expect("failed to create JavaScript vm context factory");
+                let vm_free = Function::new(ctx.clone(), host_vm_free).expect("failed to create JavaScript vm context releaser");
+                let vm_run = Function::new(ctx.clone(), host_vm_run).expect("failed to create JavaScript vm context runner");
                 let web_zlib_streams = Rc::new(RefCell::new(HashMap::<u32, WebZlibStream>::new()));
                 let next_web_zlib_stream = Rc::new(Cell::new(1u32));
                 let create_web_zlib_stream = {
@@ -893,9 +1996,13 @@ fn ensure_context() {
                     let next = Rc::clone(&next_web_zlib_stream);
                     Function::new(
                         ctx.clone(),
-                        move |operation: String, format: String| -> rquickjs::Result<u32> {
+                        move |operation: String,
+                              format: String,
+                              options: rquickjs::function::Opt<String>|
+                              -> rquickjs::Result<u32> {
+                            let options = ZlibOptions::parse(options.0.as_deref().unwrap_or(""));
                             let stream =
-                                WebZlibStream::new(&operation, &format).map_err(|error| {
+                                WebZlibStream::new(&operation, &format, &options).map_err(|error| {
                                     rquickjs::Error::new_from_js_message(
                                         "zlib stream",
                                         "handle",
@@ -960,32 +2067,54 @@ fn ensure_context() {
                     })
                     .expect("failed to create streaming zlib closer")
                 };
-                let fs_function = Function::new(
-                    ctx.clone(),
-                    |operation: String, path: String, value: String, recursive: bool| {
-                        host_fs(operation, path, value, recursive)
-                    },
-                )
-                .expect("failed to create JavaScript filesystem function");
+                let fs_handles = Rc::new(RefCell::new(FsHandleTable::new()));
+                let fs_function = {
+                    let handles = Rc::clone(&fs_handles);
+                    Function::new(
+                        ctx.clone(),
+                        move |operation: String, path: String, value: String, recursive: bool| {
+                            host_fs(operation, path, value, recursive, &mut handles.borrow_mut())
+                        },
+                    )
+                    .expect("failed to create JavaScript filesystem function")
+                };
                 let tcp_connect = Function::new(ctx.clone(), |host: String, port: u32| {
-                    net_connect(&host, port as u16)
+                    match checked_port(port) { Ok(port) => net_connect(&host, port), Err(error) => error }
                 })
                 .expect("failed to create JavaScript TCP connector");
+                let tcp_connect_start = Function::new(ctx.clone(), |host: String, port: u32| net_connect_start(&host, port))
+                    .expect("failed to create JavaScript asynchronous TCP connector");
+                let dns_lookup_start_function = Function::new(ctx.clone(), dns_lookup_start)
+                    .expect("failed to create JavaScript asynchronous DNS lookup");
+                let dns_query_start_function = Function::new(ctx.clone(), |name: String, rrtype: String, servers: String, timeout_ms: u32, tries: u32| dns_query_start(name, rrtype, servers, timeout_ms, tries))
+                    .expect("failed to create JavaScript DNS query starter");
+                let dns_default_servers_function = Function::new(ctx.clone(), dns_default_servers)
+                    .expect("failed to create JavaScript DNS server reader");
+                let async_op_poll_function = Function::new(ctx.clone(), async_op_poll)
+                    .expect("failed to create JavaScript asynchronous operation poller");
+                let async_op_cancel_function = Function::new(ctx.clone(), async_op_cancel)
+                    .expect("failed to create JavaScript asynchronous operation canceller");
                 let tcp_write = Function::new(ctx.clone(), |handle: u32, value: String| {
                     net_write(handle, &hex_decode(&value))
                 })
                 .expect("failed to create JavaScript TCP writer");
+                let net_set_option_function = Function::new(ctx.clone(), |kind: String, handle: u32, option: String, enable: bool, delay_ms: u32| net_set_option(&kind, handle, &option, enable, delay_ms))
+                    .expect("failed to create JavaScript socket option setter");
+                let tcp_pending = Function::new(ctx.clone(), |handle: u32| net_pending_bytes(handle))
+                    .expect("failed to create JavaScript TCP pending-bytes reader");
                 let tcp_finish = Function::new(ctx.clone(), |handle: u32| net_finish(handle))
                     .expect("failed to create JavaScript TCP finisher");
                 let tcp_shutdown =
                     Function::new(ctx.clone(), |handle: u32| net_shutdown_write(handle))
                         .expect("failed to create JavaScript TCP shutdown function");
-                let tcp_poll_read = Function::new(ctx.clone(), |handle: u32| net_poll_read(handle))
+                let tcp_poll_read = Function::new(ctx.clone(), |handle: u32, retain_on_eof: rquickjs::function::Opt<bool>| {
+                    if retain_on_eof.0.unwrap_or(false) { net_poll_read_impl(handle, true) } else { net_poll_read(handle) }
+                })
                     .expect("failed to create JavaScript TCP polling reader");
-                let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
+                let tcp_destroy = Function::new(ctx.clone(), |handle: u32, reset: rquickjs::function::Opt<bool>| net_destroy_with(handle, reset.0.unwrap_or(false)))
                     .expect("failed to create JavaScript TCP closer");
                 let tcp_listen = Function::new(ctx.clone(), |host: String, port: u32| {
-                    net_listen(&host, port as u16)
+                    match checked_port(port) { Ok(port) => net_listen(&host, port), Err(error) => error }
                 })
                 .expect("failed to create JavaScript TCP listener");
                 let tcp_accept = Function::new(ctx.clone(), |handle: u32| net_accept(handle))
@@ -999,35 +2128,48 @@ fn ensure_context() {
                     Function::new(ctx.clone(), |handle: u32| net_close_listener(handle))
                         .expect("failed to create JavaScript TCP listener closer");
                 let udp_bind_function = Function::new(ctx.clone(), |host: String, port: u32| {
-                    udp_bind(&host, port as u16)
+                    match u16::try_from(port) { Ok(port) => udp_bind(&host, port), Err(_) => "err|EINVAL|invalid UDP port".to_string() }
                 })
                 .expect("failed to create JavaScript UDP binder");
                 let udp_send_function = Function::new(
                     ctx.clone(),
                     |handle: u32, value: String, host: String, port: u32| {
-                        udp_send(handle, &hex_decode(&value), &host, port as u16)
+                        match u16::try_from(port) { Ok(port) if port != 0 => udp_send(handle, &hex_decode(&value), &host, port), _ => "err|EINVAL|invalid UDP port".to_string() }
                     },
                 )
                 .expect("failed to create JavaScript UDP sender");
                 let udp_receive_function =
                     Function::new(ctx.clone(), |handle: u32| udp_receive(handle))
                         .expect("failed to create JavaScript UDP receiver");
+                let udp_connect_function = Function::new(ctx.clone(), |handle: u32, host: String, port: u32| {
+                    match u16::try_from(port) { Ok(port) if port != 0 => udp_connect(handle, &host, port), _ => "err|EINVAL|invalid UDP port".to_string() }
+                }).expect("failed to create JavaScript UDP connector");
+                let udp_option_function = Function::new(ctx.clone(), |handle: u32, name: String, a: String, b: String, c: String| udp_option(handle, &name, &a, &b, &c))
+                    .expect("failed to create JavaScript UDP option setter");
+                let udp_set_broadcast_function = Function::new(ctx.clone(), |handle: u32, enabled: bool| udp_set_broadcast(handle, enabled))
+                    .expect("failed to create JavaScript UDP broadcast setter");
+                let udp_disconnect_function = Function::new(ctx.clone(), |handle: u32| udp_disconnect(handle))
+                    .expect("failed to create JavaScript UDP disconnector");
                 let udp_close_function =
                     Function::new(ctx.clone(), |handle: u32| udp_close(handle))
                         .expect("failed to create JavaScript UDP closer");
                 let tls_connect_function = Function::new(
                     ctx.clone(),
-                    |host: String, port: u32, server_name: String, ca: String| {
+                    |host: String, port: u32, server_name: String, ca: Value<'_>| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             cert_spec: "",
                             key_spec: "",
                             alpn_spec: "",
+                            versions_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
+                            defer_name_verification: false,
                         })
                     },
                 )
@@ -1037,19 +2179,23 @@ fn ensure_context() {
                     |host: String,
                      port: u32,
                      server_name: String,
-                     ca: String,
+                     ca: Value<'_>,
                      cert: String,
                      key: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: "",
+                            versions_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
+                            defer_name_verification: false,
                         })
                     },
                 )
@@ -1059,26 +2205,95 @@ fn ensure_context() {
                     |host: String,
                      port: u32,
                      server_name: String,
-                     ca: String,
+                     ca: Value<'_>,
                      cert: String,
                      key: String,
                      options: String| {
-                        let (verification, alpn) =
-                            options.split_once('|').unwrap_or(("1", options.as_str()));
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let mut option_parts = options.splitn(4, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
+                        let versions = option_parts.next().unwrap_or("");
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: alpn,
+                            versions_spec: versions,
                             report_alpn: true,
                             reject_unauthorized: verification != "0",
+                            defer_name_verification,
                         })
                     },
                 )
                 .expect("failed to create JavaScript TLS options connector");
+                let tls_connect_start_function = Function::new(
+                    ctx.clone(),
+                    |host: String,
+                     port: u32,
+                     server_name: String,
+                     ca: Value<'_>,
+                     cert: String,
+                     key: String,
+                     options: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return async_op_ready(format!("err:{error}")) };
+                        let mut option_parts = options.splitn(4, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
+                        let versions = option_parts.next().unwrap_or("");
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return async_op_ready(error) };
+                        tls_connect_start(TlsClientOptions {
+                            host: &host,
+                            port,
+                            server_name: &server_name,
+                            ca_spec: ca_spec.as_deref(),
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            alpn_spec: alpn,
+                            versions_spec: versions,
+                            report_alpn: true,
+                            reject_unauthorized: verification != "0",
+                            defer_name_verification,
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript asynchronous TLS connector");
+                let tls_wrap_start_function = Function::new(
+                    ctx.clone(),
+                    |net_handle: u32,
+                     server_name: String,
+                     ca: Value<'_>,
+                     cert: String,
+                     key: String,
+                     options: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return async_op_ready(format!("err:{error}")) };
+                        let mut option_parts = options.splitn(4, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
+                        let versions = option_parts.next().unwrap_or("");
+                        tls_wrap_start(TlsClientOptions {
+                            host: "",
+                            port: 0,
+                            server_name: &server_name,
+                            ca_spec: ca_spec.as_deref(),
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            alpn_spec: alpn,
+                            versions_spec: versions,
+                            report_alpn: true,
+                            reject_unauthorized: verification != "0",
+                            defer_name_verification,
+                        }, net_handle)
+                    },
+                )
+                .expect("failed to create JavaScript TLS wrapper");
                 let tls_write_function =
                     Function::new(ctx.clone(), |handle: u32, value: String| {
                         tls_write(handle, &hex_decode(&value))
@@ -1098,17 +2313,30 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS closer");
                 let tls_alpn_function = Function::new(ctx.clone(), |handle: u32| tls_alpn(handle))
                     .expect("failed to create JavaScript TLS ALPN reader");
+                let tls_session_info_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_session_info(handle))
+                        .expect("failed to create JavaScript TLS session info reader");
                 let tls_peer_certificate_function =
                     Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, true))
                         .expect("failed to create JavaScript TLS peer certificate reader");
                 let tls_local_certificate_function =
                     Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, false))
                         .expect("failed to create JavaScript TLS local certificate reader");
+                let tls_peer_chain_function = Function::new(ctx.clone(), |handle: u32| tls_peer_chain(handle))
+                    .expect("failed to create JavaScript TLS peer chain reader");
+                let tls_certificate_metadata_hex_function = Function::new(ctx.clone(), |hex: String| tls_certificate_metadata_hex(&hex))
+                    .expect("failed to create JavaScript TLS certificate metadata reader");
                 let tls_peer_certificate_metadata_function =
                     Function::new(ctx.clone(), |handle: u32| {
                         tls_certificate_metadata(handle, true)
                     })
                     .expect("failed to create JavaScript TLS peer certificate metadata reader");
+                let tls_authorization_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_authorization(handle))
+                        .expect("failed to create JavaScript TLS authorization reader");
+                let tls_canonical_ip_function =
+                    Function::new(ctx.clone(), |host: String| tls_canonical_ip(&host))
+                        .expect("failed to create JavaScript TLS IP canonicalizer");
                 let tls_local_certificate_metadata_function =
                     Function::new(ctx.clone(), |handle: u32| {
                         tls_certificate_metadata(handle, false)
@@ -1117,15 +2345,17 @@ fn ensure_context() {
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
-                            ca_spec: "",
+                            ca_spec: None,
                             request_cert: false,
                             reject_unauthorized: true,
                             alpn_spec: "",
+                            versions_spec: "",
                         })
                     },
                 )
@@ -1136,17 +2366,20 @@ fn ensure_context() {
                      port: u32,
                      cert: String,
                      key: String,
-                     ca: String,
+                     ca: Value<'_>,
                      reject_unauthorized: bool| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             request_cert: true,
                             reject_unauthorized,
                             alpn_spec: "",
+                            versions_spec: "",
                         })
                     },
                 )
@@ -1157,18 +2390,23 @@ fn ensure_context() {
                      port: u32,
                      cert: String,
                      key: String,
-                     ca: String,
+                     ca: Value<'_>,
                      flags: u32,
-                     alpn: String| {
+                     alpn_and_versions: String| {
+                        // `<alpn>|<minVersion>,<maxVersion>` (the closure is at the argument-count limit).
+                        let (alpn, versions) = alpn_and_versions.split_once('|').unwrap_or((alpn_and_versions.as_str(), ""));
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             request_cert: flags & 1 != 0,
                             reject_unauthorized: flags & 2 != 0,
-                            alpn_spec: &alpn,
+                            alpn_spec: alpn,
+                            versions_spec: versions,
                         })
                     },
                 )
@@ -1187,6 +2425,12 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS listener closer");
                 let os_info_function = Function::new(ctx.clone(), os_info_json)
                     .expect("failed to create JavaScript OS information source");
+                let os_identity_function = Function::new(ctx.clone(), os_identity_json)
+                    .expect("failed to create JavaScript OS identity source");
+                let os_get_priority_function = Function::new(ctx.clone(), os_get_priority_json)
+                    .expect("failed to create JavaScript OS priority getter");
+                let os_set_priority_function = Function::new(ctx.clone(), os_set_priority_json)
+                    .expect("failed to create JavaScript OS priority setter");
                 let os_network_interfaces_function =
                     Function::new(ctx.clone(), network_interfaces_json)
                         .expect("failed to create JavaScript OS network interface source");
@@ -1211,6 +2455,12 @@ fn ensure_context() {
                 let intl_locale_resolve_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_resolve_json(&tag))
                         .expect("failed to create JavaScript Intl locale resolver");
+                #[cfg(feature = "intl")]
+                let intl_datetime_resolved_options_function = Function::new(
+                    ctx.clone(),
+                    |tag: String| intl_datetime_resolved_options_json(&tag),
+                )
+                .expect("failed to create JavaScript Intl DateTimeFormat option resolver");
                 #[cfg(feature = "intl")]
                 let intl_locale_maximize_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_maximize_json(&tag))
@@ -1244,28 +2494,54 @@ fn ensure_context() {
                 #[cfg(feature = "intl")]
                 let intl_percent_format_function = Function::new(
                     ctx.clone(),
-                    |locale: String, digits: String| {
-                        intl_percent_format(&locale, &digits).unwrap_or_default()
+                    |locale: String, digits: String, grouping: bool| {
+                        intl_percent_format(&locale, &digits, grouping).unwrap_or_default()
                     },
                 )
                 .expect("failed to create JavaScript Intl percent formatter");
                 #[cfg(feature = "intl")]
+                let intl_percent_format_large_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, representative: String, core: String, grouping: bool| {
+                        intl_percent_format_large(&locale, &representative, &core, grouping).unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl large percent formatter");
+                #[cfg(feature = "intl")]
                 let intl_currency_format_function = Function::new(
                     ctx.clone(),
-                    |locale: String, digits: String, currency: String, display: String| {
-                        intl_currency_format(&locale, &digits, &currency, &display)
+                    |locale: String, digits: String, currency: String, display: String, grouping: bool| {
+                        intl_currency_format(&locale, &digits, &currency, &display, grouping)
                             .unwrap_or_default()
                     },
                 )
                 .expect("failed to create JavaScript Intl currency formatter");
                 #[cfg(feature = "intl")]
+                let intl_currency_format_large_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, representative: String, core: String, currency: String, display: String, grouping: bool| {
+                        intl_currency_format_large(&locale, &representative, &core, &currency, &display, grouping)
+                            .unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl large currency formatter");
+                #[cfg(feature = "intl")]
                 let intl_unit_format_function = Function::new(
                     ctx.clone(),
-                    |locale: String, digits: String, unit: String, width: String| {
-                        intl_unit_format(&locale, &digits, &unit, &width).unwrap_or_default()
+                    |locale: String, digits: String, unit: String, width: String, grouping: bool| {
+                        intl_unit_format(&locale, &digits, &unit, &width, grouping).unwrap_or_default()
                     },
                 )
                 .expect("failed to create JavaScript Intl unit formatter");
+                #[cfg(feature = "intl")]
+                let intl_unit_format_large_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, representative: String, core: String, unit: String, width: String, grouping: bool| {
+                        intl_unit_format_large(&locale, &representative, &core, &unit, &width, grouping)
+                            .unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl large unit formatter");
                 #[cfg(feature = "intl")]
                 let intl_time_zone_name_function = Function::new(
                     ctx.clone(),
@@ -1296,8 +2572,8 @@ fn ensure_context() {
                 #[cfg(feature = "intl")]
                 let intl_segment_function = Function::new(
                     ctx.clone(),
-                    |locale: String, granularity: String, text: String| {
-                        intl_segment(&locale, &granularity, &text)
+                    |locale: String, granularity: String, text: crate::Wtf8String| {
+                        intl_segment(&locale, &granularity, &text.0)
                     },
                 )
                 .expect("failed to create JavaScript Intl segmenter");
@@ -1309,9 +2585,9 @@ fn ensure_context() {
                      ignore_punctuation: bool,
                      numeric: bool,
                      case_first: String,
-                     a: String,
-                     b: String| {
-                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a, &b)
+                     a: crate::Wtf8String,
+                     b: crate::Wtf8String| {
+                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a.0, &b.0)
                     },
                 )
                 .expect("failed to create JavaScript Intl collator");
@@ -1323,16 +2599,16 @@ fn ensure_context() {
                      ignore_punctuation: bool,
                      numeric: bool,
                      case_first: String,
-                     a: String,
-                     b: String| {
+                     a: crate::Wtf8String,
+                     b: crate::Wtf8String| {
                         intl_collator_compare_search(
                             &locale,
                             &sensitivity,
                             ignore_punctuation,
                             numeric,
                             &case_first,
-                            &a,
-                            &b,
+                            &a.0,
+                            &b.0,
                         )
                     },
                 )
@@ -1543,6 +2819,10 @@ fn ensure_context() {
                     .expect("failed to install JavaScript Intl locale resolver");
                 #[cfg(feature = "intl")]
                 ctx.globals()
+                    .set("__thaw_intl_datetime_resolved_options", intl_datetime_resolved_options_function)
+                    .expect("failed to install JavaScript Intl DateTimeFormat option resolver");
+                #[cfg(feature = "intl")]
+                ctx.globals()
                     .set("__thaw_intl_locale_maximize", intl_locale_maximize_function)
                     .expect("failed to install JavaScript Intl locale maximizer");
                 #[cfg(feature = "intl")]
@@ -1573,12 +2853,24 @@ fn ensure_context() {
                     .expect("failed to install JavaScript Intl percent formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
+                    .set("__thaw_intl_percent_format_large", intl_percent_format_large_function)
+                    .expect("failed to install JavaScript Intl large percent formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
                     .set("__thaw_intl_currency_format", intl_currency_format_function)
                     .expect("failed to install JavaScript Intl currency formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
+                    .set("__thaw_intl_currency_format_large", intl_currency_format_large_function)
+                    .expect("failed to install JavaScript Intl large currency formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
                     .set("__thaw_intl_unit_format", intl_unit_format_function)
                     .expect("failed to install JavaScript Intl unit formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_unit_format_large", intl_unit_format_large_function)
+                    .expect("failed to install JavaScript Intl large unit formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_time_zone_name", intl_time_zone_name_function)
@@ -1683,6 +2975,15 @@ fn ensure_context() {
                     .set("__thaw_hpack_huffman_decode", hpack_huffman_decode)
                     .expect("failed to install HPACK Huffman decoder");
                 ctx.globals()
+                    .set("__thaw_memory_usage", Function::new(ctx.clone(), host_memory_usage).expect("failed to create heap accounting function"))
+                    .expect("failed to install heap accounting function");
+                ctx.globals()
+                    .set("__thaw_vm_eval", vm_eval)
+                    .expect("failed to install JavaScript vm evaluator");
+                ctx.globals().set("__thaw_vm_create", vm_create).expect("failed to install JavaScript vm context factory");
+                ctx.globals().set("__thaw_vm_free", vm_free).expect("failed to install JavaScript vm context releaser");
+                ctx.globals().set("__thaw_vm_run", vm_run).expect("failed to install JavaScript vm context runner");
+                ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");
                 ctx.globals()
@@ -1701,8 +3002,32 @@ fn ensure_context() {
                     .set("__thaw_net_connect", tcp_connect)
                     .expect("failed to install JavaScript TCP connector");
                 ctx.globals()
+                    .set("__thaw_net_connect_start", tcp_connect_start)
+                    .expect("failed to install JavaScript asynchronous TCP connector");
+                ctx.globals()
+                    .set("__thaw_dns_lookup_start", dns_lookup_start_function)
+                    .expect("failed to install JavaScript asynchronous DNS lookup");
+                ctx.globals()
+                    .set("__thaw_dns_query_start", dns_query_start_function)
+                    .expect("failed to install JavaScript DNS query starter");
+                ctx.globals()
+                    .set("__thaw_dns_default_servers", dns_default_servers_function)
+                    .expect("failed to install JavaScript DNS server reader");
+                ctx.globals()
+                    .set("__thaw_async_poll", async_op_poll_function)
+                    .expect("failed to install JavaScript asynchronous operation poller");
+                ctx.globals()
+                    .set("__thaw_async_cancel", async_op_cancel_function)
+                    .expect("failed to install JavaScript asynchronous operation canceller");
+                ctx.globals()
                     .set("__thaw_net_write", tcp_write)
                     .expect("failed to install JavaScript TCP writer");
+                ctx.globals()
+                    .set("__thaw_net_set_option", net_set_option_function)
+                    .expect("failed to install JavaScript socket option setter");
+                ctx.globals()
+                    .set("__thaw_net_pending", tcp_pending)
+                    .expect("failed to install JavaScript TCP pending-bytes reader");
                 ctx.globals()
                     .set("__thaw_net_finish", tcp_finish)
                     .expect("failed to install JavaScript TCP finisher");
@@ -1740,6 +3065,18 @@ fn ensure_context() {
                     .set("__thaw_udp_receive", udp_receive_function)
                     .expect("failed to install JavaScript UDP receiver");
                 ctx.globals()
+                    .set("__thaw_udp_connect", udp_connect_function)
+                    .expect("failed to install JavaScript UDP connector");
+                ctx.globals()
+                    .set("__thaw_udp_option", udp_option_function)
+                    .expect("failed to install JavaScript UDP option setter");
+                ctx.globals()
+                    .set("__thaw_udp_set_broadcast", udp_set_broadcast_function)
+                    .expect("failed to install JavaScript UDP broadcast setter");
+                ctx.globals()
+                    .set("__thaw_udp_disconnect", udp_disconnect_function)
+                    .expect("failed to install JavaScript UDP disconnector");
+                ctx.globals()
                     .set("__thaw_udp_close", udp_close_function)
                     .expect("failed to install JavaScript UDP closer");
                 ctx.globals()
@@ -1757,6 +3094,12 @@ fn ensure_context() {
                         tls_connect_with_options_function,
                     )
                     .expect("failed to install JavaScript TLS options connector");
+                ctx.globals()
+                    .set("__thaw_tls_connect_start", tls_connect_start_function)
+                    .expect("failed to install JavaScript asynchronous TLS connector");
+                ctx.globals()
+                    .set("__thaw_tls_wrap_start", tls_wrap_start_function)
+                    .expect("failed to install JavaScript TLS wrapper");
                 ctx.globals()
                     .set("__thaw_tls_write", tls_write_function)
                     .expect("failed to install JavaScript TLS writer");
@@ -1776,6 +3119,9 @@ fn ensure_context() {
                     .set("__thaw_tls_alpn", tls_alpn_function)
                     .expect("failed to install JavaScript TLS ALPN reader");
                 ctx.globals()
+                    .set("__thaw_tls_session_info", tls_session_info_function)
+                    .expect("failed to install JavaScript TLS session info reader");
+                ctx.globals()
                     .set("__thaw_tls_peer_certificate", tls_peer_certificate_function)
                     .expect("failed to install JavaScript TLS peer certificate reader");
                 ctx.globals()
@@ -1790,6 +3136,18 @@ fn ensure_context() {
                         tls_peer_certificate_metadata_function,
                     )
                     .expect("failed to install JavaScript TLS peer certificate metadata reader");
+                ctx.globals()
+                    .set("__thaw_tls_peer_chain", tls_peer_chain_function)
+                    .expect("failed to install JavaScript TLS peer chain reader");
+                ctx.globals()
+                    .set("__thaw_tls_certificate_metadata_hex", tls_certificate_metadata_hex_function)
+                    .expect("failed to install JavaScript TLS certificate metadata reader");
+                ctx.globals()
+                    .set("__thaw_tls_authorization", tls_authorization_function)
+                    .expect("failed to install JavaScript TLS authorization reader");
+                ctx.globals()
+                    .set("__thaw_tls_canonical_ip", tls_canonical_ip_function)
+                    .expect("failed to install JavaScript TLS IP canonicalizer");
                 ctx.globals()
                     .set(
                         "__thaw_tls_local_certificate_metadata",
@@ -1830,6 +3188,15 @@ fn ensure_context() {
                     .set("__thaw_os_info", os_info_function)
                     .expect("failed to install JavaScript OS information source");
                 ctx.globals()
+                    .set("__thaw_os_identity", os_identity_function)
+                    .expect("failed to install JavaScript OS identity source");
+                ctx.globals()
+                    .set("__thaw_os_get_priority", os_get_priority_function)
+                    .expect("failed to install JavaScript OS priority getter");
+                ctx.globals()
+                    .set("__thaw_os_set_priority", os_set_priority_function)
+                    .expect("failed to install JavaScript OS priority setter");
+                ctx.globals()
                     .set(
                         "__thaw_os_network_interfaces",
                         os_network_interfaces_function,
@@ -1838,23 +3205,137 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_dns_lookup", dns_lookup_function)
                     .expect("failed to install JavaScript DNS lookup source");
-                ctx.eval::<(), _>(PLATFORM_GLOBALS)
-                    .expect("failed to install JavaScript platform globals");
+                install_graph_handle_functions(&ctx)
+                    .expect("failed to install graph handle functions");
+                install_async_context_bootstrap(&ctx)
+                    .expect("failed to install async context bootstrap");
+                let process_clock_origin = std::time::Instant::now();
+                let process_monotonic_clock = Function::new(ctx.clone(), move || -> String {
+                    process_clock_origin.elapsed().as_nanos().to_string()
+                })
+                .expect("failed to create native process monotonic clock");
+                ctx.globals()
+                    .set("__thaw_process_monotonic_clock_bootstrap", process_monotonic_clock)
+                    .expect("failed to install native process monotonic clock");
+                let clone_unsupported_bootstrap = Function::new(
+                    ctx.clone(),
+                    |value: Value<'_>| value.is_promise() || value.is_proxy(),
+                )
+                .expect("failed to create clone brand bootstrap");
+                ctx.globals()
+                    .set("__thaw_clone_unsupported_bootstrap", clone_unsupported_bootstrap)
+                    .expect("failed to install clone brand bootstrap");
+                let clone_error_bootstrap = Function::new(
+                    ctx.clone(),
+                    |value: Value<'_>| value.is_error(),
+                )
+                .expect("failed to create clone Error brand bootstrap");
+                ctx.globals()
+                    .set("__thaw_clone_error_bootstrap", clone_error_bootstrap)
+                    .expect("failed to install clone Error brand bootstrap");
+                let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
+                ctx.globals().remove("__thaw_async_context_bootstrap")
+                    .expect("failed to remove async context bootstrap");
+                ctx.globals().remove("__thaw_process_monotonic_clock_bootstrap")
+                    .expect("failed to remove process monotonic clock bootstrap");
+                ctx.globals().remove("__thaw_clone_unsupported_bootstrap")
+                    .expect("failed to remove clone brand bootstrap");
+                ctx.globals().remove("__thaw_clone_error_bootstrap")
+                    .expect("failed to remove clone Error brand bootstrap");
+                platform_result.expect("failed to install JavaScript platform globals");
+                install_native_exception_bridge(&ctx)
+                    .expect("failed to install native exception carrier bridge");
             });
             (runtime, context)
         });
     });
 }
 
+thread_local! {
+    static PENDING_NATIVE_GRAPH_RELEASES: RefCell<Vec<PendingNativeGraphRelease>> = const { RefCell::new(Vec::new()) };
+    static NATIVE_GRAPH_RELEASES_OUTSTANDING: Cell<usize> = const { Cell::new(0) };
+    static NATIVE_GRAPH_RELEASES_DRAINING: Cell<bool> = const { Cell::new(false) };
+    static ENGINE_ENTRY_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static REALM_CLOSING: Cell<bool> = const { Cell::new(false) };
+}
+
+struct EngineEntryGuard;
+
+impl EngineEntryGuard {
+    fn enter() -> Self {
+        ENGINE_ENTRY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for EngineEntryGuard {
+    fn drop(&mut self) {
+        let _ = ENGINE_ENTRY_DEPTH.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn drain_native_graph_releases() {
+    if ENGINE_ENTRY_DEPTH.try_with(Cell::get).unwrap_or(usize::MAX) != 0
+        || ACTIVE_NAPI_CONTEXT.try_with(|active| !active.get().is_null()).unwrap_or(true)
+        || REALM_CLOSING.try_with(Cell::get).unwrap_or(true)
+        || !JS.try_with(|slot| slot.try_borrow_mut().is_ok_and(|slot| slot.is_some())).unwrap_or(false)
+    {
+        return;
+    }
+    drain_native_graph_release_queue();
+}
+
+fn drain_native_graph_release_queue() {
+    let Ok(entered) = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| {
+        !draining.replace(true)
+    }) else { return; };
+    if !entered { return; }
+    struct DrainGuard;
+    impl Drop for DrainGuard {
+        fn drop(&mut self) { let _ = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| draining.set(false)); }
+    }
+    let _guard = DrainGuard;
+    let mut failed = Vec::new();
+    while let Some(batch) = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+        pending.try_borrow_mut().ok().map(|mut pending| std::mem::take(&mut *pending))
+    }).ok().flatten() {
+        if batch.is_empty() { break; }
+        for release in batch {
+            let success = release.callback.is_some_and(|callback| callback(release.token) != 0);
+            if success {
+                let _ = NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.set(count.get().saturating_sub(1)));
+            } else {
+                failed.push(release);
+            }
+        }
+    }
+    if !failed.is_empty() {
+        let _ = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+            let Ok(mut pending) = pending.try_borrow_mut() else { return; };
+            pending.extend(failed);
+        });
+    }
+}
+
+fn native_graph_releases_pending() -> bool {
+    NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.get() != 0).unwrap_or(true)
+        || PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| pending.try_borrow().map_or(true, |pending| !pending.is_empty()))
+            .unwrap_or(true)
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
-    ensure_context();
-    JS.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .expect("QuickJS context was initialized")
-            .1
-            .with(f)
-    })
+    let outer = ENGINE_ENTRY_DEPTH.with(|depth| depth.get() == 0);
+    {
+        let _initialization_entry = EngineEntryGuard::enter();
+        ensure_context();
+    }
+    if outer { drain_native_graph_releases(); }
+    let entry = EngineEntryGuard::enter();
+    let result = JS.with(|cell| cell.borrow().as_ref()
+        .expect("QuickJS context was initialized").1.with(f));
+    drop(entry);
+    if outer { drain_native_graph_releases(); }
+    result
 }
 
 /// Like [`with_context`], but reuses the currently-active `Ctx` (see
@@ -1884,4 +3365,85 @@ fn with_active_or_context<R>(f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> R {
             f(ctx)
         }
     })
+}
+
+/// Host side of `process.env`: JavaScript reads and writes the real process environment (libc
+/// `getenv`/`setenv`), the store compiled code already uses.
+fn install_process_environment_functions(ctx: &Ctx<'_>) {
+    let globals = ctx.globals();
+    globals.set("__thaw_env_get", Function::new(ctx.clone(), |key: String| -> Option<String> {
+        if key.is_empty() || key.contains(['=', '\0']) { return None; }
+        std::env::var_os(&key).map(|value| value.to_string_lossy().into_owned())
+    }).expect("failed to create __thaw_env_get")).expect("failed to install __thaw_env_get");
+    globals.set("__thaw_env_set", Function::new(ctx.clone(), |key: String, value: String| {
+        if !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0') {
+            std::env::set_var(key, value);
+        }
+    }).expect("failed to create __thaw_env_set")).expect("failed to install __thaw_env_set");
+    globals.set("__thaw_env_unset", Function::new(ctx.clone(), |key: String| {
+        if !key.is_empty() && !key.contains(['=', '\0']) {
+            std::env::remove_var(key);
+        }
+    }).expect("failed to create __thaw_env_unset")).expect("failed to install __thaw_env_unset");
+    globals.set("__thaw_env_keys", Function::new(ctx.clone(), || -> String {
+        let keys = std::env::vars_os()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        serde_json::to_string(&keys).unwrap_or_else(|_| "[]".into())
+    }).expect("failed to create __thaw_env_keys")).expect("failed to install __thaw_env_keys");
+}
+
+/// `structuredClone` and Worker messages keep a SharedArrayBuffer's memory shared: QuickJS's own
+/// object serialization (JS_WRITE_OBJ_SAB / JS_READ_OBJ_SAB) duplicates the block reference through
+/// the allocator functions installed above, and the reader attaches to the same block.
+/// `__thaw_sab_serialize` gives the bytes as hex (it holds one block reference until read).
+fn install_shared_array_buffer_clone_functions(ctx: &Ctx<'_>) {
+    fn serialize<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<Vec<u8>> {
+        let raw = ctx.as_raw().as_ptr();
+        let mut size = 0;
+        // SAFETY: `raw` is the live context; the returned buffer is freed with the same context.
+        let data = unsafe {
+            rquickjs::qjs::JS_WriteObject(raw, &mut size, value.as_raw(), rquickjs::qjs::JS_WRITE_OBJ_SAB as i32)
+        };
+        if data.is_null() {
+            return Err(rquickjs::Error::Exception);
+        }
+        // SAFETY: JS_WriteObject returned `size` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+        unsafe { rquickjs::qjs::js_free(raw, data.cast()) };
+        Ok(bytes)
+    }
+    fn deserialize<'js>(ctx: &Ctx<'js>, bytes: &[u8]) -> rquickjs::Result<Value<'js>> {
+        let raw = ctx.as_raw().as_ptr();
+        // SAFETY: `bytes` was produced by `serialize`; ownership of the block reference moves to the new object.
+        let value = unsafe {
+            rquickjs::qjs::JS_ReadObject(raw, bytes.as_ptr(), bytes.len() as _, rquickjs::qjs::JS_READ_OBJ_SAB as i32)
+        };
+        if unsafe { rquickjs::qjs::JS_IsException(value) } {
+            return Err(rquickjs::Error::Exception);
+        }
+        Ok(unsafe { Value::from_raw(ctx.clone(), value) })
+    }
+    fn sab_clone<'js>(ctx: Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Value<'js>> {
+        let bytes = serialize(&ctx, &value)?;
+        deserialize(&ctx, &bytes)
+    }
+    fn sab_serialize<'js>(ctx: Ctx<'js>, value: Value<'js>) -> rquickjs::Result<String> {
+        let bytes = serialize(&ctx, &value)?;
+        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+    fn sab_deserialize<'js>(ctx: Ctx<'js>, hex: String) -> rquickjs::Result<Value<'js>> {
+        let bytes = (0..hex.len() / 2)
+            .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|_| rquickjs::Error::new_from_js_message("string", "SharedArrayBuffer", "invalid serialized SharedArrayBuffer"))?;
+        deserialize(&ctx, &bytes)
+    }
+    let globals = ctx.globals();
+    globals.set("__thaw_sab_clone", Function::new(ctx.clone(), sab_clone).expect("failed to create __thaw_sab_clone"))
+        .expect("failed to install __thaw_sab_clone");
+    globals.set("__thaw_sab_serialize", Function::new(ctx.clone(), sab_serialize).expect("failed to create __thaw_sab_serialize"))
+        .expect("failed to install __thaw_sab_serialize");
+    globals.set("__thaw_sab_deserialize", Function::new(ctx.clone(), sab_deserialize).expect("failed to create __thaw_sab_deserialize"))
+        .expect("failed to install __thaw_sab_deserialize");
 }

@@ -1,6 +1,8 @@
-use std::ffi::{CStr, CString};
+#[cfg(test)]
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
+use thaw_arena::NativeStr as CStr;
 
 fn string_from_ptr(value: *const c_char) -> String {
     if value.is_null() {
@@ -25,7 +27,7 @@ pub extern "C" fn readFileSync(path: *const c_char, encoding: *const c_char) -> 
     } else {
         String::new()
     };
-    CString::new(value).unwrap_or_default().into_raw()
+    thaw_arena::owned_string(value)
 }
 
 #[no_mangle]

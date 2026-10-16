@@ -27,12 +27,26 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
         &source,
         "import { Database } from \"sqlite3\";\n\
              function main(): void {\n\
+                 console.error(\"sqlite-stage:before-constructor\");\n\
                  const database: JsValue = new Database(\":memory:\");\n\
+                 console.error(\"sqlite-stage:constructor-returned\");\n\
+                 console.error(\"sqlite-stage:exec-issued\");\n\
                  database.exec(\"CREATE TABLE values_table (value INTEGER)\");\n\
+                 console.error(\"sqlite-stage:run-issued\");\n\
                  database.run(\"INSERT INTO values_table(value) VALUES (?)\", [42], (error: Json): void => {\n\
+                     console.error(\"sqlite-stage:run-entered\");\n\
+                     if (error !== null) { console.error(\"sqlite-stage:run-error\", error); throw error; }\n\
+                     console.error(\"sqlite-stage:all-issued\");\n\
                      database.all(\"SELECT value FROM values_table\", (error: Json, rows: Json): void => {\n\
+                         console.error(\"sqlite-stage:all-entered\");\n\
+                         if (error !== null) { console.error(\"sqlite-stage:all-error\", error); throw error; }\n\
                          console.log(JSON.stringify(rows));\n\
-                         database.close((): void => { console.log(\"sqlite3-closed\"); });\n\
+                         console.error(\"sqlite-stage:close-issued\");\n\
+                         database.close((error: Json): void => {\n\
+                             console.error(\"sqlite-stage:close-entered\");\n\
+                             if (error !== null) { console.error(\"sqlite-stage:close-error\", error); throw error; }\n\
+                             console.log(\"sqlite3-closed\");\n\
+                         });\n\
                      });\n\
                  });\n\
                  console.log(\"sqlite3-constructed\");\n\
@@ -50,7 +64,8 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     )
     .unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let result = Command::new(&output).output().unwrap();
+    let result = command_output_with_timeout(&mut Command::new(&output), Duration::from_secs(60))
+        .unwrap_or_else(|error| panic!("sqlite3 app failed or timed out: {error}"));
     assert!(
         result.status.success(),
         "{}",
@@ -526,4 +541,3 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     assert!(exited, "watcher process did not exit after unsubscribe");
     let _ = std::fs::remove_dir_all(dir);
 }
-

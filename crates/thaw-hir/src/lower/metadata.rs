@@ -208,7 +208,7 @@ fn discriminant_literal(ty: &TsType, generic: &GenericInterfaces<'_>) -> Option<
         return None;
     };
     match &literal.lit {
-        TsLit::Str(value) => Some(HirLit::Str(value.value.to_string_lossy().into_owned())),
+        TsLit::Str(value) => Some(hir_string_literal_from_wtf8(value.value.as_wtf8().as_bytes())),
         TsLit::Number(value) => Some(HirLit::F64(value.value)),
         TsLit::Bool(value) => Some(HirLit::Bool(value.value)),
         _ => None,
@@ -745,15 +745,14 @@ fn function_expression_as_arrow(
     expression: &swc_ecma_ast::FnExpr,
 ) -> Result<swc_ecma_ast::ArrowExpr, String> {
     let function = expression.function.as_ref();
-    if function.this_param.is_some()
-        || !function.decorators.is_empty()
+    if !function.decorators.is_empty()
         || function
             .params
             .iter()
             .any(|parameter| !parameter.decorators.is_empty())
     {
         return Err(
-            "function expressions with this parameters or decorators are not supported".into(),
+            "function expressions with decorators are not supported".into(),
         );
     }
     let body = function

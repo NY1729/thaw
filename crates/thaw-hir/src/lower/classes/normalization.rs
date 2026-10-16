@@ -27,6 +27,48 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
                     });
                 }
             }
+            // `const Outer = class Inner {}` is observed as `Outer.name === "Inner"`;
+            // the declaration form carries the binding's name, so keep the
+            // expression's own name as an explicit static `name` member.
+            if let Some(internal) = &expression.ident {
+                let has_name = class.body.iter().any(|member| {
+                    matches!(member, swc_ecma_ast::ClassMember::ClassProp(property)
+                        if property.is_static
+                            && matches!(&property.key, swc_ecma_ast::PropName::Ident(key) if key.sym == *"name"))
+                });
+                if internal.sym != binding.id.sym && !has_name {
+                    class.body.push(swc_ecma_ast::ClassMember::ClassProp(swc_ecma_ast::ClassProp {
+                        span: swc_common::DUMMY_SP,
+                        key: swc_ecma_ast::PropName::Ident(swc_ecma_ast::IdentName::new(
+                            "name".into(),
+                            swc_common::DUMMY_SP,
+                        )),
+                        value: Some(Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                            span: swc_common::DUMMY_SP,
+                            value: internal.sym.as_ref().into(),
+                            raw: None,
+                        })))),
+                        type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                            span: swc_common::DUMMY_SP,
+                            type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(
+                                swc_ecma_ast::TsKeywordType {
+                                    span: swc_common::DUMMY_SP,
+                                    kind: swc_ecma_ast::TsKeywordTypeKind::TsStringKeyword,
+                                },
+                            )),
+                        })),
+                        is_static: true,
+                        decorators: Vec::new(),
+                        accessibility: None,
+                        is_abstract: false,
+                        is_optional: false,
+                        is_override: false,
+                        readonly: false,
+                        declare: false,
+                        definite: false,
+                    }));
+                }
+            }
             body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(ClassDecl {
                 ident: binding.id.clone(),
                 declare: false,
@@ -221,7 +263,8 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
         }
     }
 
-    let normalize_class = |class: &mut swc_ecma_ast::Class| {
+    let normalize_class = |class: &mut swc_ecma_ast::Class, initialized: &HashMap<Symbol, String>| {
+        let mut uninitialized_key = None;
         for member in &mut class.body {
             let key = match member {
                 ClassMember::ClassProp(property) => Some(&mut property.key),
@@ -250,29 +293,86 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             // `invoke_class_to_primitive` finds it under the same
             // sentinel -- is safe and doesn't leak into that broader
             // pass.
+            let missing = RefCell::new(None);
             let Some(value) = static_class_member_name(&computed.expr, &|name| {
-                constants.get(name).cloned()
+                initialized.get(name).cloned().or_else(|| {
+                    let value = constants.get(name).cloned()?;
+                    if missing.borrow().is_none() {
+                        *missing.borrow_mut() = Some(name.to_string());
+                    }
+                    Some(value)
+                })
             })
             .or_else(|| well_known_symbol_from_expr(&computed.expr).map(well_known_symbol_key))
             else {
                 continue;
             };
+            if uninitialized_key.is_none() {
+                uninitialized_key = missing.into_inner();
+            }
             *key = PropName::Str(swc_ecma_ast::Str {
                 span,
                 value: value.into(),
                 raw: None,
             });
         }
+        if let Some(name) = uninitialized_key {
+            let span = class.span;
+            class.body.insert(0, ClassMember::StaticBlock(swc_ecma_ast::StaticBlock {
+                span,
+                body: swc_ecma_ast::BlockStmt {
+                    span,
+                    ctxt: Default::default(),
+                    stmts: vec![Stmt::Throw(swc_ecma_ast::ThrowStmt {
+                        span,
+                        arg: Box::new(Expr::Call(swc_ecma_ast::CallExpr {
+                            span,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("@@thaw_class_key_reference_error".into(), span)))),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                                    span,
+                                    value: format!("Cannot access '{name}' before initialization").into(),
+                                    raw: None,
+                                }))),
+                            }],
+                            type_args: None,
+                        })),
+                    })],
+                },
+            }));
+        }
     };
     let mut normalized = module.clone();
+    let mut initialized = HashMap::new();
     for item in &mut normalized.body {
+        let variable = match &*item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(variable))) => Some(variable.as_ref()),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                Decl::Var(variable) => Some(variable.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(variable) = variable {
+            if variable.kind == swc_ecma_ast::VarDeclKind::Const {
+                for declarator in &variable.decls {
+                    if let (Pat::Ident(binding), Some(value)) = (&declarator.name, declarator.init.as_deref()) {
+                        if let Some(value) = static_class_member_name(value, &|name| initialized.get(name).cloned()) {
+                            initialized.insert(binding.id.sym.to_string(), value);
+                        }
+                    }
+                }
+            }
+        }
         match item {
             ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
-                normalize_class(&mut declaration.class)
+                normalize_class(&mut declaration.class, &initialized)
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
                 if let Decl::Class(declaration) = &mut export.decl {
-                    normalize_class(&mut declaration.class);
+                    normalize_class(&mut declaration.class, &initialized);
                 }
             }
             _ => {}
@@ -292,7 +392,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             collector
                 .names
                 .into_iter()
-                .filter(|name| self.constants.contains_key(name))
+                .filter(|name| name == "Symbol" || self.constants.contains_key(name))
                 .collect()
         }
 
@@ -326,6 +426,19 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
         }
     }
     impl VisitMut for ComputedAccessNormalizer<'_> {
+        fn visit_mut_class_method(&mut self, method: &mut swc_ecma_ast::ClassMethod) {
+            // Class keys were normalized using declaration-time constants.
+            let key = method.key.clone();
+            method.visit_mut_children_with(self);
+            method.key = key;
+        }
+
+        fn visit_mut_class_prop(&mut self, property: &mut swc_ecma_ast::ClassProp) {
+            let key = property.key.clone();
+            property.visit_mut_children_with(self);
+            property.key = key;
+        }
+
         fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
             let shadowed = self.local_constant_shadows(function);
             self.shadowed.push(shadowed);
@@ -347,6 +460,12 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             };
             if self.expression_is_shadowed(&computed.expr) {
                 computed.visit_mut_children_with(self);
+                return;
+            }
+            if matches!(computed.expr.as_ref(), Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Symbol")
+                    && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "iterator"))
+            {
                 return;
             }
             let Some(value) = static_class_member_name(&computed.expr, &|name| {
@@ -371,6 +490,12 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 computed.visit_mut_children_with(self);
                 return;
             }
+            if matches!(computed.expr.as_ref(), Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Symbol")
+                    && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "iterator"))
+            {
+                return;
+            }
             let Some(value) = static_class_member_name(&computed.expr, &|name| {
                 self.constants.get(name).cloned()
             }) else {
@@ -392,16 +517,35 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
 }
 
 fn private_member_name(owner: &str, name: &str) -> Symbol {
-    format!("__thaw_private_{owner}_{name}")
+    PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow().get(owner)
+        .and_then(|fields| fields.get(name)).cloned())
+        .unwrap_or_else(|| format!("__thaw_private_{owner}_{name}"))
 }
 
 struct PrivateMemberNormalizer<'a> {
     owner: &'a str,
+    shadowed: Vec<HashSet<Symbol>>,
 }
 
 impl VisitMut for PrivateMemberNormalizer<'_> {
+    fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+        // Heritage is evaluated in the enclosing private environment.
+        let mut heritage = class.super_class.take();
+        if let Some(expression) = &mut heritage { expression.visit_mut_with(self); }
+        let names = class.body.iter().filter_map(|member| match member {
+            ClassMember::PrivateProp(property) => Some(property.key.name.to_string()),
+            ClassMember::PrivateMethod(method) => Some(method.key.name.to_string()),
+            _ => None,
+        }).collect();
+        self.shadowed.push(names);
+        class.visit_mut_children_with(self);
+        self.shadowed.pop();
+        class.super_class = heritage;
+    }
+
     fn visit_mut_expr(&mut self, expression: &mut Expr) {
         if let Expr::PrivateName(name) = expression {
+            if self.shadowed.iter().any(|scope| scope.contains(name.name.as_ref())) { return; }
             *expression = Expr::Lit(Lit::Str(swc_ecma_ast::Str {
                 span: name.span,
                 value: private_member_name(self.owner, name.name.as_ref()).into(),
@@ -414,6 +558,7 @@ impl VisitMut for PrivateMemberNormalizer<'_> {
 
     fn visit_mut_member_prop(&mut self, property: &mut MemberProp) {
         if let MemberProp::PrivateName(name) = property {
+            if self.shadowed.iter().any(|scope| scope.contains(name.name.as_ref())) { return; }
             *property = MemberProp::Ident(IdentName::new(
                 private_member_name(self.owner, name.name.as_ref()).into(),
                 name.span,
@@ -426,11 +571,47 @@ impl VisitMut for PrivateMemberNormalizer<'_> {
 
 fn normalize_private_class_members(module: &Module) -> Module {
     let mut module = module.clone();
+    // Reserve public names across the module before choosing internal slots:
+    // an inherited public field can also collide with a derived private slot.
+    let mut occupied = module.body.iter().filter_map(|item| match item {
+        ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => Some(declaration),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            Decl::Class(declaration) => Some(declaration),
+            _ => None,
+        },
+        _ => None,
+    }).flat_map(|declaration| declaration.class.body.iter().filter_map(|member| {
+        let key = match member {
+            ClassMember::ClassProp(property) => &property.key,
+            ClassMember::Method(method) => &method.key,
+            _ => return None,
+        };
+        class_property_name(key).ok()
+    })).collect::<HashSet<_>>();
     for item in &mut module.body {
-        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
-            continue;
+        let declaration = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => declaration,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &mut export.decl {
+                Decl::Class(declaration) => declaration,
+                _ => continue,
+            },
+            _ => continue,
         };
         let owner = declaration.ident.sym.to_string();
+        let mut slots = HashMap::new();
+        for member in &declaration.class.body {
+            let name = match member {
+                ClassMember::PrivateProp(property) => property.key.name.as_ref(),
+                ClassMember::PrivateMethod(method) => method.key.name.as_ref(),
+                _ => continue,
+            };
+            if slots.contains_key(name) { continue; }
+            let mut slot = format!("__thaw_private_{owner}_{name}");
+            while occupied.contains(&slot) { slot.push('_'); }
+            occupied.insert(slot.clone());
+            slots.insert(name.to_string(), slot);
+        }
+        PRIVATE_CLASS_SLOTS.with(|registry| { registry.borrow_mut().insert(owner.clone(), slots); });
         declaration.class.body = std::mem::take(&mut declaration.class.body)
             .into_iter()
             .map(|member| match member {
@@ -471,7 +652,7 @@ fn normalize_private_class_members(module: &Module) -> Module {
             .collect();
         declaration
             .class
-            .visit_mut_with(&mut PrivateMemberNormalizer { owner: &owner });
+            .visit_mut_children_with(&mut PrivateMemberNormalizer { owner: &owner, shadowed: Vec::new() });
     }
     module
 }

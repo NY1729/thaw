@@ -17,18 +17,28 @@ pub unsafe extern "C" fn thaw_string_split(
     if value.is_null() || separator.is_null() {
         return std::ptr::null_mut();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut parts: Vec<String> = if separator.is_empty() {
+    let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let separator = wtf8_decode_utf16(unsafe { wtf8_bytes(separator) });
+    let mut parts: Vec<Vec<u8>> = if separator.is_empty() {
         value
-            .encode_utf16()
-            .map(|unit| String::from_utf16_lossy(&[unit]))
+            .iter()
+            .map(|unit| wtf8_encode_utf16(&[*unit]))
             .collect()
     } else {
-        value
-            .split(separator.as_ref())
-            .map(str::to_string)
-            .collect()
+        let mut parts = Vec::new();
+        let mut start = 0;
+        let mut index = 0;
+        while index + separator.len() <= value.len() {
+            if value[index..index + separator.len()] == separator[..] {
+                parts.push(wtf8_encode_utf16(&value[start..index]));
+                index += separator.len();
+                start = index;
+            } else {
+                index += 1;
+            }
+        }
+        parts.push(wtf8_encode_utf16(&value[start..]));
+        parts
     };
     let limit = if limit == -1.0 {
         usize::MAX
@@ -46,7 +56,7 @@ pub unsafe extern "C" fn thaw_string_split(
         output.cast::<u64>().write(parts.len() as u64);
     }
     for (index, part) in parts.into_iter().enumerate() {
-        let Some(part) = arena_c_string(&part) else {
+        let Some(part) = arena_wtf8(&part) else {
             return std::ptr::null_mut();
         };
         unsafe {
@@ -70,8 +80,24 @@ pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
     if value.is_null() {
         return std::ptr::null_mut();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let characters = value.chars().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    // The string iterator yields one slot per code point: a valid surrogate
+    // pair becomes one astral character, a lone surrogate stays one unit.
+    let mut characters: Vec<Vec<u8>> = Vec::new();
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            characters.push(wtf8_encode_utf16(&[unit, units[index + 1]]));
+            index += 2;
+        } else {
+            characters.push(wtf8_encode_utf16(&[unit]));
+            index += 1;
+        }
+    }
     let output = thaw_arena::thaw_arena_alloc((characters.len() + 1) * 8, 8);
     if output.is_null() {
         return std::ptr::null_mut();
@@ -80,7 +106,7 @@ pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
         output.cast::<u64>().write(characters.len() as u64);
     }
     for (index, character) in characters.into_iter().enumerate() {
-        let Some(character) = arena_c_string(&character.to_string()) else {
+        let Some(character) = arena_wtf8(&character) else {
             return std::ptr::null_mut();
         };
         unsafe {
@@ -884,6 +910,42 @@ pub unsafe extern "C" fn thaw_array_presence_slice(
 }
 
 #[no_mangle]
+/// Returns the presence mask of a destructuring-rest copy: every entry is an
+/// own element of the new array, so a hole in the source becomes an explicit
+/// `undefined` (state 2) instead of staying a hole.
+///
+/// # Safety
+/// `presence` must be null for a dense array or point to a readable Thaw
+/// presence mask containing a `u64` length followed by one byte per entry.
+pub unsafe extern "C" fn thaw_array_presence_rest(
+    presence: *const u8,
+    array_length: usize,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    if presence.is_null() {
+        return std::ptr::null_mut();
+    }
+    let start = relative_array_index(start, array_length);
+    let end = relative_array_index(end, array_length);
+    let count = end.saturating_sub(start);
+    let output = thaw_arena::thaw_arena_alloc(8 + count, 1);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mask_length = unsafe { presence.cast::<u64>().read() as usize };
+    unsafe {
+        output.cast::<u64>().write(count as u64);
+        for index in 0..count {
+            let source = start + index;
+            let state = if source < mask_length { presence.add(8 + source).read() } else { 1 };
+            output.add(8 + index).write(if state == 0 { 2 } else { state });
+        }
+    }
+    output
+}
+
+#[no_mangle]
 /// Returns an arena-owned shallow concatenation of two native arrays.
 ///
 /// # Safety
@@ -1465,6 +1527,15 @@ unsafe fn native_array_slots(array: *mut u8) -> Option<&'static mut [u64]> {
     Some(unsafe { std::slice::from_raw_parts_mut(array.add(8).cast::<u64>(), length) })
 }
 
+unsafe fn native_string_sort_units(value: u64) -> Vec<u16> {
+    let pointer = value as usize as *const c_char;
+    if pointer.is_null() {
+        Vec::new()
+    } else {
+        wtf8_decode_utf16(unsafe { wtf8_bytes(pointer) })
+    }
+}
+
 #[no_mangle]
 /// # Safety
 /// `array` must point to a writable Thaw number array.
@@ -1511,18 +1582,7 @@ pub unsafe extern "C" fn thaw_string_array_sort(array: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     };
     slots.sort_by(|left, right| {
-        let string = |value: u64| {
-            let pointer = value as usize as *const c_char;
-            if pointer.is_null() {
-                Vec::new()
-            } else {
-                unsafe { CStr::from_ptr(pointer) }
-                    .to_string_lossy()
-                    .encode_utf16()
-                    .collect::<Vec<_>>()
-            }
-        };
-        string(*left).cmp(&string(*right))
+        unsafe { native_string_sort_units(*left) }.cmp(&unsafe { native_string_sort_units(*right) })
     });
     array
 }
@@ -1532,18 +1592,7 @@ unsafe fn thaw_string_array_sort_descending(array: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     };
     slots.sort_by(|left, right| {
-        let string = |value: u64| {
-            let pointer = value as usize as *const c_char;
-            if pointer.is_null() {
-                Vec::new()
-            } else {
-                unsafe { CStr::from_ptr(pointer) }
-                    .to_string_lossy()
-                    .encode_utf16()
-                    .collect::<Vec<_>>()
-            }
-        };
-        string(*right).cmp(&string(*left))
+        unsafe { native_string_sort_units(*right) }.cmp(&unsafe { native_string_sort_units(*left) })
     });
     array
 }
@@ -1701,19 +1750,19 @@ pub unsafe extern "C" fn thaw_number_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if !unsafe { array_index_present(presence, index) } {
             continue;
         }
         let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
-        result.push_str(&javascript_number_string(slot));
+        result.extend_from_slice(javascript_number_string(slot).as_bytes());
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1743,11 +1792,13 @@ pub unsafe extern "C" fn thaw_string_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    // WTF-8-preserving: concatenate raw bytes so a lone surrogate in an
+    // element round-trips (the display path lossily renders it, not `join`).
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result: Vec<u8> = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -1759,10 +1810,10 @@ pub unsafe extern "C" fn thaw_string_array_join(
                 .read_unaligned()
         };
         if !slot.is_null() {
-            result.push_str(&unsafe { CStr::from_ptr(slot) }.to_string_lossy());
+            result.extend_from_slice(unsafe { wtf8_bytes(slot) });
         }
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1792,19 +1843,19 @@ pub unsafe extern "C" fn thaw_bool_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if !unsafe { array_index_present(presence, index) } {
             continue;
         }
         let slot = unsafe { array.add(8 + index * 8).read() };
-        result.push_str(if slot == 0 { "false" } else { "true" });
+        result.extend_from_slice(if slot == 0 { &b"false"[..] } else { &b"true"[..] });
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1853,18 +1904,17 @@ pub unsafe extern "C" fn thaw_object_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let result = (0..length)
-        .map(|index| {
-            if unsafe { array_index_present(presence, index) } {
-                "[object Object]"
-            } else {
-                ""
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(&separator);
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
+    for index in 0..length {
+        if index != 0 {
+            result.extend_from_slice(separator);
+        }
+        if unsafe { array_index_present(presence, index) } {
+            result.extend_from_slice(b"[object Object]");
+        }
+    }
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1888,11 +1938,11 @@ pub unsafe extern "C" fn thaw_tagged_array_join(
         return std::ptr::null();
     }
     let tags = if kind == 5 { unsafe { CStr::from_ptr(tags) }.to_bytes() } else { &[] };
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result: Vec<u8> = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if kind == 4 || !unsafe { array_index_present(presence, index) } {
             continue;
@@ -1909,21 +1959,26 @@ pub unsafe extern "C" fn thaw_tagged_array_join(
             match kind { 0 => b'n', 1 => b's', 2 => b'b', 3 => b'o', _ => b'u' }
         };
         match value_kind {
-            b'n' => result.push_str(&javascript_number_string(unsafe {
-                payload.cast::<f64>().read_unaligned()
-            })),
+            b'n' => result.extend_from_slice(
+                javascript_number_string(unsafe { payload.cast::<f64>().read_unaligned() })
+                    .as_bytes(),
+            ),
             b's' => {
                 let string = unsafe { payload.cast::<*const c_char>().read_unaligned() };
                 if !string.is_null() {
-                    result.push_str(&unsafe { CStr::from_ptr(string) }.to_string_lossy());
+                    result.extend_from_slice(unsafe { wtf8_bytes(string) });
                 }
             }
-            b'b' => result.push_str(if unsafe { payload.read() } == 0 { "false" } else { "true" }),
-            b'o' => result.push_str("[object Object]"),
+            b'b' => result.extend_from_slice(if unsafe { payload.read() } == 0 {
+                b"false"
+            } else {
+                b"true"
+            }),
+            b'o' => result.extend_from_slice(b"[object Object]"),
             _ => {}
         }
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 fn array_search_start(length: usize, from_index: f64) -> usize {
@@ -1969,6 +2024,83 @@ unsafe fn array_index_present(presence: *const u8, index: usize) -> bool {
         || unsafe { presence.add(8 + index).read() == 1 }
 }
 
+fn canonical_array_property_index(key: &str) -> Option<usize> {
+    let index = key.parse::<u32>().ok()?;
+    (key == index.to_string()).then_some(index as usize)
+}
+
+#[no_mangle]
+/// Deletes an own native-array property without changing its length.
+/// Returns 0 for a non-configurable own property, 1 for success, and 2 when
+/// a dense-to-sparse mask allocation fails.
+///
+/// # Safety
+/// `handle` must point to a writable two-pointer native array handle, and
+/// `key` to a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_array_delete_property(
+    handle: *mut u8,
+    key: *const c_char,
+) -> u8 {
+    if handle.is_null() || key.is_null() {
+        return 0;
+    }
+    let Ok(key) = (unsafe { CStr::from_ptr(key) }).to_str() else {
+        return 1;
+    };
+    if key == "length" {
+        return 0;
+    }
+    let Some(index) = canonical_array_property_index(key) else {
+        return 1;
+    };
+    let array = unsafe { handle.cast::<*mut u8>().read() };
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return 0;
+    };
+    if index >= length {
+        return 1;
+    }
+    let presence_slot = unsafe { handle.add(8).cast::<*mut u8>() };
+    let mut presence = unsafe { presence_slot.read() };
+    if !unsafe { array_index_exists(presence, index) } {
+        return 1;
+    }
+    if thaw_object_state(handle, 1) {
+        return 0;
+    }
+    let mask_length = if presence.is_null() {
+        0
+    } else {
+        unsafe { presence.cast::<u64>().read() as usize }
+    };
+    if index >= mask_length {
+        // Both the dense-mask setter and the short-mask extender allocate
+        // `8 + length` bytes; check before either reaches its unchecked sum.
+        if length.checked_add(8).is_none() {
+            return 2;
+        }
+        if !presence.is_null() {
+            // A live index beyond an older mask defaults to present. Extend
+            // privately before writing state 0; a failed allocation leaves
+            // the handle's original mask and its holes untouched.
+            presence = unsafe {
+                thaw_array_presence_extend(
+                    presence, mask_length, length - mask_length, 0, std::ptr::null(),
+                )
+            };
+            if presence.is_null() {
+                return 2;
+            }
+        }
+    }
+    let updated = unsafe { thaw_array_presence_set_state(presence, length, index, 0) };
+    if updated.is_null() {
+        return 2;
+    }
+    unsafe { presence_slot.write(updated) };
+    1
+}
+
 #[no_mangle]
 /// # Safety
 /// `array` is a readable Thaw array, `presence` its mask or null, and `key` a C string.
@@ -2004,15 +2136,12 @@ pub unsafe extern "C" fn thaw_array_has_property(
     ) {
         return 1;
     }
-    let Ok(index) = key.parse::<u32>() else {
+    let Some(index) = canonical_array_property_index(key) else {
         return 0;
     };
-    if key != index.to_string()
-        || unsafe { native_array_length(array) }.is_none_or(|length| (index as usize) >= length)
-    {
+    if unsafe { native_array_length(array) }.is_none_or(|length| index >= length) {
         return 0;
     }
-    let index = index as usize;
     u8::from(unsafe { array_index_exists(presence, index) })
 }
 
@@ -2103,7 +2232,7 @@ pub unsafe extern "C" fn thaw_tagged_array_index_of(
                 let value = unsafe { payload.cast::<*const c_char>().read_unaligned() };
                 let expected = unsafe { needle.cast::<*const c_char>().read_unaligned() };
                 !value.is_null() && !expected.is_null()
-                    && unsafe { CStr::from_ptr(value).to_bytes() == CStr::from_ptr(expected).to_bytes() }
+                    && unsafe { thaw_string_compare(value, expected) == 0 }
             }
             2 => (unsafe { payload.read() } != 0) == (unsafe { needle.read() } != 0),
             3 => (unsafe { payload.cast::<*const u8>().read_unaligned() })
@@ -2207,7 +2336,6 @@ unsafe fn string_array_search(
     if needle.is_null() {
         return -1.0;
     }
-    let needle = unsafe { CStr::from_ptr(needle) }.to_bytes();
     for index in array_search_start(length, from_index)..length {
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -2218,7 +2346,7 @@ unsafe fn string_array_search(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { CStr::from_ptr(slot) }.to_bytes() == needle {
+        if !slot.is_null() && unsafe { thaw_string_compare(slot, needle) == 0 } {
             return index as f64;
         }
     }
@@ -2272,7 +2400,6 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
     let Some(start) = array_search_end(length, from_index) else {
         return -1.0;
     };
-    let needle = unsafe { CStr::from_ptr(needle) }.to_bytes();
     for index in (0..=start).rev() {
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -2283,7 +2410,7 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { CStr::from_ptr(slot) }.to_bytes() == needle {
+        if !slot.is_null() && unsafe { thaw_string_compare(slot, needle) == 0 } {
             return index as f64;
         }
     }
@@ -2532,6 +2659,7 @@ pub unsafe extern "C" fn thaw_object_array_last_index_of(
 unsafe extern "C" {
     pub fn thaw_json_strict_equal(a: *const u8, b: *const u8) -> u8;
     fn thaw_json_same_value_zero(a: *const u8, b: *const u8) -> u8;
+    fn thaw_json_is_undefined(value: *const u8) -> u8;
 }
 
 fn json_same_value_zero(a: *const u8, b: *const u8) -> bool {
@@ -2563,8 +2691,14 @@ unsafe fn any_array_search(
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return -1.0;
     };
+    let mut needle_is_undefined = None;
     for index in array_search_start(length, from_index)..length {
         if !unsafe { array_index_present(presence, index) } {
+            if (same_value_zero || unsafe { array_index_exists(presence, index) })
+                && *needle_is_undefined.get_or_insert_with(|| unsafe { thaw_json_is_undefined(needle) != 0 })
+            {
+                return index as f64;
+            }
             continue;
         }
         let slot = unsafe {
@@ -2624,8 +2758,14 @@ pub unsafe extern "C" fn thaw_any_array_last_index_of(
     let Some(start) = array_search_end(length, from_index) else {
         return -1.0;
     };
+    let mut needle_is_undefined = None;
     for index in (0..=start).rev() {
         if !unsafe { array_index_present(presence, index) } {
+            if unsafe { array_index_exists(presence, index) }
+                && *needle_is_undefined.get_or_insert_with(|| unsafe { thaw_json_is_undefined(needle) != 0 })
+            {
+                return index as f64;
+            }
             continue;
         }
         let slot = unsafe {
@@ -2670,6 +2810,120 @@ mod array_read_ptr_tests {
         for index in [100.0, -5.0, 1.5, f64::NAN, f64::INFINITY] {
             let ptr = unsafe { thaw_array_read_ptr(array, 8, index) };
             assert_eq!(unsafe { ptr.cast::<f64>().read() }, 0.0);
+        }
+    }
+
+    #[test]
+    fn delete_extends_a_shorter_live_presence_mask_before_marking_the_index_absent() {
+        let array = build_array(&[10.0, 20.0, 30.0, 40.0]);
+        let mask = thaw_arena::thaw_arena_alloc(10, 1);
+        let handle = thaw_arena::thaw_arena_alloc(16, 8);
+        unsafe {
+            mask.cast::<u64>().write(2);
+            mask.add(8).write(0);
+            mask.add(9).write(1);
+            handle.cast::<*mut u8>().write(array);
+            handle.add(8).cast::<*mut u8>().write(mask);
+            assert_eq!(thaw_array_delete_property(handle, c"3".as_ptr()), 1);
+            let updated = handle.add(8).cast::<*mut u8>().read();
+            assert_eq!(updated.cast::<u64>().read(), 4);
+            assert_eq!((0..4).map(|index| updated.add(8 + index).read()).collect::<Vec<_>>(), vec![0, 1, 1, 0]);
+            assert_eq!(array.cast::<u64>().read(), 4);
+            assert_eq!(thaw_array_has_property(array, updated, c"3".as_ptr(), 1), 0);
+            assert_eq!(thaw_array_has_property(array, updated, c"2".as_ptr(), 1), 1);
+        }
+    }
+
+    #[test]
+    fn string_array_search_compares_utf16_units() {
+        let canonical = arena_wtf8("😀".as_bytes()).unwrap().cast::<c_char>();
+        let split_pair = arena_wtf8(&[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]).unwrap().cast::<c_char>();
+        let different = arena_wtf8("😁".as_bytes()).unwrap().cast::<c_char>();
+        for (stored, needle) in [(canonical, split_pair), (split_pair, canonical)] {
+            let array = [1_u64, stored as usize as u64];
+            let tagged = [1_u64, 1, stored as usize as u64];
+            unsafe {
+                let array = array.as_ptr().cast::<u8>();
+                assert_eq!(thaw_string_array_index_of(array, std::ptr::null(), needle, 0.0), 0.0);
+                assert_eq!(thaw_string_array_includes(array, std::ptr::null(), needle, 0.0), 1);
+                assert_eq!(thaw_string_array_last_index_of(array, std::ptr::null(), needle, f64::INFINITY), 0.0);
+                assert_eq!(thaw_string_array_includes(array, std::ptr::null(), different, 0.0), 0);
+                for (reverse, includes) in [(0, 0), (0, 1), (1, 0)] {
+                    assert_eq!(thaw_tagged_array_index_of(tagged.as_ptr().cast(), std::ptr::null(),
+                        (&needle as *const *const c_char).cast(),
+                        if reverse == 0 { 0.0 } else { f64::INFINITY },
+                        reverse, includes, 1, 1, 0), 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn array_search_and_join_keep_registered_nul_and_wtf8_bytes() {
+        let x = arena_wtf8(b"a\0x").unwrap().cast::<c_char>();
+        let y = arena_wtf8(b"a\0y").unwrap().cast::<c_char>();
+        let z = arena_wtf8(b"a\0z").unwrap().cast::<c_char>();
+        let array = thaw_arena::thaw_arena_alloc(24, 8);
+        let tagged = thaw_arena::thaw_arena_alloc(40, 8);
+        let numbers = thaw_arena::thaw_arena_alloc(24, 8);
+        let bools = thaw_arena::thaw_arena_alloc(24, 8);
+        assert!(!array.is_null() && !tagged.is_null() && !numbers.is_null() && !bools.is_null());
+        unsafe {
+            array.cast::<u64>().write(2);
+            array.add(8).cast::<*const c_char>().write(x);
+            array.add(16).cast::<*const c_char>().write(y);
+            assert_eq!(thaw_string_array_index_of(array, std::ptr::null(), y, 0.0), 1.0);
+            assert_eq!(thaw_string_array_includes(array, std::ptr::null(), z, 0.0), 0);
+            assert_eq!(thaw_string_array_last_index_of(array, std::ptr::null(), x, f64::INFINITY), 0.0);
+            tagged.cast::<u64>().write(2);
+            tagged.add(8).write(1);
+            tagged.add(16).cast::<*const c_char>().write(x);
+            tagged.add(24).write(1);
+            tagged.add(32).cast::<*const c_char>().write(y);
+            assert_eq!(thaw_tagged_array_index_of(tagged, std::ptr::null(), (&y as *const *const c_char).cast(), 0.0, 0, 0, 1, 1, 0), 1.0);
+            assert_eq!(thaw_tagged_array_index_of(tagged, std::ptr::null(), (&z as *const *const c_char).cast(), 0.0, 0, 1, 1, 1, 0), -1.0);
+            array.add(8).cast::<*const c_char>().write(y);
+            array.add(16).cast::<*const c_char>().write(x);
+            let sorted = thaw_string_array_to_sorted(array);
+            assert!(!sorted.is_null());
+            assert_eq!(sorted.add(8).cast::<*const c_char>().read(), x);
+            assert_eq!(array.add(8).cast::<*const c_char>().read(), y);
+            assert_eq!(thaw_string_array_sort(array), array);
+            assert_eq!(array.add(8).cast::<*const c_char>().read(), x);
+            assert_eq!(thaw_jit_array_sort(5, array), array);
+            assert_eq!(array.add(8).cast::<*const c_char>().read(), y);
+            numbers.cast::<u64>().write(2);
+            numbers.add(8).cast::<f64>().write(1.0);
+            numbers.add(16).cast::<f64>().write(2.0);
+            bools.cast::<u64>().write(2);
+            bools.add(8).write(0);
+            bools.add(16).write(1);
+            let separator = arena_wtf8(&[0, 0xed, 0xa0, 0x80]).unwrap().cast::<c_char>();
+            assert_eq!(wtf8_bytes(thaw_number_array_join(numbers, std::ptr::null(), separator)), &[b'1', 0, 0xed, 0xa0, 0x80, b'2']);
+            assert_eq!(wtf8_bytes(thaw_bool_array_join(bools, std::ptr::null(), separator)), b"false\0\xed\xa0\x80true");
+            assert_eq!(wtf8_bytes(thaw_object_array_join(array, std::ptr::null(), separator)), b"[object Object]\0\xed\xa0\x80[object Object]");
+        }
+    }
+
+    #[test]
+    fn string_sort_and_to_sorted_compare_lone_surrogates_as_utf16_units() {
+        let replacement = arena_wtf8(&wtf8_encode_utf16(&[0xFFFD])).expect("replacement");
+        let lone_high = arena_wtf8(&wtf8_encode_utf16(&[0xD800])).expect("lone high surrogate");
+        let array = thaw_arena::thaw_arena_alloc(24, 8);
+        assert!(!array.is_null());
+        unsafe {
+            array.cast::<u64>().write(2);
+            array.add(8).cast::<u64>().write(replacement as usize as u64);
+            array.add(16).cast::<u64>().write(lone_high as usize as u64);
+            let copy = thaw_string_array_to_sorted(array);
+            assert!(!copy.is_null());
+            assert_eq!(copy.add(8).cast::<u64>().read(), lone_high as usize as u64);
+            assert_eq!(copy.add(16).cast::<u64>().read(), replacement as usize as u64);
+            assert_eq!(array.add(8).cast::<u64>().read(), replacement as usize as u64);
+            assert_eq!(thaw_string_array_sort(array), array);
+            assert_eq!(array.add(8).cast::<u64>().read(), lone_high as usize as u64);
+            assert_eq!(thaw_jit_array_sort(5, array), array);
+            assert_eq!(array.add(8).cast::<u64>().read(), replacement as usize as u64);
         }
     }
 

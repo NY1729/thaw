@@ -44,7 +44,7 @@ macro_rules! jit_callables {
         recursive_parameters: Vec<thaw_hir::HirType>,
         recursive_result: Option<JitKind>,
         loop_depth: usize,
-        loop_labels: Vec<(String, usize)>,
+        loop_labels: Vec<(String, usize, bool)>,
         /// Locals bound to a native `Set` (a string-keyed dictionary), so a
         /// `.size` read can lower to the dictionary length instead of a
         /// field lookup.
@@ -476,6 +476,48 @@ macro_rules! jit_callables {
             && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)
     }
 
+    /// A side-effect-free arithmetic/comparison expression over pure leaf values:
+    /// re-evaluating it at every use of the inlined parameter is harmless.
+    fn jit_pure_arithmetic(tokens: &[String]) -> bool {
+        !tokens.is_empty()
+            && tokens.iter().all(|token| {
+                jit_single_pure_value(std::slice::from_ref(token))
+                    || matches!(
+                        token.as_str(),
+                        "+" | "-" | "*" | "/" | "%" | "pow" | "rsub" | "rdiv" | "rrem" | "rpow"
+                            | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr" | "neg"
+                            | "<" | "<=" | ">" | ">=" | "==" | "!="
+                            // Math.* (everything but `random`).
+                            | "abs" | "asin" | "asinh" | "atan" | "atan2" | "atanh" | "cbrt"
+                            | "ceil" | "clz32" | "cos" | "cosh" | "exp" | "expm1" | "floor"
+                            | "fround" | "hypot" | "imul" | "log" | "log1p" | "log2" | "log10"
+                            | "min" | "max" | "round" | "sign" | "sin" | "sinh" | "sqrt"
+                            | "tan" | "tanh" | "trunc"
+                    )
+            })
+    }
+
+    fn jit_single_pure_value(tokens: &[String]) -> bool {
+        let [token] = tokens else {
+            return false;
+        };
+        if let Some(value) = token.strip_prefix('c') {
+            return value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+        }
+        if let Some(value) = token.strip_prefix('t') {
+            return value.len() % 2 == 0 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+        }
+        let local = [
+            "rn", "rb", "rs", "dn", "db", "ds", "en", "eb", "es",
+            "ln", "lb", "ls", "la", "ld", "a", "b", "s", "h",
+        ]
+        .iter()
+        .find_map(|prefix| token.strip_prefix(prefix));
+        local.is_some_and(|index| {
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }
+
     fn encode_numeric_map_operand(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
@@ -535,7 +577,7 @@ macro_rules! jit_callables {
         } else {
             return None;
         };
-        if encoded.is_empty()
+        if !jit_single_pure_value(&encoded)
             || jit_expression_kind(&encoded)?.0 != JitKind::Number
             || encoded
                 .iter()
@@ -1467,6 +1509,11 @@ macro_rules! jit_callables {
                 context,
                 &mut encoded,
             )?;
+            // Inlined parameter tokens may be referenced more than once or out of order.
+            // Only substitute values whose re-evaluation is harmless.
+            if !jit_pure_arithmetic(&encoded) {
+                return None;
+            }
             helper_locals.insert(parameter.id.sym.to_string(), encoded);
         }
         context.active.push(name.to_string());

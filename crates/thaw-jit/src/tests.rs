@@ -3,6 +3,88 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn dynamic_argument_requires_two_available_registers() {
+        for (depth, accepted) in [(6, true), (7, false)] {
+            let mut values = vec![NumericValue::Constant(1.0); depth];
+            values.push(NumericValue::DynamicArgument(0));
+            values.extend(std::iter::repeat_n(NumericValue::Operation(NumericOp::Add), depth));
+            assert_eq!(NumericProgram(values).machine_code().is_some(), accepted);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn string_well_formed_operations_handle_lone_surrogates() {
+        let check = CString::new("expr:s0,iswellformed:iswellformed").unwrap();
+        let repair = CString::new("expr:s0,towellformed:towellformed").unwrap();
+        for (units, expected) in [
+            (vec![0xd800, b'x' as u16, 0xdc00], "\u{fffd}x\u{fffd}"),
+            (vec![0xd800, 0xdc00, 0xd800], "\u{10000}\u{fffd}"),
+        ] {
+            let input = CString::new(thaw_arena::wtf8_encode_utf16(&units)).unwrap();
+            let argument = f64::from_bits(input.as_ptr() as usize as u64);
+            let checked = call(&check, &[argument]);
+            assert!(checked.error.is_null());
+            assert_eq!(checked.value, 0.0);
+            let result = call(&repair, &[argument]);
+            assert!(result.error.is_null());
+            let output = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), expected.as_bytes());
+            unsafe { libc::free(output.cast()) };
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn reversed_helper_calls_preserve_outer_values() {
+        for (operation, args, expected) in [
+            ("rpow", [19.0, 3.0, 2.0], 27.0),
+            ("rrem", [19.0, 3.0, 10.0], 20.0),
+        ] {
+            let symbol = CString::new(format!("expr:a0,a1,a2,{operation},+:outer-{operation}")).unwrap();
+            let result = call(&symbol, &args);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn nullish_tuple_reads_preserve_null_and_undefined() {
+        for kind in ["n", "b", "s"] {
+            let symbol = CString::new(format!("expr:a0,tupnull{kind}0:tuple-absence")).unwrap();
+            for (tag, expected) in [(1_u64, NULL_STATUS), (2_u64, ABSENT_STATUS)] {
+                let data = [1_u64, tag, 0];
+                let handle = data.as_ptr().cast::<u8>();
+                let argument = f64::from_bits((&handle as *const *const u8) as usize as u64);
+                let result = call(&symbol, &[argument]);
+                assert_eq!(result.error, expected);
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn dynamic_array_search_type_mismatch_is_not_an_exception() {
+        let data = [0_u64];
+        let handle = data.as_ptr().cast::<u8>();
+        let array = f64::from_bits((&handle as *const *const u8) as usize as u64);
+        for (array_tag, needle_tag) in [("tagrn", "tagbool"), ("tagrb", "tagnum"), ("tagrs", "tagnum")] {
+            for (operation, expected) in [("dynarrayincludes", 0.0), ("dynarrayindexof", -1.0), ("dynarraylastindexof", -1.0)] {
+                let symbol = CString::new(format!("expr:a0,{array_tag},a1,{needle_tag},a2,{operation}:mismatch")).unwrap();
+                let result = call(&symbol, &[array, 1.0, 0.0]);
+                assert!(result.error.is_null());
+                assert_eq!(result.value, expected);
+            }
+        }
+        let invalid = CString::new("expr:a0,tagnum,a1,tagbool,a2,dynarrayincludes:invalid-receiver").unwrap();
+        assert!(!call(&invalid, &[1.0, 1.0, 0.0]).error.is_null());
+        let null_array = CString::new("expr:a0,tagrn,a1,tagbool,a2,dynarrayincludes:null-array").unwrap();
+        assert!(!call(&null_array, &[f64::from_bits(0), 1.0, 0.0]).error.is_null());
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
@@ -265,6 +347,20 @@ mod tests {
             unsafe { out_value.write(20.0) };
             1
         }
+        /// Host dictionary queries: only operation 12 (create an empty dictionary) is provided,
+        /// enough for the dictionary-tag probes; everything else reports an unsupported query.
+        unsafe extern "C" fn dictionary_query(
+            operation: u8,
+            _object: *mut libc::c_void,
+            _key: *const c_char,
+            error: *mut *const c_char,
+        ) -> f64 {
+            if operation == 12 {
+                return f64::from_bits(unsafe { libc::malloc(16) } as usize as u64);
+            }
+            unsafe { error.write(c"invalid JIT symbol".as_ptr()) };
+            0.0
+        }
         unsafe extern "C" fn replace_array(
             operation: u8,
             array: *const u8,
@@ -322,7 +418,7 @@ mod tests {
                 Some(from_code_point),
                 None,
                 None,
-                None,
+                Some(dictionary_query),
                 None,
             )
         }
@@ -627,6 +723,20 @@ mod tests {
             assert_eq!(result.value, expected);
         }
 
+        for (name, clauses, cases) in [
+            ("default-first", format!("default,ln0,{ten},+,setl0,case,dup,{one},==,casebody,ln0,{twenty},+,setl0,switchbreak"), vec![(1.0, 20.0), (2.0, 30.0)]),
+            ("default-first-break", format!("default,ln0,{ten},+,setl0,switchbreak,case,dup,{one},==,casebody,ln0,{twenty},+,setl0,switchbreak"), vec![(1.0, 20.0), (2.0, 10.0)]),
+            ("default-middle", format!("case,dup,{one},==,casebody,ln0,{ten},+,setl0,default,ln0,{twenty},+,setl0,case,dup,{two},==,casebody,ln0,{forty},+,setl0,switchbreak"), vec![(1.0, 70.0), (2.0, 40.0), (3.0, 60.0)]),
+            ("default-last", format!("case,dup,{one},==,casebody,ln0,{ten},+,setl0,default,ln0,{twenty},+,setl0"), vec![(1.0, 30.0), (2.0, 20.0)]),
+        ] {
+            let symbol = CString::new(format!("expr:{zero},a0,switch,{clauses},switchend,ln0,nip:{name}")).unwrap();
+            for (value, expected) in cases {
+                let result = call(&symbol, &[value]);
+                assert!(result.error.is_null());
+                assert_eq!(result.value, expected, "{name}: {value}");
+            }
+        }
+
         let optional_present = CString::new(format!(
             "expr:{one},if,{one},else,absentn,end:optional-present"
         ))
@@ -830,21 +940,25 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
-        for (index, expected) in [(0.0, "a"), (1.0, "�"), (-1.0, "")] {
+        // `charAt` returns the single UTF-16 unit; a lone surrogate stays WTF-8 (ED A0 BD for
+        // U+D83D) instead of being replaced, so compare raw bytes rather than valid UTF-8.
+        for (index, expected) in [
+            (0.0, &b"a"[..]),
+            (1.0, &[0xED, 0xA0, 0xBD][..]),
+            (-1.0, &b""[..]),
+        ] {
             let character = CString::new("expr:s0,a1,charat:charat").unwrap();
             let result = call(&character, &[text_argument, index]);
             let result = result.value.to_bits() as usize as *mut c_char;
-            assert_eq!(
-                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
-                expected
-            );
+            assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), expected);
             unsafe { libc::free(result.cast()) };
         }
         let at = CString::new("expr:s0,a1,at:at").unwrap();
         let result = call(&at, &[text_argument, -1.0]);
         assert!(result.error.is_null());
         let value = result.value.to_bits() as usize as *mut c_char;
-        assert_eq!(unsafe { CStr::from_ptr(value) }.to_str().unwrap(), "�");
+        // `at(-1)` is the last UTF-16 unit, a lone low surrogate: WTF-8 ED B8 80 (U+DE00).
+        assert_eq!(unsafe { CStr::from_ptr(value) }.to_bytes(), &[0xED, 0xB8, 0x80]);
         unsafe { libc::free(value.cast()) };
         assert_eq!(call(&at, &[text_argument, 3.0]).error, ABSENT_STATUS);
         let code_point = CString::new("expr:s0,a1,codepointat:codepointat").unwrap();
@@ -898,6 +1012,12 @@ mod tests {
             ("includes2", "😀", 1.0, 1.0),
             ("indexof2", "😀", 1.0, 5.0),
             ("lastindexof2", "😀", 4.0, 0.0),
+            ("lastindexof2", "😀", f64::NAN, 5.0),
+            ("lastindexof2", "", f64::NAN, 7.0),
+            ("lastindexof2", "😀", f64::NEG_INFINITY, 0.0),
+            ("indexof2", "😀", f64::NAN, 0.0),
+            ("startswith2", "😀", f64::NAN, 1.0),
+            ("endswith2", "😀", f64::NAN, 0.0),
             ("indexof2", "", f64::INFINITY, 7.0),
         ] {
             let search = CString::new(search).unwrap();
@@ -979,6 +1099,34 @@ mod tests {
         )
         .error
         .is_null());
+        for count in [-0.5, -0.0, 0.0, f64::NAN] {
+            let output = call(&repeat, &[f64::from_bits(repeated.as_ptr() as usize as u64), count]);
+            assert!(output.error.is_null());
+            let output = output.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), b"");
+            unsafe { libc::free(output.cast()) };
+        }
+        for count in [-1.5, f64::NEG_INFINITY, f64::INFINITY] {
+            assert!(!call(&repeat, &[f64::from_bits(repeated.as_ptr() as usize as u64), count]).error.is_null());
+        }
+        let lone = CString::new(vec![0xed, 0xa0, 0x80]).unwrap();
+        let output = call(&repeat, &[f64::from_bits(lone.as_ptr() as usize as u64), 2.0]);
+        assert!(output.error.is_null());
+        let output = output.value.to_bits() as usize as *mut c_char;
+        assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), &[0xed, 0xa0, 0x80, 0xed, 0xa0, 0x80]);
+        unsafe { libc::free(output.cast()) };
+        let raw_case = CString::new(vec![0xed, 0xa0, 0x80, b'A', 0xc3, 0x9f, 0xed, 0xb0, 0x80]).unwrap();
+        for (operation, expected) in [
+            ("tolowercase", &[0xed, 0xa0, 0x80, b'a', 0xc3, 0x9f, 0xed, 0xb0, 0x80][..]),
+            ("touppercase", &[0xed, 0xa0, 0x80, b'A', b'S', b'S', 0xed, 0xb0, 0x80][..]),
+        ] {
+            let symbol = CString::new(format!("expr:s0,{operation}:{operation}")).unwrap();
+            let result = call(&symbol, &[f64::from_bits(raw_case.as_ptr() as usize as u64)]);
+            assert!(result.error.is_null());
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), expected);
+            unsafe { libc::free(result.cast()) };
+        }
         let sliced = CString::new("😀abcd").unwrap();
         for (operation, start, expected) in [
             ("slice", -2.0, "cd"),
@@ -1016,6 +1164,18 @@ mod tests {
             );
             unsafe { libc::free(result.cast()) };
         }
+        // UTF-16 ranges may split a surrogate pair and must preserve lone units.
+        for (operation, start, end, expected) in [
+            ("slice2", 0.0, 1.0, &[0xed, 0xa0, 0xbd][..]),
+            ("substring2", 1.0, 2.0, &[0xed, 0xb8, 0x80][..]),
+        ] {
+            let range = CString::new(format!("expr:s0,a1,a2,{operation}:{operation}")).unwrap();
+            let result = call(&range, &[f64::from_bits(sliced.as_ptr() as usize as u64), start, end]);
+            assert!(result.error.is_null());
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), expected);
+            unsafe { libc::free(result.cast()) };
+        }
         let padded = CString::new("😀").unwrap();
         let padding = CString::new("ab").unwrap();
         for (operation, expected) in [("padstart", "a😀"), ("padend", "😀a")] {
@@ -1040,6 +1200,8 @@ mod tests {
             ("replace", "a", "x", "xba"),
             ("replaceall", "a", "x", "xbx"),
             ("replaceall", "", "-", "-a-b-a-"),
+            ("replace", "b", "$$:$&:$`:$'", "a$:b:a:aa"),
+            ("replaceall", "a", "$&$&", "aabaa"),
         ] {
             let search = CString::new(search).unwrap();
             let replacement = CString::new(replacement).unwrap();
@@ -1164,7 +1326,7 @@ mod tests {
             &[f64::from_bits(split_value.as_ptr() as usize as u64)],
         );
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(
             unsafe { CStr::from_ptr(output.add(8).cast::<*const c_char>().read()) }.to_bytes(),
@@ -1178,7 +1340,7 @@ mod tests {
             &[f64::from_bits(emoji.as_ptr() as usize as u64)],
         );
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(
             unsafe { CStr::from_ptr(output.add(8).cast::<*const c_char>().read()) }.to_bytes(),
@@ -1685,20 +1847,20 @@ mod tests {
             CString::new("expr:rn0,c3ff0000000000000,c4058c00000000000,rnwith:with").unwrap();
         let result = call(&replaced, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 99.0);
         unsafe { libc::free(output.cast()) };
         let sorted = CString::new("expr:rn0,rnsorted:sorted").unwrap();
         let result = call(&sorted, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 10.0);
         unsafe { libc::free(output.cast()) };
         let reverse = CString::new("expr:rn0,arrayreversed:reverse").unwrap();
         let result = call(&reverse, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 30.0);
         unsafe { libc::free(output.cast()) };
@@ -1706,7 +1868,7 @@ mod tests {
             CString::new("expr:rn0,c3ff0000000000000,c4000000000000000,arrayslice:slice").unwrap();
         let result = call(&slice, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
         unsafe { libc::free(output.cast()) };
@@ -1716,7 +1878,7 @@ mod tests {
         .unwrap();
         let result = call(&literal, &[]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 1.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 2.0);

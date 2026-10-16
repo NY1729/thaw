@@ -18,7 +18,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let try_guard = format!("__thaw_try_{}", *next_guard);
         let catch_guard = format!("__thaw_catch_{}", *next_guard);
         *next_guard += 1;
-        Self::push_async_catch_locals(extra_locals, catch_name);
+        self.push_async_catch_locals(extra_locals, catch_name);
 
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
@@ -45,6 +45,7 @@ impl<'ctx> HirCompiler<'ctx> {
             catch_guard: catch_guard.clone(),
             catch_binding: catch_name.to_string(),
             disable_guards: Vec::new(),
+            parent: enclosing_handler.clone().map(Box::new),
         };
         for stmt in try_body {
             if let HirStmt::Try(nested_try, nested_name, nested_catch, _) = stmt {
@@ -65,7 +66,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 continue;
             }
             if let HirStmt::Throw(error) = stmt {
-                let mut caught = Self::async_catch_assignments(catch_name, error.clone());
+                let mut caught = self.async_catch_assignments(catch_name, error.clone());
                 caught.extend([
                     HirStmt::Expr(HirExpr::Assign(
                         try_guard.clone(),
@@ -97,9 +98,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 next_temporary,
                 next_guard,
             )?;
-            for segment in &mut segments[first_new..] {
-                if segment.rejection_handler.is_none() {
-                    segment.rejection_handler = Some(handler.clone());
+            if !matches!(stmt, HirStmt::Finally(..)) {
+                for segment in &mut segments[first_new..] {
+                    if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                        segment.rejection_handler = Some(handler.clone());
+                    }
                 }
             }
         }
@@ -151,10 +154,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     next_guard,
                 )?;
             }
-            if let Some(outer) = &catch_enclosing {
-                for segment in &mut segments[first_new..] {
-                    if segment.rejection_handler.is_none() {
-                        segment.rejection_handler = Some(outer.clone());
+            if !matches!(stmt, HirStmt::Finally(..)) {
+                if let Some(outer) = &catch_enclosing {
+                    for segment in &mut segments[first_new..] {
+                        if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                            segment.rejection_handler = Some(outer.clone());
+                        }
                     }
                 }
             }

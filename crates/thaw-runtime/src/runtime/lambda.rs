@@ -13,7 +13,6 @@ impl Drop for InvocationArenaReset {
         // registered would let a timer or fd event fire during a later
         // invocation and resume a pointer into since-reused memory.
         purge_pending_async_state();
-        clear_object_states();
         thaw_arena::thaw_arena_reset();
     }
 }
@@ -28,10 +27,59 @@ pub extern "C" fn thaw_runtime_run(handler: HandlerFn, error_slot: HandlerErrorS
         "AWS_LAMBDA_RUNTIME_API is not set -- is this running inside a Lambda execution environment?",
     );
 
+    let mut consecutive_failures = 0u32;
     loop {
-        if let Err(err) = handle_one_invocation(&runtime_api, handler, error_slot) {
-            eprintln!("thaw-runtime: {err}");
+        match handle_one_invocation(&runtime_api, handler, error_slot) {
+            Ok(()) => consecutive_failures = 0,
+            Err(err) => {
+                eprintln!("thaw-runtime: {err}");
+                consecutive_failures += 1;
+                match failure_backoff(consecutive_failures) {
+                    Some(delay) => std::thread::sleep(delay),
+                    None => {
+                        // An unreachable Runtime API will not recover by
+                        // retrying forever; like the managed runtimes, exit
+                        // non-zero so the environment is replaced.
+                        eprintln!(
+                            "thaw-runtime: giving up after {consecutive_failures} consecutive failures"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Maximum number of consecutive invocation-loop failures before the runtime exits.
+const MAX_CONSECUTIVE_FAILURES: u32 = 20;
+
+/// Delay before retrying after the `consecutive`-th failure in a row (25 ms doubling to
+/// 500 ms, about 8 s in total), or `None` once the runtime should give up. A short bounded
+/// retry still covers a Runtime API that is not listening yet at process start.
+fn failure_backoff(consecutive: u32) -> Option<std::time::Duration> {
+    if consecutive >= MAX_CONSECUTIVE_FAILURES {
+        return None;
+    }
+    let millis = (25u64 << (consecutive - 1).min(5)).min(500);
+    Some(std::time::Duration::from_millis(millis))
+}
+
+#[cfg(test)]
+mod failure_backoff_tests {
+    use super::{failure_backoff, MAX_CONSECUTIVE_FAILURES};
+    use std::time::Duration;
+
+    #[test]
+    fn retries_back_off_then_give_up() {
+        assert_eq!(failure_backoff(1), Some(Duration::from_millis(25)));
+        assert_eq!(failure_backoff(2), Some(Duration::from_millis(50)));
+        assert_eq!(failure_backoff(5), Some(Duration::from_millis(400)));
+        assert_eq!(failure_backoff(6), Some(Duration::from_millis(500)));
+        assert_eq!(failure_backoff(MAX_CONSECUTIVE_FAILURES - 1), Some(Duration::from_millis(500)));
+        assert_eq!(failure_backoff(MAX_CONSECUTIVE_FAILURES), None);
+        let total: Duration = (1..MAX_CONSECUTIVE_FAILURES).filter_map(failure_backoff).sum();
+        assert!(total < Duration::from_secs(10), "bounded total delay: {total:?}");
     }
 }
 
@@ -52,6 +100,17 @@ fn handle_one_invocation(
         .header("lambda-runtime-aws-request-id")
         .ok_or("response from .../invocation/next is missing the request id header")?
         .to_string();
+
+    // The Lambda Runtime API supplies the X-Ray parent and sampling decision
+    // per invocation. A warm environment must not retain the previous trace
+    // when the next response has no trace header.
+    match next.header("lambda-runtime-trace-id") {
+        Some(trace_id) if trace_id.contains('\0') => {
+            return Err("response from .../invocation/next has an invalid trace id header".into());
+        }
+        Some(trace_id) => std::env::set_var("_X_AMZN_TRACE_ID", trace_id),
+        None => std::env::remove_var("_X_AMZN_TRACE_ID"),
+    }
 
     // `Lambda-Runtime-Deadline-Ms` is an absolute epoch timestamp; convert it
     // to a countdown so the event-loop drivers in lib.rs only need a
@@ -84,8 +143,8 @@ fn handle_one_invocation(
             )
         } else {
             let raw = unsafe { CStr::from_ptr(*error_slot) }.to_string_lossy();
-            let (name, message) = split_error_tag(&raw);
-            (name.to_string(), message.to_string())
+            let (_, message) = split_error_tag(&raw);
+            (resolved_error_name(&raw), message.to_string())
         };
         let error_path = format!("/2018-06-01/runtime/invocation/{request_id}/error");
         let body = format!(
@@ -174,11 +233,10 @@ fn http_request(
     stream
         .read_to_end(&mut raw)
         .map_err(|e| format!("reading response: {e}"))?;
-    let raw = String::from_utf8_lossy(&raw);
-
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
+    let header_end = find_bytes(&raw, b"\r\n\r\n")
         .ok_or("malformed HTTP response (no header/body separator)")?;
+    let head = String::from_utf8_lossy(&raw[..header_end]);
+    let body = &raw[header_end + 4..];
 
     let mut lines = head.lines();
     let status_line = lines.next().ok_or("empty HTTP response")?;
@@ -188,15 +246,27 @@ fn http_request(
         .and_then(|s| s.parse::<u32>().ok())
         .ok_or_else(|| format!("malformed status line: {status_line}"))?;
 
-    let headers = lines
+    let headers: Vec<(String, String)> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect();
 
+    let chunked = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    });
+    let body = if chunked {
+        decode_chunked(body)?.ok_or("incomplete chunked HTTP response")?
+    } else {
+        body.to_vec()
+    };
+
     let response = HttpResponse {
         status,
         headers,
-        body: body.to_string(),
+        body: String::from_utf8_lossy(&body).into_owned(),
     };
 
     if response.status >= 400 {

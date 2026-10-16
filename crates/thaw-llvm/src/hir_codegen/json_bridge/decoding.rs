@@ -7,6 +7,84 @@ impl<'ctx> HirCompiler<'ctx> {
         let HirType::Object(fields) = ty else {
             return Err("dynamic result requires an object type".to_string());
         };
+        // Date is represented across the JSON bridge by its authenticated
+        // runtime identity and timestamp, not by enumerable JS properties.
+        // Decode it through the Date helper before allocating the native
+        // result so a host-side conversion error cannot leave arena garbage.
+        if matches!(fields.as_slice(),
+            [(marker, HirType::Bool), (timestamp, HirType::F64)]
+                if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp")
+        {
+            let timestamp = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_date_timestamp").unwrap(),
+                    &[json.into()],
+                    "decoded_date_timestamp",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_date_timestamp returned no value")?
+                .into_float_value();
+            self.compile_check_json_host_error(json, None)?;
+
+            let object = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_arena_alloc").unwrap(),
+                    &[
+                        self.context
+                            .i64_type()
+                            .const_int(object_storage_bytes(fields)?, false)
+                            .into(),
+                        self.context.i64_type().const_int(8, false).into(),
+                    ],
+                    "dynamic_result_date_object",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_pointer_value();
+            let values: [BasicValueEnum<'ctx>; 2] = [
+                self.context.bool_type().const_int(1, false).into(),
+                timestamp.into(),
+            ];
+            for (index, value) in values.into_iter().enumerate() {
+                let offset = self
+                    .context
+                    .i64_type()
+                    .const_int(object_field_offset(fields, index)?, false);
+                let pointer = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            object,
+                            &[offset],
+                            "decoded_date_field",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                self.builder
+                    .build_store(pointer, value)
+                    .map_err(|error| error.to_string())?;
+            }
+            let marker = self
+                .builder
+                .build_global_string_ptr(&fields[0].0, "decoded_date_identity")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_object_set_class_identity")
+                        .unwrap(),
+                    &[object.into(), marker.as_pointer_value().into()],
+                    "register_decoded_date_identity",
+                )
+                .map_err(|error| error.to_string())?;
+            return Ok(object.into());
+        }
         let object = self
             .builder
             .build_call(
@@ -14,7 +92,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     self.context
                         .i64_type()
-                        .const_int(object_storage_bytes(fields), false)
+                        .const_int(object_storage_bytes(fields)?, false)
                         .into(),
                     self.context.i64_type().const_int(8, false).into(),
                 ],
@@ -41,6 +119,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
+            self.compile_check_json_host_error(field_json, Some("thaw_json_destroy"))?;
             let field = match field_ty {
                 HirType::Optional(payload) => self.compile_json_to_optional_field(
                     json,
@@ -64,7 +143,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let offset = self
                 .context
                 .i64_type()
-                .const_int(object_field_offset(fields, index), false);
+                .const_int(object_field_offset(fields, index)?, false);
             let pointer = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "result_field")
@@ -73,7 +152,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(pointer, field)
                 .map_err(|error| error.to_string())?;
-            self.compile_destroy_json_if_native_scalar(field_json, field_ty)?;
+            self.compile_destroy_decoded_owned_json(field_json, field_ty)?;
         }
         Ok(object.into())
     }
@@ -125,7 +204,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
             HirType::Bool => self.compile_json_as_bool_value(json),
-            HirType::Json | HirType::Dictionary(_) | HirType::Undefined | HirType::Null => Ok(json),
+            HirType::Json | HirType::Dictionary(_) => Ok(json),
+            HirType::Null => Ok(self.context.bool_type().const_int(1, false).into()),
+            HirType::Undefined => Ok(self.context.bool_type().const_zero().into()),
             HirType::Optional(payload) => {
                 let absent = self.compile_json_is_napi_undefined(json)?;
                 let present = self
@@ -138,6 +219,13 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(json, ty)
             }
+            // A `Union`-typed object field (or callback argument) decodes by
+            // runtime `typeof` discrimination -- the same
+            // `compile_json_to_union_result` `compile_json_to_native`'s own
+            // `Union` arm uses. Without this, an object-shaped JS value's
+            // union field failed with "unsupported dynamic result value
+            // Union(...)".
+            HirType::Union(elements) => self.compile_json_to_union_result(json, elements),
             // A `JsValue`-typed native-callback parameter (e.g. zod's
             // `.superRefine((val, ctx: JsValue) => { ctx.addIssue(...); })`
             // -- `ctx`, a live object with methods, has no JSON
@@ -169,24 +257,54 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::CallableFunction(params, _, None, ret) => {
                 self.compile_js_callback_from_json(json, params, ret)
             }
+            // A rest callable's physical ABI is its fixed prefix plus one packed `Array` of the
+            // rest element; the adapter spreads that array back into individual JS arguments.
+            HirType::CallableFunction(params, _, Some(rest), ret) => {
+                let mut physical = params.clone();
+                physical.push(HirType::Array(rest.clone()));
+                self.compile_js_callback_from_json_spreading(json, &physical, ret, true)
+            }
+            // A native Promise resolver accepts `Promise<T> | undefined` (`Optional(Promise)`):
+            // `setTimeout(resolve, 5)` calls it with no argument and never reaches this arm.
+            // A JS promise handed to it has no native adoption path, so it is a TypeError.
+            HirType::Promise(_) => {
+                self.compile_throw_type_error("a JavaScript Promise cannot be adopted by a native Promise resolver")?;
+                let function = self.current_function();
+                let unreachable = self.context.append_basic_block(function, "promise_adoption_unreachable");
+                self.builder.position_at_end(unreachable);
+                self.compile_zero_value(ty)
+            }
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }
     }
 
-    fn compile_destroy_json_if_native_scalar(
+    /// A decoded Json/Dictionary field transfers its owned Box into native
+    /// storage. Other fields have detached storage; tagged Json payloads keep
+    /// the Box only on a present branch. The parent input is independent.
+    fn compile_destroy_decoded_owned_json(
         &mut self,
         json: BasicValueEnum<'ctx>,
         ty: &HirType,
     ) -> Result<(), String> {
-        if matches!(ty, HirType::F64 | HirType::Str | HirType::Bool) {
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_json_destroy").unwrap(),
-                    &[json.into()],
-                    "destroy_decoded_json_scalar",
-                )
-                .map_err(|error| error.to_string())?;
-        }
+        if matches!(ty, HirType::Json | HirType::Dictionary(_)) { return Ok(()) }
+        let payload = match ty {
+            HirType::Optional(payload) | HirType::Nullable(payload)
+            | HirType::Nullish(payload) => Some(payload.as_ref()),
+            _ => None,
+        };
+        let absent = if payload.is_some_and(Self::typed_result_embeds_input_json) {
+            Some(self.compile_typed_input_absent(json, ty)?)
+        } else { None };
+        self.compile_destroy_typed_input_if_detached(json, ty, absent)
+    }
+
+    fn compile_destroy_optional_result_container(
+        &mut self,
+        object: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[object.into()], "destroy_optional_result_container")
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -233,6 +351,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("thaw_json_has_own returned no value")?
                 .into_int_value();
+            self.compile_check_json_host_error(has_own.into(), None)?;
             let has_own = self.builder
                 .build_int_compare(
                     IntPredicate::NE,
@@ -351,6 +470,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_has_own returned no value")?
             .into_int_value();
+        self.compile_check_json_host_error(has_own.into(), None)?;
         let has_own = self
             .builder
             .build_int_compare(
@@ -454,19 +574,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_array_length returned no value")?
             .into_int_value();
-        let element_bytes = i64_type.const_int(array_element_storage_bytes(element), false);
-        let payload_size = self
-            .builder
-            .build_int_mul(length, element_bytes, "json_array_payload_size")
-            .map_err(|error| error.to_string())?;
-        let allocation_size = self
-            .builder
-            .build_int_add(
-                payload_size,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "json_array_allocation_size",
-            )
-            .map_err(|error| error.to_string())?;
+        self.compile_check_json_host_error(length.into(), None)?;
+        let element_bytes = array_element_storage_bytes(element)?;
+        let allocation_size = self.checked_array_allocation_size(
+            length, element_bytes, "json_native_array")?;
         let array = self
             .builder
             .build_call(
@@ -474,7 +585,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     allocation_size.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element).min(8), false)
+                        .const_int(element_bytes.min(8), false)
                         .into(),
                 ],
                 "json_native_array",
@@ -540,6 +651,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_index returned no value")?;
+        self.compile_check_json_host_error(element_json, Some("thaw_json_destroy"))?;
         let value = match element {
             HirType::F64 => self.compile_json_as_value(element_json, "thaw_json_as_number")?,
             HirType::Str => self.compile_json_as_value(element_json, "thaw_json_as_string")?,
@@ -547,14 +659,18 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json | HirType::Dictionary(_) => element_json,
             HirType::Optional(payload) => {
                 let (object, key) = self.compile_napi_optional_result_container(element_json)?;
-                self.compile_json_to_optional_field(object, key, element_json, payload, false)?
+                let value = self.compile_json_to_optional_field(object, key, element_json, payload, false)?;
+                self.compile_destroy_optional_result_container(object)?;
+                value
             }
             HirType::Nullable(payload) => {
                 self.compile_json_to_nullable_field(element_json, payload)?
             }
             HirType::Nullish(payload) => {
                 let (object, key) = self.compile_napi_optional_result_container(element_json)?;
-                self.compile_json_to_nullish_field(object, key, element_json, payload)?
+                let value = self.compile_json_to_nullish_field(object, key, element_json, payload)?;
+                self.compile_destroy_optional_result_container(object)?;
+                value
             }
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Union(_) => {
                 self.compile_json_to_native(element_json, element)?
@@ -565,7 +681,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_int_mul(
                 index.as_basic_value().into_int_value(),
-                element_bytes,
+                self.context.i64_type().const_int(element_bytes, false),
                 "json_array_element_offset",
             )
             .map_err(|error| error.to_string())?;
@@ -585,7 +701,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pointer, value)
             .map_err(|error| error.to_string())?;
-        self.compile_destroy_json_if_native_scalar(element_json, element)?;
+        self.compile_destroy_decoded_owned_json(element_json, element)?;
         let next = self
             .builder
             .build_int_add(
@@ -616,12 +732,8 @@ impl<'ctx> HirCompiler<'ctx> {
         elements: &[HirType],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let element_bytes = elements
-            .iter()
-            .map(array_element_storage_bytes)
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
-        let size = ARRAY_HEADER_BYTES + element_bytes * elements.len() as u64;
+        let element_bytes = tuple_element_storage_bytes(elements)?;
+        let size = checked_array_offset(element_bytes, elements.len())?;
         let tuple = self
             .builder
             .build_call(
@@ -657,6 +769,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or("thaw_json_index returned no tuple element")?;
+            self.compile_check_json_host_error(element_json, Some("thaw_json_destroy"))?;
             let value = match element {
                 HirType::F64 => {
                     self.compile_json_as_value(element_json, "thaw_json_as_number")?
@@ -676,28 +789,31 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirType::Undefined => self.context.bool_type().const_zero().into(),
                 HirType::Optional(payload) => {
                     let (object, key) = self.compile_napi_optional_result_container(element_json)?;
-                    self.compile_json_to_optional_field(
+                    let value = self.compile_json_to_optional_field(
                         object,
                         key,
                         element_json,
                         payload,
                         false,
-                    )?
+                    )?;
+                    self.compile_destroy_optional_result_container(object)?;
+                    value
                 }
                 HirType::Nullable(payload) => {
                     self.compile_json_to_nullable_field(element_json, payload)?
                 }
                 HirType::Nullish(payload) => {
                     let (object, key) = self.compile_napi_optional_result_container(element_json)?;
-                    self.compile_json_to_nullish_field(object, key, element_json, payload)?
+                    let value = self.compile_json_to_nullish_field(object, key, element_json, payload)?;
+                    self.compile_destroy_optional_result_container(object)?;
+                    value
                 }
-                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
-                    self.compile_json_to_native(element_json, element)?
-                }
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                | HirType::Union(_) => self.compile_json_to_native(element_json, element)?,
                 other => return Err(format!("unsupported JSON tuple element {other:?}")),
             };
             let offset = i64_type.const_int(
-                ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                checked_array_offset(element_bytes, index)?,
                 false,
             );
             let pointer = unsafe {
@@ -713,7 +829,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(pointer, value)
                 .map_err(|error| error.to_string())?;
-            self.compile_destroy_json_if_native_scalar(element_json, element)?;
+            self.compile_destroy_decoded_owned_json(element_json, element)?;
         }
         // `tuple` is a freshly built raw buffer; wrap it in a handle before
         // treating it as this call's tuple-typed return value (see

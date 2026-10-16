@@ -52,7 +52,7 @@ fn completeness_report(with_node: bool) -> Result<serde_json::Value, String> {
     let unsupported = typescript["counts"]["unsupported"].as_u64().unwrap_or(0);
     let out_of_scope = typescript["counts"]["out-of-scope"].as_u64().unwrap_or(0);
     let typescript_bugs = typescript["bugs"].as_u64().unwrap_or(0);
-    let typescript_coverage = percentage(supported, supported + unsupported);
+    let typescript_coverage = percentage(supported, supported + unsupported + typescript_bugs);
 
     let node = if with_node {
         let mut total = 0;
@@ -81,7 +81,7 @@ fn completeness_report(with_node: bool) -> Result<serde_json::Value, String> {
             "failed": failed,
             "bugs": bugs,
             "referenceErrors": reference_errors,
-            "coveragePercent": percentage(matched, matched + unsupported),
+            "coveragePercent": percentage(matched, total),
         }))
     } else {
         None
@@ -192,7 +192,8 @@ fn print_completeness(report: &serde_json::Value) {
         "TypeScript subset   {supported}/{in_scope} in scope ({coverage}%)  bugs={bugs}  out-of-scope={out_of_scope}",
         supported = typescript["supported"],
         in_scope = typescript["supported"].as_u64().unwrap_or(0)
-            + typescript["unsupported"].as_u64().unwrap_or(0),
+            + typescript["unsupported"].as_u64().unwrap_or(0)
+            + typescript["bugs"].as_u64().unwrap_or(0),
         coverage = typescript["coveragePercent"],
         bugs = typescript["bugs"],
         out_of_scope = typescript["outOfScope"],
@@ -201,8 +202,7 @@ fn print_completeness(report: &serde_json::Value) {
         Some(node) => println!(
             "Node runtime         {matched}/{in_scope} compared ({coverage}%)  unsupported={unsupported} failed={failed} bugs={bugs}",
             matched = node["matched"],
-            in_scope = node["matched"].as_u64().unwrap_or(0)
-                + node["unsupported"].as_u64().unwrap_or(0),
+            in_scope = node["total"],
             coverage = node["coveragePercent"],
             unsupported = node["unsupported"],
             failed = node["failed"],

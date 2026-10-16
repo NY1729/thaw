@@ -80,7 +80,7 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
         }
         _ => hex,
     };
-    if hex.len() % 2 != 0 {
+    if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let bytes = (0..hex.len())
@@ -115,11 +115,17 @@ struct FnSignature {
     /// `HirExpr::FfiCall`, not `HirExpr::Call`.
     is_extern: bool,
     source_range: (u32, u32),
+    /// Original class declaring an accessor; inherited signature clones keep this owner.
+    accessor_owner: Option<Symbol>,
     generic_type_params: Vec<Symbol>,
     generic_type_constraints: Vec<Option<Box<TsType>>>,
     generic_type_defaults: Vec<Option<Box<TsType>>>,
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_param_optional: Vec<bool>,
+    /// Generic top-level explicit `this` metadata, when it can be represented
+    /// by the generic matcher. `LegacyUnmatched` preserves accepted physical
+    /// receiver annotations that the pattern grammar cannot express.
+    generic_this_pattern: Option<GenericReceiverPattern>,
     generic_return_type: Option<Box<TsType>>,
     type_predicate: Option<(usize, GenericTypePattern, bool)>,
     /// The return type's own `GenericTypePattern`, when the type
@@ -259,6 +265,14 @@ impl Visit for IdentifierUseCollector<'_> {
             self.found = true;
         }
     }
+
+    fn visit_labeled_stmt(&mut self, statement: &swc_ecma_ast::LabeledStmt) {
+        statement.body.visit_with(self);
+    }
+
+    fn visit_break_stmt(&mut self, _: &swc_ecma_ast::BreakStmt) {}
+
+    fn visit_continue_stmt(&mut self, _: &swc_ecma_ast::ContinueStmt) {}
 }
 
 fn named_function_is_recursive(expression: &swc_ecma_ast::FnExpr) -> bool {
@@ -299,6 +313,12 @@ enum GenericTypePattern {
         Option<Box<GenericTypePattern>>,
         Box<GenericTypePattern>,
     ),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum GenericReceiverPattern {
+    Pattern(GenericTypePattern),
+    LegacyUnmatched,
 }
 
 #[derive(Clone, Debug, PartialEq)]

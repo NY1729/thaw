@@ -51,24 +51,29 @@ fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
             }
             out
         }
-        "latin1" | "binary" | "ascii" => bytes.iter().map(|&b| b as char).collect(),
+        "ascii" => bytes.iter().map(|&b| (b & 0x7f) as char).collect(),
+        "latin1" | "binary" => bytes.iter().map(|&b| b as char).collect(),
         // "utf8" / "utf-8" / anything else: lossy UTF-8 decode.
         _ => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
 
-fn decode_string(text: &str, encoding: &str) -> Vec<u8> {
+fn decode_string(text: &[u8], encoding: &str) -> Vec<u8> {
     match encoding {
         "hex" => {
-            let digits: Vec<u8> = text
-                .bytes()
-                .filter_map(|b| (b as char).to_digit(16).map(|d| d as u8))
-                .collect();
-            digits.chunks(2).map(|pair| (pair[0] << 4) | pair.get(1).copied().unwrap_or(0)).collect()
+            let mut bytes = Vec::with_capacity(text.len() / 2);
+            for pair in text.as_chunks::<2>().0 {
+                let (Some(high), Some(low)) = ((pair[0] as char).to_digit(16), (pair[1] as char).to_digit(16)) else {
+                    break;
+                };
+                bytes.push(((high << 4) | low) as u8);
+            }
+            bytes
         }
         "base64" | "base64url" => {
             let cleaned: Vec<u8> = text
-                .bytes()
+                .iter()
+                .copied()
                 .map(|b| match b {
                     b'-' => b'+',
                     b'_' => b'/',
@@ -95,8 +100,8 @@ fn decode_string(text: &str, encoding: &str) -> Vec<u8> {
             }
             out
         }
-        "latin1" | "binary" | "ascii" => text.chars().map(|c| c as u32 as u8).collect(),
-        _ => text.as_bytes().to_vec(),
+        "latin1" | "binary" | "ascii" => wtf8_decode_utf16(text).into_iter().map(|unit| unit as u8).collect(),
+        _ => wtf8_to_well_formed(text),
     }
 }
 
@@ -161,7 +166,7 @@ pub unsafe extern "C" fn thaw_bytes_to_string(
 ///
 /// # Safety
 ///
-/// `text` / `encoding` must be null or valid NUL-terminated C strings.
+/// `text` / `encoding` must be null or valid native or NUL-terminated strings.
 pub unsafe extern "C" fn thaw_bytes_from_string(
     text: *const c_char,
     encoding: *const c_char,
@@ -169,45 +174,137 @@ pub unsafe extern "C" fn thaw_bytes_from_string(
     if text.is_null() {
         return std::ptr::null_mut();
     }
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
-    let bytes = decode_string(&text, &encoding_str(encoding));
+    let bytes = decode_string(unsafe { CStr::from_ptr(text) }.to_bytes(), &encoding_str(encoding));
     unsafe { write_byte_array(&bytes) }
+}
+
+/// Decode the default base64 alphabet only as far as the destination can
+/// hold complete chunks. Positions are UTF-16 code-unit offsets in `text`.
+fn decode_set_from_base64(text: &[u16], max_length: usize) -> (usize, Vec<u8>) {
+    if max_length == 0 {
+        return (0, Vec::new());
+    }
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4];
+    let mut chunk_length = 0;
+    let mut index = 0;
+    let mut read = 0;
+    while index < text.len() {
+        // The five ASCII whitespace code units in SkipAsciiWhitespace.
+        if matches!(text[index], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+            index += 1;
+            continue;
+        }
+        if text[index] == u16::from(b'=') && (chunk_length == 2 || chunk_length == 3) {
+            let mut tail = index + 1;
+            while tail < text.len() && matches!(text[tail], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+                tail += 1;
+            }
+            if chunk_length == 2 && tail < text.len() && text[tail] == u16::from(b'=') {
+                tail += 1;
+            }
+            while tail < text.len() && matches!(text[tail], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+                tail += 1;
+            }
+            if tail == text.len() {
+                let n = (u32::from(chunk[0]) << 18)
+                    | (u32::from(chunk[1]) << 12)
+                    | (u32::from(chunk[2]) << 6);
+                bytes.push((n >> 16) as u8);
+                if chunk_length == 3 {
+                    bytes.push((n >> 8) as u8);
+                }
+                return (text.len(), bytes);
+            }
+        }
+        let Some(value) = u8::try_from(text[index]).ok().and_then(base64_decode_value) else {
+            // ponytail: Add setFrom SyntaxError/options validation with a separate decoder contract;
+            // the generic Buffer decoder remains permissive.
+            index += 1;
+            continue;
+        };
+        index += 1;
+        let remaining = max_length - bytes.len();
+        if (remaining == 1 && chunk_length == 2)
+            || (remaining == 2 && chunk_length == 3)
+        {
+            return (read, bytes);
+        }
+        chunk[chunk_length] = value;
+        chunk_length += 1;
+        if chunk_length == 4 {
+            let n = (u32::from(chunk[0]) << 18)
+                | (u32::from(chunk[1]) << 12)
+                | (u32::from(chunk[2]) << 6)
+                | u32::from(chunk[3]);
+            bytes.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+            chunk_length = 0;
+            read = index;
+            if bytes.len() == max_length {
+                return (read, bytes);
+            }
+        }
+    }
+    if chunk_length >= 2 {
+        let n = (u32::from(chunk[0]) << 18)
+            | (u32::from(chunk[1]) << 12)
+            | (u32::from(chunk[2]) << 6);
+        bytes.push((n >> 16) as u8);
+        if chunk_length == 3 {
+            bytes.push((n >> 8) as u8);
+        }
+    }
+    (text.len(), bytes)
 }
 
 #[no_mangle]
 /// `Uint8Array.prototype.setFromHex`/`setFromBase64`: decode `text` and
 /// write its bytes into `array` from offset 0, up to the array's length.
-/// Returns the number of bytes written (the HIR reports `read` as the
-/// source length and `written` as this count, matching a fully valid
-/// input).
+/// Returns an arena object with adjacent `read` and `written` f64 fields.
 ///
 /// # Safety
 ///
 /// `array` must point to a Thaw array of `f64` element slots; `text` /
-/// `encoding` must be null or valid NUL-terminated C strings.
+/// `encoding` must be null or a valid native or NUL-terminated string.
 pub unsafe extern "C" fn thaw_bytes_set_from_string(
     array: *mut u8,
     text: *const c_char,
     encoding: *const c_char,
-) -> f64 {
-    if array.is_null() || text.is_null() {
-        return 0.0;
+) -> *mut u8 {
+    let result = thaw_arena::thaw_arena_alloc(16, 8);
+    if result.is_null() {
+        return result;
     }
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
-    let decoded = decode_string(&text, &encoding_str(encoding));
-    let Some(length) = (unsafe { native_array_length(array) }) else {
-        return 0.0;
+    let (read, decoded) = if array.is_null() || text.is_null() {
+        (0, Vec::new())
+    } else if let Some(length) = unsafe { native_array_length(array) } {
+        let source = unsafe { CStr::from_ptr(text) }.to_bytes();
+        match encoding_str(encoding).as_str() {
+            "base64" => decode_set_from_base64(&wtf8_decode_utf16(source), length),
+            "hex" => {
+                let mut decoded = decode_string(source, "hex");
+                decoded.truncate(length);
+                (decoded.len() * 2, decoded)
+            }
+            other => {
+                let mut decoded = decode_string(source, other);
+                decoded.truncate(length);
+                (decoded.len(), decoded)
+            }
+        }
+    } else {
+        (0, Vec::new())
     };
-    let written = decoded.len().min(length);
-    for (index, byte) in decoded.iter().take(written).enumerate() {
+    for (index, byte) in decoded.iter().enumerate() {
         unsafe {
-            array
-                .add(8 + index * 8)
-                .cast::<f64>()
-                .write_unaligned(f64::from(*byte));
+            array.add(8 + index * 8).cast::<f64>().write_unaligned(f64::from(*byte));
         }
     }
-    written as f64
+    unsafe {
+        result.cast::<f64>().write_unaligned(read as f64);
+        result.add(8).cast::<f64>().write_unaligned(decoded.len() as f64);
+    }
+    result
 }
 
 #[no_mangle]
@@ -318,7 +415,7 @@ pub unsafe extern "C" fn thaw_bytes_read(
         return 0.0;
     }
     let offset = offset as usize;
-    if offset + width > bytes.len() {
+    if offset.checked_add(width).is_none_or(|end| end > bytes.len()) {
         return 0.0;
     }
     let mut le_bytes = vec![0u8; width];
@@ -359,9 +456,8 @@ pub unsafe extern "C" fn thaw_bytes_write(
         return offset;
     }
     let offset = offset as usize;
-    if offset + width > length {
-        return (offset + width) as f64;
-    }
+    let Some(end) = offset.checked_add(width) else { return offset as f64; };
+    if end > length { return end as f64; }
     let encoded = encode_scalar(value, width, kind as u32);
     for index in 0..width {
         let byte = if le != 0.0 {
@@ -375,7 +471,7 @@ pub unsafe extern "C" fn thaw_bytes_write(
                 .write_unaligned(f64::from(byte));
         }
     }
-    (offset + width) as f64
+    end as f64
 }
 
 #[no_mangle]
@@ -404,7 +500,7 @@ pub unsafe extern "C" fn thaw_bytes_read_i64(buf: *const u8, offset: f64, le: f6
         return 0;
     }
     let offset = offset as usize;
-    if offset + 8 > bytes.len() {
+    if offset.checked_add(8).is_none_or(|end| end > bytes.len()) {
         return 0;
     }
     let mut le_bytes = [0u8; 8];
@@ -441,9 +537,8 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
         return offset;
     }
     let offset = offset as usize;
-    if offset + 8 > length {
-        return (offset + 8) as f64;
-    }
+    let Some(end) = offset.checked_add(8) else { return offset as f64; };
+    if end > length { return end as f64; }
     let encoded = value.to_le_bytes();
     for index in 0..8 {
         let byte = if le != 0.0 {
@@ -457,7 +552,7 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
                 .write_unaligned(f64::from(byte));
         }
     }
-    (offset + 8) as f64
+    end as f64
 }
 
 #[no_mangle]
@@ -517,8 +612,8 @@ pub unsafe extern "C" fn thaw_bytes_copy(
 /// / wraps a number first). Returns the first (or last, `last != 0`)
 /// index at or after `from`, or `-1`. An empty needle returns `from`
 /// clamped into the haystack (Node's rule). A negative / non-finite
-/// `from` clamps to 0 for a forward search, to the last start for a
-/// reverse one.
+/// `from` clamps into the haystack for empty needles. `+Infinity` starts
+/// beyond any nonempty forward match; `NaN` and `-Infinity` start at 0.
 ///
 /// # Safety
 ///
@@ -532,10 +627,10 @@ pub unsafe extern "C" fn thaw_bytes_index_of(
     let hay = unsafe { read_byte_array(haystack) }.unwrap_or_default();
     let nee = unsafe { read_byte_array(needle) }.unwrap_or_default();
     let clamp_from = |hi: usize| -> usize {
-        if from.is_finite() && from >= 0.0 {
-            (from as usize).min(hi)
-        } else if from.is_finite() {
+        if from.is_nan() || from <= 0.0 {
             0
+        } else if from.is_finite() {
+            (from as usize).min(hi)
         } else {
             hi
         }
@@ -556,7 +651,7 @@ pub unsafe extern "C" fn thaw_bytes_index_of(
         }
         return -1.0;
     }
-    let start = if from.is_finite() && from >= 0.0 {
+    let start = if from.is_sign_positive() && !from.is_nan() {
         from as usize
     } else {
         0
@@ -575,12 +670,12 @@ pub unsafe extern "C" fn thaw_bytes_index_of(
 #[no_mangle]
 /// `Buffer.byteLength(string, encoding)` -- the number of bytes the
 /// string occupies in `encoding` (null defaults to `utf8`): the UTF-8
-/// byte length, `len / 2` for `hex`, the decoded length for `base64`,
-/// the character count for `latin1`.
+/// byte length, UTF-16 length / 2 for `hex`, a padded-length estimate for
+/// `base64`, and the UTF-16 code-unit count for `latin1`.
 ///
 /// # Safety
 ///
-/// `text` / `encoding` must be null or valid NUL-terminated C strings.
+/// `text` / `encoding` must be null or valid native or NUL-terminated strings.
 pub unsafe extern "C" fn thaw_bytes_byte_length(
     text: *const c_char,
     encoding: *const c_char,
@@ -588,8 +683,16 @@ pub unsafe extern "C" fn thaw_bytes_byte_length(
     if text.is_null() {
         return 0.0;
     }
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
-    decode_string(&text, &encoding_str(encoding)).len() as f64
+    let text = unsafe { CStr::from_ptr(text) }.to_bytes();
+    match encoding_str(encoding).as_str() {
+        "hex" => (wtf8_decode_utf16(text).len() / 2) as f64,
+        "base64" | "base64url" => {
+            let units = wtf8_decode_utf16(text);
+            let padded = units.iter().rev().take(2).take_while(|&&unit| unit == b'=' as u16).count();
+            ((units.len() - padded).saturating_mul(3) / 4) as f64
+        }
+        encoding => decode_string(text, encoding).len() as f64,
+    }
 }
 
 #[no_mangle]
@@ -652,4 +755,27 @@ pub extern "C" fn thaw_bytes_alloc(size: f64) -> *mut u8 {
         0
     };
     unsafe { write_byte_array(&vec![0_u8; size]) }
+}
+
+#[no_mangle]
+/// `Buffer.alloc(size, fill)` -- `size` bytes made of `pattern` repeated (a
+/// truncated last repetition is kept). An empty or unreadable pattern leaves
+/// the buffer zero-filled, as `Buffer.alloc(size, "")` does.
+///
+/// # Safety
+///
+/// `pattern` must be null or point to a Thaw byte array.
+pub unsafe extern "C" fn thaw_bytes_alloc_fill(size: f64, pattern: *const u8) -> *mut u8 {
+    let size = if size.is_finite() && size > 0.0 {
+        size as usize
+    } else {
+        0
+    };
+    let pattern = unsafe { read_byte_array(pattern) }.unwrap_or_default();
+    let bytes = if pattern.is_empty() {
+        vec![0_u8; size]
+    } else {
+        pattern.iter().copied().cycle().take(size).collect()
+    };
+    unsafe { write_byte_array(&bytes) }
 }

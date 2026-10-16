@@ -23,6 +23,11 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
             dynamic_json_collection_element_supported(payload)
         }
         HirType::Array(element) => dynamic_json_collection_element_supported(element),
+        // A scalar union (`number | string`) decodes member by member from the JSON element.
+        HirType::Union(members) => members.iter().all(|member| matches!(
+            member,
+            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined
+        )),
         HirType::Tuple(elements) => elements
             .iter()
             .all(dynamic_json_collection_element_supported),
@@ -42,6 +47,30 @@ fn quickjs_callback_type(ty: &HirType) -> bool {
 }
 
 type NapiFunctionArgument = (usize, Vec<HirType>, HirType, bool, Option<usize>);
+
+impl<'ctx> HirCompiler<'ctx> {
+    fn compile_napi_export_handle(
+        &mut self,
+        name: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_napi_get_export_typed_result").unwrap(),
+            &[name.into()],
+            "napi_export_lookup",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("N-API export lookup returned no result")?.into_struct_value();
+        let value = self.builder.build_extract_value(result, 0, "napi_export_handle")
+            .map_err(|error| error.to_string())?;
+        let error = self.builder.build_extract_value(result, 1, "napi_export_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+}
 
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
@@ -134,5 +163,38 @@ fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
         HirType::Object(_) => Some(10),
         HirType::Tuple(_) => Some(11),
         _ => None,
+    }
+}
+
+impl<'ctx> HirCompiler<'ctx> {
+    fn destroy_typed_host_arguments(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        args_json: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[args_json.into()],
+            "destroy_typed_host_args_string",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[array.into()],
+            "destroy_typed_host_args",
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn destroy_typed_host_result_string(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[value.into()],
+            "destroy_typed_host_result_string",
+        ).map_err(|error| error.to_string())?;
+        Ok(())
     }
 }

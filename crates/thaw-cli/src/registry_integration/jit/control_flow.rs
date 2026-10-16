@@ -173,6 +173,21 @@ macro_rules! jit_control_flow {
                     | "dynarraypop"
                     | "dynarrayshift"
                     | "dkeys"
+                    | "dnget"
+                    | "dbget"
+                    | "dsget"
+                    | "dngetoptional"
+                    | "dbgetoptional"
+                    | "dsgetoptional"
+                    | "dnset"
+                    | "dbset"
+                    | "dsset"
+                    | "dnpostset"
+                    | "ddelete"
+                    | "dstrictdelete"
+                    | "dhasown"
+                    | "din"
+                    | "dassign"
                     | "dnvalues"
                     | "dbvalues"
                     | "dsvalues"
@@ -193,6 +208,14 @@ macro_rules! jit_control_flow {
                     | "callableget"
                     | "callableset"
             )
+                || token.starts_with("recur")
+                || token.starts_with("dnlset")
+                || token.starts_with("dblset")
+                || token.starts_with("dslset")
+                || token.starts_with("dnput")
+                || token.starts_with("dbput")
+                || token.starts_with("dsput")
+                || matches!(token.as_str(), "dnappend" | "dbappend" | "dsappend")
                 || token.starts_with("rnreduce")
                 || token.starts_with("rnreduceright")
                 || token.starts_with("rnfilter")
@@ -1315,7 +1338,7 @@ macro_rules! jit_control_flow {
                 let target = context.loop_depth;
                 context
                     .loop_labels
-                    .push((labeled.label.sym.to_string(), target));
+                    .push((labeled.label.sym.to_string(), target, false));
                 let result = encode_aggregate_return_effects(
                     labeled.body.as_ref(),
                     requested,
@@ -1338,8 +1361,8 @@ macro_rules! jit_control_flow {
                     .loop_labels
                     .iter()
                     .rev()
-                    .find(|(name, _)| name == &label)
-                    .map(|(_, depth)| *depth)?;
+                    .find(|(name, _, _)| name == &label)
+                    .map(|(_, depth, _)| *depth)?;
                 let distance = context
                     .loop_depth
                     .checked_sub(target.checked_add(1)?)?;
@@ -1352,8 +1375,8 @@ macro_rules! jit_control_flow {
                     .loop_labels
                     .iter()
                     .rev()
-                    .find(|(name, _)| name == &label)
-                    .map(|(_, depth)| *depth)?;
+                    .find(|(name, _, _)| name == &label)
+                    .map(|(_, depth, _)| *depth)?;
                 let distance = context
                     .loop_depth
                     .checked_sub(target.checked_add(1)?)?;
@@ -1414,7 +1437,7 @@ macro_rules! jit_control_flow {
                 let target = context.loop_depth;
                 context
                     .loop_labels
-                    .push((labeled.label.sym.to_string(), target));
+                    .push((labeled.label.sym.to_string(), target, false));
                 let nested = std::iter::once(labeled.body.as_ref())
                     .chain(rest.iter().copied())
                     .collect::<Vec<_>>();

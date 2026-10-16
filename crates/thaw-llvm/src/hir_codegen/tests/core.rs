@@ -19,6 +19,183 @@ fn compiles_and_runs_a_native_hello_world_binary() {
     assert_eq!(compile_and_run(source, "hello"), "Hello, Thaw!\n5\n");
 }
 
+fn assert_native_event_key_bridge(source: &str, module_name: &str) {
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("retainEventKey"), "{hir}");
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, module_name);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+}
+
+#[test]
+fn typed_event_keys_transfer_native_wtf8_strings_and_live_symbols() {
+    let source = r#"
+        declare function __thaw_typed_js_73746f72654b6579(key: JsValue): void;
+        declare function __thaw_typed_js_6861734b6579(key: JsValue): boolean;
+        function main(): void {
+            loadScript("globalThis.__thaw_keys = []; globalThis.storeKey = key => { globalThis.__thaw_keys.push(key); }; globalThis.hasKey = key => globalThis.__thaw_keys.some(saved => saved === key);");
+            const nulKey = "left\u0000right";
+            const uniqueA = Symbol("same");
+            const uniqueB = Symbol("same");
+            const registeredA = Symbol.for("shared");
+            const registeredB = Symbol.for("shared");
+            const describedNul = Symbol("left\u0000right");
+            const loneSurrogateKey = "\uD800";
+            const loneSurrogateSymbol = Symbol("\uD800");
+            __thaw_typed_js_73746f72654b6579(nulKey);
+            __thaw_typed_js_73746f72654b6579(uniqueA);
+            __thaw_typed_js_73746f72654b6579(registeredA);
+            __thaw_typed_js_73746f72654b6579(describedNul);
+            __thaw_typed_js_73746f72654b6579(loneSurrogateKey);
+            __thaw_typed_js_73746f72654b6579(loneSurrogateSymbol);
+            console.log(
+                __thaw_typed_js_6861734b6579(nulKey),
+                __thaw_typed_js_6861734b6579(uniqueB),
+                __thaw_typed_js_6861734b6579(uniqueA),
+                __thaw_typed_js_6861734b6579(registeredB),
+                __thaw_typed_js_6861734b6579(describedNul),
+                __thaw_typed_js_6861734b6579(loneSurrogateKey),
+                __thaw_typed_js_6861734b6579(loneSurrogateSymbol),
+            );
+        }
+    "#;
+    assert_native_event_key_bridge(source, "typed_event_key_identity_hir_ir");
+    assert_eq!(compile_and_run(source, "typed_event_key_identity"), "true false true true true true true\n");
+}
+
+#[test]
+fn native_event_key_is_released_when_a_later_argument_throws() {
+    let source = r#"
+        declare function __thaw_typed_js_616363657074(key: JsValue, listener: JsValue): void;
+        function main(): void {
+            loadScript("globalThis.accept = () => { throw new Error('must not be invoked'); }; globalThis.__thaw_event_key_baseline = 0; globalThis.__thaw_event_key_mark = () => { globalThis.__thaw_event_key_baseline = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_event_key_refs = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_event_key_baseline;");
+            const eventKeyRefs: JsValue = getDynamicValue("__thaw_event_key_refs");
+            loadScript("globalThis.__thaw_event_key_mark();");
+            function failListener(): JsValue { throw "later argument"; }
+            let caught = false;
+            try {
+                __thaw_typed_js_616363657074("native-key", failListener());
+            } catch (_) {
+                caught = true;
+            }
+            console.log(caught, callDynamicValue(eventKeyRefs, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_native_event_key_bridge(source, "event_key_later_argument_hir_ir");
+    assert_eq!(compile_and_run(source, "event_key_later_argument_cleanup"), "true true\n");
+
+    let uncaught = r#"
+        declare function __thaw_typed_js_616363657074(key: JsValue, listener: JsValue): void;
+        function failListener(): JsValue { throw "uncaught later argument"; }
+        function main(): void {
+            loadScript("globalThis.accept = () => { throw new Error('must not be invoked'); };");
+            __thaw_typed_js_616363657074("native-key", failListener());
+        }
+    "#;
+    assert_native_event_key_bridge(uncaught, "event_key_uncaught_later_argument_hir_ir");
+    let (_stdout, stderr, code) = compile_and_run_failing(uncaught, "event_key_uncaught_later_argument_cleanup");
+    assert!(matches!(code, Some(status) if status != 0));
+    assert!(stderr.contains("uncaught later argument"), "{stderr}");
+}
+
+#[test]
+fn native_event_key_scalar_ownership_stays_in_nested_lambda_function() {
+    let source = r#"
+        declare function __thaw_typed_js_6f6e(key: JsValue, listener: () => void): void;
+        declare function __thaw_typed_js_66697265(): void;
+        function main(): void {
+            loadScript("globalThis.on = (key, listener) => { globalThis.__thaw_inner_listener = listener; }; globalThis.fire = () => globalThis.__thaw_inner_listener(); globalThis.__thaw_nested_key_mark = () => { globalThis.__thaw_nested_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_nested_key_refs_match = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_nested_key_base;");
+            const mark: JsValue = getDynamicValue("__thaw_nested_key_mark");
+            const refsMatch: JsValue = getDynamicValue("__thaw_nested_key_refs_match");
+            __thaw_typed_js_6f6e("outer", () => {
+                const nested: JsValue = "inner";
+                releaseDynamicValue(nested);
+            });
+            callDynamicValue(mark, __thaw_json_argument_array());
+            __thaw_typed_js_66697265();
+            console.log(callDynamicValue(refsMatch, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_native_event_key_bridge(source, "nested_event_key_lambda_ownership_hir_ir");
+    assert_eq!(compile_and_run(source, "nested_event_key_lambda_ownership"), "true\n");
+}
+
+#[test]
+fn native_event_key_quickjs_setter_transfers_handle_once() {
+    let source = r#"
+        declare function __thaw_typed_js_2473657474657224626f782476616c7565(receiver: JsValue, value: JsValue): void;
+        function main(): void {
+            loadScript("globalThis.box = {}; globalThis.__thaw_setter_saw_symbol = false; globalThis.__thaw_setter_throws = false; Object.defineProperty(box, 'value', { set(v) { globalThis.__thaw_setter_saw_symbol = typeof v === 'symbol'; if (globalThis.__thaw_setter_throws) throw new Error('setter marker failure'); } }); globalThis.__thaw_key_base = 0; globalThis.__thaw_key_mark = () => { globalThis.__thaw_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_key_check = () => __thaw_setter_saw_symbol && __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_key_base; globalThis.__thaw_setter_throw = () => { globalThis.__thaw_setter_throws = true; };");
+            const box: JsValue = getDynamicValue("box");
+            const mark: JsValue = getDynamicValue("__thaw_key_mark");
+            const check: JsValue = getDynamicValue("__thaw_key_check");
+            const makeThrow: JsValue = getDynamicValue("__thaw_setter_throw");
+            callDynamicValue(mark, __thaw_json_argument_array());
+            __thaw_typed_js_2473657474657224626f782476616c7565(box, Symbol("setter-value"));
+            console.log(callDynamicValue(check, __thaw_json_argument_array()));
+            callDynamicValue(makeThrow, __thaw_json_argument_array());
+            let caught = false;
+            try {
+                __thaw_typed_js_2473657474657224626f782476616c7565(box, Symbol("throwing-setter-value"));
+            } catch (error: any) {
+                caught = error.message === "setter marker failure";
+            }
+            console.log(caught, callDynamicValue(check, __thaw_json_argument_array()));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("retainEventKey"), "{hir}");
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_event_key_setter");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+    assert!(ir.contains("fresh_event_key_active"), "{ir}");
+    assert_eq!(compile_and_run(source, "typed_quickjs_event_key_setter"), "true\ntrue true\n");
+}
+
+#[test]
+fn native_event_key_graph_failure_releases_only_its_owned_handle() {
+    let source = r#"
+        declare function __thaw_typed_js_656d6974(key: JsValue, value: Json, arm: boolean): void;
+        declare function __thaw_typed_js_61726d5f6661756c74(): boolean;
+        declare function __thaw_typed_js_61726d6564(): boolean;
+        declare function __thaw_typed_js_726573746f72655f6661756c74(): boolean;
+        declare function __thaw_typed_js_656d69745f6e6f745f696e766f6b6564(): boolean;
+        declare function __thaw_typed_js_726566735f6d61746368(): boolean;
+        declare function __thaw_typed_js_6661756c745f686974(): boolean;
+        function main(): void {
+            loadScript("globalThis.__thaw_emit_invoked = false; globalThis.emit_not_invoked = () => !globalThis.__thaw_emit_invoked; globalThis.emit = () => { globalThis.__thaw_emit_invoked = true; throw new Error('graph path should fail before invocation'); }; globalThis.__thaw_key_host = {}; globalThis.__thaw_key_fault_armed = false; globalThis.__thaw_key_fault_hit = false; globalThis.__thaw_key_base = 0; globalThis.__thaw_key_mark = () => { globalThis.__thaw_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.refs_match = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_key_base; globalThis.arm_fault = () => { const refs = globalThis.__thaw_value_handle_refs; const handles = globalThis.__thaw_value_handles; const index = handles.findIndex(value => value === globalThis.__thaw_key_host); const descriptor = Object.getOwnPropertyDescriptor(refs, index); if (index < 0 || !descriptor || !('value' in descriptor) || !descriptor.writable || !descriptor.configurable) return false; const state = {index, descriptor, count: descriptor.value, faultHit: false}; globalThis.__thaw_key_fault_state = state; Object.defineProperty(refs, index, {configurable: descriptor.configurable, enumerable: descriptor.enumerable, get() { return state.count; }, set(next) { if (next > state.count) { state.faultHit = true; globalThis.__thaw_key_fault_hit = true; throw new Error('forced retain increment failure'); } state.count = next; }}); globalThis.__thaw_key_fault_armed = true; return true; }; globalThis.armed = () => globalThis.__thaw_key_fault_armed; globalThis.fault_hit = () => globalThis.__thaw_key_fault_hit; globalThis.restore_fault = () => { const refs = globalThis.__thaw_value_handle_refs; const state = globalThis.__thaw_key_fault_state; if (!state) return false; const saved = state.descriptor; const count = state.count; Object.defineProperty(refs, state.index, {...saved, value: count}); const restored = Object.getOwnPropertyDescriptor(refs, state.index); delete globalThis.__thaw_key_fault_state; return !!restored && restored.value === count && restored.writable === saved.writable && restored.enumerable === saved.enumerable && restored.configurable === saved.configurable; }; globalThis.__thaw_stale_source = globalThis.__thaw_key_host;");
+            const mark: JsValue = getDynamicValue("__thaw_key_mark");
+            const source: JsValue = getDynamicValue("__thaw_stale_source");
+            const value: Json = source;
+            const refsMatch: JsValue = getDynamicValue("refs_match");
+            callDynamicValue(mark, __thaw_json_argument_array());
+            let caught = false;
+            let restored = false;
+            try {
+                __thaw_typed_js_656d6974("graph-failure-key", value, __thaw_typed_js_61726d5f6661756c74());
+            } catch (_) {
+                caught = true;
+            } finally {
+                restored = __thaw_typed_js_726573746f72655f6661756c74();
+            }
+            const armed = __thaw_typed_js_61726d6564();
+            const emitNotInvoked = __thaw_typed_js_656d69745f6e6f745f696e766f6b6564();
+            const faultHit = __thaw_typed_js_6661756c745f686974();
+            console.log(caught, armed, restored, faultHit, emitNotInvoked, callDynamicValue(refsMatch, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_native_event_key_bridge(source, "event_key_graph_failure_hir_ir");
+    assert_eq!(compile_and_run(source, "event_key_graph_failure_cleanup"), "true true true true true true\n");
+}
+
 #[test]
 fn console_log_accepts_multiple_arguments_after_evaluating_them_in_order() {
     let source = r#"
@@ -73,7 +250,7 @@ fn console_log_serializes_arrays_objects_and_json_values() {
 
     assert_eq!(
         compile_and_run(source, "structured_console_log"),
-        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{ nested: [ 1, true, null ] }\ndynamic text null\n"
+        "[ 1, 2 ] [ 'a', 'b' ] [ true, false ]\n[ [ 1, 2 ], [ 3 ] ]\n{ name: 'thaw', active: true, scores: [ 4, 5 ] }\n{ name: 'thaw', active: true, scores: [ 4, 5 ] }\n{ nested: [ 1, true, null ] }\ndynamic text null\n"
     );
 }
 
@@ -92,7 +269,7 @@ fn console_log_formats_numbers_precisely_and_inline_expressions_correctly() {
     "#;
     assert_eq!(
         compile_and_run(source, "console_log_numbers_and_inline_exprs"),
-        "9007199254740991\n0.30000000000000004\n1000000\nNaN\n{\"a\":3,\"b\":true,\"c\":\"text1\",\"d\":2}\n{\"big\":9007199254740991,\"neg\":-5,\"cmp\":true}\n[{\"x\":1},{\"x\":2}]\n"
+        "9007199254740991\n0.30000000000000004\n1000000\nNaN\n{ a: 3, b: true, c: 'text1', d: 2 }\n{ big: 9007199254740991, neg: -5, cmp: true }\n[ { x: 1 }, { x: 2 } ]\n"
     );
 }
 
@@ -118,7 +295,7 @@ fn console_log_serializes_typed_tuples_in_all_tagged_positions() {
 
     assert_eq!(
         compile_and_run(source, "tuple_console_log"),
-        "[1,\"two\",true,{\"x\":3,\"label\":\"p\"},[4,5]]\n[[6,\"seven\"],[false,{\"x\":8,\"label\":\"q\"}]]\n[\"nine\",10]\nundefined\n[11,\"twelve\"]\n"
+        "[ 1, 'two', true, { x: 3, label: 'p' }, [ 4, 5 ] ]\n[ [ 6, 'seven' ], [ false, { x: 8, label: 'q' } ] ]\n[ 'nine', 10 ]\nundefined\n[ 11, 'twelve' ]\n"
     );
 }
 
@@ -149,7 +326,10 @@ fn console_log_serializes_tagged_values_inside_collections() {
 
     assert_eq!(
         compile_and_run(source, "tagged_collection_console"),
-        "[1,null,3]\n[\"a\",null,\"c\"]\n[true,null,null]\n[null,null,null]\n{\"nullable\":null}\n{\"optional\":2,\"nullable\":\"x\",\"nullish\":null}\n"
+        // Verified against Node 22: `console.log` prints `undefined` array
+        // elements and an explicit `undefined` property, but omits an absent
+        // optional property.
+        "[ 1, undefined, 3 ]\n[ 'a', null, 'c' ]\n[ true, null, undefined ]\n[ undefined, null, undefined ]\n{ nullable: null, nullish: undefined }\n{ optional: 2, nullable: 'x', nullish: null }\n"
     );
 }
 
@@ -172,7 +352,7 @@ fn console_methods_use_their_node_compatible_output_streams() {
 
     let (stdout, stderr) = compile_and_run_output(source, "console_output_streams");
     assert_eq!(stdout, "info 1\ndebug true\nevaluated\n");
-    assert_eq!(stderr, "A warning\nerror {\"code\":7}\n");
+    assert_eq!(stderr, "A warning\nerror { code: 7 }\n");
 }
 
 #[test]
@@ -209,7 +389,7 @@ fn console_assert_evaluates_all_arguments_and_only_reports_falsy_conditions() {
     );
     assert_eq!(
         stderr,
-        "Assertion failed\nAssertion failed: failed 2 {\"code\":7}\nAssertion failed: zero\nAssertion failed: empty\nAssertion failed: json\nAssertion failed\n"
+        "Assertion failed\nAssertion failed: failed 2 { code: 7 }\nAssertion failed: zero\nAssertion failed: empty\nAssertion failed: json\nAssertion failed\n"
     );
 }
 
@@ -286,7 +466,7 @@ fn top_level_destructuring_supports_nested_defaults_rests_and_runtime_keys() {
 
     assert_eq!(
         compile_and_run(source, "top_level_destructuring"),
-        "2 1 2 fallback 3\n4 6 [7] 1 8 {\"kept\":9}\n"
+        "2 1 2 fallback 3\n4 6 [ 7 ] 1 8 { kept: 9 }\n"
     );
 }
 
@@ -320,7 +500,7 @@ fn local_dictionary_destructuring_supports_computed_keys_and_rest() {
 
     assert_eq!(
         compile_and_run(source, "local_dictionary_destructuring"),
-        "1 1 1 2 4 {\"second\":3}\n{\"selected\":1,\"first\":2,\"second\":3}\n"
+        "1 1 1 2 4 { second: 3 }\n{ selected: 1, first: 2, second: 3 }\n"
     );
 }
 
@@ -438,7 +618,7 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
 
     assert_eq!(
         compile_and_run(source, "dictionary_destructuring_assignment"),
-        "1 1 1 4 {\"kept\":2}\n{\"selected\":1,\"kept\":2}\n"
+        "1 1 1 4 { kept: 2 }\n{ selected: 1, kept: 2 }\n"
     );
 }
 
@@ -669,7 +849,7 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
 
     assert_eq!(
         compile_and_run(source, "structured_dictionary_destructuring"),
-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
+        "1 one 1 one { kept: { value: 2, label: 'two' } }\n[ 3, 4 ] { kept: [ 5 ] }\n[ 'a', 'b' ] [ true, false ]\n6 seven [ [ 9, 10 ], [ 11 ] ]\n[ 'x', 'y' ] [ [ 13 ], [ 14, 15 ] ] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
     );
 }
 
@@ -1180,6 +1360,93 @@ fn for_let_closures_capture_each_iteration_binding() {
 }
 
 #[test]
+fn for_let_test_and_update_closures_share_their_iteration() {
+    let source = r#"
+        function main(): void {
+            const tests: (() => number)[] = [];
+            const updates: (() => number)[] = [];
+            const bodies: (() => number)[] = [];
+            for (let i = 0; (tests.push((): number => i), i < 3);
+                 (updates.push((): number => i), i++)) {
+                bodies.push((): number => i);
+                if (i === 1) continue;
+            }
+            console.log(tests[0](), tests[1](), tests[2](), tests[3]());
+            console.log(updates[0](), updates[1](), updates[2]());
+            console.log(bodies[0](), bodies[1](), bodies[2]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_test_update_cells"),
+        "0 1 2 3\n1 2 3\n0 1 2\n");
+}
+
+#[test]
+fn for_let_capture_detection_includes_test_and_update_without_body_capture() {
+    let source = r#"
+        function main(): void {
+            const tests: (() => number)[] = [];
+            for (let i = 0; (tests.push((): number => i), i < 2); i++) {}
+            const updates: (() => number)[] = [];
+            for (let j = 0; j < 2; (updates.push((): number => j), j++)) {}
+            console.log(tests[0](), tests[1](), tests[2]());
+            console.log(updates[0](), updates[1]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_header_only_captures"),
+        "0 1 2\n1 2\n");
+}
+
+#[test]
+fn for_let_body_mutation_flows_through_continue_into_next_update() {
+    let source = r#"
+        function main(): void {
+            const bodies: (() => number)[] = [];
+            const updates: (() => number)[] = [];
+            for (let i = 0; i < 4; (updates.push((): number => i), i++)) {
+                bodies.push((): number => i);
+                if (i === 0) { i = 2; continue; }
+            }
+            console.log(bodies[0](), bodies[1]());
+            console.log(updates[0](), updates[1]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_continue_cells"), "2 3\n3 4\n");
+}
+
+#[test]
+fn async_for_let_closures_keep_distinct_cells_across_await() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const callbacks: (() => number)[] = [];
+            for (let i = 0; i < 3; i++) {
+                callbacks.push((): number => i);
+                await sleep(1);
+            }
+            console.log(callbacks[0](), callbacks[1](), callbacks[2]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_for_iteration_cells"), "0 1 2\n");
+}
+
+#[test]
+fn async_for_let_header_closures_share_updated_cells_after_resume() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const tests: (() => number)[] = [];
+            const updates: (() => number)[] = [];
+            for (let i = 0; (tests.push((): number => i), i < 2);
+                 (updates.push((): number => i), i++)) {
+                await sleep(1);
+            }
+            console.log(tests[0](), tests[1](), tests[2]());
+            console.log(updates[0](), updates[1]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_for_header_cells"),
+        "0 1 2\n1 2\n");
+}
+
+#[test]
 fn returned_closures_share_one_promoted_arena_cell() {
     let source = r#"
         type Counter = { increment: () => number; read: () => number };
@@ -1324,6 +1591,25 @@ fn calls_function_values_with_explicit_this_across_function_boundaries() {
 }
 
 #[test]
+fn bound_tagged_receiver_preserves_partial_arguments_and_async_result() {
+    let source = r#"
+        function sum(left: number, right: number): number { return left + right; }
+        async function later(value: number): Promise<number> { return value + 1; }
+        async function main(): Promise<void> {
+            const bound = sum.bind(7, 40);
+            console.log(bound(2));
+            console.log(bound.call(null, 3));
+            const asyncBound = later.bind(0, 41);
+            console.log(await asyncBound());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_tagged_receiver"), "42
+43
+42
+");
+}
+
+#[test]
 fn compiles_unary_and_extended_comparisons_without_duplicate_evaluation() {
     let source = r#"
         function left(): number {
@@ -1376,6 +1662,25 @@ fn compiles_remainder_exponentiation_and_compound_forms() {
     assert_eq!(
         compile_and_run(source, "remainder_exponentiation"),
         "1\n8\n8\n2\n1024\n"
+    );
+}
+
+#[test]
+fn compiles_javascript_pow_special_values() {
+    let source = r#"
+        function main(): void {
+            const one = 1;
+            const minusOne = -1;
+            const infinity = 1 / 0;
+            const nan = 0 / 0;
+            console.log(Number.isNaN(one ** infinity), Number.isNaN(minusOne ** -infinity));
+            console.log(Number.isNaN(one ** nan), Number.isNaN(Math.pow(minusOne, infinity)));
+            console.log(Number.isNaN(Math.pow(one, nan)), Math.pow(nan, 0), 2 ** 3);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "javascript_pow_special_values"),
+        "true true\ntrue true\ntrue 1 8\n"
     );
 }
 
@@ -2210,7 +2515,7 @@ fn console_log_prints_inline_number_conversions_inside_object_literals() {
     "#;
     assert_eq!(
         compile_and_run(source, "console_log_inline_number_conversions"),
-        "{\"n\":42}\n{\"p\":42}\n{\"f\":3.14}\n{\"b\":1}\n"
+        "{ n: 42 }\n{ p: 42 }\n{ f: 3.14 }\n{ b: 1 }\n"
     );
 }
 
@@ -2314,6 +2619,120 @@ fn compiles_quickjs_fallback_path() {
     assert_eq!(
         compile_and_run(source, "quickjs_fallback"),
         "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\n10\n12\n12\n10\nkept\ntrue\ntrue\n7\ngetter failed\nsum:86\n42\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn quickjs_dynamic_property_first_boundary_preserves_exact_getter_throws() {
+    let source = r#"
+        function main(): void {
+            console.log(loadScript(
+                "globalThis.getterObjectMarker = { tag: 'object' }; globalThis.getterStringMarker = 'string marker'; globalThis.getterFunctionMarker = function marker() {}; globalThis.getterSymbolMarker = Symbol('marker'); globalThis.getterTarget = Object.create(null); Object.defineProperties(getterTarget, { object: { get() { throw getterObjectMarker; } }, text: { get() { throw getterStringMarker; } }, missing: { get() { throw undefined; } }, callable: { get() { throw getterFunctionMarker; } }, symbol: { get() { throw getterSymbolMarker; } } });"
+            ));
+            const target: JsValue = getDynamicValue("getterTarget");
+            const objectMarker: JsValue = getDynamicValue("getterObjectMarker");
+            const stringMarker: JsValue = getDynamicValue("getterStringMarker");
+            const functionMarker: JsValue = getDynamicValue("getterFunctionMarker");
+            const symbolMarker: JsValue = getDynamicValue("getterSymbolMarker");
+            let objectMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "object"); }
+            catch (error) { objectMatches = error === objectMarker; }
+            let stringMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "text"); }
+            catch (error) { stringMatches = error === stringMarker; }
+            let undefinedDidThrow = false;
+            let undefinedMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "missing"); }
+            catch (error) { undefinedDidThrow = true; undefinedMatches = error === undefined; }
+            let functionMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "callable"); }
+            catch (error) { functionMatches = error === functionMarker; }
+            let symbolMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "symbol"); }
+            catch (error) { symbolMatches = error === symbolMarker; }
+            console.log(objectMatches);
+            console.log(stringMatches);
+            console.log(undefinedDidThrow);
+            console.log(undefinedMatches);
+            console.log(functionMatches);
+            console.log(symbolMatches);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_property_exact_first_throw"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn quickjs_dynamic_property_exact_read_preserves_order_and_success_identity() {
+    let source = r#"
+        function main(): void {
+            console.log(loadScript(
+                "globalThis.savedPropertyValue = { live: true }; globalThis.propertyTarget = { other: savedPropertyValue }; globalThis.propertyTrace = []; Object.defineProperty(propertyTarget, 'payload', { enumerable: false, get() { propertyTrace.push('G'); console.log('G'); if (this !== propertyTarget) throw 'wrong receiver'; return savedPropertyValue; } }); globalThis.hiddenPrototype = Object.create(null); Object.defineProperty(hiddenPrototype, 'hidden', { value: savedPropertyValue, enumerable: false }); globalThis.hiddenTarget = Object.create(hiddenPrototype); globalThis.getterFailureMarker = { exact: true }; globalThis.getterFailureTarget = Object.create(null); Object.defineProperty(getterFailureTarget, 'fail', { get() { propertyTrace.push('G'); console.log('G'); throw getterFailureMarker; } });"
+            ));
+            const saved: JsValue = getDynamicValue("savedPropertyValue");
+            const target: JsValue = getDynamicValue("propertyTarget");
+            const trace: JsValue = getDynamicValue("propertyTrace");
+            function receiverProducer(): JsValue { console.log("R"); return target; }
+            function keyProducer(): string { console.log("K"); return "payload"; }
+            const result: JsValue = receiverProducer()[keyProducer()];
+            console.log(result === saved);
+            if (Number(readDynamicValue(getDynamicProperty(trace, "length"))) !== 1) {
+                throw new Error("success getter should run exactly once");
+            }
+            const reusedReceiver: JsValue = getDynamicProperty(target, "other");
+            console.log(reusedReceiver === saved);
+            const inherited: JsValue = getDynamicProperty(getDynamicValue("hiddenTarget"), "hidden");
+            console.log(inherited === saved);
+
+            const failingTarget: JsValue = getDynamicValue("getterFailureTarget");
+            const failureMarker: JsValue = getDynamicValue("getterFailureMarker");
+            function failureReceiver(): JsValue { console.log("R"); return failingTarget; }
+            function failureKey(): string { console.log("K"); return "fail"; }
+            let getterMatches = false;
+            try { const ignored: JsValue = failureReceiver()[failureKey()]; }
+            catch (error) { getterMatches = error === failureMarker; }
+            if (Number(readDynamicValue(getDynamicProperty(trace, "length"))) !== 2) {
+                throw new Error("throwing getter should run exactly once");
+            }
+            console.log(getterMatches);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_property_exact_order"),
+        "true\nR\nK\nG\ntrue\ntrue\ntrue\nR\nK\nG\ntrue\n"
+    );
+}
+
+#[test]
+fn quickjs_dynamic_property_exact_receiver_and_key_throws_keep_order() {
+    let source = r#"
+        function main(): void {
+            console.log(loadScript(
+                "globalThis.receiverFailureMarker = { where: 'receiver' }; globalThis.keyFailureMarker = { where: 'key' }; globalThis.throwTarget = Object.create(null); Object.defineProperty(throwTarget, 'never', { get() { console.log('G'); return 1; } });"
+            ));
+            const receiverMarker: JsValue = getDynamicValue("receiverFailureMarker");
+            const keyMarker: JsValue = getDynamicValue("keyFailureMarker");
+            function throwingReceiver(): JsValue { console.log("R"); throw receiverMarker; }
+            function skippedKey(): string { console.log("K"); return "never"; }
+            let receiverMatches = false;
+            try { const ignored: JsValue = throwingReceiver()[skippedKey()]; }
+            catch (error) { receiverMatches = error === receiverMarker; }
+            console.log(receiverMatches);
+
+            const target: JsValue = getDynamicValue("throwTarget");
+            function validReceiver(): JsValue { console.log("R"); return target; }
+            function throwingKey(): string { console.log("K"); throw keyMarker; }
+            let keyMatches = false;
+            try { const ignored: JsValue = validReceiver()[throwingKey()]; }
+            catch (error) { keyMatches = error === keyMarker; }
+            console.log(keyMatches);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_property_exact_argument_throws"),
+        "true\nR\ntrue\nR\nK\ntrue\n"
     );
 }
 
@@ -2479,7 +2898,113 @@ fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_callback_exception"),
-        "`invokeCallback` threw: callback failed\n"
+        // Node: `error.message` of an Error thrown inside a callback that crosses
+        // the JS boundary is the bare message; the old "`label` threw:" prefix was a
+        // Thaw-only decoration (checked with node 22: prints "callback failed").
+        "callback failed\n"
+    );
+}
+
+#[test]
+fn callback_exception_snapshot_survives_captured_catch_closure_and_async_suspension() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b654361707475726564(
+            callback: () => void,
+        ): void;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.invokeCaptured = callback => callback();");
+            let inspect: () => string = () => "missing";
+            try {
+                __thaw_typed_js_696e766f6b654361707475726564(
+                    (): void => { throw 73; },
+                );
+            } catch (error) {
+                inspect = () => typeof error + ":" + String(error);
+            }
+            await sleep(0);
+            console.log(inspect());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_exception_captured_catch_after_async_reset"),
+        "number:73\n"
+    );
+}
+
+#[test]
+fn async_native_callback_rejection_preserves_embedded_nul_text() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b654465666572726564(
+            callback: () => Promise<void>,
+        ): void;
+
+        function main(): void {
+            loadScript("globalThis.invokeDeferred = callback => { callback().catch(error => console.log(error.name + ':' + error.message)); };");
+            __thaw_typed_js_696e766f6b654465666572726564(
+                async (): Promise<void> => {
+                    await sleep(0);
+                    throw new TypeError("before\0after");
+                },
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_native_callback_rejection_embedded_nul"),
+        "TypeError:before\0after\n"
+    );
+}
+
+#[test]
+fn native_callback_own_typed_throw_and_deferred_sync_throw_keep_host_abi() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b6553796e63(
+            callback: () => void,
+        ): void;
+        declare function __thaw_typed_js_696e766f6b654465666572726564(
+            callback: () => Promise<number>,
+        ): void;
+        function main(): void {
+            loadScript("globalThis.invokeSync = callback => { try { callback(); } catch (error) { console.log(error.name + ':' + error.message); } }; globalThis.invokeDeferred = callback => { const promise = callback(); console.log(typeof promise.then); promise.catch(error => console.log(error.name + ':' + error.message)); };");
+            __thaw_typed_js_696e766f6b6553796e63(
+                (): void => { throw new TypeError("inner typed"); },
+            );
+            // This is deliberately non-async: its closure throws before it
+            // creates a Promise, but the registered callback ABI is deferred.
+            __thaw_typed_js_696e766f6b654465666572726564(
+                (): Promise<number> => { throw new TypeError("deferred typed"); },
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_callback_typed_pending_and_deferred_failure"),
+        "TypeError:inner typed\nfunction\nTypeError:deferred typed\n"
+    );
+}
+
+#[test]
+fn settled_native_callback_promise_keeps_unrelated_rejection_separate() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65436f6e63757272656e74(
+            first: () => Promise<number>,
+            second: () => Promise<number>,
+        ): void;
+        async function first(): Promise<number> {
+            await sleep(0);
+            return 31;
+        }
+        async function second(): Promise<number> {
+            await sleep(0);
+            throw new TypeError("other continuation");
+        }
+        function main(): void {
+            loadScript("globalThis.invokeConcurrent = (first, second) => { const own = first(); const other = second(); own.then(value => console.log('own:' + value)); other.catch(error => console.log('other:' + error.message)); };");
+            __thaw_typed_js_696e766f6b65436f6e63757272656e74(first, second);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "settled_callback_and_unrelated_continuation"),
+        "own:31\nother:other continuation\n"
     );
 }
 
@@ -2547,8 +3072,128 @@ fn dynamic_json_calls_release_bridge_temporaries() {
     let mut compiler = HirCompiler::new(&context, "dynamic_json_cleanup");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
-    assert_eq!(ir.matches("call void @thaw_cstring_destroy").count(), 2, "{ir}");
-    assert_eq!(ir.matches("call void @thaw_json_destroy").count(), 1, "{ir}");
+    // Inspect only the user entry point: the generated `main` carries its own
+    // process-listener cstring cleanup that is unrelated to the bridge.
+    let body = ir.split("define internal void @thaw_user_main(").nth(1).expect(&ir)
+        .split("\n}").next().expect(&ir);
+    // The encoded argument graph and the parsed argument are released right
+    // after the call, before the pending-exception branch.
+    let call = body.find("@thaw_js_call_graph_result(").expect(&ir);
+    let after = &body[call..];
+    let args = after.find("call void @thaw_cstring_destroy(ptr %call_dynamic_args_json)").expect(&ir);
+    let parsed = after.find("call void @thaw_json_destroy(ptr %json_parse)").expect(&ir);
+    let branch = after.find("br i1 %has_pending_exception").expect(&ir);
+    assert!(args < parsed && parsed < branch, "{ir}");
+    // The result graph text is released immediately after it is decoded.
+    let decode = body.find("%decode_quickjs_graph = call ptr @thaw_json_graph_decode(").expect(&ir);
+    assert!(body[decode..].lines().nth(1).unwrap()
+        .contains("call void @thaw_cstring_destroy(ptr %call_dynamic_value)"), "{ir}");
+    // Every early exit that holds the encoded arguments also releases them.
+    for exit in ["json_stringify_invalid:", "json_stringify_host_failed:"] {
+        let block = body.split(exit).nth(1).expect(&ir).split("\n\n").next().unwrap();
+        assert!(block.contains("call void @thaw_cstring_destroy(ptr %call_dynamic_args_json)"), "{ir}");
+        assert!(block.contains("call void @thaw_json_destroy(ptr %json_parse)"), "{ir}");
+    }
+}
+
+#[test]
+fn declares_error_exact_constructor_boundary_abi() {
+    let context = Context::create();
+    let compiler = HirCompiler::new(&context, "error_exact_boundary_abi");
+    compiler.declare_runtime_builtins();
+    let module = &compiler.module;
+    let i8_ptr = context.ptr_type(AddressSpace::default());
+    let result = context.struct_type(&[
+        context.i64_type().into(),
+        context.i64_type().into(),
+        context.i8_type().into(),
+        i8_ptr.into(),
+    ], false);
+    let lookup = module.get_function("thaw_js_get_error_constructor_exact_result").unwrap();
+    let invoke = module.get_function("thaw_js_invoke_handle_graph_exact_result").unwrap();
+    for (function, params) in [
+        (lookup, vec![i8_ptr.into()]),
+        (invoke, vec![context.i64_type().into(), i8_ptr.into(), context.i8_type().into()]),
+    ] {
+        let ty = function.get_type();
+        assert_eq!(ty.get_return_type(), Some(result.into()));
+        assert_eq!(ty.get_param_types(), params);
+        assert!(!ty.is_var_arg());
+        assert_eq!(function.get_linkage(), Linkage::External);
+    }
+
+    // Adding siblings must not change the existing consumers' ABI.
+    let legacy = [
+        ("thaw_js_get_property_exact_result", vec![context.i64_type().into(), i8_ptr.into()]),
+        ("thaw_js_call_handle_mixed_exact_consuming_result", vec![context.i64_type().into(), i8_ptr.into(), i8_ptr.into()]),
+        ("thaw_js_construct_handle_graph_args_result", vec![context.i64_type().into(), i8_ptr.into()]),
+    ];
+    for (name, params) in legacy {
+        let function = module.get_function(name).unwrap();
+        assert_eq!(function.get_type().get_param_types(), params, "{name}");
+        assert!(!function.get_type().is_var_arg(), "{name}");
+        assert_eq!(function.get_linkage(), Linkage::External, "{name}");
+    }
+    assert_eq!(module.get_function("thaw_js_get_property_exact_result").unwrap().get_type().get_return_type(), Some(result.into()));
+    assert_eq!(module.get_function("thaw_js_call_handle_mixed_exact_consuming_result").unwrap().get_type().get_return_type(), Some(result.into()));
+    let legacy_handle_result = context.struct_type(&[context.i64_type().into(), i8_ptr.into()], false);
+    assert_eq!(module.get_function("thaw_js_construct_handle_graph_args_result").unwrap().get_type().get_return_type(), Some(legacy_handle_result.into()));
+}
+
+#[test]
+fn dynamic_json_setter_destroys_owned_result_before_exception_branch() {
+    // Both paths use setDynamicPropertyJson: one ordinary assignment and one
+    // assignment whose JavaScript setter can throw into a Thaw catch block.
+    for (name, source, caught) in [
+        (
+            "dynamic_set_success_cleanup",
+            r#"function main(): void {
+                const box: JsValue = getDynamicValue("box");
+                box.value = JSON.parse("1");
+            }"#,
+            false,
+        ),
+        (
+            "dynamic_set_throw_cleanup",
+            r#"function main(): void {
+                loadScript("globalThis.box = {}; Object.defineProperty(box, 'value', { set() { throw new Error('setter'); } });");
+                const box: JsValue = getDynamicValue("box");
+                try {
+                    box.value = JSON.parse("1");
+                } catch (error) {
+                    console.log(error);
+                }
+            }"#,
+            true,
+        ),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, name);
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.print_to_string();
+        let setter = ir.lines().position(|line| {
+            line.contains("call ") && line.contains("@thaw_js_set_property_json_graph_result(")
+        }).expect(&ir);
+        let suffix = ir.lines().skip(setter).collect::<Vec<_>>().join("\n");
+        let extracted = suffix.find("dynamic_property_json_set_value = extractvalue").expect(&ir);
+        let destroyed = suffix.find("call void @thaw_cstring_destroy").expect(&ir);
+        let branch = suffix.find("br i1 %has_pending_exception").expect(&ir);
+        assert!(extracted < destroyed && destroyed < branch, "{ir}");
+        assert!(suffix[destroyed..].lines().next().unwrap()
+            .contains("%dynamic_property_json_set_value"), "{ir}");
+        let branch_line = suffix[branch..].lines().next().unwrap();
+        // The setter runs inside the lowered try body, which propagates the
+        // pending exception to its caller; the caller's catch is entered through
+        // the catch-entry cleanup block (an empty trampoline into `%catch`).
+        assert!(branch_line.contains("label %propagate_exception"), "{ir}");
+        if caught {
+            let trampoline = ir.split("cleanup_before_catch:").nth(1).expect(&ir)
+                .lines().nth(1).unwrap();
+            assert!(trampoline.contains("br label %catch"), "{ir}");
+        }
+    }
 }
 
 #[test]
@@ -2655,4 +3300,973 @@ fn unset_env_var_reads_as_empty_string_not_a_crash() {
         }
     "#;
     assert_eq!(compile_and_run(source, "envvar_unset"), "\nstill alive\n");
+}
+#[test]
+fn embedded_nuls_survive_native_strings_and_json_boundaries() {
+    let source = r#"
+        function main(): void {
+            const s: string = "a\u0000b";
+            console.log(s.length, s.charCodeAt(1), s.charCodeAt(2));
+            console.log(s === "a", (s + "c").length, s.repeat(2).length);
+            console.log(s.slice(1).length, s.replace("b", "z").charCodeAt(1));
+            const value: any = s;
+            const restored: string = String(value);
+            console.log(restored.length, restored.charCodeAt(2), JSON.stringify(value));
+            const decoded: string = decodeURIComponent("a%00b");
+            console.log(decoded.length, encodeURIComponent(decoded));
+            console.log(s);
+            const object: any = JSON.parse('{"a\\u0000b":"x\\u0000y"}');
+            console.log(Object.keys(object)[0].length, String(Object.values(object)[0]).length);
+            console.log(String(eval("'a\\u0000b'")).length);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "embedded_nuls"),
+        "3 0 98\nfalse 4 6\n2 0\n3 98 \"a\\u0000b\"\n3 a%00b\na\0b\n3 3\n3\n");
+}
+
+#[test]
+fn compiled_quickjs_graph_result_keeps_cycle_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.returnCycle = () => { const value = {}; value.self = value; return value; };");
+            const result: Json = callDynamic("returnCycle", JSON.parse("[]"));
+            console.log(result === result.self);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "quickjs_graph_cycle_result"), "true\n");
+}
+
+#[test]
+fn generated_main_uses_result_reporters_and_destroys_listener_errors() {
+    let module = thaw_parser::parse_typescript("function main(): void { const value: JsValue = getDynamicValue('x'); }").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "process_report_result_abi");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_emit_uncaught_result"), "{ir}");
+    assert!(ir.contains("@thaw_js_emit_unhandled_rejection_result"), "{ir}");
+    assert!(ir.contains("@thaw_js_emit_rejection_handled_result"), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_set_unhandled_reporter_text_result(")), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_drain_unhandled_text_result(")), "{ir}");
+    assert!(!ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_drain_unhandled_result(")), "{ir}");
+    assert!(!ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_set_unhandled_reporter_result(")), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_js_terminal_work_pending(")), "{ir}");
+    // Listener errors returned in the `{ handled, error }` result pair are owned C
+    // strings; the generated main destroys them through `thaw_cstring_destroy`
+    // (previously asserted via the named blocks destroy_js_listener_exception /
+    // destroy_rejection_listener_exception).
+    for owned in ["%process_exception_listener_error", "%process_rejection_listener_error"] {
+        assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
+            && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");
+    }
+}
+
+#[test]
+fn opaque_hir_throw_does_not_trust_user_metadata_suffix() {
+    // `opaque` can be any producer-owned byte pointer. A source binding that
+    // resembles the old synthetic suffix must never make it a native C string.
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "opaque_test".into(),
+            params: vec![HirParam { name: "opaque".into(), ty: HirType::Str }],
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![
+                HirStmt::Let(
+                    "error__thaw_exception_native_text".into(), HirType::Str,
+                    HirExpr::Lit(HirLit::Str("source-controlled spoof".into())),
+                ),
+                HirStmt::Try(
+                    vec![HirStmt::Throw(HirExpr::Var("opaque".into()))],
+                    "error".into(),
+                    vec![HirStmt::Throw(HirExpr::Var("error".into()))],
+                    None,
+                ),
+            ],
+        }, HirFunction {
+            name: "main".into(),
+            params: vec![],
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![HirStmt::Return(None)],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "opaque_catch_provenance");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    // Current carrier design: provenance is read from the pending-native-text
+    // global into `catch_native_text_slot`, and the rethrow only trusts it when the
+    // catch value is unchanged and equals that recorded pointer
+    // (`caught_native_trusted`). The source binding named like the old synthetic
+    // suffix must never be consulted as provenance: its cell is allocated and
+    // initialised once and never loaded.
+    assert!(ir.contains("catch_native_text_slot"), "{ir}");
+    assert!(ir.contains("%rethrow_native_text = select i1 %caught_native_trusted, ptr %caught_native_text, ptr null"), "{ir}");
+    let function = ir.split("define internal void @opaque_test(").nth(1).unwrap().split("\n}").next().unwrap();
+    let spoof_uses = function.lines().filter(|line| line.contains("%error__thaw_exception_native_text_cell")).count();
+    assert_eq!(spoof_uses, 2, "spoofed suffix binding must only be allocated and initialised: {function}");
+    assert!(!function.lines().any(|line| line.contains("load ptr, ptr %error__thaw_exception_native_text_cell")), "{function}");
+}
+
+#[test]
+fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
+    let source = r#"
+        function main(): void {
+            try {
+                throw new TypeError("native failure");
+            } catch (error) {
+                const synchronous = (): number => 1;
+                const asynchronous = async (): Promise<number> => 2;
+                if (true) {
+                    synchronous();
+                }
+                throw error;
+            }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "catch_lambda_native_text_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    // The async lambda is a Promise-returning `__thaw_lambda_N` in the current naming.
+    assert!(ir.contains("define internal ptr @__thaw_lambda_"), "{ir}");
+    // Behavioural form of "the rethrow keeps the native text after the nested
+    // lambdas were compiled": the uncaught report still names the original error.
+    let (_stdout, stderr, code) = compile_and_run_failing(source, "catch_lambda_native_text_run");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("TypeError: native failure"), "{stderr}");
+}
+
+#[test]
+fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
+    let module = thaw_parser::parse_typescript(
+        "function __thaw_module_init(): void { throw 'init failed'; } function main(): void {}",
+    ).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "terminal_shutdown_order");
+    compiler.uses_napi = true;
+    compiler.uses_quickjs = true;
+    compiler.uses_quickjs_handles = true;
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("init_failed") && ir.contains("entry_cleanup"), "{ir}");
+    let ordinary = ir.find("terminal_ordinary_notifications:").unwrap();
+    let begin = ir.find("terminal_begin_shutdown:").unwrap();
+    let finish = ir.find("finish_napi_shutdown").unwrap();
+    assert!(ordinary < begin && begin < finish, "{ir}");
+    let terminal_js = ir.find("terminal_quickjs_jobs = call i32 @thaw_js_run_event_loop").unwrap();
+    let late_gc = ir[terminal_js..].find("call void @thaw_js_collect_garbage()").unwrap() + terminal_js;
+    let confirm = ir.find("confirm_napi_shutdown = call i8 @thaw_napi_poll_shutdown").unwrap();
+    assert!(terminal_js < late_gc && late_gc < confirm, "GC must follow terminal JS work before the owner barrier is confirmed: {ir}");
+    assert!(ir.contains("take_shutdown_error") && ir.contains("terminal_promise_notifications"), "{ir}");
+    // The owned report texts are produced and released through
+    // `thaw_cstring_destroy` (the earlier named destroy_* blocks no longer exist).
+    for owned in ["%original_exception_owned_report_text", "%listener_exception_owned_report_text"] {
+        assert!(ir.lines().any(|line| line.contains(&"= call ptr @thaw_runtime_exception_report_text(".to_string())
+            && line.trim_start().starts_with(owned)), "{owned}: {ir}");
+        assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
+            && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");
+    }
+    let original = ir.find("process_pending_exception = load ptr").unwrap();
+    let listener = ir[original..].find("emit_process_uncaught_exception = call").unwrap() + original;
+    let handler = ir[listener..].find("process_handler_exception = load ptr").unwrap() + listener;
+    // The uncaught-report call is void now (no `report_uncaught_exception` result name).
+    let next_report = ir[handler..].find("call void @thaw_runtime_report_uncaught(").unwrap() + handler;
+    for slot in [
+        "@__thaw_pending_exception_object",
+        "@__thaw_pending_exception_value_tag",
+        "@__thaw_pending_exception_f64",
+        "@__thaw_pending_exception_i64",
+        "@__thaw_pending_exception_bool",
+    ] {
+        assert!(ir[original..listener].contains(slot), "original exception metadata: {ir}");
+        assert!(ir[handler..next_report].contains(slot), "listener exception metadata: {ir}");
+    }
+    assert!(!ir.contains("unload_napi_addons"), "{ir}");
+}
+
+#[test]
+fn napi_only_terminal_cleanup_does_not_reference_quickjs_symbols() {
+    let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_only_terminal_cleanup");
+    compiler.uses_napi = true;
+    compiler.uses_quickjs = false;
+    compiler.uses_quickjs_handles = false;
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+
+    assert!(
+        !ir.lines().any(|line| line.contains("call void @thaw_js_collect_garbage(")),
+        "N-API-only code must not require the QuickJS archive for terminal GC: {ir}"
+    );
+    assert!(
+        !ir.lines()
+            .any(|line| line.contains("call i8 @thaw_js_terminal_work_pending(")),
+        "N-API-only code must not require the QuickJS terminal-work query: {ir}"
+    );
+    for call in [
+        "call i8 @thaw_napi_begin_shutdown(",
+        "call i8 @thaw_napi_poll_shutdown(",
+        "call i8 @thaw_napi_finish_shutdown(",
+        "call i64 @thaw_runtime_run_until_idle(",
+    ] {
+        assert!(ir.contains(call), "expected N-API/native shutdown call {call}: {ir}");
+    }
+    let begin = ir.find("call i8 @thaw_napi_begin_shutdown(").unwrap();
+    let poll = ir.find("call i8 @thaw_napi_poll_shutdown(").unwrap();
+    let finish = ir.find("call i8 @thaw_napi_finish_shutdown(").unwrap();
+    assert!(begin < poll && poll < finish, "N-API shutdown order changed: {ir}");
+}
+
+#[test]
+fn terminal_quickjs_shutdown_is_emitted_only_for_quickjs_programs() {
+    for (name, source, expect_quickjs_shutdown) in [
+        (
+            "terminal_quickjs_shutdown",
+            "function main(): void { const value: JsValue = getDynamicValue(\"value\"); }",
+            true,
+        ),
+        ("terminal_native_no_quickjs_shutdown", "function main(): void {}", false),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, name);
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.print_to_string();
+        let shutdown = ir.find("call i8 @thaw_js_shutdown_context()");
+        assert_eq!(shutdown.is_some(), expect_quickjs_shutdown, "{ir}");
+        if let Some(shutdown) = shutdown {
+            let release = ir.find("call i64 @thaw_js_release_all_handles()").expect(&ir);
+            let returned = ir[shutdown..].find("ret i32").expect(&ir) + shutdown;
+            assert!(release < shutdown && shutdown < returned, "{ir}");
+        }
+    }
+}
+
+#[test]
+fn terminal_rejection_listener_jobs_finish_before_process_exit() {
+    let source = r#"
+        function main(): void {
+            loadScript("process.on('unhandledRejection', () => { console.log('notify'); queueMicrotask(() => console.log('job')); });");
+            Promise.reject("first");
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "terminal_rejection_jobs"), "notify\njob\n");
+}
+
+#[test]
+fn source_function_cannot_forge_trusted_exception_text_marker() {
+    let source = r#"
+        function __thaw_trusted_exception_text(value: string): string {
+            return "user:" + value;
+        }
+        function main(): void {
+            try { throw __thaw_trusted_exception_text("x"); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "reserved_exception_text_marker"), "user:x\n");
+}
+
+#[test]
+fn branch_capture_initializes_shared_cell_on_both_successors() {
+    let source = r#"
+        function choose(take: boolean): string {
+            let value = "before";
+            if (take) {
+                const change = () => { value = "after"; };
+                change();
+            }
+            return value;
+        }
+        function main(): void {
+            console.log(choose(false));
+            console.log(choose(true));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "branch_capture_initialized_cell"), "before\nafter\n");
+}
+
+#[test]
+fn else_and_both_branch_captures_share_initialized_cells() {
+    let source = r#"
+        function elseOnly(take: boolean): string {
+            let value = "before";
+            if (take) {
+                value = value;
+            } else {
+                const change = () => { value = "else"; };
+                change();
+            }
+            return value;
+        }
+        function both(take: boolean): string {
+            let value = "before";
+            if (take) {
+                const change = () => { value = "then"; };
+                change();
+            } else {
+                const change = () => { value = "else"; };
+                change();
+            }
+            return value;
+        }
+        function main(): void {
+            console.log(elseOnly(true));
+            console.log(elseOnly(false));
+            console.log(both(true));
+            console.log(both(false));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "else_and_both_branch_captures"),
+        "before\nelse\nthen\nelse\n"
+    );
+}
+
+#[test]
+fn ternary_captures_initialize_before_either_successor() {
+    let source = r#"
+        function captureThen(take: boolean): string {
+            let value = "before";
+            const chosen = take
+                ? (() => { value = "then"; return value; })()
+                : value;
+            return chosen + ":" + value;
+        }
+        function captureElse(take: boolean): string {
+            let value = "before";
+            const chosen = take
+                ? value
+                : (() => { value = "else"; return value; })();
+            return chosen + ":" + value;
+        }
+        function main(): void {
+            console.log(captureThen(false));
+            console.log(captureThen(true));
+            console.log(captureElse(true));
+            console.log(captureElse(false));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "ternary_capture_preinit"),
+        "before:before\nthen:then\nbefore:before\nelse:else\n"
+    );
+}
+
+#[test]
+fn branch_and_ternary_capture_a_fresh_loop_local_each_iteration() {
+    let source = r#"
+        function main(): void {
+            let index = 0;
+            while (index < 2) {
+                let branch = "before";
+                if (index === 0) {
+                    const change = () => { branch = "after"; };
+                    change();
+                }
+                let ternary = "before";
+                const chosen = index === 0
+                    ? (() => { ternary = "after"; return ternary; })()
+                    : ternary;
+                console.log(branch, chosen, ternary);
+                index++;
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "branch_capture_loop_local"),
+        "after after after\nbefore before before\n"
+    );
+}
+
+#[test]
+fn skipped_jsvalue_branch_capture_does_not_retain() {
+    let source = r#"
+        function choose(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            if (take) {
+                const hold = () => value;
+            }
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            choose(false);
+            choose(true);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "skipped_js_capture"),
+        "true\nfalse\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn jsvalue_capture_claim_is_once_for_both_branches_and_repeated_closures() {
+    let source = r#"
+        function choose(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            if (take) {
+                const first = () => value;
+                const second = () => value;
+            } else {
+                const other = () => value;
+            }
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            choose(true);
+            choose(false);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_once_both_branches"),
+        "true\ntrue\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn jsvalue_ternary_and_short_circuit_claim_only_executed_capture() {
+    let source = r#"
+        function conditional(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            const done = take ? (() => { const alias: JsValue = value; return true; })() : false;
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function logical(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            const done = take && (() => { const alias: JsValue = value; return true; })();
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            conditional(false);
+            conditional(true);
+            logical(false);
+            logical(true);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_conditional_logical"),
+        "true\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n");
+}
+
+#[test]
+fn jsvalue_while_capture_claims_at_first_executed_iteration_only() {
+    let source = r#"
+        function choose(times: number): void {
+            const value: JsValue = getDynamicValue("value");
+            let i = 0;
+            while (i < times) {
+                const hold = () => value;
+                i++;
+            }
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            choose(0);
+            choose(2);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_while_once"),
+        "true\nfalse\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn jsvalue_branch_claim_is_fresh_for_each_outer_loop_local() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            let i = 0;
+            while (i < 2) {
+                const value: JsValue = getDynamicValue("value");
+                if (i === 0) {
+                    const hold = () => value;
+                }
+                console.log(releaseDynamicValue(value));
+                console.log(releaseDynamicValue(value));
+                console.log(releaseDynamicValue(value));
+                i++;
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_per_loop_local"),
+        "true\ntrue\nfalse\ntrue\nfalse\nfalse\n");
+}
+
+#[test]
+fn branch_capture_of_parameter_claims_before_condition_enables_quickjs() {
+    // `first` compiles before any other function enables the QuickJS host.
+    // Its condition is the first dynamic operation, after branch prepromotion.
+    let module = thaw_parser::parse_typescript(r#"
+        function first(value: JsValue): void {
+            if (hasDynamicProperty(value, "missing")) {
+                const skipped = () => value;
+            }
+            if (hasDynamicProperty(value, "x")) {
+                const held = () => value;
+            }
+        }
+        function main(): void {
+            loadScript("globalThis.obj = { x: 1 };");
+            const value: JsValue = getDynamicValue("obj");
+            first(value);
+        }
+    "#).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "first_capture_before_host_condition");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let body = ir.split("define internal void @first(").nth(1).expect(&ir)
+        .split("\n}").next().expect(&ir);
+    let zero = body.find("store i8 0, ptr %value_capture_claim_cell").expect(&ir);
+    let conditions = body.match_indices("@thaw_js_has_property_result(")
+        .map(|(index, _)| index).collect::<Vec<_>>();
+    let retains = body.match_indices("call i8 @thaw_js_retain_handle(")
+        .map(|(index, _)| index).collect::<Vec<_>>();
+    assert_eq!(conditions.len(), 2, "{ir}");
+    assert_eq!(retains.len(), 2, "{ir}");
+    assert_eq!(body.matches("store i8 0, ptr %value_capture_claim_cell").count(), 1, "{ir}");
+    // The first condition is false for `obj`; the second closure must still
+    // have a reachable claim block. Neither retain can precede its test.
+    // Claim blocks are appended after the branch merge blocks in the textual
+    // order, so only "zeroed before any test, and each retain after its own
+    // test" is a layout-independent statement.
+    assert!(zero < conditions[0] && conditions[0] < retains[0]
+        && conditions[0] < conditions[1] && conditions[1] < retains[1], "{ir}");
+    assert!(compiler.uses_quickjs() && compiler.uses_quickjs_handles, "{ir}");
+}
+
+#[test]
+fn absent_function_pointer_checks_after_plain_call_arguments() {
+    // Direct HIR isolates the consumer gate before the class method read
+    // starts producing absent Function values in a later dependent unit.
+    let callback = HirType::Function(vec![HirType::F64], Box::new(HirType::Void));
+    let absent = HirExpr::OptionalValue(
+        Box::new(HirExpr::OptionalNone(callback.clone())),
+        callback.clone(),
+    );
+    let program = HirProgram {
+        functions: vec![
+            HirFunction {
+                name: "effect".into(),
+                params: vec![],
+                ret: HirType::F64,
+                is_async: false,
+                body: vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(1.0))))],
+            },
+            HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Let("maybe_function".into(), callback,
+                        absent),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("maybe_function".into())),
+                        vec![HirExpr::Call(Box::new(HirExpr::Var("effect".into())), vec![])],
+                    )),
+                    HirStmt::Return(None),
+                ],
+            },
+        ],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "absent_function_call_order");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.lines()
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@thaw_user_main(")))
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let effect = main.find("@effect(").expect(&ir);
+    let check = main.find("callable_is_undefined").expect(&ir);
+    let load = main.find("closure_code").expect(&ir);
+    assert!(effect < check && check < load, "{ir}");
+}
+
+#[test]
+fn absent_function_registration_takes_undefined_handle_path() {
+    // Direct HIR supplies a Function-typed zero before a class property
+    // read starts producing one in a later dependent unit.
+    let callback = HirType::Function(vec![HirType::F64], Box::new(HirType::Void));
+    let absent = HirExpr::OptionalValue(
+        Box::new(HirExpr::OptionalNone(callback.clone())), callback.clone(),
+    );
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "main".into(), params: vec![], ret: HirType::Void, is_async: false,
+            body: vec![
+                HirStmt::Let("missing_callback".into(), callback, absent),
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("registerNativeCallback".into())),
+                    vec![HirExpr::Var("missing_callback".into())],
+                )),
+                HirStmt::Return(None),
+            ],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "absent_function_registration");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("native_callback_is_undefined"), "{ir}");
+    assert!(ir.contains("native_callback_undefined_handle"), "{ir}");
+}
+
+
+/// A `JsValue` stored in a native object literal or tuple that is handed to a
+/// `JsValue` slot keeps its live JS identity (graph wire), not a structural copy.
+#[test]
+fn retained_native_aggregate_keeps_nested_jsvalue_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicBox = { value: 1 };");
+            const box: JsValue = getDynamicValue("dynamicBox");
+            const record: JsValue = keepDynamic({ label: "kept", nested: box, deeper: { again: box } });
+            console.log(getDynamicProperty(record, "nested") === box);
+            console.log(getDynamicProperty(getDynamicProperty(record, "deeper"), "again") === box);
+            const pair: JsValue = keepDynamic([box, { inner: box }]);
+            console.log(getDynamicProperty(pair, "0") === box);
+            console.log(getDynamicProperty(getDynamicProperty(pair, "1"), "inner") === box);
+        }
+        function keepDynamic(value: JsValue): JsValue { return value; }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "retained_aggregate_keeps_jsvalue_identity"),
+        "true\ntrue\ntrue\ntrue\n"
+    );
+}
+
+
+#[test]
+fn inline_nullish_comparison_callees_release_their_handles() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.__thaw_inline_value = {}; globalThis.__thaw_inline_sum = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); globalThis.__thaw_inline_identity = value => true; globalThis.__thaw_inline_throw = () => { throw 'invocation failure'; };");
+            const sum: JsValue = getDynamicValue("__thaw_inline_sum");
+            const value: JsValue = getDynamicValue("__thaw_inline_value");
+            const baseline = Number(callDynamicValue(sum, __thaw_json_argument_array()));
+
+            for (let index = 0; index < 20; index++) {
+                const isNull = value === null;
+                const isUndefined = value === undefined;
+                if (isNull || isUndefined) throw "object matched null or undefined";
+            }
+
+            function failArgument(): JsValue { throw "argument failure"; }
+            let argumentCaught = false;
+            try {
+                callDynamicValueWithValue(getDynamicValue("__thaw_inline_identity"), failArgument());
+            } catch (error) {
+                argumentCaught = error === "argument failure";
+            }
+            let invocationCaught = false;
+            try {
+                callDynamicValueWithValue(getDynamicValue("__thaw_inline_throw"), value);
+            } catch (error) {
+                invocationCaught = error === "invocation failure";
+            }
+            if (!argumentCaught || !invocationCaught)
+                throw "inline callee exception path did not preserve the thrown value";
+
+            if (Number(callDynamicValue(sum, __thaw_json_argument_array())) !== baseline)
+                throw "inline nullish predicate handles leaked";
+            if (Number(callDynamicValue(sum, __thaw_json_argument_array())) !== baseline)
+                throw "borrowed callable Var was released";
+            releaseDynamicValue(value);
+            releaseDynamicValue(sum);
+            console.log(true);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "inline_nullish_callee_lease"), "true\n");
+}
+
+#[test]
+fn native_typed_quickjs_fresh_json_arguments_survive_all_return_lanes() {
+    let source = r#"
+        declare function __thaw_typed_js_73746f7265566f6964(value: Json): void;
+        declare function __thaw_typed_js_73746f7265426f6f6c(value: Json): boolean;
+        declare function __thaw_typed_js_73746f72654a736f6e(value: Json): Json;
+        declare function __thaw_typed_js_73746f72654a7356616c7565(value: Json): JsValue;
+        declare function __thaw_typed_js_7468726f77566f6964(value: Json): void;
+        declare function __thaw_typed_js_7468726f77426f6f6c(value: Json): boolean;
+        declare function __thaw_typed_js_7468726f774a736f6e(value: Json): Json;
+        declare function __thaw_typed_js_7468726f774a7356616c7565(value: Json): JsValue;
+        declare function __thaw_typed_js_73746f7265426f7468(left: Json, right: Json): void;
+        function borrowed_json_owner(value: Json): void {
+            __thaw_typed_js_73746f7265566f6964(value);
+        }
+        function two_fresh_json_owners(value: JsValue): void {
+            __thaw_typed_js_73746f7265426f7468(value, value);
+        }
+        function main(): void {
+            loadScript("globalThis.__thaw_saved = {}; globalThis.__thaw_source = {marker: 'live'}; globalThis.__thaw_store = (name, value) => { globalThis.__thaw_saved[name] = value; }; globalThis.storeVoid = value => { __thaw_store('storeVoid', value); }; globalThis.storeBoth = (left, right) => { __thaw_store('storeBothLeft', left); __thaw_store('storeBothRight', right); }; globalThis.storeBool = value => { __thaw_store('storeBool', value); return true; }; globalThis.storeJson = value => { __thaw_store('storeJson', value); return 'json-result'; }; globalThis.storeJsValue = value => { __thaw_store('storeJsValue', value); return true; }; globalThis.throwVoid = value => { __thaw_store('throwVoid', value); throw 'stored-argument'; }; globalThis.throwBool = value => { __thaw_store('throwBool', value); throw 'stored-argument'; }; globalThis.throwJson = value => { __thaw_store('throwJson', value); throw 'stored-argument'; }; globalThis.throwJsValue = value => { __thaw_store('throwJsValue', value); throw 'stored-argument'; }; globalThis.__thaw_saved_identity_ok = () => Object.keys(globalThis.__thaw_saved).length === 10 && Object.values(globalThis.__thaw_saved).every(value => value === globalThis.__thaw_source && value.marker === 'live'); globalThis.__thaw_refs = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0);");
+            const sourceValue: JsValue = getDynamicValue("__thaw_source");
+            const refs: JsValue = getDynamicValue("__thaw_refs");
+            const identity: JsValue = getDynamicValue("__thaw_saved_identity_ok");
+            const baseline = Number(callDynamicValue(refs, __thaw_json_argument_array()));
+            __thaw_typed_js_73746f7265566f6964(sourceValue);
+            two_fresh_json_owners(sourceValue);
+            const boolResult = __thaw_typed_js_73746f7265426f6f6c(sourceValue);
+            const jsonResult: Json = __thaw_typed_js_73746f72654a736f6e(sourceValue);
+            const jsValueResult: JsValue = __thaw_typed_js_73746f72654a7356616c7565(sourceValue);
+            releaseDynamicValue(jsValueResult);
+            let caughtVoid = false;
+            let caughtBool = false;
+            let caughtJson = false;
+            let caughtJsValue = false;
+            try { __thaw_typed_js_7468726f77566f6964(sourceValue); } catch (error) { caughtVoid = error === "stored-argument"; }
+            try { __thaw_typed_js_7468726f77426f6f6c(sourceValue); } catch (error) { caughtBool = error === "stored-argument"; }
+            try { __thaw_typed_js_7468726f774a736f6e(sourceValue); } catch (error) { caughtJson = error === "stored-argument"; }
+            try { __thaw_typed_js_7468726f774a7356616c7565(sourceValue); } catch (error) { caughtJsValue = error === "stored-argument"; }
+            const live = callDynamicValue(identity, __thaw_json_argument_array());
+            const after = Number(callDynamicValue(refs, __thaw_json_argument_array()));
+            console.log(boolResult, jsonResult === "json-result", caughtVoid, caughtBool, caughtJson, caughtJsValue, live, after === baseline);
+            releaseDynamicValue(sourceValue);
+            releaseDynamicValue(refs);
+            releaseDynamicValue(identity);
+        }
+    "#;
+
+    assert_eq!(compile_and_run(source, "typed_quickjs_all_return_lanes"), "true true true true true true true true\n");
+
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_all_return_lanes_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.find("define internal void @thaw_user_main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let mut from = 0;
+    for _ in 0..8 {
+        let pushed = body[from..].find("@thaw_json_array_push_json(").map(|offset| from + offset).expect(body);
+        let released = body[pushed..]
+            .find("\nrelease_typed_wrapper_json_argument")
+            .map(|offset| pushed + offset + 1)
+            .expect(body);
+        let release_end = body[released..]
+            .find("\ntyped_wrapper_json_released")
+            .map(|offset| released + offset)
+            .expect(body);
+        let encoded = body[release_end..].find("@thaw_json_graph_encode(").map(|offset| release_end + offset).expect(body);
+        let called = body[encoded..].find("@thaw_js_call_handle_mixed_exact_").map(|offset| encoded + offset).expect(body);
+        let release_block = &body[released..release_end];
+        assert!(
+            pushed < released
+                && released < release_end
+                && release_end < encoded
+                && encoded < called
+                && release_block.contains("call void @thaw_json_destroy("),
+            "{body}"
+        );
+        from = called + 1;
+    }
+    let two_fresh = ir.find("define internal void @two_fresh_json_owners(").expect(&ir);
+    let two_fresh_body = &ir[two_fresh..two_fresh + ir[two_fresh..].find("\n}").unwrap()];
+    let pushes = two_fresh_body.matches("@thaw_json_array_push_json(").count();
+    let first_encode = two_fresh_body.find("@thaw_json_graph_encode(").expect(two_fresh_body);
+    let release_labels: Vec<usize> = two_fresh_body
+        .match_indices("\nrelease_typed_wrapper_json_argument")
+        .map(|(offset, _)| offset + 1)
+        .filter(|offset| {
+            let line_start = two_fresh_body[..*offset].rfind('\n').map(|index| index + 1).unwrap_or(0);
+            let line_end = two_fresh_body[*offset..]
+                .find('\n')
+                .map(|index| *offset + index)
+                .unwrap_or(two_fresh_body.len());
+            let label_line = &two_fresh_body[line_start..line_end];
+            *offset < first_encode
+                && two_fresh_body[..*offset].matches("@thaw_json_array_push_json(").count() == 2
+                && label_line.contains("; preds =")
+                && !label_line.contains("%propagate_exception")
+        })
+        .collect();
+    assert_eq!(pushes, 2, "{two_fresh_body}");
+    assert_eq!(release_labels.len(), 2, "{two_fresh_body}");
+    assert_eq!(two_fresh_body[..release_labels[0]].matches("@thaw_json_array_push_json(").count(), 2, "{two_fresh_body}");
+    for (index, released) in release_labels.iter().copied().enumerate() {
+        let release_end = two_fresh_body[released..]
+            .find("\ntyped_wrapper_json_released")
+            .map(|offset| released + offset)
+            .unwrap_or(first_encode);
+        assert!(released < release_end && release_end <= first_encode, "{two_fresh_body}");
+        assert!(two_fresh_body[released..release_end].contains("call void @thaw_json_destroy("), "{two_fresh_body}");
+        if index + 1 < release_labels.len() {
+            assert!(release_labels[index + 1] < first_encode, "{two_fresh_body}");
+        }
+    }
+    let borrowed = ir.find("define internal void @borrowed_json_owner(").expect(&ir);
+    let borrowed_body = &ir[borrowed..borrowed + ir[borrowed..].find("\n}").unwrap()];
+    assert!(!borrowed_body.contains("release_typed_wrapper_json_argument:"), "{borrowed_body}");
+}
+
+#[test]
+fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() {
+    let source = r#"
+        declare function __thaw_typed_js_616363657074(first: Json, second: JsValue): void;
+        declare function __thaw_typed_js_7468726f775f696e6e6572(): void;
+        declare function __thaw_typed_js_766572696679(value: Json): boolean;
+        declare function __thaw_typed_js_696e6e6572(first: Json, second: JsValue): JsValue;
+        function failSecond(): JsValue { throw "later argument"; }
+        function innerCaught(value: JsValue): JsValue {
+            try { __thaw_typed_js_7468726f775f696e6e6572(); } catch (_) {}
+            return value;
+        }
+        function main(): void {
+            loadScript("globalThis.__thaw_source = {marker: 'source'}; globalThis.__thaw_accept_calls = 0; globalThis.__thaw_inner_calls = 0; globalThis.__thaw_saved_first = undefined; globalThis.accept = (first, second) => { globalThis.__thaw_accept_calls++; globalThis.__thaw_saved_first = first; }; globalThis.inner = (first, second) => { globalThis.__thaw_inner_calls++; return first; }; globalThis.throw_inner = () => { throw 'inner'; }; globalThis.verify = value => !!value && value.marker === 'borrowed'; globalThis.__thaw_ref_total = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); globalThis.__thaw_accept_identity = () => globalThis.__thaw_accept_calls === 1 && globalThis.__thaw_saved_first === globalThis.__thaw_source && globalThis.__thaw_saved_first.marker === 'source'; globalThis.__thaw_nested_untouched = () => globalThis.__thaw_accept_calls === 0 && globalThis.__thaw_inner_calls === 0 && globalThis.__thaw_source.marker === 'source';");
+            const sourceValue: JsValue = getDynamicValue("__thaw_source");
+            const refTotal: JsValue = getDynamicValue("__thaw_ref_total");
+            const acceptedIdentity: JsValue = getDynamicValue("__thaw_accept_identity");
+            const nestedUntouched: JsValue = getDynamicValue("__thaw_nested_untouched");
+            const baseline = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            let freshCaught = 0;
+            for (let index = 0; index < 20; index++) {
+                try { __thaw_typed_js_616363657074(sourceValue, failSecond()); }
+                catch (error) { if (error === "later argument") freshCaught++; }
+            }
+            const afterFresh = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            const borrowed: Json = JSON.parse('{"marker":"borrowed"}');
+            let borrowedCaught = 0;
+            for (let index = 0; index < 3; index++) {
+                try { __thaw_typed_js_616363657074(borrowed, failSecond()); }
+                catch (error) { if (error === "later argument") borrowedCaught++; }
+            }
+            const borrowedUsable = __thaw_typed_js_766572696679(borrowed);
+            const afterBorrowed = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            let nestedCaught = 0;
+            for (let index = 0; index < 10; index++) {
+                try { __thaw_typed_js_616363657074(sourceValue, __thaw_typed_js_696e6e6572(sourceValue, failSecond())); }
+                catch (error) { if (error === "later argument") nestedCaught++; }
+            }
+            const nestedTargetsUntouched = callDynamicValue(nestedUntouched, __thaw_json_argument_array());
+            const afterNestedFailures = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            __thaw_typed_js_616363657074(sourceValue, innerCaught(sourceValue));
+            const accepted = callDynamicValue(acceptedIdentity, __thaw_json_argument_array());
+            const afterNested = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            console.log(freshCaught === 20, afterFresh === baseline, borrowedCaught === 3, borrowedUsable, afterBorrowed === baseline, nestedCaught === 10, nestedTargetsUntouched, afterNestedFailures === baseline, accepted, afterNested === baseline);
+            releaseDynamicValue(sourceValue);
+            releaseDynamicValue(refTotal);
+            releaseDynamicValue(acceptedIdentity);
+            releaseDynamicValue(nestedUntouched);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_argument_array_unwind"),
+        "true true true true true true true true true true\n"
+    );
+
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_argument_array_unwind_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.find("define internal void @thaw_user_main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let release = body.find("\nrelease_typed_dynamic_argument_array").expect(body) + 1;
+    let released = body[release..]
+        .find("\ntyped_dynamic_argument_array_released")
+        .map(|offset| release + offset)
+        .expect(body);
+    let release_block = &body[release..released];
+    assert!(release_block.contains("call void @thaw_json_destroy(ptr "), "{body}");
+    assert!(release_block.contains("dynamic_args"), "{body}");
+    assert!(body.contains("typed_dynamic_argument_array_active"), "{body}");
+}
+
+#[test]
+fn native_typed_quickjs_jsvalue_json_argument_is_released_after_array_clone() {
+    let source = r#"
+        declare function __thaw_typed_js_6563686f(value: Json): JsValue;
+        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_wrapper_js_user_store(value: Json): Json;
+        function direct_owner(value: JsValue): void {
+            __thaw_typed_js_6563686f(value);
+        }
+        function main(): void {}
+        function nested_unproven_store(value: JsValue, key: JsValue): void {
+            __thaw_typed_js_70616972(__thaw_typed_wrapper_js_user_store(value), key);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_jsvalue_argument");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let direct_owner = ir.find("define internal void @direct_owner(").expect(&ir);
+    let body = &ir[direct_owner..direct_owner + ir[direct_owner..].find("\n}").unwrap()];
+    let cloned = body.find("@thaw_json_array_push_json(").expect(body);
+    let release_block = body.find("release_typed_wrapper_json_argument:").expect(body);
+    let destroy = body[release_block..]
+        .find("@thaw_json_destroy(")
+        .map(|offset| release_block + offset)
+        .expect(body);
+    let exact_call = body
+        .find("@thaw_js_call_handle_mixed_exact_consuming_result(")
+        .expect(body);
+    assert!(cloned < release_block && release_block < destroy && destroy < exact_call, "{body}");
+
+    let nested = ir.find("define internal void @nested_unproven_store(").expect(&ir);
+    let nested_body = &ir[nested..nested + ir[nested..].find("\n}").unwrap()];
+    assert!(
+        !nested_body.contains("release_typed_wrapper_json_argument:"),
+        "unproven inner wrapper's borrowed Json must not be attached to the outer direct-call scope: {nested_body}"
+    );
+}
+
+
+// This runtime case checks alias usability. The adjacent HIR/IR control checks
+// the unproven-prefix marker owner mismatch without changing native Json
+// argument coercion to manufacture a marker in a local function.
+#[test]
+fn stored_json_alias_survives_nested_outer_quickjs_call() {
+    let source = r#"
+        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_js_766572696679(value: Json): boolean;
+        let saved: Json = null;
+        function __thaw_typed_wrapper_js_user_store(value: Json): Json {
+            saved = value;
+            return value;
+        }
+        function main(): void {
+            loadScript("globalThis.source = { value: 7 }; globalThis.pairValue = null; globalThis.pair = (value, key) => { globalThis.pairValue = value; return value; }; globalThis.verify = (value) => value.value === 7 && pairValue.value === 7;");
+            const sourceValue: JsValue = getDynamicValue("source");
+            const key: JsValue = Symbol("key");
+            const returned: JsValue = __thaw_typed_js_70616972(
+                __thaw_typed_wrapper_js_user_store(sourceValue), key,
+            );
+            console.log(__thaw_typed_js_766572696679(saved));
+            releaseDynamicValue(returned);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_unproven_wrapper_owner"), "true\n");
 }

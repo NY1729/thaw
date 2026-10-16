@@ -8,4 +8,5 @@ license.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+thaw-arena = { path = "../thaw-arena" }
 libc = "0.2"

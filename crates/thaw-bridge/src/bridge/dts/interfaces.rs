@@ -1,54 +1,55 @@
-/// A single top-level `declare function`/`export declare function`
-/// extracts one `(name, function)` pair; a `declare namespace Foo {
-/// function bar(...): ...; }` recurses into its body and extracts every
-/// function found inside (at any nesting depth -- a namespace can itself
-/// contain a nested namespace). Found necessary by a real npm package
-/// (`qs`), whose entire type surface -- including every function --
-/// lives inside `declare namespace QueryString { ... }` rather than at
-/// the top level; without this, `parse_dts` found zero functions in it.
-/// The extracted `DtsFunction.name` is the bare function name (`parse`,
-/// not `QueryString.parse`) -- that's also what `wrap_as_commonjs_module`'s
-/// object-export hoisting binds it to at runtime (`qs`'s own
-/// `module.exports = { parse, stringify, ... }`), so the two already
-/// agree without any extra namespace-qualification logic.
-///
-/// Also handles a *named* `export default function foo(...): T;` (an
-/// `ExportDefaultDecl`, a different AST shape than `ExportDecl` --
-/// found necessary by real ESM packages, whose `.d.ts` commonly uses
-/// this form, e.g. `escape-string-regexp`'s `export default function
-/// escapeStringRegexp(string: string): string;`). An *anonymous*
-/// `export default function(...): T;` has no name to extract a callable
-/// `DtsFunction` under and is silently skipped -- `.d.ts` authors
-/// essentially always name it in practice specifically so it's
-/// referenceable, so this isn't expected to matter.
-fn extract_fn_decls(item: &ModuleItem) -> Vec<(&str, &Function)> {
-    match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_fn_decls_from_decl(decl),
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
-            extract_fn_decls_from_decl(&export.decl)
+/// Visit declarations under their lexical namespace while keeping the
+/// original module order. Functions, callable constants, and aliases share
+/// this traversal so a member cannot silently lose its owner namespace.
+fn scoped_module_items(module: &Module) -> Vec<(String, &ModuleItem)> {
+    fn walk<'a>(item: &'a ModuleItem, scope: &str, found: &mut Vec<(String, &'a ModuleItem)>) {
+        found.push((scope.to_string(), item));
+        let decl = match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => decl,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+            _ => return,
+        };
+        if let Decl::TsModule(namespace) = decl {
+            let swc_ecma_ast::TsModuleName::Ident(name) = &namespace.id else { return; };
+            let scope = if scope.is_empty() { name.sym.to_string() }
+                else { format!("{scope}.{}", name.sym) };
+            if let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body {
+                for item in &block.body { walk(item, &scope, found); }
+            }
         }
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
-            DefaultDecl::Fn(fn_expr) => match &fn_expr.ident {
-                Some(ident) => vec![(ident.sym.as_str(), &fn_expr.function)],
-                None => Vec::new(),
-            },
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
     }
+    let mut found = Vec::new();
+    for item in &module.body { walk(item, "", &mut found); }
+    found
 }
 
-fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<(&str, &Function)> {
-    match decl {
-        Decl::Fn(fn_decl) => vec![(fn_decl.ident.sym.as_str(), &fn_decl.function)],
-        Decl::TsModule(module_decl) => {
-            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
-                return Vec::new();
-            };
-            block.body.iter().flat_map(extract_fn_decls).collect()
+/// Retains each declaration's full namespace path while returning its bare
+/// identifier separately. `parse_dts` keeps ordinary namespace identities
+/// distinct and preserves the bare CommonJS method ABI for `export = NS`.
+fn scoped_fn_decls(module: &Module) -> Vec<(String, String, &Function)> {
+    let mut found = Vec::new();
+    for (scope, item) in scoped_module_items(module) {
+        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) = item {
+            if let DefaultDecl::Fn(function) = &export.decl {
+                if let Some(name) = &function.ident {
+                    let name = name.sym.to_string();
+                    found.push((name.clone(), name, &*function.function));
+                }
+            }
+            continue;
         }
-        _ => Vec::new(),
+        let decl = match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => decl,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+            _ => continue,
+        };
+        if let Decl::Fn(function) = decl {
+            let bare = function.ident.sym.to_string();
+            let full = if scope.is_empty() { bare.clone() } else { format!("{scope}.{bare}") };
+            found.push((full, bare, &*function.function));
+        }
     }
+    found
 }
 
 /// The interface name that `export = <ident>;` together with `declare
@@ -58,10 +59,8 @@ fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<(&str, &Function)> {
 /// `extract_interface_method_decls`, as opposed to just some interface
 /// used elsewhere as an ordinary parameter/return type (e.g. a callback
 /// interface that has nothing to do with the package's own exports).
-/// `<TypeRef>` may be namespace-qualified (`_.LoDashStatic`); only the
-/// rightmost segment is used, matching how every interface here is
-/// tracked by its own bare name regardless of which namespace it's
-/// nested in.
+/// `<TypeRef>` may be namespace-qualified (`_.LoDashStatic`); keep its
+/// complete name so a same-named interface in another namespace is not used.
 fn export_assignment_interface_name(module: &Module) -> Option<String> {
     let exported = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
@@ -87,79 +86,64 @@ fn export_assignment_interface_name(module: &Module) -> Option<String> {
             let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
                 return None;
             };
-            match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => Some(ident.sym.to_string()),
-                TsEntityName::TsQualifiedName(qualified) => {
-                    Some(qualified.right.sym.to_string())
-                }
-            }
+            Some(type_reference_name(&ty_ref.type_name))
         })
     })
 }
 
-/// Every method signature from every declaration (top-level or inside a
-/// `declare namespace` block) of the one interface named `target` --
-/// parallel to `extract_fn_decls`, for an `export = obj` binding whose
-/// declared type is an interface with method members rather than a
-/// plain callable/namespace-function object. Real-world example:
-/// lodash's `declare const _: _.LoDashStatic;` with `interface
-/// LoDashStatic { chunk(...): ...; /* ~300 more */ }`, commonly re-opened
-/// (TS declaration merging) across several files each augmenting the
-/// same interface with a handful of methods -- rather than actually
-/// merging same-named interfaces into one combined type, this just
-/// extracts every declaration's own methods independently, the same
-/// "grab every function-shaped thing, wherever it is" policy
-/// `extract_fn_decls` already applies to plain functions; a name used by
-/// more than one still only needs *a* signature that classifies, and
-/// `Classification::classify_all` already falls back to `Fallback` for a
-/// name with more than one anyway. Restricted to `target` (see
-/// `export_assignment_interface_name`) rather than every interface in
-/// the file: an interface used only as some other value's parameter or
-/// return type (e.g. a callback interface with its own unrelated
-/// methods) must not contribute spurious package-level functions.
-fn extract_interface_method_decls<'a>(
-    item: &'a ModuleItem,
+/// Collect public methods from the `export =` interface and its bases,
+/// including all merged declarations under each namespace-qualified name.
+fn export_assignment_interface_methods<'a>(
+    module: &'a Module,
     target: &str,
-) -> Vec<(String, &'a TsMethodSignature)> {
-    match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => {
-            extract_interface_method_decls_from_decl(decl, target)
+) -> Vec<(String, String, &'a TsMethodSignature)> {
+    fn expr_name(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name) => Some(name.sym.to_string()),
+            Expr::Member(member) => {
+                let MemberProp::Ident(name) = &member.prop else { return None; };
+                Some(format!("{}.{}", expr_name(&member.obj)?, name.sym))
+            }
+            _ => None,
         }
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
-            extract_interface_method_decls_from_decl(&export.decl, target)
-        }
-        _ => Vec::new(),
     }
-}
-
-fn extract_interface_method_decls_from_decl<'a>(
-    decl: &'a Decl,
-    target: &str,
-) -> Vec<(String, &'a TsMethodSignature)> {
-    match decl {
-        Decl::TsInterface(iface) if iface.id.sym.as_str() == target => iface
-            .body
-            .body
-            .iter()
-            .filter_map(|member| match member {
-                TsTypeElement::TsMethodSignature(method) if !method.computed => {
-                    type_property_name(&method.key).map(|name| (name, method))
+    fn collect<'a>(
+        name: &str,
+        declarations: &HashMap<String, Vec<&'a TsInterfaceDecl>>,
+        visited: &mut HashSet<String>,
+        methods: &mut Vec<(String, String, &'a TsMethodSignature)>,
+    ) {
+        if !visited.insert(name.to_string()) { return; }
+        let Some(interfaces) = declarations.get(name) else { return; };
+        for interface in interfaces {
+            for base in &interface.extends {
+                let Some(base_name) = expr_name(&base.expr) else { continue; };
+                let base_name = lexical_type_key(
+                    &base_name, declaration_scope(name), |candidate| declarations.contains_key(candidate),
+                ).unwrap_or(base_name);
+                collect(&base_name, declarations, visited, methods);
+            }
+        }
+        for interface in interfaces {
+            for member in &interface.body.body {
+                if let TsTypeElement::TsMethodSignature(method) = member {
+                    if !method.computed {
+                        if let Some(method_name) = type_property_name(&method.key) {
+                            methods.push((method_name, name.to_string(), method));
+                        }
+                    }
                 }
-                _ => None,
-            })
-            .collect(),
-        Decl::TsModule(module_decl) => {
-            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
-                return Vec::new();
-            };
-            block
-                .body
-                .iter()
-                .flat_map(|item| extract_interface_method_decls(item, target))
-                .collect()
+            }
         }
-        _ => Vec::new(),
     }
+    let (interfaces, _) = scoped_type_declarations(module);
+    let mut declarations = HashMap::<String, Vec<&TsInterfaceDecl>>::new();
+    for (name, interface) in interfaces {
+        declarations.entry(name).or_default().push(interface);
+    }
+    let mut methods = Vec::new();
+    collect(target, &declarations, &mut HashSet::new(), &mut methods);
+    methods
 }
 
 /// Like `extract_fn_decls`/`extract_class_decls`, but for an `interface`
@@ -217,11 +201,162 @@ fn extract_type_alias_decls_from_decl(decl: &Decl) -> Vec<&swc_ecma_ast::TsTypeA
     }
 }
 
-#[derive(Default)]
+fn type_reference_name(name: &TsEntityName) -> String {
+    match name {
+        TsEntityName::Ident(name) => name.sym.to_string(),
+        TsEntityName::TsQualifiedName(name) =>
+            format!("{}.{}", type_reference_name(&name.left), name.right.sym),
+    }
+}
+
+fn declaration_scope(name: &str) -> &str {
+    name.rsplit_once('.').map_or("", |(scope, _)| scope)
+}
+
+fn lexical_type_key(
+    reference: &str,
+    scope: &str,
+    contains: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let mut current = scope;
+    while !current.is_empty() {
+        let candidate = format!("{current}.{reference}");
+        if contains(&candidate) { return Some(candidate); }
+        current = current.rsplit_once('.').map_or("", |(parent, _)| parent);
+    }
+    contains(reference).then(|| reference.to_string())
+}
+
+thread_local! {
+    /// Declaration scope that bare type references are currently resolved against (see
+    /// `scoped_type_context`).
+    static TYPE_SCOPE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Restores the previous `TYPE_SCOPE` when the scoped context goes out of use.
+struct TypeScopeGuard(String);
+
+impl Drop for TypeScopeGuard {
+    fn drop(&mut self) {
+        TYPE_SCOPE.with(|scope| *scope.borrow_mut() = std::mem::take(&mut self.0));
+    }
+}
+
+/// A shared map plus, for the first of a context pair, the scope guard that keeps lexical
+/// lookups (`scoped_reference`) aimed at the right declaration scope.
+struct Scoped<'b, T> {
+    value: &'b T,
+    _guard: Option<TypeScopeGuard>,
+}
+
+impl<T> std::ops::Deref for Scoped<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+/// Makes references classified while the returned context is alive resolve lexically from
+/// `scope` outward (`scope.Name`, parent scopes, then bare `Name`). The maps are shared, not
+/// copied: the lookup sites call `scoped_reference` instead.
+fn scoped_type_context<'a, 'b>(
+    scope: &str,
+    interfaces: &'b HashMap<String, DtsType>,
+    generic: &'b GenericInterfaces<'a>,
+) -> (Scoped<'b, HashMap<String, DtsType>>, Scoped<'b, GenericInterfaces<'a>>) {
+    let previous = TYPE_SCOPE.with(|current| std::mem::replace(&mut *current.borrow_mut(), scope.to_string()));
+    (
+        Scoped { value: interfaces, _guard: Some(TypeScopeGuard(previous)) },
+        Scoped { value: generic, _guard: None },
+    )
+}
+
+/// The key a type reference resolves to in the current declaration scope.
+fn scoped_reference(
+    reference: &str,
+    interfaces: &HashMap<String, DtsType>,
+    generic: &GenericInterfaces<'_>,
+) -> String {
+    scoped_generic_reference(reference, |name| interfaces.contains_key(name) || generic_has(generic, name))
+}
+
+fn generic_has(generic: &GenericInterfaces<'_>, name: &str) -> bool {
+    generic.interfaces.contains_key(name) || generic.aliases.contains_key(name) || generic.classes.contains(name)
+}
+
+fn scoped_generic_reference(reference: &str, contains: impl Fn(&str) -> bool) -> String {
+    TYPE_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        if scope.is_empty() {
+            return reference.to_string();
+        }
+        lexical_type_key(reference, &scope, contains).unwrap_or_else(|| reference.to_string())
+    })
+}
+
+/// Preserve the enclosing declaration namespace in resolver keys. Bare names
+/// are added separately only when they cannot identify a different scope.
+#[allow(clippy::type_complexity)]
+fn scoped_type_declarations(
+    module: &Module,
+) -> (
+    Vec<(String, &TsInterfaceDecl)>,
+    Vec<(String, &swc_ecma_ast::TsTypeAliasDecl)>,
+) {
+    fn walk_item<'a>(
+        item: &'a ModuleItem,
+        scope: &str,
+        interfaces: &mut Vec<(String, &'a TsInterfaceDecl)>,
+        aliases: &mut Vec<(String, &'a swc_ecma_ast::TsTypeAliasDecl)>,
+    ) {
+        let decl = match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => decl,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+            _ => return,
+        };
+        match decl {
+            Decl::TsInterface(iface) => {
+                let name = iface.id.sym.as_str();
+                interfaces.push((if scope.is_empty() { name.to_string() } else { format!("{scope}.{name}") }, iface));
+            }
+            Decl::TsTypeAlias(alias) => {
+                let name = alias.id.sym.as_str();
+                aliases.push((if scope.is_empty() { name.to_string() } else { format!("{scope}.{name}") }, alias));
+            }
+            Decl::TsModule(namespace) => {
+                let swc_ecma_ast::TsModuleName::Ident(name) = &namespace.id else { return; };
+                let name = if scope.is_empty() {
+                    name.sym.to_string()
+                } else {
+                    format!("{scope}.{}", name.sym)
+                };
+                if let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body {
+                    for item in &block.body {
+                        walk_item(item, &name, interfaces, aliases);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut interfaces = Vec::new();
+    let mut aliases = Vec::new();
+    for item in &module.body {
+        walk_item(item, "", &mut interfaces, &mut aliases);
+    }
+    (interfaces, aliases)
+}
+
+#[derive(Default, Clone)]
 struct GenericInterfaces<'a> {
     interfaces: HashMap<String, &'a TsInterfaceDecl>,
     aliases: HashMap<String, &'a swc_ecma_ast::TsTypeAliasDecl>,
     classes: HashSet<String>,
+    canonical_names: HashMap<String, String>,
+}
+
+fn generic_canonical_name<'a>(name: &'a str, generic: &'a GenericInterfaces<'_>) -> &'a str {
+    generic.canonical_names.get(name).map_or(name, String::as_str)
 }
 
 /// Resolves every top-level *non-generic* `interface` into a `DtsType`
@@ -235,58 +370,83 @@ struct GenericInterfaces<'a> {
 /// doc comment for the scope limits this mirrors (no nested-inside-
 /// another-interface use, no `extends` on the generic interface itself).
 fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInterfaces<'_>) {
-    let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
+    let mut raw: HashMap<String, Vec<&TsInterfaceDecl>> = HashMap::new();
     let mut names = Vec::new();
     let mut generic = GenericInterfaces::default();
-    generic.classes.extend(
-        module
-            .body
-            .iter()
-            .flat_map(extract_class_decls)
-            .map(|(name, _)| name.to_string()),
-    );
-    for iface in module.body.iter().flat_map(extract_interface_decls) {
-        let name = iface.id.sym.to_string();
-        if iface.type_params.is_some() {
-            generic.interfaces.insert(name, iface);
-        } else {
-            if !raw.contains_key(&name) {
-                names.push(name.clone());
-            }
-            raw.insert(name, iface);
+    let scoped_classes = scoped_class_names(module);
+    let mut class_locations = HashMap::<String, HashSet<String>>::new();
+    for (qualified, bare) in &scoped_classes {
+        class_locations.entry(bare.clone()).or_default().insert(qualified.clone());
+    }
+    for (qualified, bare) in scoped_classes {
+        generic.classes.insert(qualified.clone());
+        if class_locations[&bare].len() == 1 {
+            generic.classes.insert(bare);
         }
     }
-    for alias in module
-        .body
-        .iter()
-        .flat_map(extract_type_alias_decls)
-        .filter(|alias| alias.type_params.is_some())
-    {
-        generic.aliases.insert(alias.id.sym.to_string(), alias);
+    let (interface_decls, alias_decls) = scoped_type_declarations(module);
+    for (name, iface) in &interface_decls {
+        if iface.type_params.is_some() {
+            generic.interfaces.insert(name.to_string(), iface);
+        } else {
+            if !raw.contains_key(name) {
+                names.push(name.to_string());
+            }
+            raw.entry(name.to_string()).or_default().push(iface);
+        }
+    }
+    for (name, alias) in &alias_decls {
+        if alias.type_params.is_some() {
+            generic.aliases.insert(name.to_string(), alias);
+        }
     }
 
     let mut resolved = HashMap::new();
     for name in &names {
         resolve_interface(name, &raw, &generic, &mut resolved, &mut Vec::new());
     }
-    let aliases = module
-        .body
-        .iter()
-        .flat_map(extract_type_alias_decls)
-        .filter(|alias| alias.type_params.is_none())
+    let aliases = alias_decls.iter()
+        .filter(|(_, alias)| alias.type_params.is_none())
         .collect::<Vec<_>>();
     for _ in 0..raw.len() + aliases.len() {
         for name in &names {
-            if matches!(resolved.get(name), Some(DtsType::Unsupported(_))) {
-                resolved.remove(name);
-            }
+            // A newly resolved alias in the same lexical namespace may
+            // replace a previously selected outer name, even when that
+            // earlier interface result looked native.
+            resolved.remove(name);
         }
         for name in &names {
             resolve_interface(name, &raw, &generic, &mut resolved, &mut Vec::new());
         }
-        for alias in &aliases {
-            let ty = classify_ts_type(&alias.type_ann, &resolved, &generic);
-            resolved.insert(alias.id.sym.to_string(), ty);
+        for (name, alias) in &aliases {
+            let (context, generic_context) = scoped_type_context(
+                declaration_scope(name), &resolved, &generic,
+            );
+            let ty = classify_ts_type(&alias.type_ann, &context, &generic_context);
+            resolved.insert(name.to_string(), ty);
+        }
+    }
+    // Keep the old convenient bare spelling for a unique namespace member,
+    // but never let one namespace's Options replace another's Options.
+    let mut bare_counts = HashMap::<String, HashSet<String>>::new();
+    for name in resolved.keys().chain(generic.interfaces.keys()).chain(generic.aliases.keys()) {
+        bare_counts.entry(name.rsplit('.').next().unwrap_or(name).to_string())
+            .or_default().insert(name.to_string());
+    }
+    for (bare, keys) in bare_counts {
+        if keys.len() != 1 || resolved.contains_key(&bare)
+            || generic.interfaces.contains_key(&bare) || generic.aliases.contains_key(&bare) {
+            continue;
+        }
+        let name = keys.into_iter().next().unwrap();
+        if let Some(ty) = resolved.get(&name).cloned() {
+            resolved.insert(bare, ty);
+        } else if let Some(decl) = generic.interfaces.get(&name).copied() {
+            generic.canonical_names.insert(bare.clone(), name);
+            generic.interfaces.insert(bare, decl);
+        } else if let Some(decl) = generic.aliases.get(&name).copied() {
+            generic.canonical_names.insert(bare.clone(), name);
+            generic.aliases.insert(bare, decl);
         }
     }
     (resolved, generic)
@@ -294,7 +454,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
 
 fn resolve_interface(
     name: &str,
-    raw: &HashMap<String, &TsInterfaceDecl>,
+    raw: &HashMap<String, Vec<&TsInterfaceDecl>>,
     generic: &GenericInterfaces,
     resolved: &mut HashMap<String, DtsType>,
     in_progress: &mut Vec<String>,
@@ -309,15 +469,12 @@ fn resolve_interface(
         resolved.insert(name.to_string(), ty.clone());
         return ty;
     }
-    let Some(iface) = raw.get(name) else {
+    let Some(declarations) = raw.get(name) else {
         return DtsType::Unsupported(format!("unknown or generic interface `{name}`"));
     };
 
-    if iface
-        .body
-        .body
-        .iter()
-        .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
+    if declarations.iter().any(|iface| iface.body.body.iter()
+        .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_))))
     {
         let ty = DtsType::Native(HirType::JsValue);
         resolved.insert(name.to_string(), ty.clone());
@@ -342,19 +499,22 @@ fn resolve_interface(
     // adds of its own -- real example: axios's `AxiosStatic extends
     // AxiosInstance`, where `AxiosInstance` itself has call signatures.
     let mut base_is_opaque = false;
-    'extends: for base in &iface.extends {
+    'extends: for iface in declarations {
+    for base in &iface.extends {
         if base.type_args.is_some() {
             failure =
                 Some("extends a base with type arguments, which is not classified yet".to_string());
             break;
         }
-        let Expr::Ident(base_ident) = base.expr.as_ref() else {
-            failure = Some(
-                "has an unsupported `extends` target (only a plain interface name)".to_string(),
-            );
-            break;
+        let base_name = match base.expr.as_ref() {
+            Expr::Ident(base_ident) => lexical_type_key(
+                base_ident.sym.as_str(), declaration_scope(name), |candidate| raw.contains_key(candidate),
+            ).unwrap_or_else(|| base_ident.sym.to_string()),
+            _ => {
+                failure = Some("has an unsupported `extends` target".to_string());
+                break;
+            }
         };
-        let base_name = base_ident.sym.to_string();
         match resolve_interface(&base_name, raw, generic, resolved, in_progress) {
             DtsType::Native(HirType::Object(base_fields)) => {
                 for (field_name, field_ty) in base_fields {
@@ -393,7 +553,9 @@ fn resolve_interface(
         }
     }
 
+    }
     if failure.is_none() {
+        'members: for iface in declarations {
         for member in &iface.body.body {
             if let TsTypeElement::TsIndexSignature(signature) = member {
                 let value = match index_signature_value(signature) {
@@ -477,6 +639,10 @@ fn resolve_interface(
                 }
             }
         }
+        if failure.is_some() {
+            break 'members;
+        }
+        }
     }
 
     in_progress.pop();
@@ -524,20 +690,27 @@ fn resolve_interface(
 /// interface table (`resolve_interfaces`).
 fn resolve_type_with_interfaces(
     ty: &TsType,
-    raw: &HashMap<String, &TsInterfaceDecl>,
+    raw: &HashMap<String, Vec<&TsInterfaceDecl>>,
     generic: &GenericInterfaces,
     resolved: &mut HashMap<String, DtsType>,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
     if let TsType::TsTypeRef(ty_ref) = ty {
-        if let TsEntityName::Ident(id) = &ty_ref.type_name {
-            let ref_name = id.sym.as_str();
-            if raw.contains_key(ref_name) {
-                return resolve_interface(ref_name, raw, generic, resolved, in_progress);
+        let ref_name = type_reference_name(&ty_ref.type_name);
+        let scope = in_progress.last().map_or("", |name| declaration_scope(name));
+        if let Some(name) = lexical_type_key(&ref_name, scope, |candidate| {
+            raw.contains_key(candidate) || resolved.contains_key(candidate)
+                || generic.interfaces.contains_key(candidate)
+                || generic.aliases.contains_key(candidate) || generic.classes.contains(candidate)
+        }) {
+            if raw.contains_key(&name) {
+                return resolve_interface(&name, raw, generic, resolved, in_progress);
             }
         }
     }
-    classify_ts_type(ty, resolved, generic)
+    let scope = in_progress.last().map_or("", |name| declaration_scope(name));
+    let (context, generic_context) = scoped_type_context(scope, resolved, generic);
+    classify_ts_type(ty, &context, &generic_context)
 }
 
 /// Never fails: an unsupported parameter pattern (e.g. destructuring)
@@ -550,6 +723,36 @@ fn resolve_type_with_interfaces(
 /// with a destructured parameter (`function milliseconds({ years, ... }:
 /// Duration)`) used to silently delete every other function in that file
 /// from `parse_dts`'s result.
+/// The name of a constrained, default-less type parameter that is both the
+/// whole return type and the bare type of a parameter
+/// (`<T extends X>(stream: T): T`): the call site infers `T` from the
+/// argument, so the constraint is only what the parameter accepts. A type
+/// parameter that no parameter mentions (`nanoid<Type extends string>(): Type`)
+/// is chosen by the caller, and its constraint stays the best description.
+fn inferred_return_type_param(return_type: &TsType, func: &Function) -> Option<String> {
+    let bare = |ty: &TsType| match ty {
+        TsType::TsTypeRef(reference) if reference.type_params.is_none() => match &reference.type_name {
+            TsEntityName::Ident(id) => Some(id.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let name = bare(return_type)?;
+    let parameter = func.type_params.as_ref()?.params.iter().find(|parameter| {
+        parameter.name.sym == name.as_str() && parameter.constraint.is_some() && parameter.default.is_none()
+    })?;
+    func.params
+        .iter()
+        .any(|param| match &param.pat {
+            Pat::Ident(binding) => binding
+                .type_ann
+                .as_ref()
+                .is_some_and(|annotation| bare(&annotation.type_ann).as_deref() == Some(name.as_str())),
+            _ => false,
+        })
+        .then(|| parameter.name.sym.to_string())
+}
+
 fn lower_dts_function(
     name: &str,
     func: &Function,
@@ -652,7 +855,7 @@ fn lower_dts_function(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -674,7 +877,7 @@ fn lower_dts_function(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(&param.pat, Pat::Ident(binding) if !binding.optional))
+        .take_while(|param| !matches!(&param.pat, Pat::Ident(binding) if binding.optional))
         .count();
     let params = func
         .params
@@ -688,7 +891,7 @@ fn lower_dts_function(
                         .to_string();
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => classify(&ann.type_ann),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
@@ -698,7 +901,24 @@ fn lower_dts_function(
         .collect::<Vec<_>>();
 
     let ret = match &func.return_type {
-        Some(ann) => classify(&ann.type_ann),
+        Some(ann) => match inferred_return_type_param(&ann.type_ann, func) {
+            // `query<T extends Submittable>(stream: T): T`: the constraint
+            // only bounds what the parameter accepts; the return type is
+            // whatever the call site infers `T` to be, so decoding it as the
+            // constraint rejects the real result (a Promise for `query("sql")`).
+            Some(name) => {
+                let mut inferred = substitution.clone();
+                inferred.insert(name, HirType::JsValue);
+                resolve_ts_type_with_substitution(
+                    &ann.type_ann,
+                    &inferred,
+                    interfaces,
+                    generic_interfaces,
+                    &mut Vec::new(),
+                )
+            }
+            None => classify(&ann.type_ann),
+        },
         None => DtsType::Native(HirType::Void),
     };
 
@@ -785,22 +1005,17 @@ fn lower_dts_method_signature(
     let mut substitution = HashMap::new();
     if let Some(type_params) = &method.type_params {
         for parameter in &type_params.params {
-            let Some(constraint) = parameter
+            let constrained = parameter
                 .default
                 .as_deref()
                 .or(parameter.constraint.as_deref())
-            else {
-                continue;
-            };
-            if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
-                constraint,
-                &substitution,
-                interfaces,
-                generic_interfaces,
-                &mut Vec::new(),
-            ) {
-                substitution.insert(parameter.name.sym.to_string(), constraint);
-            }
+                .and_then(|constraint| match resolve_ts_type_with_substitution(
+                    constraint, &substitution, interfaces, generic_interfaces, &mut Vec::new(),
+                ) {
+                    DtsType::Native(ty) => Some(ty),
+                    DtsType::Unsupported(_) => None,
+                });
+            substitution.insert(parameter.name.sym.to_string(), constrained.unwrap_or(HirType::Json));
         }
     }
     let classify = |ty: &TsType| {
@@ -818,7 +1033,7 @@ fn lower_dts_method_signature(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -838,7 +1053,7 @@ fn lower_dts_method_signature(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.optional))
+        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.optional))
         .count();
     let params = method
         .params
@@ -852,7 +1067,7 @@ fn lower_dts_method_signature(
                         .to_string();
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => classify(&ann.type_ann),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
@@ -875,4 +1090,16 @@ fn lower_dts_method_signature(
         rest_param,
         ret,
     }
+}
+
+/// A `.d.ts` may name a parameter with any identifier, but the generated shims are parsed as
+/// strict-mode module code, where `eval`/`arguments` cannot be bound and the strict-mode future
+/// reserved words (and `await`) cannot be identifiers at all -- so rename those. Parameter names are
+/// only labels in a signature, so the rename is invisible to callers.
+fn safe_param_name(name: &str) -> String {
+    const STRICT_MODE_RESERVED: &[&str] = &[
+        "eval", "arguments", "await", "implements", "interface", "let", "package", "private",
+        "protected", "public", "static", "yield",
+    ];
+    if STRICT_MODE_RESERVED.contains(&name) { format!("{name}_") } else { name.to_string() }
 }

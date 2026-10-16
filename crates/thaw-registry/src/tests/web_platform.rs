@@ -2,7 +2,7 @@
 fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_vm");
-    fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
+    fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var receiverSandbox = { marker: 17 }, receiverContext = vm.createContext(receiverSandbox); if (vm.runInContext('this === globalThis', receiverContext) !== true) throw new Error('vm context receiver'); if (vm.runInContext(\"'use strict'; this === globalThis\", receiverContext) !== true) throw new Error('vm strict context receiver'); if (vm.runInContext('(() => this === globalThis)()', receiverContext) !== true) throw new Error('vm lexical context receiver'); if (vm.runInContext('this.marker += 1; this.marker', receiverContext) !== 18 || receiverSandbox.marker !== 18) throw new Error('vm receiver property'); if (new vm.Script('this === globalThis').runInContext(receiverContext) !== true) throw new Error('vm Script receiver'); if (vm.runInNewContext('this === globalThis', {}) !== true || new vm.Script('this === globalThis').runInNewContext({}) !== true) throw new Error('vm fresh receiver'); if (vm.runInThisContext('this === globalThis') !== true) throw new Error('vm host receiver unchanged'); var invalidContext; try { vm.runInContext('1', {}); } catch (error) { invalidContext = error; } if (!(invalidContext instanceof TypeError)) throw new Error('vm context validation unchanged'); var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate > 0, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_vm_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -16,7 +16,7 @@ fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[12,12,13,7,42,17,true,false,true,false,0,true,"symbol"]"#
+        r#"[12,12,13,7,42,17,true,false,true,null,true,true,"symbol"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -88,6 +88,140 @@ fn dgram_socket_exchanges_real_udp_datagrams() {
         )
     );
     assert_eq!(client.join().unwrap(), b"pong");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn dgram_receives_multiple_packets_after_send_auto_bind_without_blocking_timers() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_dgram_lifecycle");
+    fs::write(dir.join("index.js"), r#"
+        var dgram = require('node:dgram');
+        module.exports = async function () {
+          var server = dgram.createSocket('udp4'), client = dgram.createSocket('udp4');
+          var invalid = dgram.createSocket('udp4');
+          var events = [], received = [], replies = 0, errors = 0, timers = [];
+          var nativeReceive = __thaw_udp_receive, injected = false;
+          function later(callback, delay) { var timer = setTimeout(callback, delay); timers.push(timer); return timer; }
+          function close(socket) { try { if (socket && !socket._closed) socket.close(); } catch (_) {} }
+          try {
+            __thaw_udp_receive = function(handle) {
+              if (handle === server._handle && !injected) { injected = true; return 'err|EIO|injected read error'; }
+              return nativeReceive(handle);
+            };
+            await new Promise(function(resolve, reject) {
+              later(function() { reject(new Error('UDP receive stalled')); }, 2000);
+              server.on('error', function(error) { if (++errors !== 1 || error.code !== 'EIO') reject(error); });
+              client.on('error', reject);
+              server.on('message', function(message, remote) {
+                received.push(message.toString());
+                server.send('reply' + received.length, remote.port, remote.address);
+                if (received.length === 1) later(function() { client.send('second', server.address().port); }, 5);
+              });
+              client.on('message', function(message) {
+                events.push(message.toString()); replies++;
+                if (replies === 2) { close(client); close(server); resolve(); }
+              });
+              server.bind(0, '127.0.0.1', function() {
+                later(function() { events.push('timer'); client.send('first', server.address().port); }, 5);
+              });
+            });
+            var closed = false;
+            try { client.send('late', 1234); } catch (error) { closed = true; }
+            var invalidPort = false;
+            try { invalid.send('bad', 65537); } catch (error) { invalidPort = error instanceof RangeError; }
+            return [received, events, errors, closed, invalidPort];
+          } finally {
+            __thaw_udp_receive = nativeReceive;
+            timers.forEach(clearTimeout);
+            close(client); close(server); close(invalid);
+          }
+        };
+    "#).unwrap();
+    let empty_node_modules = temp_registry("builtin_dgram_lifecycle_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgramLifecycle = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseDgramLifecycle").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["first","second"],["timer","reply1","reply2"],1,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn dgram_bind_retry_and_connect_errors_settle_once_with_native_codes() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_dgram_errors");
+    fs::write(dir.join("index.js"), r#"
+        var dgram = require('node:dgram');
+        module.exports = async function () {
+          var holder = dgram.createSocket('udp4'), socket = dgram.createSocket('udp4');
+          var connector, unavailable, deadline, bindDeadline;
+          var nativeConnect = __thaw_udp_connect, nativeBind = __thaw_udp_bind;
+          var first = 0, second = 0, connectCallbacks = 0, connectEvents = 0, codes = [];
+          function close(value) { try { if (value && !value._closed) value.close(); } catch (_) {} }
+          try {
+            await new Promise(function(resolve, reject) {
+              deadline = setTimeout(function() { reject(new Error('UDP callback stalled')); }, 2000);
+              holder.on('error', reject);
+              socket.on('error', function(error) {
+                codes.push(error.code);
+                socket.bind(0, '127.0.0.1', function() {
+                  second++;
+                  connector = dgram.createSocket('udp4');
+                  connector.on('error', reject);
+                  connector.on('connect', function() { connectEvents++; });
+                  __thaw_udp_connect = function() { return 'err|EAFNOSUPPORT|injected connect error'; };
+                  connector.connect(1234, '127.0.0.1', function(error) {
+                    connectCallbacks++;
+                    codes.push(error.code);
+                    resolve();
+                  });
+                });
+              });
+              holder.bind(0, '127.0.0.1', function() {
+                socket.bind(holder.address().port, '127.0.0.1', function() { first++; });
+              });
+            });
+            clearTimeout(deadline);
+            close(connector); close(socket); close(holder);
+            unavailable = dgram.createSocket('udp4');
+            __thaw_udp_bind = function() { return 'err|EADDRNOTAVAIL|injected bind error'; };
+            var unavailableCode = await new Promise(function(resolve, reject) {
+              bindDeadline = setTimeout(function() { reject(new Error('UDP bind error stalled')); }, 2000);
+              unavailable.on('error', function(error) { resolve(error.code); });
+              unavailable.bind(0, '127.0.0.1');
+            });
+            return [first, second, connectCallbacks, connectEvents, codes, unavailableCode];
+          } finally {
+            __thaw_udp_connect = nativeConnect;
+            __thaw_udp_bind = nativeBind;
+            clearTimeout(deadline); clearTimeout(bindDeadline);
+            close(connector); close(unavailable); close(socket); close(holder);
+          }
+        };
+    "#).unwrap();
+    let empty_node_modules = temp_registry("builtin_dgram_errors_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgramErrors = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseDgramErrors").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[0,1,1,0,["EADDRINUSE","EAFNOSUPPORT"],"EADDRNOTAVAIL"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -293,7 +427,7 @@ fn text_encoder_stream_preserves_split_surrogate_pairs() {
 fn web_compression_streams_round_trip_supported_formats() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_web_compression");
-    fs::write(dir.join("index.js"), "var web = require('node:stream/web'); var consumers = require('node:stream/consumers'); async function roundTrip(format) { var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('thaw ')); controller.enqueue(new TextEncoder().encode('compression')); controller.close(); } }); return consumers.text(source.pipeThrough(new web.CompressionStream(format)).pipeThrough(new web.DecompressionStream(format)).pipeThrough(new web.TextDecoderStream())); } module.exports = async function () { var gzipSource = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('header')); controller.close(); } }); var gzip = await consumers.buffer(gzipSource.pipeThrough(new CompressionStream('gzip'))); var unsupported = false; try { new CompressionStream('brotli'); } catch (error) { unsupported = error instanceof TypeError; } return [await roundTrip('gzip'), await roundTrip('deflate'), await roundTrip('deflate-raw'), await roundTrip('br'), gzip[0], gzip[1], web.CompressionStream === globalThis.CompressionStream, unsupported]; };").unwrap();
+    fs::write(dir.join("index.js"), "var web = require('node:stream/web'); var consumers = require('node:stream/consumers'); async function roundTrip(format) { var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('thaw ')); controller.enqueue(new TextEncoder().encode('compression')); controller.close(); } }); return consumers.text(source.pipeThrough(new web.CompressionStream(format)).pipeThrough(new web.DecompressionStream(format)).pipeThrough(new web.TextDecoderStream())); } module.exports = async function () { var gzipSource = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('header')); controller.close(); } }); var gzip = await consumers.buffer(gzipSource.pipeThrough(new CompressionStream('gzip'))); var unsupported = false; try { new CompressionStream('br'); } catch (error) { unsupported = error instanceof TypeError; } var decompressionUnsupported = false; try { new DecompressionStream('br'); } catch (error) { decompressionUnsupported = error instanceof TypeError; } unsupported = unsupported && decompressionUnsupported; return [await roundTrip('gzip'), await roundTrip('deflate'), await roundTrip('deflate-raw'), await roundTrip('brotli'), gzip[0], gzip[1], web.CompressionStream === globalThis.CompressionStream, unsupported]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_web_compression_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -510,7 +644,7 @@ fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
             });
 
     let dir = temp_registry("builtin_tls");
-    fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function (port, caHex, certHex, keyHex) { var events = []; var socket = new tls.TLSSocket(); socket.on('connect', function() { events.push('connect'); }); socket.on('secureConnect', function() { events.push('secureConnect'); }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var closed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect({ host: '127.0.0.1', port: port, servername: 'localhost', ca: Buffer.from(caHex, 'hex'), cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ALPNProtocols: ['h2', 'http/1.1'] }); socket.end('ping'); await closed; var peer = socket.getPeerCertificate(), local = socket.getCertificate(); var bypassData = '', bypass = new tls.TLSSocket(); var bypassClosed = new Promise(function(resolve, reject) { bypass.on('error', reject); bypass.on('data', function(chunk) { bypassData += chunk.toString(); }); bypass.on('close', resolve); }); bypass.connect({ host: '127.0.0.1', port: port, servername: 'not-localhost', cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), rejectUnauthorized: false }); bypass.end('insecure'); await bypassClosed; return [events, socket.authorized, socket.authorizationError, socket.encrypted, socket.alpnProtocol, socket.getProtocol(), socket.getCipher().version, socket.bytesWritten, socket.bytesRead, tls.getCiphers().length, tls.DEFAULT_MIN_VERSION, peer.raw.length > 0, local.raw.length > 0, /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(peer.fingerprint256), peer.subject.CN, peer.issuer.CN, local.subject.CN, peer.valid_from.length > 0, peer.valid_to.length > 0, peer.serialNumber.length > 0, bypassData, bypass.authorized, bypass.authorizationError]; };").unwrap();
+    fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function (port, caHex, certHex, keyHex) { var events = []; var socket = new tls.TLSSocket(); socket.on('connect', function() { events.push('connect'); }); var snapshot; socket.on('secureConnect', function() { events.push('secureConnect'); snapshot = { protocol: socket.getProtocol(), cipher: socket.getCipher().version, peer: socket.getPeerCertificate(), local: socket.getCertificate() }; }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var closed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect({ host: '127.0.0.1', port: port, servername: 'localhost', ca: Buffer.from(caHex, 'hex'), cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ALPNProtocols: ['h2', 'http/1.1'] }); socket.end('ping'); await closed; var peer = snapshot.peer, local = snapshot.local; var bypassData = '', bypass = new tls.TLSSocket(); var bypassClosed = new Promise(function(resolve, reject) { bypass.on('error', reject); bypass.on('data', function(chunk) { bypassData += chunk.toString(); }); bypass.on('close', resolve); }); bypass.connect({ host: '127.0.0.1', port: port, servername: 'not-localhost', cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), rejectUnauthorized: false }); bypass.end('insecure'); await bypassClosed; return [events, socket.authorized, socket.authorizationError, socket.encrypted, socket.alpnProtocol, snapshot.protocol, snapshot.cipher, socket.bytesWritten, socket.bytesRead, tls.getCiphers().length, tls.DEFAULT_MIN_VERSION, peer.raw.length > 0, local.raw.length > 0, /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(peer.fingerprint256), peer.subject.CN, peer.issuer.CN, local.subject.CN, peer.valid_from.length > 0, peer.valid_to.length > 0, peer.serialNumber.length > 0, bypassData, bypass.authorized, bypass.authorizationError]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_tls_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -714,3 +848,98 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
     let _ = fs::remove_dir_all(&certificate_dir);
 }
 
+
+
+#[test]
+fn file_urls_resolve_relative_paths_from_current_working_directory() {
+    // Unrun regression: use a deterministic cwd without changing host process state.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_file_url_cwd");
+    fs::write(dir.join("index.js"), "var url = require('node:url'); module.exports = function () { var original = process.cwd; process.cwd = function () { return '/work/current'; }; try { return [url.pathToFileURL('file.txt').href, url.pathToFileURL('../a b#%.txt').href, url.pathToFileURL('').href, url.pathToFileURL('/absolute/a b').href, url.fileURLToPath(url.pathToFileURL('./a b#%.txt')), url.pathToFileURL('directory/').href]; } finally { process.cwd = original; } };").unwrap();
+    let empty_node_modules = temp_registry("builtin_file_url_cwd_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileUrl = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseFileUrl").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["file:///work/current/file.txt","file:///work/a%20b%23%25.txt","file:///work/current","file:///absolute/a%20b","/work/current/a b#%.txt","file:///work/current/directory/"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+
+#[test]
+fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
+    // Unrun regression for the shared append/set storage and body decoder.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("form_data_file_metadata");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var form = new FormData(), blob = new Blob([new Uint8Array([0, 255, 13])], { type: 'application/custom' });
+      form.append('名前', blob, '日本語.bin'); form.append('default', blob);
+      form.append('replace', 'old'); form.append('replace', 'duplicate'); form.set('replace', blob, '変更.bin');
+      var original = new File(['file'], 'original.txt', { lastModified: 42 }); form.append('original', original);
+      var before = [form.get('名前') instanceof File, form.get('名前').name, form.get('default').name, form.get('replace').name, form.getAll('replace').length, form.get('original') === original, form.get('original').lastModified, [...form][0][1].name];
+      var parsed = await new Response(form).formData(), received = parsed.get('名前');
+      var raw = '--boundary\r\nContent-Disposition: form-data; name="file"; filename="plain.txt"\r\n\r\nhello\r\n--boundary--\r\n';
+      var noType = await new Response(raw, { headers: { 'content-type': 'multipart/form-data; boundary=boundary' } }).formData();
+      return [before, received.name, received.type, Array.from(new Uint8Array(await received.arrayBuffer())), noType.get('file').type, await noType.get('file').text()];
+    };"#).unwrap();
+    let modules = temp_registry("form_data_file_metadata_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFormData = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseFormData").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,"日本語.bin","blob","変更.bin",1,true,42,"日本語.bin"],"日本語.bin","application/custom",[0,255,13],"text/plain","hello"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn node_util_text_encoding_exports_and_web_callers_share_fixed_utf8_paths() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("util_text_encoding_contracts");
+    fs::write(
+        dir.join("index.js"),
+        r#"var util = require('node:util'), web = require('node:stream/web'), consumers = require('node:stream/consumers');
+module.exports = async function () {
+  var encoder = new util.TextEncoder(), output = new Uint8Array(5); output.set = function() {};
+  var into = encoder.encodeInto('A😀B', output), encoded = Array.from(new Uint8Array(output.buffer));
+  var invalid; try { new util.TextDecoder().decode({ buffer: new ArrayBuffer(1), byteOffset: 0, byteLength: 1 }); } catch (error) { invalid = error.name; }
+  var fatal = new util.TextDecoder('utf-8', { fatal: true }); fatal.decode(new Uint8Array([65]), { stream: true }); var failed = false;
+  try { fatal.decode(new Uint8Array([255])); } catch (error) { failed = error instanceof TypeError; }
+  var afterFatal = fatal.decode(new Uint8Array([239, 187, 191, 66]));
+  var blobText = await new Blob(['Blob']).text(), responseText = await new Response('Response').text();
+  var requestText = await new Request('https://example.test/', { method: 'POST', body: 'Request' }).text();
+  var formBom = new URLSearchParams('x=%EF%BB%BFy').get('x').codePointAt(0);
+  var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new Uint8Array([239, 187])); controller.enqueue(new Uint8Array([191, 226, 130])); controller.enqueue(new Uint8Array([172])); controller.close(); } });
+  var decoderStream = await consumers.text(source.pipeThrough(new web.TextDecoderStream()));
+  var strings = new web.ReadableStream({ start: function(controller) { controller.enqueue('\ud83d'); controller.enqueue('\ude00A'); controller.close(); } });
+  var encoderStream = await consumers.text(strings.pipeThrough(new web.TextEncoderStream()).pipeThrough(new web.TextDecoderStream()));
+  return [util.TextEncoder === globalThis.TextEncoder, util.TextDecoder === globalThis.TextDecoder,
+    into, encoded, invalid, failed, afterFatal, blobText, responseText, requestText, formBom, decoderStream, encoderStream];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("util_text_encoding_contracts_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUtilText = module.exports;"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseUtilText").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[true,true,{"read":3,"written":5},[65,240,159,152,128],"TypeError",true,"B","Blob","Response","Request",65279,"€","😀A"]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}

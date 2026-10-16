@@ -60,58 +60,31 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn expr_is_string(&self, expr: &HirExpr) -> bool {
-        match expr {
-            HirExpr::Lit(HirLit::Str(_)) | HirExpr::EnvVar(_) | HirExpr::JsonAsString(_) => true,
-            HirExpr::Var(name) => self.variable_hir_types.get(name) == Some(&HirType::Str),
-            HirExpr::TypedIndex(_, _, element) => element == &HirType::Str,
-            HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
-                .iter()
-                .any(|(name, ty)| name == field && ty == &HirType::Str),
-            HirExpr::Assign(_, value) => self.expr_is_string(value),
-            HirExpr::PostfixUpdate(_, _) => false,
-            HirExpr::Call(callee, _) => match callee.as_ref() {
-                HirExpr::Var(name) => {
-                    self.function_return_types.get(name) == Some(&HirType::Str)
-                        || matches!(
-                            name.as_str(),
-                            "__thaw_string_concat"
-                                | "__thaw_bool_to_string"
-                                | "__thaw_number_to_string"
-                                | "__thaw_number_array_to_string"
-                                | "__thaw_string_array_to_string"
-                                | "__thaw_bool_array_to_string"
-                                | "__thaw_object_array_to_string"
-                                | "__thaw_bytes_to_string"
-                                | "__thaw_object_to_string"
-                                | "__thaw_number_array_join"
-                                | "__thaw_string_array_join"
-                                | "__thaw_bool_array_join"
-                                | "__thaw_object_array_join"
-                                | "__thaw_string_trim"
-                                | "__thaw_string_trim_start"
-                                | "__thaw_string_trim_end"
-                                | "fetch"
-                                | "JSON.stringify"
-                        )
-                }
-                HirExpr::Lambda(_, _, ret, _) => ret == &HirType::Str,
-                _ => false,
-            },
-            HirExpr::DynamicCall(signature, _) => signature.ret == HirType::Str,
-            _ => false,
-        }
+        self.expr_hir_type(expr) == Some(HirType::Str)
     }
 
     fn expr_hir_type(&self, expr: &HirExpr) -> Option<HirType> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
-            HirExpr::Lit(HirLit::Str(_)) => Some(HirType::Str),
+            HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))
+            | HirExpr::EnvVar(_) | HirExpr::JsonAsString(_) => Some(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
-            HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
-            HirExpr::Assign(_, value) => self.expr_hir_type(value),
+            HirExpr::Var(name) => self
+                .variable_hir_types
+                .get(name)
+                .cloned()
+                .or_else(|| self.planning_var_types.borrow().get(name).cloned()),
+            HirExpr::Assign(_, value)
+            | HirExpr::IndexAssign(_, _, value)
+            | HirExpr::PropAssign(_, _, _, value) => self.expr_hir_type(value),
+            HirExpr::Block(statements) => match statements.last() {
+                Some(HirStmt::Return(Some(value))) => self.expr_hir_type(value),
+                _ => None,
+            },
+            HirExpr::EvalThen(_, second) => self.expr_hir_type(second),
             HirExpr::PostfixUpdate(_, _) => Some(HirType::F64),
             HirExpr::OptionalSome(_, payload) | HirExpr::OptionalNone(payload) => {
                 Some(HirType::Optional(Box::new(payload.clone())))
@@ -190,14 +163,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 Box::new(ret.clone()),
             )),
             HirExpr::RecursiveClosure(_, ty, _) => Some(ty.clone()),
-            HirExpr::TypedClosure(ty, _) => Some(ty.clone()),
+            HirExpr::TypedClosure(ty, _) | HirExpr::JsonAsNative(_, ty) => Some(ty.clone()),
+            HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
+                HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>
+                    Some(HirType::Function(params[1..].iter().map(|param| param.ty.clone()).collect(), Box::new(ret.clone()))),
+                _ => self.expr_hir_type(closure),
+            },
             HirExpr::FunctionRef(_, params, ret) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
-            HirExpr::MethodRef(_, _, params, ret, _) => {
+            HirExpr::MethodRef(_, _, params, ret, _, _) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::Call(callee, arguments) => {
+                // HIR preserves the adapted closure's callable type through this
+                // identity alias; keep the LLVM type mirror in sync with HIR inference.
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias") {
+                    if let [adapted, _original] = arguments.as_slice() {
+                        return self.expr_hir_type(adapted);
+                    }
+                }
                 if let HirExpr::Var(name) = callee.as_ref() {
                     match name.as_str() {
                         "JSON.parse"
@@ -207,6 +192,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_object_from_json_entries"
                         | "__thaw_json_object_assign"
                         | "__thaw_json_array_slice"
+                        | "__thaw_json_array_assign"
                         | "__thaw_json_clone"
                         | "__thaw_json_get_mut"
                         | "__thaw_json_index_get_mut"
@@ -217,7 +203,16 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_map_or_set_set"
                         | "__thaw_json_map_or_set_add"
                         | "__thaw_json_map_or_set_delete"
-                        | "__thaw_json_map_or_set_clear" => return Some(HirType::Json),
+                        | "__thaw_json_map_or_set_clear"
+                        // Boxing a native scalar yields a Json value; `===` against
+                        // it must go through the Json comparison, not pointer equality.
+                        | "__thaw_json_receiver_number"
+                        | "__thaw_json_receiver_bool"
+                        | "__thaw_json_receiver_string"
+                        | "__thaw_json_receiver_bigint"
+                        | "__thaw_json_from_consumed_dynamic"
+                        | "__thaw_json_host_from_dynamic"
+                        | "__thaw_json_host_from_borrowed_dynamic" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
                         // `Reflect.ownKeys` on a `Json`/`Dictionary`/
                         // array receiver, and the array-receiver variant
@@ -233,9 +228,13 @@ impl<'ctx> HirCompiler<'ctx> {
                         // `thaw_error_message`, not a value to format --
                         // observed printing garbage/replacement-character
                         // bytes instead of the array's own text.
-                        "__thaw_json_keys" | "__thaw_json_own_keys" | "__thaw_array_keys"
-                        | "__thaw_template_strings_raw" => {
+                        "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_array_keys"
+                        | "__thaw_template_strings_raw"
+                        | "__thaw_template_site" => {
                             return Some(HirType::Array(Box::new(HirType::Str)))
+                        }
+                        "__thaw_json_own_keys" => {
+                            return Some(HirType::Array(Box::new(HirType::Json)))
                         }
                         "__thaw_json_values"
                         | "__thaw_json_map_or_set_keys"
@@ -283,7 +282,22 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys_number_space"
                         | "__thaw_json_stringify_keys_string_space"
                         | "fetch"
-                        | "__thaw_string_concat" => return Some(HirType::Str),
+                        | "__thaw_string_concat"
+                        | "__thaw_bool_to_string"
+                        | "__thaw_number_to_string"
+                        | "__thaw_number_array_to_string"
+                        | "__thaw_string_array_to_string"
+                        | "__thaw_bool_array_to_string"
+                        | "__thaw_object_array_to_string"
+                        | "__thaw_bytes_to_string"
+                        | "__thaw_object_to_string"
+                        | "__thaw_number_array_join"
+                        | "__thaw_string_array_join"
+                        | "__thaw_bool_array_join"
+                        | "__thaw_object_array_join"
+                        | "__thaw_string_trim"
+                        | "__thaw_string_trim_start"
+                        | "__thaw_string_trim_end" => return Some(HirType::Str),
                         "__thaw_i64_to_string"
                         | "__thaw_i64_to_bigint_string"
                         | "__thaw_i64_to_radix_string" => return Some(HirType::Str),
@@ -323,13 +337,19 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "constructDynamicValue"
                         | "callDynamicMethodHandle"
                         | "callDynamicMethodHandleRaw"
+                        | "__thaw_call_selected_dynamic_method_handle"
+                        | "__thaw_call_selected_dynamic_method_raw"
                         | "registerNativeCallback"
+                        | "registerNativeCallbackGraph"
                         | "getDynamicProperty"
                         | "callDynamicValueHandle"
                         | "resolveDynamicValue" => return Some(HirType::JsValue),
                         "readDynamicValue"
                         | "callDynamicMethod"
+                        | "__thaw_call_selected_dynamic_method"
                         | "callDynamicValueMixed"
+                        | "callDynamicValueMixedExact"
+                        | "callDynamicValueMixedNativeJson"
                         | "callDynamic"
                         | "callDynamicValue"
                         | "callDynamicValueWithValue" => return Some(HirType::Json),
@@ -340,6 +360,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "deleteDynamicProperty"
                         | "hasDynamicProperty"
                         | "__thaw_error_is_error"
+                        | "__thaw_native_wrapper_is_live"
                         | "__thaw_error_is_instance" => {
                             return Some(HirType::Bool)
                         }
@@ -537,7 +558,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         let compared = self
                             .builder
                             .build_call(
-                                self.module.get_function("strcmp").unwrap(),
+                                self.module.get_function("thaw_string_compare").unwrap(),
                                 &[lhs.into(), rhs.into()],
                                 "strcmp",
                             )
@@ -571,6 +592,20 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             let lhs = lhs_value.into_int_value();
             let rhs = rhs_value.into_int_value();
+            if matches!(op, BinOp::Div | BinOp::Mod) {
+                let zero = rhs.get_type().const_zero();
+                let invalid = self.builder
+                    .build_int_compare(IntPredicate::EQ, rhs, zero, "bigint_zero_divisor")
+                    .map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "bigint_division_error");
+                let continue_bb = self.context.append_basic_block(function, "bigint_division_ok");
+                self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                self.compile_throw_builtin_error("RangeError", "Division by zero")?;
+                self.builder.position_at_end(continue_bb);
+            }
             return match op {
                 BinOp::Add => self.builder.build_int_add(lhs, rhs, "bigint_add"),
                 BinOp::Sub => self.builder.build_int_sub(lhs, rhs, "bigint_sub"),
@@ -622,17 +657,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_float_rem(lhs_val, rhs_val, "modtmp")
                 .map(Into::into)
                 .map_err(|e| e.to_string()),
-            BinOp::Exp => self
-                .builder
-                .build_call(
-                    self.module.get_function("pow").unwrap(),
-                    &[lhs_val.into(), rhs_val.into()],
-                    "powtmp",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "pow returned no value".to_string()),
+            BinOp::Exp => self.compile_js_pow(lhs_val, rhs_val),
             BinOp::BitOr
             | BinOp::BitXor
             | BinOp::BitAnd
@@ -640,14 +665,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | BinOp::RShift
             | BinOp::ZeroFillRShift => {
                 let i32_type = self.context.i32_type();
-                let lhs_int = self
-                    .builder
-                    .build_float_to_signed_int(lhs_val, i32_type, "bit_lhs")
-                    .map_err(|error| error.to_string())?;
-                let rhs_int = self
-                    .builder
-                    .build_float_to_signed_int(rhs_val, i32_type, "bit_rhs")
-                    .map_err(|error| error.to_string())?;
+                let lhs_int = self.compile_to_uint32(lhs_val)?;
+                let rhs_int = self.compile_to_uint32(rhs_val)?;
                 let shift = self
                     .builder
                     .build_and(rhs_int, i32_type.const_int(31, false), "shift_count")
@@ -700,5 +719,95 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string()),
             BinOp::EqEqEq => unreachable!(),
         }
+    }
+
+    fn compile_js_pow(
+        &mut self,
+        base: FloatValue<'ctx>,
+        exponent: FloatValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let float = self.context.f64_type();
+        let exponent_nan = self.builder.build_float_compare(
+            FloatPredicate::UNO, exponent, exponent, "pow_exponent_nan",
+        ).map_err(|error| error.to_string())?;
+        let exponent_abs = self.builder.build_call(
+            self.module.get_function("llvm.fabs.f64").unwrap(),
+            &[exponent.into()], "pow_exponent_abs",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("fabs returned no value")?.into_float_value();
+        let exponent_infinite = self.builder.build_float_compare(
+            FloatPredicate::OEQ, exponent_abs, float.const_float(f64::INFINITY), "pow_exponent_infinite",
+        ).map_err(|error| error.to_string())?;
+        let base_abs = self.builder.build_call(
+            self.module.get_function("llvm.fabs.f64").unwrap(),
+            &[base.into()], "pow_base_abs",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("fabs returned no value")?.into_float_value();
+        let base_unit = self.builder.build_float_compare(
+            FloatPredicate::OEQ, base_abs, float.const_float(1.0), "pow_base_unit",
+        ).map_err(|error| error.to_string())?;
+        let unit_to_infinite = self.builder.build_and(
+            exponent_infinite, base_unit, "pow_unit_to_infinite",
+        ).map_err(|error| error.to_string())?;
+        let special = self.builder.build_or(
+            exponent_nan, unit_to_infinite, "pow_special",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let special_block = self.context.append_basic_block(function, "pow_nan");
+        let regular_block = self.context.append_basic_block(function, "pow_regular");
+        let merge_block = self.context.append_basic_block(function, "pow_done");
+        self.builder.build_conditional_branch(special, special_block, regular_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(special_block);
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(regular_block);
+        let regular = self.builder.build_call(
+            self.module.get_function("pow").unwrap(),
+            &[base.into(), exponent.into()], "powtmp",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("pow returned no value")?.into_float_value();
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_block);
+        let result = self.builder.build_phi(float, "pow_result")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[
+            (&float.const_float(f64::NAN), special_block),
+            (&regular, regular_block),
+        ]);
+        Ok(result.as_basic_value())
+    }
+
+    // ECMAScript ToUint32's bit pattern is also ToInt32's bit pattern.
+    fn compile_to_uint32(&mut self, value: FloatValue<'ctx>) -> Result<IntValue<'ctx>, String> {
+        let float = self.context.f64_type();
+        let zero = float.const_zero();
+        let finite_low = self.builder.build_float_compare(
+            FloatPredicate::OGT, value, float.const_float(f64::NEG_INFINITY), "bit_finite_low",
+        ).map_err(|error| error.to_string())?;
+        let finite_high = self.builder.build_float_compare(
+            FloatPredicate::OLT, value, float.const_float(f64::INFINITY), "bit_finite_high",
+        ).map_err(|error| error.to_string())?;
+        let finite = self.builder.build_and(finite_low, finite_high, "bit_finite")
+            .map_err(|error| error.to_string())?;
+        let safe = self.builder.build_select(finite, value, zero, "bit_finite_value")
+            .map_err(|error| error.to_string())?.into_float_value();
+        let truncated = self.builder.build_call(
+            self.module.get_function("llvm.trunc.f64").unwrap(), &[safe.into()], "bit_truncated",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("llvm.trunc returned no value")?.into_float_value();
+        let modulus = float.const_float(4_294_967_296.0);
+        let remainder = self.builder.build_float_rem(truncated, modulus, "bit_remainder")
+            .map_err(|error| error.to_string())?;
+        let negative = self.builder.build_float_compare(
+            FloatPredicate::OLT, remainder, zero, "bit_negative",
+        ).map_err(|error| error.to_string())?;
+        let wrapped = self.builder.build_float_add(remainder, modulus, "bit_wrapped")
+            .map_err(|error| error.to_string())?;
+        let normalized = self.builder.build_select(negative, wrapped, remainder, "bit_normalized")
+            .map_err(|error| error.to_string())?.into_float_value();
+        self.builder.build_float_to_unsigned_int(normalized, self.context.i32_type(), "bit_uint32")
+            .map_err(|error| error.to_string())
     }
 }

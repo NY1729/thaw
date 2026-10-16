@@ -195,6 +195,10 @@ impl<'a> FnLowerer<'a> {
                 self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
             }
             HirType::Tuple(elements) => {
+                let source_type = HirType::Tuple(elements.clone());
+                let source_name = format!("__thaw_promise_tuple_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(source_name.clone(), source_type.clone());
                 let mut resolved = Vec::with_capacity(elements.len());
                 let mut promises = Vec::with_capacity(elements.len());
                 for (index, element) in elements.into_iter().enumerate() {
@@ -210,14 +214,17 @@ impl<'a> FnLowerer<'a> {
                     }
                     resolved.push(payload.as_ref().clone());
                     promises.push(HirExpr::TypedIndex(
-                        Box::new(value.clone()),
+                        Box::new(HirExpr::Var(source_name.clone())),
                         Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                         element,
                     ));
                 }
                 let first = resolved.first().cloned().unwrap_or(HirType::F64);
                 if combinator == "all" && resolved.iter().any(|element| element != &first) {
-                    return Ok(HirExpr::PromiseAllTuple(promises, resolved));
+                    return self.wrap_call_argument_bindings(
+                        HirExpr::PromiseAllTuple(promises, resolved),
+                        &[(source_name, source_type, value)],
+                    );
                 }
                 if let Some((index, actual)) = resolved
                     .iter()
@@ -228,13 +235,14 @@ impl<'a> FnLowerer<'a> {
                         "Promise.{combinator} element {index} resolves to {actual:?}, expected {first:?}"
                     ));
                 }
-                Ok(match combinator {
+                let result = match combinator {
                     "all" => HirExpr::PromiseAll(promises, first),
                     "allSettled" => HirExpr::PromiseAllSettled(promises, first),
                     "race" => HirExpr::PromiseRace(promises, first),
                     "any" => HirExpr::PromiseAny(promises, first),
                     _ => unreachable!(),
-                })
+                };
+                self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
             }
             other => Err(format!(
                 "`Promise.{combinator}` expects an array of promises, got {other:?}"
@@ -391,14 +399,10 @@ impl<'a> FnLowerer<'a> {
         let variable = |name: &str| HirExpr::Var(name.to_string());
         let add_one =
             |value: HirExpr| HirExpr::BinOp(BinOp::Add, Box::new(value), Box::new(number(1.0)));
-        let working_source = if copy {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_array_slice".into())),
-                vec![variable(&receiver_name), number(0.0), number(f64::INFINITY)],
-            )
-        } else {
-            variable(&receiver_name)
-        };
+        let working_source = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_slice".into())),
+            vec![variable(&receiver_name), number(0.0), number(f64::INFINITY)],
+        );
         let inner_index = variable(&inner_name);
         let next_index = add_one(inner_index.clone());
         let left_value = HirExpr::TypedIndex(
@@ -440,9 +444,9 @@ impl<'a> FnLowerer<'a> {
                 vec![variable(&array_name)],
             )
         } else {
-            variable(&array_name)
+            variable(&receiver_name)
         };
-        let body = HirExpr::Block(vec![
+        let mut statements = vec![
             HirStmt::Let(array_name.clone(), array_type.clone(), working_source),
             HirStmt::Let(
                 length_name.clone(),
@@ -490,8 +494,58 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(result)),
-        ]);
+        ];
+        if !copy {
+            let write_index = format!("__thaw_sort_write_{}", self.next_binding);
+            self.next_binding += 1;
+            let write_state = format!("__thaw_sort_state_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(write_index.clone(), HirType::F64);
+            self.scope.insert(write_state.clone(), HirType::F64);
+            let delete_key = self.coerce_primitive_to_string(variable(&write_index))?;
+            statements.push(HirStmt::Let(write_index.clone(), HirType::F64, number(0.0)));
+            statements.push(HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(variable(&write_index)),
+                    Box::new(HirExpr::ArrayLen(Box::new(variable(&array_name)))),
+                ),
+                vec![
+                    HirStmt::Let(write_state.clone(), HirType::F64, HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                        vec![variable(&array_name), variable(&write_index)],
+                    )),
+                    HirStmt::If(
+                        HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(variable(&write_state)), Box::new(number(0.0))),
+                        vec![HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_delete_strict".into())),
+                            vec![variable(&receiver_name), delete_key],
+                        ))],
+                        vec![HirStmt::If(
+                            HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(variable(&write_state)), Box::new(number(2.0))),
+                            vec![HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_set_undefined".into())),
+                                vec![variable(&receiver_name), variable(&write_index)],
+                            ))],
+                            vec![HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(variable(&receiver_name)),
+                                Box::new(variable(&write_index)),
+                                Box::new(HirExpr::TypedIndex(
+                                    Box::new(variable(&array_name)),
+                                    Box::new(variable(&write_index)), element_type.clone(),
+                                )),
+                            ))],
+                        )],
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(write_index.clone(),
+                        Box::new(add_one(variable(&write_index))))),
+                ],
+            ));
+        }
+        statements.push(HirStmt::Return(Some(result)));
+        let body = HirExpr::Block(statements);
         self.wrap_call_argument_bindings(
             body,
             &[
@@ -514,6 +568,43 @@ impl<'a> FnLowerer<'a> {
     /// `.forEach()` on a possibly-sparse array pass an `Optional` value's
     /// runtime layout to a callback compiled to expect the bare payload,
     /// which LLVM's module verifier rejects as a parameter type mismatch.
+    /// `thisArg` is evaluated once into a binding. A receiver-taking callback
+    /// (`function (this: T, ...)`) is invoked with it as `this`; any other
+    /// callback ignores it, as in JavaScript.
+    fn bind_array_callback_this(
+        &mut self,
+        label: &str,
+        callback_type: &HirType,
+        this_arg: &Option<HirExpr>,
+    ) -> Result<Option<(String, HirType, HirExpr)>, String> {
+        let Some(this_arg) = this_arg else { return Ok(None) };
+        let declared_receiver = match callback_type {
+            HirType::FunctionWithThis(receiver, _) => Some(receiver.as_ref()),
+            _ => None,
+        };
+        let this_arg = &self.coerce_this_for_receiver(declared_receiver, this_arg.clone())?;
+        let ty = self.infer_expr_type(this_arg)?;
+        let name = format!("__thaw_{label}_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        Ok(Some((name, ty, this_arg.clone())))
+    }
+
+    /// The visible signature of an array callback and the `this` binding to
+    /// call it with (only for a `FunctionWithThis` callback).
+    fn array_callback_signature(
+        callback_type: &HirType,
+        this_binding: &Option<(String, HirType, HirExpr)>,
+    ) -> (HirType, Option<String>) {
+        match callback_type {
+            HirType::FunctionWithThis(_, inner) => (
+                inner.as_ref().clone(),
+                this_binding.as_ref().map(|(name, _, _)| name.clone()),
+            ),
+            other => (other.clone(), None),
+        }
+    }
+
     fn lower_array_callback_call(
         &mut self,
         callback_name: &str,
@@ -711,8 +802,46 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64, array_type.clone()];
+        // A fixed local callback with a declared numeric/string parameter
+        // keeps its own ABI. The array loop already adapts sparse primitive
+        // reads at the call site; normalizing the callback here instead
+        // would route Optional<F64> through the general declared-value
+        // coercion and reject a valid `number` parameter.
+        let direct_fixed_primitive_callback = if let Expr::Ident(ident) = expr {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            let is_template = self.generic_arrows.contains_key(&name)
+                || self.generic_named_templates.contains_key(&name);
+            let has_rest = self.signatures.get(&name)
+                .is_some_and(|signature| signature.native_rest.is_some());
+            !is_template && !has_rest && self.scope.get(&name).is_some_and(|ty| {
+                let HirType::Function(params, _) = ty else { return false };
+                if params.len() != arity || params.len() > available.len() {
+                    return false;
+                }
+                let supported = params.iter().zip(&available).all(|(declared, supplied)| {
+                    declared == supplied
+                        || matches!((declared, supplied),
+                            (HirType::F64, HirType::Optional(payload)) if **payload == HirType::F64)
+                        || matches!((declared, supplied),
+                            (HirType::Str, HirType::Optional(payload)) if **payload == HirType::Str)
+                });
+                let needs_primitive_adapter = params.iter().zip(&available).any(|(declared, supplied)| {
+                    matches!((declared, supplied),
+                        (HirType::F64, HirType::Optional(payload)) if **payload == HirType::F64)
+                        || matches!((declared, supplied),
+                        (HirType::Str, HirType::Optional(payload)) if **payload == HirType::Str)
+                });
+                supported && needs_primitive_adapter
+            })
+        } else {
+            false
+        };
         self.sparse_mapping_result = true;
-        let result = self.lower_promise_callback(expr, &available[..arity], None);
+        let result = if direct_fixed_primitive_callback {
+            self.lower_expr(expr)
+        } else {
+            self.lower_promise_callback(expr, &available[..arity], None)
+        };
         self.sparse_mapping_result = false;
         result
     }

@@ -38,6 +38,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::Var(_) | HirExpr::PostfixUpdate(_, _) => {}
         HirExpr::Assign(_, value) => collect_closure_captures_expr(value, names),
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
@@ -76,6 +77,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
         | HirExpr::PromiseNew(value, _, _, _)
+        | HirExpr::PromiseNewMixed(value, _, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -103,10 +105,19 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishIsNone(value, _)
         | HirExpr::NullishValue(value, _) => collect_closure_captures_expr(value, names),
         HirExpr::RecursiveClosure(_, _, closure) => collect_closure_captures_expr(closure, names),
-        HirExpr::TypedClosure(_, closure) => collect_closure_captures_expr(closure, names),
+        HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => {
+            collect_closure_captures_expr(closure, names)
+        }
         HirExpr::PromiseThen(source, callback, _, _, _, _) => {
             collect_closure_captures_expr(source, names);
             collect_closure_captures_expr(callback, names);
+        }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+            collect_closure_captures_expr(source, names);
+            if let Some(fulfilled) = fulfilled {
+                collect_closure_captures_expr(fulfilled, names);
+            }
+            collect_closure_captures_expr(rejected, names);
         }
         HirExpr::PromiseFinally(source, callback, _, _) => {
             collect_closure_captures_expr(source, names);
@@ -158,7 +169,9 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishUndefined(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
         | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
         | HirExpr::MethodRef(..) => {}
     }
 }
@@ -183,6 +196,11 @@ fn collect_closure_captures_stmt(stmt: &HirStmt, names: &mut BTreeSet<Symbol>) {
                 collect_closure_captures_stmt(stmt, names);
             }
         }
+        HirStmt::Finally(body, _) => {
+            for stmt in body {
+                collect_closure_captures_stmt(stmt, names);
+            }
+        }
         HirStmt::Try(body, _, catch_body, _) => {
             for stmt in body {
                 collect_closure_captures_stmt(stmt, names);
@@ -196,5 +214,40 @@ fn collect_closure_captures_stmt(stmt: &HirStmt, names: &mut BTreeSet<Symbol>) {
         | HirStmt::Continue
         | HirStmt::BreakDepth(_)
         | HirStmt::ContinueDepth(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_closure_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_function_ref_this_contributes_no_captured_names() {
+        let callable = HirExpr::FunctionRefThis(
+            "callable_with_this".into(),
+            HirType::Bytes,
+            vec![HirType::Bytes],
+            HirType::Bytes,
+        );
+
+        assert!(closure_captured_names_in_while(&callable, &[]).is_empty());
+    }
+
+    #[test]
+    fn thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body() {
+        let lambda = HirExpr::Lambda(
+            vec![HirParam {
+                name: "declared_capture".into(),
+                ty: HirType::F64,
+            }],
+            Vec::new(),
+            HirType::Void,
+            Box::new(HirExpr::Var("body_only_name".into())),
+        );
+
+        assert_eq!(
+            closure_captured_names_in_while(&lambda, &[]),
+            ["declared_capture".to_string()].into_iter().collect()
+        );
     }
 }

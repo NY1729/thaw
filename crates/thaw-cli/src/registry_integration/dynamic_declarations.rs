@@ -10,6 +10,12 @@ fn sanitize_identifier(s: &str) -> String {
         .collect()
 }
 
+/// The package-qualified alias a package's export is also reachable under (`{package}_{export}`);
+/// a default import is the export named `default`.
+fn qualified_export_alias(package: &str, export: &str) -> String {
+    format!("{}_{export}", sanitize_identifier(package))
+}
+
 /// A `DtsFunction`'s declared parameter types as plain `HirType`s, for
 /// `overload_type_score` (`class_methods.rs`) to compare against a real
 /// call site's actual argument types. Anything that isn't `DtsType::
@@ -183,7 +189,7 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
             .map(|elements| format!("[{}]", elements.join(", "))),
         thaw_hir::HirType::Object(fields) => fields
             .iter()
-            .map(|(name, ty)| render_dynamic_type(ty).map(|ty| format!("{name}: {ty}")))
+            .map(|(name, ty)| render_dynamic_type(ty).map(|ty| format!("{}: {ty}", thaw_bridge::ts_property_key(name))))
             .collect::<Option<Vec<_>>>()
             .map(|fields| format!("{{ {} }}", fields.join("; "))),
         thaw_hir::HirType::Function(params, ret) => {
@@ -297,22 +303,16 @@ fn typed_dynamic_callable_adapter(
             .map(|index| format!("arg{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let call = format!("{call_value}(callable, JSON.parse(JSON.stringify([{args}])))");
         declarations.push_str(&format!(
-            "        if ({condition}) return {convert}({call});\n"
+            "        if ({condition}) {{ const callArguments: Json = [{args}]; return {convert}({call_value}(callable, callArguments)); }}\n"
         ));
     }
     let args = (0..required)
         .map(|index| format!("arg{index}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let json_args = if required == 0 {
-        "JSON.parse(\"[]\")".to_string()
-    } else {
-        format!("JSON.parse(JSON.stringify([{args}]))")
-    };
     declarations.push_str(&format!(
-        "        return {convert}({call_value}(callable, {json_args}));\n    }};\n    return invoke;\n}}\n"
+        "        const callArguments: Json = [{args}];\n        return {convert}({call_value}(callable, callArguments));\n    }};\n    return invoke;\n}}\n"
     ));
     Some((adapter, declarations))
 }
@@ -1073,8 +1073,7 @@ fn typed_dynamic_bare_alias(
                     | thaw_hir::HirType::F64
                     | thaw_hir::HirType::Bool
                     | thaw_hir::HirType::Json
-                    | thaw_hir::HirType::JsValue
-            )
+            ) || (!napi && matches!(ret.as_ref(), thaw_hir::HirType::JsValue))
         }
         thaw_hir::HirType::CallableFunction(_, _, None, ret) => {
             matches!(
@@ -1083,8 +1082,7 @@ fn typed_dynamic_bare_alias(
                     | thaw_hir::HirType::F64
                     | thaw_hir::HirType::Bool
                     | thaw_hir::HirType::Json
-                    | thaw_hir::HirType::JsValue
-            )
+            ) || (!napi && matches!(ret.as_ref(), thaw_hir::HirType::JsValue))
         }
         _ => false,
     };
@@ -1105,7 +1103,11 @@ fn typed_dynamic_bare_alias(
         thaw_bridge::DtsType::Native(ty) => contains_callable_type(ty),
         thaw_bridge::DtsType::Unsupported(_) => false,
     });
-    if function.params.len() <= 1 && !param_needs_marshaling && !callback_adapter_applies {
+    if function.params.len() == 1
+        && function.required_params == 1
+        && !param_needs_marshaling
+        && !callback_adapter_applies
+    {
         return None;
     }
     // A JIT-backed `symbol` (`jit_numeric_declaration`) renders its own

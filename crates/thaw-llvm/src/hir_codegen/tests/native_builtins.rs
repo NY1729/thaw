@@ -1,4 +1,55 @@
 #[test]
+fn number_format_explicit_undefined_uses_omitted_branch() {
+    let source = r#"
+        function receiver(): number { console.log("receiver"); return 10; }
+        function missing(): undefined { console.log("argument"); return undefined; }
+        function precision(value: number | string | undefined): string {
+            return (10).toPrecision(value);
+        }
+        function exponential(value: number | string | undefined): string {
+            return (10).toExponential(value);
+        }
+        function radix(value: number | string | undefined): string {
+            return (10).toString(value);
+        }
+        function optionalPrecision(value: number | undefined): string {
+            return (10).toPrecision(value);
+        }
+        function nullishExponential(value: number | null | undefined): string {
+            return (12.5).toExponential(value);
+        }
+        function main(): void {
+            console.log(receiver().toPrecision(missing()));
+            console.log((10).toExponential(undefined));
+            console.log((10).toString(undefined));
+            console.log((10).toString(...[]));
+            console.log(optionalPrecision(undefined));
+            console.log(optionalPrecision(2));
+            console.log(precision(undefined));
+            console.log(precision("2"));
+            console.log(exponential(undefined));
+            console.log(exponential("2"));
+            console.log(radix(undefined));
+            console.log(radix("2"));
+            const dynamicMissing: any = undefined;
+            console.log((10).toPrecision(dynamicMissing));
+            console.log((10).toExponential(dynamicMissing));
+            console.log((10).toString(dynamicMissing));
+            console.log(nullishExponential(undefined));
+            console.log(nullishExponential(null));
+            try { (10).toPrecision(-1); } catch (error) { console.log("caught-precision"); }
+            try { (10).toExponential(-1); } catch (error) { console.log("caught-exponential"); }
+            try { (10).toString(1); } catch (error) { console.log("caught-radix"); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_format_explicit_undefined"),
+        "receiver\nargument\n10\n1e+1\n10\n10\n10\n10\n10\n10\n1e+1\n1.00e+1\n10\n1010\n10\n1e+1\n10\n1.25e+1\n1e+1\ncaught-precision\ncaught-exponential\ncaught-radix\n"
+    );
+}
+
+
+#[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
         function receiver(): string {
@@ -446,7 +497,7 @@ fn compiles_string_from_code_point() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_from_code_point"),
-        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\nInvalid code point\n"
+        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\n"
     );
 }
 
@@ -594,6 +645,7 @@ fn compiles_tagged_template_evaluation_order_and_async() {
 fn compiles_tagged_template_raw_strings() {
     let source = r#"
         function tag(strings: TemplateStringsArray, ...values: any[]): string {
+            console.log(strings.raw === strings.raw);
             return strings.raw.join("|") + "::" + strings.join(",") + "::" + values.join(",");
         }
         function noSub(strings: TemplateStringsArray): string {
@@ -608,7 +660,7 @@ fn compiles_tagged_template_raw_strings() {
     "#;
     assert_eq!(
         compile_and_run(source, "tagged_template_raw_strings"),
-        "hello\\n| number\\t|::hello\n, number\t,::world,42\na\\nb\n[\"plain\\\\ttext\"]\n"
+        "true\nhello\\n| number\\t|::hello\n, number\t,::world,42\na\\nb\n[\"plain\\\\ttext\"]\n"
     );
 }
 
@@ -1014,6 +1066,37 @@ fn compiles_full_year_setters_on_invalid_dates() {
             &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
         ),
         "946702800000\n2000-01-01T05:00:00.000Z\n946684800000\n2000-01-01T00:00:00.000Z\n1999-01-01T05:00:00.000Z\nNaN\n"
+    );
+}
+
+#[test]
+fn date_constructor_parses_string_values_across_any_boundary_once() {
+    let source = r#"
+        let calls = 0;
+        function dateText(): any {
+            calls++;
+            return "2020-01-01T00:00:00.000Z";
+        }
+        function main(): void {
+            const text: any = "2020-01-01T00:00:00.000Z";
+            console.log(new Date(text).getTime());
+            console.log(new Date(dateText()).getTime(), calls);
+            const emptyText: any = "";
+            console.log(Number.isNaN(new Date(emptyText).getTime()));
+            const milliseconds: any = 1704067200500;
+            const nil: any = null;
+            const absent: any = undefined;
+            const flag: any = true;
+            console.log(new Date(milliseconds).getTime(), new Date(nil).getTime());
+            console.log(Number.isNaN(new Date(absent).getTime()), new Date(flag).getTime());
+            console.log(new Date("2020-01-01T00:00:00.000Z").getTime());
+            const local = new Date(2024, 0, 1);
+            console.log(local.getFullYear(), local.getMonth(), local.getDate());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_any_string_constructor"),
+        "1577836800000\n1577836800000 1\ntrue\n1704067200500 0\ntrue 1\n1577836800000\n2024 0 1\n"
     );
 }
 
@@ -1487,7 +1570,7 @@ fn compiles_method_calls_chained_on_new() {
 #[test]
 fn compiles_regex_match_all() {
     let source = r#"
-        function printMatches(matches: string[][]): void {
+        function printMatches(matches: (string | undefined)[][]): void {
             console.log(matches.length);
             for (const match of matches) {
                 console.log(match.join(","));
@@ -1609,6 +1692,20 @@ fn compiles_number_to_string_with_radix() {
     assert_eq!(
         compile_and_run(source, "number_to_string_radix"),
         "ff\n1000\nz\n255\n255\n-ff\n0.1\n3.14159\ntoString() radix argument must be between 2 and 36\ntoString() radix argument must be between 2 and 36\n"
+    );
+}
+
+#[test]
+fn compiles_min_subnormal_nondecimal_radix_without_fraction_cap() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(Number.MIN_VALUE.toString(2));
+            console.log(Number.MIN_VALUE.toString(16));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_to_string_min_subnormal_radix"),
+        format!("0.{}1\n0.{}4\n", "0".repeat(1073), "0".repeat(268))
     );
 }
 
@@ -1830,7 +1927,7 @@ fn compiles_regex_test_last_index_state() {
 #[test]
 fn compiles_regex_exec() {
     let source = r#"
-        function printMatch(result: string[] | null): void {
+        function printMatch(result: (string | undefined)[] | null): void {
             if (result !== null) {
                 for (const part of result) {
                     console.log(part);
@@ -2285,6 +2382,120 @@ fn compiles_array_from_a_generator() {
     );
 }
 
+#[test]
+fn compiles_array_from_a_real_typed_array_iterator() {
+    let source = r#"
+        function main(): void {
+            const bytes: JsValue = new Uint8Array([65, 240, 159, 152, 128]);
+            const copied: JsValue = new Uint8Array((bytes as any).buffer);
+            console.log(JSON.stringify(Array.from(copied)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_real_typed_array_iterator"),
+        "[65,240,159,152,128]\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_live_iterator_with_single_acquisition_and_receivers() {
+    let source = r#"
+        let sourceCalls = 0;
+        function produce(): JsValue {
+            sourceCalls++;
+            return getDynamicValue("arrayFromReceiverSource");
+        }
+        function main(): void {
+            loadScript("globalThis.arrayFromIteratorGetterCalls = 0; globalThis.arrayFromIteratorCalls = 0; globalThis.arrayFromIteratorNextCalls = 0; globalThis.arrayFromSourceNextCalls = 0; globalThis.arrayFromReceiverSource = {}; Object.defineProperty(arrayFromReceiverSource, Symbol.iterator, { get() { arrayFromIteratorGetterCalls++; return function() { if (this !== arrayFromReceiverSource) throw new Error('wrong source receiver'); arrayFromIteratorCalls++; let step = 0; let iterator; iterator = { next() { if (this !== iterator) throw new Error('wrong iterator receiver'); arrayFromIteratorNextCalls++; step++; return step <= 2 ? { value: step === 1 ? 7 : 8, done: false } : { done: true }; } }; return iterator; }; } }); Object.defineProperty(arrayFromReceiverSource, 'next', { value() { arrayFromSourceNextCalls++; throw new Error('source next used'); } });");
+            const values: Json = Array.from(produce());
+            console.log(JSON.stringify(values), sourceCalls, Number(getDynamicValue("arrayFromIteratorGetterCalls")), Number(getDynamicValue("arrayFromIteratorCalls")), Number(getDynamicValue("arrayFromIteratorNextCalls")), Number(getDynamicValue("arrayFromSourceNextCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_live_iterator_receiver_and_once"),
+        "[7,8] 1 1 1 3 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_existing_next_only_dynamic_iterator() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromNextOnlyCalls = 0; globalThis.arrayFromNextOnly = { next() { arrayFromNextOnlyCalls++; return arrayFromNextOnlyCalls === 1 ? { value: 9, done: false } : { done: true }; } };");
+            const iterator: JsValue = getDynamicValue("arrayFromNextOnly");
+            console.log(JSON.stringify(Array.from(iterator)), Number(getDynamicValue("arrayFromNextOnlyCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_existing_next_only_iterator"),
+        "[9] 2\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_preserving_iterator_acquisition_throw() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromAcquireNextCalls = 0; globalThis.arrayFromAcquireFailure = {}; Object.defineProperty(arrayFromAcquireFailure, Symbol.iterator, { get() { throw 'iter-acquire'; } }); Object.defineProperty(arrayFromAcquireFailure, 'next', { value() { arrayFromAcquireNextCalls++; return { done: true }; } });");
+            const source: JsValue = getDynamicValue("arrayFromAcquireFailure");
+            try {
+                Array.from(source);
+                console.log("missed acquisition throw");
+            } catch (error) {
+                console.log(error === "iter-acquire", Number(getDynamicValue("arrayFromAcquireNextCalls")));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_iterator_acquisition_throw"),
+        "true 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_first_boundary_object_acquisition_throw_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromObjectAcquireNextCalls = 0; globalThis.arrayFromObjectAcquireMarker = {}; globalThis.arrayFromObjectAcquireFailure = {}; Object.defineProperty(arrayFromObjectAcquireFailure, Symbol.iterator, { get() { throw arrayFromObjectAcquireMarker; } }); Object.defineProperty(arrayFromObjectAcquireFailure, 'next', { value() { arrayFromObjectAcquireNextCalls++; return { done: true }; } });");
+            const marker: JsValue = getDynamicValue("arrayFromObjectAcquireMarker");
+            const source: JsValue = getDynamicValue("arrayFromObjectAcquireFailure");
+            try {
+                Array.from(source);
+                console.log("missed acquisition throw");
+            } catch (error) {
+                console.log(error === marker, Number(getDynamicValue("arrayFromObjectAcquireNextCalls")));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_first_boundary_object_acquisition_throw"),
+        "true 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_first_boundary_undefined_acquisition_throw() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromUndefinedAcquireNextCalls = 0; globalThis.arrayFromUndefinedAcquireFailure = {}; Object.defineProperty(arrayFromUndefinedAcquireFailure, Symbol.iterator, { get() { throw undefined; } }); Object.defineProperty(arrayFromUndefinedAcquireFailure, 'next', { value() { arrayFromUndefinedAcquireNextCalls++; return { done: true }; } });");
+            const source: JsValue = getDynamicValue("arrayFromUndefinedAcquireFailure");
+            let didThrow = false;
+            let caughtUndefined = false;
+            try {
+                Array.from(source);
+            } catch (error) {
+                didThrow = true;
+                caughtUndefined = error === undefined;
+            }
+            console.log(didThrow, caughtUndefined, Number(getDynamicValue("arrayFromUndefinedAcquireNextCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_first_boundary_undefined_acquisition_throw"),
+        "true true 0\n"
+    );
+}
+
 /// `Array.fromAsync(anAsyncGenerator())` -- the `async function*`
 /// sibling of `compiles_array_from_a_generator` above. `Array.fromAsync`
 /// otherwise delegates entirely to the embedded QuickJS realm's own
@@ -2620,6 +2831,126 @@ fn generator_next_assigns_to_members_indexes_and_patterns() {
     assert_eq!(
         compile_and_run(source, "generator_resume_assignment_targets"),
         "4 5 13\n"
+    );
+}
+
+#[test]
+fn generator_assignment_captures_reference_before_yield_and_calls_object_setter() {
+    let source = r#"
+        let order = "";
+        let firstStored = 0;
+        let secondStored = 0;
+        const first = { set value(next: number) { order += "S"; firstStored = next * 10; } };
+        const second = { set value(next: number) { order += "T"; secondStored = next * 100; } };
+        let selected = first;
+        function pick() { order += "R"; return selected; }
+        function yielded(): number { order += "Y"; return 1; }
+        function* setterTarget(): Generator<number, void, number> {
+            pick().value = yield yielded();
+        }
+        const target: any = { left: 0, right: 0 };
+        let key = "left";
+        function pickKey(): string { order += "K"; return key; }
+        function* computedTarget(): Generator<number, void, number> {
+            target[pickKey()] = yield yielded();
+        }
+        function main(): void {
+            const setter = setterTarget();
+            console.log(setter.next().value, order);
+            selected = second;
+            console.log(setter.next(7).done, firstStored, secondStored, order);
+            order = "";
+            const computed = computedTarget();
+            console.log(computed.next().value, order);
+            key = "right";
+            console.log(computed.next(9).done, target.left, target.right, order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_resume_setter_reference"),
+        "1 RY\ntrue 70 0 RYS\n1 KY\ntrue 9 0 KY\n"
+    );
+}
+
+#[test]
+fn generator_assignment_uses_class_setter_after_resume() {
+    let source = r#"
+        class Box {
+            stored: number = 0;
+            set value(next: number) { this.stored = next * 10; }
+            static storedStatic: number = 0;
+            static set current(next: number) { Box.storedStatic = next + 1; }
+        }
+        let selected = new Box();
+        const original = selected;
+        const replacement = new Box();
+        function* assignClass(): Generator<number, void, number> {
+            selected.value = yield 2;
+        }
+        let choices = 0;
+        function choose(): Box { choices++; return selected; }
+        function* assignCall(): Generator<number, void, number> {
+            choose().value = yield 6;
+        }
+        let recordCalls = 0;
+        const record = { n: 0 };
+        function chooseRecord(): { n: number } { recordCalls++; return record; }
+        function* assignPlain(): Generator<number, void, number> {
+            chooseRecord().n = yield 8;
+        }
+        function* assignStatic(): Generator<number, void, number> {
+            Box.current = yield 4;
+        }
+        function* assignStaticField(): Generator<number, void, number> {
+            Box.storedStatic = yield 11;
+        }
+        function* assignShadow(Box: { value: number }): Generator<number, void, number> {
+            Box.value = yield 5;
+        }
+        class Derived extends Box {
+            *assignSuper(): Generator<number, void, number> {
+                super.value = yield 3;
+            }
+        }
+        function main(): void {
+            const iterator = assignClass();
+            console.log(iterator.next().value);
+            selected = replacement;
+            iterator.next(7);
+            console.log(original.stored, replacement.stored);
+            selected = original;
+            const callIterator = assignCall();
+            console.log(callIterator.next().value, choices);
+            selected = replacement;
+            callIterator.next(5);
+            console.log(original.stored, replacement.stored, choices);
+            const plainIterator = assignPlain();
+            console.log(plainIterator.next().value, recordCalls);
+            plainIterator.next(4);
+            console.log(record.n, recordCalls);
+            const derived = new Derived();
+            const superIterator = derived.assignSuper();
+            console.log(superIterator.next().value);
+            superIterator.next(8);
+            console.log(derived.stored);
+            const staticIterator = assignStatic();
+            console.log(staticIterator.next().value);
+            staticIterator.next(8);
+            console.log(Box.storedStatic);
+            const staticFieldIterator = assignStaticField();
+            console.log(staticFieldIterator.next().value);
+            staticFieldIterator.next(13);
+            console.log(Box.storedStatic);
+            const shadow = { value: 0 };
+            const shadowIterator = assignShadow(shadow);
+            console.log(shadowIterator.next().value);
+            shadowIterator.next(11);
+            console.log(shadow.value, Box.storedStatic);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_reference_validation"),
+        "2\n70 0\n6 1\n50 0 1\n8 1\n4 1\n3\n80\n4\n9\n11\n13\n5\n11 13\n"
     );
 }
 
@@ -3462,7 +3793,7 @@ fn compiles_class_generator_methods() {
 #[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
-        function printMatch(result: string[] | null): void {
+        function printMatch(result: (string | undefined)[] | null): void {
             if (result !== null) {
                 console.log(result[0]);
             } else {
@@ -3493,28 +3824,22 @@ fn compiles_regex_exec_last_index_state() {
             console.log(plain.lastIndex);
 
             const empty = /x*/g;
-            let count = 0;
-            let current = empty.exec("abc");
-            while (current !== null) {
-                count++;
-                if (count > 10) {
-                    break;
-                }
-                current = empty.exec("abc");
-            }
-            console.log(count);
+            empty.exec("abc");
+            console.log(empty.lastIndex);
+            empty.test("abc");
+            console.log(empty.lastIndex);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "regex_exec_last_index_state"),
-        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\nfalse\n0\n5\n4\n"
+        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\nfalse\n0\n5\n0\n0\n"
     );
 }
 
 #[test]
 fn compiles_string_match() {
     let source = r#"
-        function printMatch(result: string[] | null): void {
+        function printMatch(result: (string | undefined)[] | null): void {
             if (result !== null) {
                 for (const part of result) {
                     console.log(part);
@@ -3549,7 +3874,7 @@ fn compiles_string_match() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_match"),
-        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n12-34\n12\n34\na=1\na\n1\n\n\n12-34\n"
+        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n12-34\n12\n34\na=1\na\n1\nundefined\nundefined\n12-34\n"
     );
 }
 
@@ -3682,7 +4007,7 @@ fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_test_and_exec_any_receiver"),
-        "true\nfalse\n[\"12-34\",\"12\",\"34\"]\n"
+        "true\nfalse\n[ '12-34', '12', '34' ]\n"
     );
 }
 
@@ -3858,6 +4183,50 @@ fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
     assert_eq!(
         compile_and_run(source, "date_stringify_crossing_any_boundary"),
         "2024\ntrue\n\"2024-01-01T00:00:00.500Z\"\n{\"created\":\"2024-01-01T00:00:00.500Z\",\"count\":3}\n2024-01-01T00:00:00.500Z\ntrue\nnull\nInvalid Date\n"
+    );
+}
+
+#[test]
+fn json_date_setters_mutate_original_alias_after_argument_evaluation() {
+    let source = r#"
+        function main(): void {
+            const date: any = new Date(0);
+            const alias: any = date;
+            console.log(date.setTime(2000));
+            console.log(alias.getTime());
+            console.log(date.setYear(72));
+            console.log(alias.getFullYear());
+            let effects = 0;
+            const lookalike: any = { timestamp: 0 };
+            try { lookalike.setTime(++effects); } catch (_) {}
+            console.log(effects);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_date_setter_alias_and_order"),
+        "2000\n2000\n63072002000\n1972\n1\n"
+    );
+}
+
+#[test]
+fn forged_date_layout_does_not_gain_native_date_methods_or_coercion() {
+    let source = r#"
+        function main(): void {
+            const fake = {
+                ["__thaw_class_identity_\u001eDate"]: true,
+                timestamp: 0,
+            } as Date;
+            let effects = 0;
+            try { fake.setTime(++effects); } catch (_) { console.log("setter rejected"); }
+            console.log(effects);
+            try { fake.getTime(); } catch (_) { console.log("getter rejected"); }
+            try { Number(fake); } catch (_) { console.log("coercion rejected"); }
+            console.log(Object.prototype.toString.call(fake));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "forged_date_layout_identity"),
+        "setter rejected\n1\ngetter rejected\ncoercion rejected\n[object Object]\n"
     );
 }
 
@@ -4128,24 +4497,21 @@ fn compiles_map_or_set_mutating_methods_for_any_typed_receivers() {
 }
 
 /// `.set()` on a `Map` stored in `any` behind a property chain (not a
-/// bare local variable) is a documented, narrower limitation, not a
-/// silent no-op or a crash -- see the doc comment on
-/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`.
+/// bare local variable) mutates the real map, as in Node; it used to be a
+/// documented limitation that failed to compile (see the doc comment on
+/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`).
 #[test]
 fn map_set_on_an_any_typed_property_chain_receiver_errors_clearly() {
+    // An `any` property holding a real native `Map` accepts `set`/`get` just
+    // like Node; it no longer needs a plain local variable receiver.
     let source = r#"
         function main(): void {
             const holder: { m: any } = { m: new Map<string, number>([["a", 1]]) };
             holder.m.set("b", 2);
+            console.log(holder.m.get("b"), holder.m.size);
         }
     "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let error =
-        thaw_hir::lower_module(&module).expect_err("property-chain receiver should error");
-    assert!(
-        error.contains("plain local variable"),
-        "unexpected error: {error}"
-    );
+    assert_eq!(compile_and_run(source, "map_set_any_property_chain"), "2 2\n");
 }
 
 #[test]
@@ -4322,7 +4688,7 @@ fn compiles_instanceof_against_an_arbitrary_named_global() {
 #[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
-        function printAll(parts: string[]): void {
+        function printAll(parts: (string | undefined)[]): void {
             for (const part of parts) {
                 console.log(part);
             }
@@ -4354,7 +4720,7 @@ fn compiles_regex_split_and_replace() {
 #[test]
 fn compiles_regex_split_with_limit() {
     let source = r#"
-        function printAll(parts: string[]): void {
+        function printAll(parts: (string | undefined)[]): void {
             for (const part of parts) {
                 console.log(part);
             }
@@ -4374,7 +4740,7 @@ fn compiles_regex_split_with_limit() {
 #[test]
 fn compiles_regex_split_captures_and_named_replacements() {
     let source = r#"
-        function printAll(parts: string[]): void {
+        function printAll(parts: (string | undefined)[]): void {
             console.log(parts.length);
             for (const part of parts) {
                 console.log(part);
@@ -4766,6 +5132,23 @@ fn compiles_symbol_registry_and_description() {
     );
 }
 
+#[test]
+fn native_string_failures_are_typed_and_symbol_key_can_be_undefined() {
+    let source = r#"
+        function main(): void {
+            console.log(Symbol.keyFor(Symbol("x")) === undefined);
+            console.log(Symbol.keyFor(Symbol.for("")) === "");
+            try { encodeURIComponent(String.fromCharCode(0xD800)); }
+            catch (error) { console.log(error instanceof URIError, error.name); }
+            try { decodeURIComponent("%+1"); }
+            catch (error) { console.log(error instanceof URIError, error.name); }
+            try { String.fromCodePoint(0x110000); }
+            catch (error) { console.log(error instanceof RangeError, error.name); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_string_errors"), "true\ntrue\ntrue URIError\ntrue URIError\ntrue RangeError\n");
+}
+
 /// `Object.freeze`/`seal`/`preventExtensions` (identity in thaw's fixed
 /// layout), `String.prototype.substr` (Annex B), and `Reflect.has`/`get`/
 /// `deleteProperty`.
@@ -4798,6 +5181,33 @@ fn compiles_reflect_object_static_and_substr() {
     assert_eq!(
         compile_and_run(source, "reflect_object_static_substr"),
         "3\n3\n4\nbcd\nef\ncdef\ntrue\nfalse\n7\ntrue\n5\ntrue\n{\"b\":6}\n"
+    );
+}
+
+#[test]
+fn compiled_json_parse_and_reflect_errors_are_catchable() {
+    let source = r#"
+        function main(): void {
+            try {
+                JSON.parse("1 2");
+                console.log("parse accepted");
+            } catch (error) {
+                console.log(error instanceof SyntaxError);
+            }
+            try {
+                Reflect.deleteProperty(1 as any, "x");
+                console.log("delete accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            const object: any = JSON.parse("{\"x\":1}");
+            console.log(Reflect.deleteProperty(object, "x"));
+            console.log(JSON.stringify(object));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_parse_reflect_typed_errors"),
+        "true\ntrue\ntrue\n{}\n"
     );
 }
 
@@ -5093,6 +5503,52 @@ fn compiles_bytes_base64_hex() {
     assert_eq!(
         compile_and_run(source, "bytes_base64_hex"),
         "Hello\nhello\n48656c6c6f\nSGVsbG8=\n8 4\ndeadbeef00000000\n4 3\n68656c\n"
+    );
+}
+
+/// setFromBase64 reports the original UTF-16 source position, not a guess
+/// from the number of bytes written. These controls remain unrun.
+#[test]
+fn compiles_bytes_set_from_base64_read_boundaries() {
+    let source = r#"
+        function main(): void {
+            const zero = Buffer.alloc(0).setFromBase64("YQ==");
+            const short = Buffer.alloc(1).setFromBase64("YQ");
+            const padded = Buffer.alloc(1).setFromBase64("YQ==");
+            const two = Buffer.alloc(2).setFromBase64("YWI");
+            const twoPadded = Buffer.alloc(2).setFromBase64("YWI=");
+            console.log(zero.read, zero.written, short.read, short.written,
+                padded.read, padded.written, two.read, two.written,
+                twoPadded.read, twoPadded.written);
+            const oneOfThree = Buffer.alloc(1);
+            const oneResult = oneOfThree.setFromBase64("YWJj");
+            const twoOfThree = Buffer.alloc(2);
+            const twoResult = twoOfThree.setFromBase64("YWJj");
+            console.log(oneResult.read, oneResult.written, oneOfThree.toHex(),
+                twoResult.read, twoResult.written, twoOfThree.toHex());
+            const exact = Buffer.alloc(3);
+            const exactResult = exact.setFromBase64("YWJj ");
+            const extra = Buffer.alloc(4);
+            const extraResult = extra.setFromBase64("YWJj ");
+            console.log(exactResult.read, exactResult.written, exact.toHex(),
+                extraResult.read, extraResult.written, extra.toHex());
+            const spaced = Buffer.alloc(3);
+            const spacedResult = spaced.setFromBase64(" Y W J j Z A==");
+            const whitespace = Buffer.alloc(1).setFromBase64(" \t\f\rYQ==\n");
+            console.log(spacedResult.read, spacedResult.written, spaced.toHex(),
+                whitespace.read, whitespace.written);
+            const hex = Buffer.alloc(2).setFromHex("deadbeef");
+            console.log(hex.read, hex.written);
+            let order = "";
+            function receiver(): Buffer { order += "R"; return Buffer.alloc(1); }
+            function text(): string { order += "S"; return "YQ"; }
+            const ordered = receiver().setFromBase64(text());
+            console.log(order, ordered.read, ordered.written);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bytes_set_from_base64_read_boundaries"),
+        "0 0 2 1 4 1 3 2 4 2\n0 0 00 0 0 0000\n4 3 616263 5 3 61626300\n8 3 616263 9 1\n4 2\nRS 2 1\n"
     );
 }
 
@@ -5881,7 +6337,8 @@ fn delete_on_a_dynamic_any_object_preserves_remaining_key_order() {
     "#;
     assert_eq!(
         compile_and_run(source, "delete_preserves_key_order"),
-        "{\"b\":2,\"c\":3,\"d\":4}\n[\"b\",\"c\",\"d\"]\n{\"b\":2,\"d\":4}\n"
+        // `Object.keys` line verified against `node -e` (util.inspect formatting).
+        "{\"b\":2,\"c\":3,\"d\":4}\n[ 'b', 'c', 'd' ]\n{\"b\":2,\"d\":4}\n"
     );
 }
 
@@ -7033,6 +7490,49 @@ fn object_freeze_and_seal_block_writes() {
     );
 }
 
+#[test]
+fn json_assign_delete_and_prototype_constraints_throw() {
+    let source = r#"
+        function main(): void {
+            const frozen: any = JSON.parse("{\"keep\":1}");
+            Object.freeze(frozen);
+            try {
+                Object.assign(frozen, { keep: 2 });
+                console.log("assign accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            console.log(frozen.keep);
+
+            const sealed: any = JSON.parse("{\"keep\":1}");
+            Object.seal(sealed);
+            console.log(Reflect.deleteProperty(sealed, "keep"));
+            try {
+                delete sealed.keep;
+                console.log("delete accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            console.log(sealed.keep);
+
+            const first: any = JSON.parse("{}");
+            const second: any = JSON.parse("{}");
+            Object.setPrototypeOf(first, second);
+            try {
+                Object.setPrototypeOf(second, first);
+                console.log("cycle accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            console.log(Object.getPrototypeOf(second) === null);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_assign_delete_prototype_constraints"),
+        "true\n1\nfalse\ntrue\n1\ntrue\ntrue\n"
+    );
+}
+
 /// A sibling of `object_freeze_and_seal_block_writes`: here `Object.freeze`/
 /// `seal` is called on a value that's still *statically* `Object`-typed at
 /// that point (the freeze/seal state itself is recorded via `thaw_object_
@@ -7506,6 +8006,42 @@ fn compiles_object_create_prototype_and_property_is_enumerable() {
     );
 }
 
+#[test]
+fn property_is_enumerable_uses_own_descriptor_without_reading_value() {
+    let source = r#"
+        let receiverCalls = 0;
+        let keyCalls = 0;
+        function receiver(): { visible: number, hidden: number } {
+            receiverCalls++;
+            return object;
+        }
+        function key(): string { keyCalls++; return "hidden"; }
+        const object = { visible: 1, hidden: 2 };
+        function main(): void {
+            Object.defineProperty(object, "hidden", { enumerable: false });
+            console.log(receiver().propertyIsEnumerable(key()), receiverCalls, keyCalls);
+            console.log(object.propertyIsEnumerable("visible"), object.propertyIsEnumerable("missing"));
+            const dictionary: Record<string, number> = { own: 1 };
+            console.log(dictionary.propertyIsEnumerable("own"), dictionary.propertyIsEnumerable("toString"));
+            const ordinary = JSON.parse("{\"own\":1}");
+            console.log(ordinary.propertyIsEnumerable("own"), ordinary.propertyIsEnumerable("missing"));
+            const array = [1, 2];
+            delete array[0];
+            console.log(array.propertyIsEnumerable(0), array.propertyIsEnumerable(1), array.propertyIsEnumerable("length"));
+            loadScript("globalThis.hostReads = 0; globalThis.host = {}; Object.defineProperty(host, 'hidden', { enumerable: false, configurable: true, get() { hostReads++; return 1; } }); Object.defineProperty(host, 'visible', { enumerable: true, configurable: true, get() { hostReads++; return 2; } }); Object.setPrototypeOf(host, { inherited: 3 });");
+            const host: Json = getDynamicValue("host");
+            console.log(host.propertyIsEnumerable("hidden"), host.propertyIsEnumerable("visible"), host.propertyIsEnumerable("missing"), host.propertyIsEnumerable("inherited"));
+            console.log(Number(getDynamicValue("hostReads")));
+            loadScript("Reflect.getOwnPropertyDescriptor = () => { throw new Error('modified Reflect'); }; JSON.parse = () => { throw new Error('modified JSON'); };");
+            console.log(host.propertyIsEnumerable("visible"));
+            const string: Json = "😀x";
+            console.log(string.propertyIsEnumerable("0"), string.propertyIsEnumerable("1"), string.propertyIsEnumerable("2"), string.propertyIsEnumerable("length"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "property_is_enumerable_descriptors"),
+        "false 1 1\ntrue false\ntrue false\ntrue false\nfalse true false\nfalse true false false\n0\ntrue\ntrue true true false\n");
+}
+
 /// `Array.fromAsync` over an array-like input with an optional sync or
 /// async mapper, delegated to the JS realm (`Array.fromAsync`) so an async
 /// mapper's per-element `await` is honored. An async iterable or an array of
@@ -7596,15 +8132,69 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
             } catch (error) {
                 console.log(error.name);
                 console.log(error.message);
+                console.log(error.error.name);
                 console.log(error.error.message);
+                console.log(error.suppressed.name);
                 console.log(error.suppressed.message);
+                console.log(error.suppressed.suppressed.name);
                 console.log(error.suppressed.suppressed.message);
             }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "using_suppressed_error"),
-        "dispose b\ndispose a\nSuppressedError\na\na\nb\nbody\n"
+        // Verified against real Node 24 (V8 13.6): disposal errors nest as
+        // SuppressedError(a, SuppressedError(b, body)); the implicitly created ones carry V8's
+        // default message "An error was suppressed during disposal" (an explicit
+        // `new SuppressedError(e, s)` has the empty message).
+        "dispose b\ndispose a\nSuppressedError\nAn error was suppressed during disposal\nError\na\nSuppressedError\nAn error was suppressed during disposal\nError\nbody\n"
+    );
+}
+
+#[test]
+fn using_single_disposal_error_and_explicit_suppressed_error_keep_distinct_messages() {
+    let source = r#"
+        function main(): void {
+            try {
+                using resource = {
+                    [Symbol.dispose]() { throw new Error("dispose"); }
+                };
+            } catch (error) {
+                console.log(error.name);
+                console.log(error.message);
+            }
+            const explicit = new SuppressedError(new Error("new"), new Error("old"));
+            console.log(explicit.name);
+            console.log(explicit.message);
+            console.log(explicit.error.message);
+            console.log(explicit.suppressed.message);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_single_disposal_error"),
+        "Error\ndispose\nSuppressedError\n\nnew\nold\n"
+    );
+}
+
+#[test]
+fn using_suppressed_error_projects_an_opaque_native_reason_through_its_carrier() {
+    let source = r#"
+        function main(): void {
+            try {
+                using resource = {
+                    [Symbol.dispose]() { throw new Error("dispose"); }
+                };
+                throw new Map<string, number>();
+            } catch (error) {
+                console.log(error.name);
+                console.log(error.error.message);
+                console.log(JSON.stringify(error.suppressed));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_suppressed_native_reason"),
+        "SuppressedError\ndispose\n{}\n"
     );
 }
 
@@ -7660,6 +8250,29 @@ fn compiles_using_bindings_in_for_of() {
     assert_eq!(
         compile_and_run(source, "using_for_of"),
         "body a\ndispose a\ndispose b\nbody c\ndispose c\n"
+    );
+}
+
+#[test]
+fn escaped_using_for_of_captures_keep_distinct_iteration_values() {
+    let source = r#"
+        function make(name: string) {
+            return {
+                name,
+                [Symbol.dispose]() { console.log("dispose " + name); }
+            };
+        }
+        function main(): void {
+            const escaped: (() => string)[] = [];
+            for (using resource of [make("a"), make("b"), make("c")]) {
+                escaped.push(() => String(resource.name));
+            }
+            for (const read of escaped) console.log("escaped " + read());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "escaped_using_for_of_captures"),
+        "dispose a\ndispose b\ndispose c\nescaped a\nescaped b\nescaped c\n"
     );
 }
 
@@ -7788,6 +8401,12 @@ fn compiles_turkish_and_azeri_string_casing() {
 
 /// `AggregateError` preserves statically typed errors and an arbitrary cause
 /// while retaining the existing tagged exception behavior when thrown.
+///
+/// A caught `AggregateError` is printed as Node prints an error that has no stack
+/// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
+/// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
+/// the stack trace, which a native binary has no equivalent of, so it is omitted.
+/// A statically typed error value still prints as its bare message (the first line).
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -7813,7 +8432,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "\n1,2,3\n17\ntrue\nall failed\ntrue\nAggregateError\nall failed\n"
+        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n"
     );
 }
 
@@ -8104,6 +8723,41 @@ fn compiles_large_bigint_literals() {
     );
 }
 
+#[test]
+fn large_bigint_zero_division_and_bounded_right_shift() {
+    let source = r#"
+        function main(): void {
+            const large = 123456789012345678901234567890n;
+            try {
+                try { throw 13n; }
+                finally { console.log(7n / 0n); }
+            } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { console.log(7n / 0n); } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { console.log(7n % 0n); } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { large / 0n; } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { large % BigInt("0"); } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            console.log((large >> 1000000n).toString());
+            console.log(((-large) >> 1000000n).toString());
+            console.log((large << -1000000n).toString());
+            console.log((large >> 8n).toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_zero_division_right_shift"),
+        "true RangeError\ntrue RangeError\ntrue RangeError\ntrue RangeError\ntrue RangeError\n0\n-1\n0\n482253082079475308207947530\n"
+    );
+}
+
 /// The native `Temporal` slice: `Now`, `Instant`, `PlainDate`/`PlainDateTime`/
 /// `PlainTime`/`PlainYearMonth`/`PlainMonthDay`, and `Duration`, on the
 /// epoch-millisecond `f64` `Date` uses plus a sub-millisecond nanoseconds
@@ -8261,6 +8915,113 @@ fn compiles_escape_and_error_statics() {
         compile_and_run(source, "escape_and_error_statics"),
         "a%20b/c%3Fd%3D1%26x\n%u65E5%u672C\na b/c\n日本\ntrue\ntrue\ntrue\nfalse\nfalse\nError\nboom\n"
     );
+}
+
+#[test]
+fn caught_quickjs_error_console_reads_message_once_without_calling_to_string() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
+        declare function __thaw_typed_js_636f6e736f6c654572726f72436f756e7473(): string;
+        function main(): void {
+            loadScript("globalThis.consoleMessageReads = 0; globalThis.consoleStringCalls = 0; const error = new Error('ignored'); Object.defineProperty(error, 'message', { configurable: true, get() { consoleMessageReads++; return 'caught message'; } }); error.toString = () => { consoleStringCalls++; return 'wrong text'; }; globalThis.throwConsoleError = () => { throw error; }; globalThis.consoleErrorCounts = () => consoleMessageReads + ':' + consoleStringCalls;");
+            try { __thaw_typed_js_7468726f77436f6e736f6c654572726f72(); }
+            catch (error) { console.log(error); }
+            console.log(__thaw_typed_js_636f6e736f6c654572726f72436f756e7473());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_console_message_once"),
+        "caught message\n1:0\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_error_console_propagates_message_getter_failure_without_partial_output() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
+        declare function __thaw_typed_js_636f6e736f6c654572726f725265616473(): number;
+        function main(): void {
+            loadScript("globalThis.consoleMessageReads = 0; const error = new Error('not printed'); Object.defineProperty(error, 'message', { configurable: true, get() { consoleMessageReads++; throw new Error('message getter failed'); } }); globalThis.throwConsoleError = () => { throw error; }; globalThis.consoleErrorReads = () => consoleMessageReads;");
+            try {
+                try { __thaw_typed_js_7468726f77436f6e736f6c654572726f72(); }
+                catch (error) { console.log(error); }
+            } catch (messageError) {
+                console.log(messageError);
+            }
+            console.log(__thaw_typed_js_636f6e736f6c654572726f725265616473());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_console_getter_failure"),
+        "message getter failed\n1\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_plain_strings_and_fake_errors_keep_their_value_format() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77507265666978537472696e67(): void;
+        declare function __thaw_typed_js_7468726f7746616b654572726f72(): void;
+        function main(): void {
+            loadScript("globalThis.throwPrefixString = () => { throw 'prefix:' + String.fromCharCode(31) + '@@iterator'; }; globalThis.throwFakeError = () => { throw { name: 'Error', message: 'fake' }; }");
+            try { __thaw_typed_js_7468726f77507265666978537472696e67(); }
+            catch (error) { console.log(error); }
+            try { __thaw_typed_js_7468726f7746616b654572726f72(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_plain_string_and_fake_error"),
+        "prefix:\u{1f}@@iterator\n{ name: 'Error', message: 'fake' }\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_proxy_prototype_trap_propagates_without_partial_output() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f7750726f746f7479706554726170(): void;
+        function main(): void {
+            loadScript("const error = new Proxy(new Error('hidden'), { getPrototypeOf() { throw new Error('prototype trap failed'); } }); globalThis.throwPrototypeTrap = () => { throw error; };");
+            try {
+                try { __thaw_typed_js_7468726f7750726f746f7479706554726170(); }
+                catch (error) { console.log(error); }
+            } catch (predicateError) {
+                console.log(predicateError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_prototype_trap"),
+        "prototype trap failed\n"
+    );
+}
+
+#[test]
+fn napi_caught_json_console_does_not_enable_quickjs() {
+    let source = r#"
+        declare function __thaw_typed_napi_6e61706963616c6c(): number;
+        function main(): void {
+            try { __thaw_typed_napi_6e61706963616c6c(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_caught_json_console");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(compiler.uses_napi(), "{ir}");
+    assert!(!compiler.uses_quickjs(), "{ir}");
+    assert!(ir.contains("thaw_json_is_host_error_family"), "{ir}");
+    assert!(
+        !ir.lines().any(|line| {
+            line.split_ascii_whitespace().any(|word| word == "call")
+                && line.contains("@thaw_js_call_graph_result(")
+        }),
+        "N-API-only console emitted a QuickJS graph-call instruction:\n{ir}"
+    );
+    assert!(!ir.contains("thaw_js_register_callback_host_operations"), "{ir}");
 }
 
 /// `Reflect.defineProperty`/`getOwnPropertyDescriptor`/`isExtensible`/
@@ -8471,6 +9232,117 @@ fn catch_preserves_typed_primitive_values() {
     assert_eq!(
         compile_and_run(source, "typed_primitive_catch_values"),
         "number\n43\nboolean\ntrue\nbigint\n9007199254740994n\n"
+    );
+}
+
+// Unrun regression controls for current carrier reads after mutation. Keep
+// source-level assertions here until product execution is permitted.
+#[test]
+fn catch_scalar_assertions_follow_mutations_and_escaped_capture_cells() {
+    let source = r#"
+        function captureArrow(): () => number {
+            let read: () => number = () => 0;
+            try {
+                throw 42;
+            } catch (error) {
+                read = () => error as number;
+                error = 7;
+                try { throw 99; } catch (error) { error = 1n; }
+            }
+            return read;
+        }
+
+        function captureFunction(): () => boolean {
+            let read: () => boolean = () => false;
+            try {
+                throw true;
+            } catch (error) {
+                read = function readCaught(): boolean { return error as boolean; };
+                error = false;
+            }
+            return read;
+        }
+
+        function main(): void {
+            try {
+                throw 42;
+            } catch (error) {
+                error = 7;
+                console.log(error as number);
+                [error] = [11];
+                console.log(error as number);
+            }
+            try { throw true; } catch (error) {
+                error = false;
+                console.log(error as boolean);
+            }
+            try { throw 9n; } catch (error) {
+                error = 10n;
+                console.log(error as bigint);
+            }
+            try { throw 42; } catch (error) {
+                error = null;
+                console.log(typeof error);
+            }
+            let error__thaw_exception_f64 = 314;
+            try { throw 42; } catch (error) {
+                error = 8;
+                console.log(error as number);
+                console.log(error__thaw_exception_f64);
+            }
+            console.log(captureArrow()());
+            console.log(captureFunction()());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "catch_scalar_mutation_and_capture_cell"),
+        "7\n11\nfalse\n10n\nobject\n8\n314\n7\nfalse\n"
+    );
+}
+
+// Unrun source control: exact-captured scalar primitives occupy Json tag 7,
+// so typed catch assertions must check typeof before decoding current Json.
+#[test]
+fn exact_caught_json_scalars_use_checked_native_assertions() {
+    let source = r#"
+        function iterableThatThrows(reason: any): any {
+            return {
+                [Symbol.iterator]() {
+                    return { next() { throw reason; } };
+                }
+            };
+        }
+
+        function main(): void {
+            try {
+                for (const ignored of iterableThatThrows(JSON.parse("42"))) {}
+            } catch (error) { console.log(error as number); }
+            try {
+                for (const ignored of iterableThatThrows(JSON.parse("true"))) {}
+            } catch (error) { console.log(error as boolean); }
+            try {
+                for (const ignored of iterableThatThrows(9n)) {}
+            } catch (error) { console.log(error as bigint); }
+            try {
+                for (const ignored of iterableThatThrows(NaN)) {}
+            } catch (error) { console.log(Number.isNaN(error as number)); }
+            try {
+                for (const ignored of iterableThatThrows(Infinity)) {}
+            } catch (error) { console.log((error as number) === Infinity); }
+            try {
+                for (const ignored of iterableThatThrows(-0)) {}
+            } catch (error) { console.log(Object.is(error as number, -0)); }
+            try {
+                for (const ignored of iterableThatThrows(JSON.parse("\"not a number\""))) {}
+            } catch (error) {
+                try { console.log(error as number); }
+                catch (mismatch) { console.log(mismatch); }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "exact_caught_json_scalar_assertions"),
+        "42\ntrue\n9n\ntrue\ntrue\ntrue\ncaught value is not a number\n"
     );
 }
 
@@ -8818,6 +9690,57 @@ fn compiles_set_and_map_any_key() {
     );
 }
 
+/// Math.sumPrecise rejects holes through the shared numeric-array presence
+/// sidecar and preserves the special-value states. Source-only, unrun.
+#[test]
+fn math_sum_precise_sparse_and_special_values() {
+    let source = r#"
+        function main(): void {
+            const deleted: number[] = [, 2];
+            try { Math.sumPrecise(deleted); console.log("deleted accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            const grown: number[] = [1];
+            grown.length = 2;
+            try { Math.sumPrecise(grown); console.log("grown accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(Object.is(Math.sumPrecise([]), -0));
+            console.log(Object.is(Math.sumPrecise([-0, -0]), -0));
+            console.log(Object.is(Math.sumPrecise([0]), 0));
+            console.log(Object.is(Math.sumPrecise([1, -1]), 0));
+            console.log(Math.sumPrecise([Infinity]));
+            console.log(Math.sumPrecise([-Infinity]));
+            console.log(Number.isNaN(Math.sumPrecise([Infinity, -Infinity])));
+            console.log(Number.isNaN(Math.sumPrecise([NaN])));
+            console.log(Math.sumPrecise([1e16, 1, -1e16]));
+            const late: number[] = [Infinity, , 1];
+            try { Math.sumPrecise(late); console.log("late accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "math_sum_precise_sparse_special"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\nInfinity\n-Infinity\ntrue\ntrue\n1\ntrue\n");
+}
+
+#[test]
+fn math_sum_precise_sparse_async_rejects_type_error() {
+    let source = r#"
+        async function fail(): Promise<void> {
+            const values: number[] = [1];
+            values.length = 2;
+            Math.sumPrecise(values);
+        }
+        async function main(): Promise<void> {
+            const values: number[] = [1];
+            values.length = 2;
+            try { Math.sumPrecise(values); console.log("accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { await fail(); console.log("uncaught accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "math_sum_precise_sparse_async"), "true\ntrue\n");
+}
+
 /// `Math.sumPrecise` and the deprecated `Date.getYear`/`setYear`.
 #[test]
 fn compiles_math_sum_precise_and_date_year() {
@@ -8839,8 +9762,7 @@ fn compiles_math_sum_precise_and_date_year() {
     );
 }
 
-/// `Promise.prototype.then(onFulfilled, onRejected)` (desugared to
-/// `then(...).catch(...)`).
+/// Both `Promise.prototype.then` handlers observe the original settlement.
 #[test]
 fn compiles_promise_then_two_arg() {
     let source = r#"
@@ -8858,6 +9780,79 @@ fn compiles_promise_then_two_arg() {
     assert_eq!(
         compile_and_run(source, "promise_then_two_arg"),
         "11\n42\n"
+    );
+}
+
+#[test]
+fn promise_then_two_handlers_do_not_catch_fulfillment_failure() {
+    let source = r#"
+        let rejectedCalls = 0;
+        let order = "";
+        function source(): Promise<number> {
+            order += "S";
+            return Promise.resolve(1);
+        }
+        function fulfilled(): (value: number) => number {
+            order += "F";
+            return (value: number): number => value + 1;
+        }
+        function rejected(): (reason: string) => number {
+            order += "R";
+            return (reason: string): number => { rejectedCalls++; return 42; };
+        }
+        async function main(): Promise<void> {
+            console.log(await source().then(fulfilled(), rejected()), order);
+            try {
+                await Promise.resolve(2).then((value: number): number => {
+                    throw new Error("fulfillment");
+                }, rejected());
+            } catch (error) { console.log("fulfillment-rejected"); }
+            console.log(rejectedCalls);
+            try {
+                await Promise.resolve(3).then(
+                    (value: number): Promise<number> => Promise.reject<number>("adopted"),
+                    rejected()
+                );
+            } catch (error) { console.log("adopted-rejected"); }
+            console.log(rejectedCalls);
+            console.log(await Promise.reject<number>("source").then(
+                (value: number): number => value + 1,
+                rejected()
+            ));
+            console.log(await Promise.reject<number>("source").then(undefined, rejected()));
+            console.log(rejectedCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_then_two_handler_failure_routing"),
+        "2 SFR\nfulfillment-rejected\n0\nadopted-rejected\n0\n42\n42\n2\n"
+    );
+}
+
+#[test]
+fn promise_handlers_preserve_callable_optional_rest_and_zero_arg_abi() {
+    let source = r#"
+        const onReject: (reason: string) => number = (reason: string): number => 7;
+        const optionalReject: (reason?: string) => number =
+            (reason?: string): number => reason === "source" ? 8 : 0;
+        const restReject: (...reasons: string[]) => number =
+            (...reasons: string[]): number => reasons.length;
+        function namedRest(...reasons: string[]): number { return reasons.length + 10; }
+        const ignored: () => number = (): number => 9;
+        async function main(): Promise<void> {
+            console.log(await Promise.reject<number>("source").then(
+                (value: number): number => value + 1, onReject));
+            console.log(await Promise.reject<number>("source").then(undefined, optionalReject));
+            console.log(await Promise.reject<number>("source").then(undefined, restReject));
+            console.log(await Promise.reject<number>("source").then(undefined, namedRest));
+            console.log(await Promise.resolve(1).then(ignored, onReject));
+            console.log(await Promise.reject<number>("source").catch(optionalReject));
+            console.log(await Promise.resolve(3).finally(ignored));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_callable_handler_shapes"),
+        "7\n8\n1\n11\n9\n8\n3\n"
     );
 }
 
@@ -8994,19 +9989,33 @@ fn compiles_well_known_symbols() {
 fn object_literal_to_primitive_is_consulted_by_coercions() {
     let source = r#"
         function main(): void {
+            let numberCalls = 0;
+            let stringCalls = 0;
             const obj = {
                 value: 5,
                 [Symbol.toPrimitive](hint: string): any {
-                    if (hint === "number") return this.value;
+                    if (hint === "number") { numberCalls++; return this.value; }
+                    stringCalls++;
                     return `obj(${this.value})`;
                 },
             };
-            console.log(+obj, `${obj}`);
+            console.log(+obj, `${obj}`, numberCalls, stringCalls);
+            loadScript("globalThis.dynamicUnaryCalls = 0; globalThis.dynamicUnaryObject = { [Symbol.toPrimitive](hint) { dynamicUnaryCalls++; if (hint !== 'number') throw new Error('wrong hint'); return 9; } }; globalThis.numberConstructorCalls = 0; globalThis.numberConstructorObject = { [Symbol.toPrimitive](hint) { numberConstructorCalls++; if (hint !== 'number') throw new Error('wrong Number hint'); return 12; } }; globalThis.unaryPlusBigInt = 1n; globalThis.numberConstructorBigInt = 1n; globalThis.unaryPlusSymbol = Symbol('value');");
+            const dynamicObject: JsValue = getDynamicValue("dynamicUnaryObject");
+            console.log(+dynamicObject, Number(getDynamicValue("dynamicUnaryCalls")));
+            const numberObject: JsValue = getDynamicValue("numberConstructorObject");
+            console.log(Number(numberObject), Number(getDynamicValue("numberConstructorCalls")));
+            const numberBigInt: JsValue = getDynamicValue("numberConstructorBigInt");
+            console.log(Number(numberBigInt));
+            const big: JsValue = getDynamicValue("unaryPlusBigInt");
+            const symbol: JsValue = getDynamicValue("unaryPlusSymbol");
+            try { console.log(+big); } catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(+symbol); } catch (error) { console.log(error instanceof TypeError); }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_literal_to_primitive_coercion"),
-        "5 obj(5)\n"
+        "5 obj(5) 1 1\n9 1\n12 1\n1\ntrue\ntrue\n"
     );
 }
 
@@ -9208,8 +10217,8 @@ fn compiles_promise_keyed_combinators() {
     );
 }
 
-/// Backreferences and lookaround, which the `regex` crate lacks; the runtime
-/// falls back to `fancy-regex` so such patterns stay native instead of
+/// Backreferences and lookaround use the runtime's JavaScript-pattern
+/// backend, so such patterns stay native instead of
 /// silently reporting "no match".
 #[test]
 fn compiles_regex_backreferences_and_lookaround() {
@@ -9277,5 +10286,2018 @@ fn compiles_string_raw() {
     assert_eq!(
         compile_and_run(source, "string_raw"),
         "a\\nb1c\na1b\n"
+    );
+}
+
+/// All direct-call `String.raw` substitutions evaluate left to right even when
+/// no raw segment consumes them. The empty-raw branch must retain the effects.
+#[test]
+fn string_raw_evaluates_unused_substitutions() {
+    let source = r#"
+        function main(): void {
+            let count = 0;
+            const one = String.raw({ raw: ["x"] }, ++count);
+            console.log(one === "x" && count === 1);
+            const empty = String.raw({ raw: [] }, ++count);
+            console.log(empty === "" && count === 2);
+            const usedAndExtra = String.raw({ raw: ["a", "b"] }, ++count, ++count);
+            console.log(usedAndExtra === "a3b" && count === 4);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_raw_unused_substitutions"),
+        "true\ntrue\ntrue\n"
+    );
+}
+
+/// `WeakRef<T>` (a one-element-array model), `Uint8Array.from`, and
+/// `Uint8Array.prototype.set` -- the three gaps closed after the
+/// `tests/builtins-compat.json` coverage pass.
+#[test]
+fn compiles_weakref_uint8array_from_and_set() {
+    let source = r#"
+        function main(): void {
+            const target: object = { value: 1 };
+            const reference: WeakRef<object> = new WeakRef(target);
+            console.log(reference.deref() === target);
+            console.log(Uint8Array.from([1, 2, 3]).join(","));
+            const bytes: Uint8Array = new Uint8Array(4);
+            bytes[0] = 9;
+            bytes.set([1, 2], 1);
+            console.log(bytes[0], bytes[1], bytes[2], bytes[3]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "weakref_uint8array_from_set"),
+        "true\n1,2,3\n9 1 2 0\n"
+    );
+}
+
+/// Typed arrays (modeled as `Bytes`) and `Atomics` on a
+/// `SharedArrayBuffer`-backed `Int32Array`.
+#[test]
+fn compiles_typed_arrays_and_atomics() {
+    let source = r#"
+        function main(): void {
+            const a: Int32Array = new Int32Array(4);
+            a[0] = 5;
+            console.log(a[0], a.length);
+            const from: Int32Array = new Int32Array([1, 2, 3]);
+            console.log(from[0], from[1], from[2]);
+            const f: Float64Array = new Float64Array(2);
+            f[0] = 1.5;
+            console.log(f[0]);
+            const shared: Int32Array = new Int32Array(new SharedArrayBuffer(8));
+            console.log(Atomics.store(shared, 0, 42), Atomics.load(shared, 0));
+            console.log(Atomics.add(shared, 0, 5), Atomics.load(shared, 0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_arrays_and_atomics"),
+        "5 4\n1 2 3\n1.5\n42 42\n42 47\n"
+    );
+}
+
+/// A custom iterable (`{ [Symbol.iterator]() {...} }`, with the
+/// `Iterable<T>`/`Iterator<T>`/`IteratorResult<T>` annotations) works in
+/// both `for...of` and array spread `[...it]`.
+#[test]
+fn compiles_custom_iterable_for_of_and_spread() {
+    let source = r#"
+        function main(): void {
+            const it: Iterable<number> = {
+                [Symbol.iterator](): Iterator<number> {
+                    let i: number = 0;
+                    return {
+                        next(): IteratorResult<number> {
+                            return i < 3 ? { value: i++, done: false } : { value: 0, done: true };
+                        },
+                    };
+                },
+            };
+            const collected: number[] = [];
+            for (const value of it) collected.push(value);
+            console.log(collected.join(","));
+            console.log([...it].join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "custom_iterable_for_of_and_spread"),
+        "0,1,2\n0,1,2\n"
+    );
+}
+
+/// `JSON.stringify` omits method fields (and calls `toJSON`), and a
+/// property read on a nullish `any` value throws a catchable TypeError
+/// while `?.` still short-circuits.
+#[test]
+fn compiles_json_stringify_methods_and_json_null_guard() {
+    let source = r#"
+        function main(): void {
+            const plain = { a: 1, b(): number { return 2; } };
+            console.log(JSON.stringify(plain));
+            const withToJson = { a: 1, toJSON(): number { return 7; } };
+            console.log(JSON.stringify(withToJson));
+            const z: any = null;
+            try {
+                z.x;
+                console.log("no-throw");
+            } catch (error) {
+                console.log("threw");
+            }
+            const n: any = null;
+            console.log(n?.x);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_methods_and_json_null_guard"),
+        "{\"a\":1}\n7\nthrew\nundefined\n"
+    );
+}
+
+/// Lone UTF-16 surrogates are preserved through literals, `fromCharCode`,
+/// `slice`, string iteration, and `isWellFormed`/`toWellFormed` (WTF-8).
+#[test]
+fn compiles_lone_surrogate_strings() {
+    let source = r#"
+        function main(): void {
+            const s = "\ud800";
+            console.log(s.length, s.charCodeAt(0), s.isWellFormed());
+            console.log(s.toWellFormed().length, s.toWellFormed().charCodeAt(0));
+            console.log(String.fromCharCode(0xD800).charCodeAt(0));
+            console.log("a\ud800b".slice(1, 2).charCodeAt(0));
+            console.log("\ud800\udc00".isWellFormed(), "\ud800\udc00".length);
+            console.log([..."a\ud800b"].length, [..."a\ud800b"][1].charCodeAt(0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "lone_surrogate_strings"),
+        "1 55296 false\n1 65533\n55296\n55296\ntrue 2\n3 55296\n"
+    );
+}
+
+/// `JSON.stringify` preserves a lone surrogate as a `\uXXXX` escape (the
+/// custom serializer bypasses `serde_json`), and still matches its
+/// pretty-print format.
+#[test]
+fn compiles_json_stringify_lone_surrogate() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify("\ud800"));
+            console.log(JSON.stringify({ a: "\ud800" }));
+            console.log(JSON.stringify({ a: 1 }, null, 2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_lone_surrogate"),
+        "\"\\ud800\"\n{\"a\":\"\\ud800\"}\n{\n  \"a\": 1\n}\n"
+    );
+}
+
+/// `JSON.parse` keeps a lone-surrogate `\uXXXX` escape (custom parser) and
+/// normalizes an exponent number the way Node does.
+#[test]
+fn compiles_json_parse_lone_surrogate_and_numbers() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify(JSON.parse('"\\ud800"')));
+            console.log(JSON.stringify(JSON.parse('{"a":1,"b":[true,null,1.5,-2e3]}')));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_parse_lone_surrogate_and_numbers"),
+        "\"\\ud800\"\n{\"a\":1,\"b\":[true,null,1.5,-2000]}\n"
+    );
+}
+
+/// `eval(code)` lowers to the QuickJS realm's global `eval` (indirect
+/// eval semantics).
+#[test]
+fn compiles_eval_through_quickjs() {
+    let source = r#"
+        function main(): void {
+            console.log(eval("1+1"));
+            console.log(eval("'a' + 'b'"));
+            console.log(eval("var q = 5; q * 2"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "eval_through_quickjs"),
+        "2\nab\n10\n"
+    );
+}
+
+/// `new Function(...)` goes to the JS realm's `Function` constructor
+/// (source-keyed cache) and the result is callable.
+#[test]
+fn compiles_new_function_constructor() {
+    let source = r#"
+        function main(): void {
+            const add = new Function("a", "b", "return a + b");
+            console.log(add(1, 2));
+            const answer = new Function("return 42");
+            console.log(answer());
+            const double = new Function("x", "return x * 2");
+            console.log(double(21));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "new_function_constructor"),
+        "3\n42\n42\n"
+    );
+}
+
+#[test]
+fn regex_exec_empty_match_preserves_last_index_and_search_respects_sticky() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const r = /(?:)/g;
+            r.exec("x");
+            console.log(r.lastIndex);
+            r.test("x");
+            console.log(r.lastIndex);
+            console.log("ba".search(/a/y));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_empty_and_sticky"), "0\n0\n-1\n");
+}
+
+#[test]
+fn regex_match_state_and_match_all_start_from_copied_last_index() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const sticky = /a/y;
+            sticky.lastIndex = 1;
+            console.log("ba".match(sticky)?.index);
+            console.log(sticky.lastIndex);
+            const global = /a/g;
+            global.lastIndex = 1;
+            const matches = "aa".matchAll(global);
+            console.log(matches.length, matches[0].index, global.lastIndex);
+            console.log("aa".match(global)?.length, global.lastIndex);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_match_state"), "1\n2\n1 1 1\n2 0\n");
+}
+
+#[test]
+fn regex_captures_and_metadata_survive_optional_groups_and_push() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const m = /(?<x>a)|b/.exec("bb");
+            if (m) {
+                console.log(m[1] === undefined, m.groups.x === undefined);
+                m.push("extra");
+                console.log(m.index, m.input, m.groups.x === undefined);
+            }
+            const parts = "a,b".split(/(,)|(x)/);
+            console.log(parts.length, parts[2] === undefined);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_optional_capture_metadata"), "true true\n0 bb true\n4 true\n");
+}
+
+#[test]
+fn regex_javascript_ascii_digit_and_word_classes() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(/^\d$/u.test("\u0661"), /^\w$/u.test("é"));
+            console.log(/^\d$/u.test("7"), /^\w$/u.test("A"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_ascii_classes"), "false false\ntrue true\n");
+}
+
+#[test]
+fn json_stringify_cycle_replacer_runs_before_cycle_error() {
+    let source = r#"
+        function main(): void {
+            const value: any = JSON.parse('{"keep":1}');
+            value.self = value;
+            console.log(JSON.stringify(value, (key: string, item: any) =>
+                key === "self" ? undefined : item));
+            try {
+                JSON.stringify(value, (_key: string, item: any) => item);
+            } catch (error) {
+                console.log((error as any).name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_cycle_function_replacer"),
+        "{\"keep\":1}\nTypeError\n"
+    );
+}
+
+#[test]
+fn json_stringify_direct_js_value_uses_live_replacer_and_space() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.directStringifyValue = {data:1,ignored:2}; globalThis.directStringifyFunction = function(k,v) { return k === 'ignored' ? undefined : v; }; globalThis.directStringifyKeys = ['data'];");
+            const direct: JsValue = getDynamicValue("directStringifyValue");
+            const liveFunction: JsValue = getDynamicValue("directStringifyFunction");
+            const liveKeys: JsValue = getDynamicValue("directStringifyKeys");
+            try {
+                console.log(JSON.stringify(direct, ["data"], 2));
+                console.log(JSON.stringify(direct, true, false));
+                console.log(JSON.stringify(direct, liveKeys, 2));
+                console.log(JSON.stringify(direct, liveFunction));
+                console.log(JSON.stringify(direct, function(key: string, value: any): any {
+                    return key === "ignored" ? undefined : value;
+                }));
+            } finally {
+                releaseDynamicValue(liveKeys);
+                releaseDynamicValue(liveFunction);
+                releaseDynamicValue(direct);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_direct_js_value"),
+        "{\n  \"data\": 1\n}\n{\"data\":1,\"ignored\":2}\n{\n  \"data\": 1\n}\n{\"data\":1}\n{\"data\":1}\n"
+    );
+}
+
+#[test]
+fn json_stringify_function_replacer_observes_live_holder_and_saved_this() {
+    let source = r#"
+        function main(): void {
+            const root: any = JSON.parse('{"child":{"value":3}}');
+            console.log(JSON.stringify(root, function(key: string, value: any): any {
+                if (key === "value") console.log(this === root.child);
+                return value;
+            }));
+            const receiver = { label: "lexical" };
+            const ordinary = function(this: { label: string }, suffix: string): string {
+                return this.label + suffix;
+            };
+            const saved = { ordinary };
+            console.log(saved.ordinary.call(receiver, "-call"));
+            console.log(saved.ordinary.apply(receiver, ["-apply"]));
+            console.log(saved.ordinary.bind(receiver, "-bind")());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_live_replacer_holder"),
+        "true\n{\"child\":{\"value\":3}}\nlexical-call\nlexical-apply\nlexical-bind\n"
+    );
+}
+
+#[test]
+fn date_set_year_truncates_before_two_digit_year_adjustment() {
+    let source = r#"
+        function main(): void {
+            for (const year of [-0.5, 0.5, -1.5, 99.9, 100.1, NaN, Infinity]) {
+                const date = new Date(0);
+                date.setYear(year);
+                console.log(date.getFullYear());
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run_with_env(source, "date_set_year_fractional", &[("TZ", "UTC")]),
+        "1900\n1900\n-1\n1999\n100\nNaN\nNaN\n");
+}
+
+#[test]
+fn math_extremes_of_sparse_runtime_array_propagate_nan() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [1];
+            sparse.length = 2;
+            console.log(Number.isNaN(Math.min(...sparse)),
+                        Number.isNaN(Math.max(...sparse)));
+            const explicit: number[] = [undefined];
+            console.log(Number.isNaN(Math.min(...explicit)),
+                        Number.isNaN(Math.max(...explicit)));
+            const empty: number[] = [];
+            console.log(Math.min(...empty) === Infinity,
+                        Math.max(...empty) === -Infinity);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "math_extremes_sparse_runtime_array"),
+        "true true\ntrue true\ntrue true\n"
+    );
+}
+
+#[test]
+fn spread_primitive_conversions_match_direct_nullish_and_bigint_conversions() {
+    let source = r#"
+        let calls = 0;
+        function absent(): null { calls++; return null; }
+        function main(): void {
+            console.log(String(...[absent()]), calls);
+            console.log(String(...[undefined]));
+            console.log(Number(...[null]));
+            console.log(Number.isNaN(Number(...[undefined])));
+            console.log(Boolean(...[null]), Boolean(...[undefined]));
+            console.log(BigInt(...[7]) === BigInt(7));
+            console.log(BigInt(...[true]) === BigInt(true));
+            console.log(BigInt(...["9007199254740993"]).toString());
+            try { BigInt(...[1.5]); } catch (error) { console.log("fraction"); }
+            try { BigInt(...["bad"]); } catch (error) { console.log("invalid"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "spread_primitive_conversion_parity"),
+        "null 1\nundefined\n0\ntrue\nfalse false\ntrue\ntrue\n9007199254740993\nfraction\ninvalid\n");
+}
+
+#[test]
+fn spread_primitive_conversion_evaluates_tuple_and_throwing_operands_once() {
+    let source = r#"
+        let calls = 0;
+        function tuple(): [null] { calls++; return [null]; }
+        function fail(): null { calls++; throw "stop"; }
+        function main(): void {
+            console.log(String(...tuple()), calls);
+            try { String(...[fail()]); } catch (error) { console.log("spread", calls); }
+            try { String(fail()); } catch (error) { console.log("direct", calls); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "spread_primitive_operand_once"),
+        "null 1\nspread 2\ndirect 3\n");
+}
+
+#[test]
+fn array_presence_checks_current_length_after_reduce_callbacks_shrink_it() {
+    let source = r#"
+        function main(): void {
+            const dense: number[] = [1, 2, 3];
+            let denseVisits = 0;
+            const denseSum = dense.reduce((sum, value, index) => {
+                denseVisits += 1;
+                if (index === 0) dense.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(denseSum, denseVisits, dense.length);
+
+            const sparse: number[] = [1, , 3];
+            let sparseVisits = 0;
+            const sparseSum = sparse.reduce((sum, value, index) => {
+                sparseVisits += 1;
+                if (index === 0) sparse.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(sparseSum, sparseVisits, sparse.length);
+
+            const reverseDense: number[] = [1, 2, 3];
+            let reverseDenseVisits = 0;
+            const reverseDenseSum = reverseDense.reduceRight((sum, value, index) => {
+                reverseDenseVisits += 1;
+                if (index === 2) reverseDense.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(reverseDenseSum, reverseDenseVisits, reverseDense.length);
+
+            const reverseSparse: number[] = [1, , 3];
+            let reverseSparseVisits = 0;
+            const reverseSparseSum = reverseSparse.reduceRight((sum, value, index) => {
+                reverseSparseVisits += 1;
+                if (index === 2) reverseSparse.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(reverseSparseSum, reverseSparseVisits, reverseSparse.length);
+
+            const presentUndefined: number[] = [, 2].toReversed();
+            let visits = 0;
+            presentUndefined.forEach(() => { visits += 1; });
+            console.log(visits, presentUndefined.indexOf(undefined), presentUndefined.length);
+            const empty: number[] = [];
+            console.log(empty.pop() === undefined, empty.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_presence_current_length_reduce"),
+        "1 1 1\n1 1 1\n4 2 1\n4 2 1\n2 1 2\ntrue 0\n"
+    );
+}
+
+#[test]
+fn array_literal_spread_snapshots_before_a_later_mutating_expression() {
+    let source = r#"
+        function main(): void {
+            const first: number[] = [1];
+            const mutate = (): number[] => {
+                first[0] = 2;
+                return [3];
+            };
+            const result: number[] = [...first, ...mutate()];
+            console.log(result.join(","), first.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_spread_prior_snapshot"), "1,3 2\n");
+}
+
+#[test]
+fn bigint_radix_and_index_arguments_validate_before_native_clamping() {
+    let source = r#"
+        function getValue(): bigint { console.log("value"); return 255n; }
+        function getBits(): number { console.log("bits"); return 8; }
+        function getReceiver(): bigint { console.log("receiver"); return 10n; }
+        function getRadix(): number { console.log("radix"); return 2; }
+        function getMissing(): undefined { console.log("missing"); return undefined; }
+        function render(radix: number | string | undefined): string { return (10n).toString(radix); }
+        function main(): void {
+            console.log(getReceiver().toString(getRadix()));
+            console.log((10n).toString(getMissing()));
+            const dynamicMissing: any = undefined;
+            console.log((10n).toString(dynamicMissing));
+            console.log((10n).toString(2.9));
+            console.log(render(undefined));
+            console.log(render(2));
+            console.log(render("16"));
+            try { render(1); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(1); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(37); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(NaN); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(Infinity); } catch (error) { console.log((error as Error).name); }
+            console.log(BigInt.asIntN(getBits(), getValue()));
+            console.log(BigInt.asIntN(NaN, 1n));
+            console.log(BigInt.asUintN(-0.5, 1n));
+            console.log(BigInt.asUintN(8.9, 255n));
+            try { BigInt.asIntN(-1, 1n); } catch (error) { console.log((error as Error).name); }
+            try { BigInt.asUintN(Infinity, 1n); } catch (error) { console.log((error as Error).name); }
+            try { BigInt.asIntN(9007199254740992, 1n); } catch (error) { console.log((error as Error).name); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_radix_index_validation"),
+        "receiver\nradix\n1010\nmissing\n10\n10\n1010\n10\n1010\na\nRangeError\nRangeError\nRangeError\nRangeError\nRangeError\nbits\nvalue\n-1n\n0n\n0n\n255n\nRangeError\nRangeError\nRangeError\n"
+    );
+}
+
+#[test]
+fn splice_without_arguments_preserves_populated_and_sparse_receivers() {
+    let source = r#"
+        function main(): void {
+            const populated: number[] = [1, 2, 3];
+            const removed = populated.splice();
+            console.log(removed.length, populated.length, populated.join(","));
+            const sparse: number[] = [1, , 3];
+            const sparseRemoved = sparse.splice();
+            console.log(sparseRemoved.length, sparse.length, Object.hasOwn(sparse, 0), Object.hasOwn(sparse, 1), Object.hasOwn(sparse, 2));
+            const spread: number[] = [4, 5];
+            const spreadRemoved = spread.splice(...[]);
+            console.log(spreadRemoved.length, spread.join(","));
+            const tail: number[] = [7, 8, 9];
+            const tailRemoved = tail.splice(1);
+            console.log(tailRemoved.join(","), tail.join(","));
+            const explicit: number[] = [6, 7];
+            const explicitRemoved = explicit.splice(undefined);
+            console.log(explicitRemoved.join(","), explicit.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "splice_without_arguments"),
+        "0 3 1,2,3\n0 3 true false true\n0 4,5\n8,9 7\n6,7 0\n"
+    );
+}
+
+#[test]
+fn uint8array_set_returns_undefined_after_copy() {
+    let source = r#"
+        const bytes: Uint8Array = new Uint8Array(3);
+        let order = "";
+        function receiver(): Uint8Array { order += "R"; return bytes; }
+        function source(): number[] { order += "S"; return [4, 5]; }
+        function offset(): number { order += "O"; return 1; }
+        function main(): void {
+            const result = receiver().set(source(), offset());
+            console.log(order, typeof result, result === undefined, bytes.join(","));
+            const target: Uint8Array = new Uint8Array(3);
+            const count = Buffer.from([7, 8]).copy(target);
+            console.log(count, target.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "uint8array_set_result"),
+        "RSO undefined true 0,4,5\n2 7,8,0\n"
+    );
+}
+
+#[test]
+fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
+    let source = r#"
+        let producerCalls = 0;
+        function produceIso(): JsValue { producerCalls++; return getDynamicValue("isoHook"); }
+        function main(): void {
+            loadScript("const NativeDate = Date; globalThis.liveDate = new NativeDate(1704067200500); liveDate[Symbol.toPrimitive] = () => { throw new Error('date hook'); }; globalThis.hookCalls = 0; globalThis.isoHook = { [Symbol.toPrimitive](hint) { if (hint !== 'default') throw new Error('wrong hint'); hookCalls++; return '2024-01-01T00:00:00.000Z'; } }; globalThis.throwHook = { [Symbol.toPrimitive]() { throw new Error('hook failed'); } }; globalThis.invalidTime = NaN; globalThis.bigValue = 1n; globalThis.symbolValue = Symbol('date'); NativeDate.prototype.getTime = () => { throw new Error('getTime changed'); }; globalThis.Date = () => { throw new Error('Date changed'); };");
+            const live: JsValue = getDynamicValue("liveDate");
+            const wrapped: Json = live;
+            console.log(new Date(live).getTime(), new Date(wrapped).getTime());
+            const native: Json = new Date(1704067200500);
+            console.log(new Date(native).getTime());
+            const wrappedIso: Json = getDynamicValue("isoHook");
+            console.log(new Date(produceIso()).getTime(), new Date(wrappedIso).getTime(), producerCalls, Number(getDynamicValue("hookCalls")));
+            const throwing: JsValue = getDynamicValue("throwHook");
+            try { new Date(throwing); console.log("missed throw"); }
+            catch (error) { console.log("hook threw"); }
+            console.log(Number.isNaN(new Date(getDynamicValue("invalidTime")).getTime()));
+            try { new Date(getDynamicValue("bigValue")); console.log("missed bigint"); }
+            catch (error) { console.log("bigint threw"); }
+            try { new Date(getDynamicValue("symbolValue")); console.log("missed symbol"); }
+            catch (error) { console.log("symbol threw"); }
+            const forged: Json = JSON.parse('{"__thaw_js_handle_id__":1}');
+            console.log(Number.isNaN(new Date(forged).getTime()));
+            loadScript("globalThis.proxyTraps = 0; globalThis.proxyHooks = 0; globalThis.invokeProxy = callback => callback(new Proxy({ [Symbol.toPrimitive](hint) { if (hint !== 'default') throw new Error('wrong proxy hint'); proxyHooks++; return '2024-01-01T00:00:00.000Z'; } }, { getPrototypeOf() { proxyTraps++; throw new Error('unexpected prototype trap'); } }));");
+            const callback: (value: Json) => number = (value: Json): number => new Date(value).getTime();
+            const callbackHandle: JsValue = registerNativeCallbackGraph(callback);
+            const invoke: JsValue = getDynamicValue("invokeProxy");
+            console.log(Number(callDynamicValueWithValue(invoke, callbackHandle)), Number(getDynamicValue("proxyHooks")), Number(getDynamicValue("proxyTraps")));
+            releaseDynamicValue(callbackHandle);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "date_live_value_constructor"),
+        "1704067200500 1704067200500\n1704067200500\n1704067200000 1704067200000 1 2\nhook threw\ntrue\nbigint threw\nsymbol threw\ntrue\n1704067200000 1 0\n");
+}
+
+#[test]
+fn typed_quickjs_date_results_authenticate_and_preserve_timestamp() {
+    let source = r#"
+        declare function __thaw_typed_js_706f736974697665(): Date;
+        declare function __thaw_typed_js_6e65676174697665(): Date;
+        declare function __thaw_typed_js_696e76616c6964(): Date;
+        declare function __thaw_typed_js_706c61696e(): Date;
+        declare function __thaw_typed_js_666f72676564(): Date;
+        function main(): void {
+            loadScript("globalThis.positive = () => new Date(1704067200500); globalThis.negative = () => new Date(-86400000); globalThis.invalid = () => new Date(NaN); globalThis.plain = () => ({ timestamp: 17 }); globalThis.forged = () => ({ ['__thaw_class_identity_' + String.fromCharCode(30) + 'Date']: true, timestamp: 19 });");
+            const positive: Date = __thaw_typed_js_706f736974697665();
+            const negative: Date = __thaw_typed_js_6e65676174697665();
+            const invalid: Date = __thaw_typed_js_696e76616c6964();
+            console.log(positive instanceof Date, positive.getTime());
+            console.log(negative instanceof Date, negative.getTime());
+            console.log(invalid instanceof Date, Number.isNaN(invalid.getTime()));
+            try { __thaw_typed_js_706c61696e(); console.log("missed plain object"); }
+            catch (_) { console.log("rejected plain object"); }
+            try { __thaw_typed_js_666f72676564(); console.log("missed forged marker"); }
+            catch (_) { console.log("rejected forged marker"); }
+            const record: { timestamp: number } = { timestamp: 23 };
+            console.log(record.timestamp, record instanceof Date);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_date_results"),
+        "true 1704067200500\ntrue -86400000\ntrue true\nrejected plain object\nrejected forged marker\n23 false\n"
+    );
+}
+
+#[test]
+fn graph_callback_argument_conversion_failure_preserves_exception_and_skips_body() {
+    let source = r#"
+        let entered = 0;
+        function callback(prior: JsValue, item: { value: number }): number {
+            entered++;
+            return item.value;
+        }
+        function main(): void {
+            loadScript("globalThis.invokeBadCallback = callback => callback({ prior: true }, { get value() { throw new Error('argument getter'); } }); globalThis.invokeGoodCallback = callback => callback({ prior: true }, { value: 4 });");
+            const handle: JsValue = registerNativeCallbackGraph(callback);
+            try {
+                callDynamicValueWithValue(getDynamicValue("invokeBadCallback"), handle);
+                console.log("missed exception");
+            } catch (error) {
+                console.log((error as Error).message === "argument getter");
+            }
+            console.log(Number(callDynamicValueWithValue(getDynamicValue("invokeGoodCallback"), handle)), entered);
+            releaseDynamicValue(handle);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "graph_callback_conversion_failure"),
+        "true\n4 1\n"
+    );
+}
+
+#[test]
+fn date_constructor_dispatches_static_string_and_absence_wrappers_once() {
+    let source = r#"
+        let calls = 0;
+        function tagged(flag: boolean): string | number {
+            calls++; return flag ? "2024-01-01T00:00:00.000Z" : 1704067200500;
+        }
+        function maybe(flag: boolean): string | undefined {
+            calls++; return flag ? "2024-01-01T00:00:00.000Z" : undefined;
+        }
+        function nullable(flag: boolean): string | null {
+            calls++; return flag ? "2024-01-01T00:00:00.000Z" : null;
+        }
+        function nullish(which: number): string | null | undefined {
+            calls++; return which === 0 ? "2024-01-01T00:00:00.000Z" : which === 1 ? null : undefined;
+        }
+        function liveOrString(flag: boolean): JsValue | string {
+            calls++; return flag ? getDynamicValue("liveIso") : "2024-01-01T00:00:00.000Z";
+        }
+        function main(): void {
+            loadScript("globalThis.liveIso = { [Symbol.toPrimitive](hint) { if (hint !== 'default') throw new Error('hint'); return '2024-01-01T00:00:00.000Z'; } }");
+            const literal: "2024-01-01T00:00:00.000Z" = "2024-01-01T00:00:00.000Z";
+            console.log(new Date(literal).getTime());
+            console.log(new Date(tagged(true)).getTime(), new Date(tagged(false)).getTime(), calls);
+            console.log(new Date(maybe(true)).getTime(), Number.isNaN(new Date(maybe(false)).getTime()), calls);
+            console.log(new Date(nullable(true)).getTime(), new Date(nullable(false)).getTime(), calls);
+            console.log(new Date(nullish(0)).getTime(), new Date(nullish(1)).getTime(), Number.isNaN(new Date(nullish(2)).getTime()), calls);
+            const mixed: string | number | null | undefined = "2024-01-01T00:00:00.000Z";
+            console.log(new Date(mixed).getTime());
+            console.log(new Date(liveOrString(true)).getTime(), new Date(liveOrString(false)).getTime(), calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "date_static_wrapper_dispatch"),
+        "1704067200000\n1704067200000 1704067200500 2\n1704067200000 true 4\n1704067200000 0 6\n1704067200000 0 true 9\n1704067200000\n1704067200000 1704067200000 11\n");
+}
+
+#[test]
+fn date_constructor_native_bigint_symbol_wrappers_throw_after_one_evaluation() {
+    let source = r#"
+        let calls = 0;
+        function big(): bigint { calls++; return 7n; }
+        function sym(): symbol { calls++; return Symbol("date"); }
+        function fail(): bigint { calls++; throw new Error("producer"); }
+        function maybeBig(which: number): string | bigint {
+            calls++; return which === 0 ? "2024-01-01T00:00:00.000Z" : 7n;
+        }
+        function maybeSymbol(which: number): number | symbol {
+            calls++; return which === 0 ? 1704067200500 : Symbol("date");
+        }
+        function optionalBig(present: boolean): bigint | undefined {
+            calls++; return present ? 7n : undefined;
+        }
+        function nullableSymbol(present: boolean): symbol | null {
+            calls++; return present ? Symbol("date") : null;
+        }
+        async function afterAwait(): Promise<void> {
+            await Promise.resolve(undefined);
+            try { new Date(big()); console.log("missed async"); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+        }
+        async function rejectAfterAwait(): Promise<void> {
+            await Promise.resolve(undefined);
+            new Date(sym());
+        }
+        async function main(): Promise<void> {
+            try { new Date(big()); console.log("missed bigint"); }
+            catch (error) { console.log(error.name, error instanceof TypeError, calls); }
+            try { new Date(sym()); console.log("missed symbol"); }
+            catch (error) { console.log(error.name, error instanceof TypeError, calls); }
+            try { new Date(fail()); console.log("missed producer"); }
+            catch (error) { console.log(error.message, calls); }
+            console.log(new Date(maybeBig(0)).getTime(), new Date(maybeSymbol(0)).getTime(), calls);
+            try { new Date(maybeBig(1)); console.log("missed union bigint"); }
+            catch (error) { console.log(error.name, calls); }
+            try { new Date(maybeSymbol(1)); console.log("missed union symbol"); }
+            catch (error) { console.log(error.name, calls); }
+            console.log(Number.isNaN(new Date(optionalBig(false)).getTime()), new Date(nullableSymbol(false)).getTime(), calls);
+            try { new Date(optionalBig(true)); console.log("missed optional bigint"); }
+            catch (error) { console.log(error.name, calls); }
+            try { new Date(nullableSymbol(true)); console.log("missed nullable symbol"); }
+            catch (error) { console.log(error.name, calls); }
+            await afterAwait();
+            try { await rejectAfterAwait(); console.log("missed outer await"); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "date_native_wrapper_type_errors"),
+        "TypeError true 1\nTypeError true 2\nproducer 3\n1704067200000 1704067200500 5\nTypeError 6\nTypeError 7\ntrue 0 9\nTypeError 10\nTypeError 11\nTypeError true\nTypeError true\n13\n");
+}
+
+#[test]
+fn native_object_method_receiver_mutations_use_original_prefix_storage() {
+    let source = r#"
+        function main(): void {
+            const object = {
+                value: 1,
+                increment(): number { this.value++; return this.value; },
+                later: 9,
+            };
+            const same = object;
+            console.log(object.increment(), same.value);
+            console.log(object.increment?.(), same.value);
+
+            const primitive = {
+                count: 0,
+                [Symbol.toPrimitive](hint: string): number {
+                    this.count++;
+                    return this.count;
+                },
+            };
+            console.log(+primitive, primitive.count);
+            console.log(+primitive, primitive.count);
+
+            const escaped = {
+                value: 7,
+                self(): any { return this; },
+                later: 9,
+            };
+            console.log(JSON.stringify(escaped.self()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_method_receiver_live_prefix"),
+        "2 2\n3 3\n1 1\n2 2\n{\"value\":7}\n"
+    );
+}
+
+#[test]
+fn live_json_date_member_get_precedes_arguments_and_preserves_selected_this() {
+    let source = r#"
+        function argument(): number {
+            loadScript("phase = phase * 10 + 2; Object.defineProperty(d, 'getTime', { configurable: true, value: () => -1 })");
+            return 7;
+        }
+        function main(): void {
+            loadScript("globalThis.phase = 0; globalThis.d = new Date(0); Object.defineProperty(d, 'getTime', { configurable: true, get() { phase = phase * 10 + 1; return function(value) { phase = phase * 10 + 3; return this === d ? value : -2; }; } });");
+            const date: any = getDynamicValue("d");
+            console.log(date.getTime(argument()));
+            console.log(Number(getDynamicValue("phase")));
+            loadScript("phase = 0; Object.defineProperty(d, 'setTime', { configurable: true, get() { phase = phase * 10 + 1; return 17; } });");
+            try { date.setTime(argument()); } catch (error) { console.log(error instanceof TypeError); }
+            console.log(Number(getDynamicValue("phase")));
+            loadScript("Object.defineProperty(d, 'setTime', { configurable: true, value: function(value) { return { custom: value, correctThis: this === d }; } })");
+            const returned: any = date.setTime(9);
+            console.log(returned.custom, returned.correctThis);
+            loadScript("globalThis.realTime = Date.prototype.getTime.call(d)");
+            console.log(Number(getDynamicValue("realTime")));
+            // A native Json Date still uses its timestamp implementation.
+            const native: any = new Date(0);
+            console.log(native.setTime(2000), native.getTime());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "live_json_date_selected_member_order"),
+        "7\n123\ntrue\n12\n9 true\n0\n2000 2000\n"
+    );
+}
+
+#[test]
+fn dynamic_primitive_method_keeps_original_this_after_property_selection() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.primitive = 'xy'; globalThis.calls = 0; String.prototype.originalThis = function(value) { 'use strict'; calls++; return typeof this + ':' + this + ':' + value; };");
+            const primitive: JsValue = getDynamicValue("primitive");
+            console.log(primitive.originalThis(3));
+            console.log(Number(getDynamicValue("calls")));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_primitive_selected_method_this"), "string:xy:3\n1\n");
+}
+#[test]
+fn selected_dynamic_method_getter_failure_skips_arguments_and_released_receiver_fails_after_arguments() {
+    let source = r#"
+        let effects = 0;
+        function argument(): number { effects++; return 1; }
+        function main(): void {
+            loadScript("globalThis.selected = { get invoke() { throw new TypeError('getter'); } }; globalThis.primitiveReceiver = 'abc'");
+            const selected: JsValue = getDynamicValue("selected");
+            try { selected.invoke(argument()); } catch (error) { console.log(error instanceof TypeError); }
+            console.log(effects);
+            const receiver: JsValue = getDynamicValue("primitiveReceiver");
+            function releaseDuringArguments(): number {
+                releaseDynamicValue(receiver);
+                return 1;
+            }
+            console.log(receiver.slice(releaseDuringArguments()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "selected_dynamic_method_failure_order"),
+        "true\n0\nbc\n"
+    );
+}
+
+#[test]
+fn native_any_object_method_mutates_shared_live_receiver_and_alias() {
+    let source = r#"
+        function main(): void {
+            const ordinary: any = {
+                value: 7,
+                getTime(): number { this.value++; return this.value; }
+            };
+            const alias: any = ordinary;
+            console.log(ordinary.getTime(), ordinary.value, alias.value);
+            alias.value = 20;
+            console.log(ordinary.getTime(), alias.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_any_object_live_method_alias"), "8 8 8\n21 21\n");
+}
+
+#[test]
+fn public_dynamic_method_helper_evaluates_arguments_before_get_but_member_call_selects_first() {
+    let source = r#"
+        function helperArgs(): any {
+            loadScript("order.push('A')");
+            return JSON.parse("[4]");
+        }
+        function memberArg(): number {
+            loadScript("order.push('A')");
+            return 5;
+        }
+        function main(): void {
+            loadScript("globalThis.order = []; globalThis.box = { get m() { order.push('G'); return function(value) { order.push('C'); return value; }; } }");
+            const box: JsValue = getDynamicValue("box");
+            console.log(Number(callDynamicMethod(box, "m", helperArgs())));
+            loadScript("globalThis.helperOrder = order.join(''); order.length = 0");
+            console.log(String(getDynamicValue("helperOrder")));
+            console.log(Number(box.m(memberArg())));
+            loadScript("globalThis.memberOrder = order.join('')");
+            console.log(String(getDynamicValue("memberOrder")));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "public_helper_vs_member_get_order"), "4\nAGC\n5\nGAC\n");
+}
+
+#[test]
+fn decoded_js_function_call_apply_bind_preserve_explicit_receiver() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.holder = {base:20}; globalThis.original = function(n) { 'use strict'; return this === undefined ? -1 : this === globalThis.holder ? 100 + n : this.base + n; }; globalThis.original.call = () => { throw new Error('overwritten call'); }; globalThis.invokeTyped = callback => callback(globalThis.original);");
+            const receiver: Json = JSON.parse('{"base":5}');
+            const callback = (fn: (n: number) => number): number => {
+                console.log(fn.call(receiver, 2));
+                console.log(fn.apply(receiver, [3]));
+                console.log(fn.bind(receiver, 4)());
+                const live: JsValue = getDynamicValue("holder");
+                console.log(fn.call(live, 5));
+                releaseDynamicValue(live);
+                return fn(9);
+            };
+            const handle: JsValue = registerNativeCallbackGraph(callback);
+            console.log(Number(callDynamicValueWithValue(getDynamicValue("invokeTyped"), handle)));
+            releaseDynamicValue(handle);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "decoded_js_function_receiver"), "7\n8\n9\n105\n-1\n");
+}
+
+#[test]
+fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
+    let source = r#"
+        let calls = 0;
+        class Bad {
+            get value(): number { throw new Error("native getter failed"); }
+        }
+        function invoke(fn: (item: { value: number }) => number): number {
+            try {
+                fn(new Bad());
+                console.log("missed native getter");
+            } catch (error) {
+                console.log((error as Error).message === "native getter failed");
+            }
+            return fn({ value: 4 });
+        }
+        function main(): void {
+            loadScript("globalThis.acceptNative = callback => callback(item => { globalThis.nativeCalls = (globalThis.nativeCalls || 0) + 1; return item.value; }); globalThis.nativeCalls = 0;");
+            const callback: JsValue = registerNativeCallbackGraph(invoke);
+            console.log(Number(callDynamicValueWithValue(getDynamicValue("acceptNative"), callback)), Number(getDynamicValue("nativeCalls")));
+            releaseDynamicValue(callback);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_function_marshal_failure"), "true\n4 1\n");
+}
+
+#[test]
+fn class_instance_with_getters_converts_to_a_structural_parameter_by_reading_them() {
+    let source = r#"
+        class Pair {
+            n = 3;
+            get double(): number { return this.n * 2; }
+        }
+        function total(item: { n: number; double: number }): number { return item.n + item.double; }
+        function main(): void {
+            const pair = new Pair();
+            const before = total(pair);
+            pair.n = 10;
+            console.log(before, total(pair));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "getter_class_structural_param"), "9 30\n");
+}
+
+#[test]
+fn console_native_object_getter_failure_keeps_exception_and_next_log() {
+    let source = r#"
+        interface Box { value: number; }
+        let reads = 0;
+        const bad: Box = {
+            get value(): number { reads++; throw new Error("console getter failed"); },
+        };
+        const good: Box = { value: 4 };
+        function main(): void {
+            try { console.log(bad); console.log("missed getter"); }
+            catch (error) { console.log((error as Error).message === "console getter failed", reads); }
+            console.log(good);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{ value: 4 }\n");
+}
+
+#[test]
+fn projected_native_object_preserves_storage_and_method_identity() {
+    let source = r#"
+        function main(): void {
+            const object = {
+                value: 1,
+                increment(): number { this.value++; return this.value; },
+                later: 9,
+            };
+            const first: any = object;
+            const second: any = object;
+            console.log(first === second, first.increment === first.increment);
+            console.log(first.increment(), object.value);
+            const detached = first.increment;
+            console.log(detached.call(second), object.value);
+
+            const other = {
+                value: 10,
+                increment(): number { this.value++; return this.value; },
+                later: 8,
+            };
+            const otherView: any = other;
+            console.log(detached.call(otherView), other.value, object.value);
+
+            const inner = {
+                value: 3,
+                increment(): number { this.value++; return this.value; },
+            };
+            const outer = { inner };
+            const outerView: any = outer;
+            console.log(outerView.inner.increment(), inner.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_object_live_method"),
+        "true true\n2 2\n3 3\n11 11 3\n4 4\n"
+    );
+}
+
+#[test]
+fn native_object_narrow_view_reuses_full_layout_and_later_wide_view() {
+    let source = r#"
+        function main(): void {
+            const owner = {
+                value: 1,
+                increment(): number { this.value++; return this.value; },
+                later: 9,
+            };
+            const narrow: { value: number } = owner;
+            const first: any = narrow;
+            const second: any = owner;
+            console.log(first === second, second.later);
+            console.log(second.increment(), owner.value, first.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_wide_layout_after_narrow_view"),
+        "true 9\n2 2 2\n"
+    );
+}
+
+#[test]
+fn native_object_nonprefix_alias_remains_native_only() {
+    let source = r#"
+        interface Narrow { later: number; value: number; }
+        function main(): void {
+            const owner = { value: 1, later: 9, tail: 3 };
+            const narrow: Narrow = owner;
+            narrow.value = 7;
+            console.log(owner.value, narrow.later, owner.tail);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_object_nonprefix_native_only"), "7 9 3\n");
+}
+
+#[test]
+fn native_object_nonprefix_alias_uses_physical_fields_and_full_wrapper() {
+    let source = r#"
+        interface Narrow { later: number; value: number; }
+        function update(view: Narrow): number {
+            view.value += 1;
+            return view.later;
+        }
+        function main(): void {
+            const owner = { value: 1, later: 9, tail: 'full' };
+            const narrow: Narrow = owner;
+            narrow.later = 12;
+            console.log(owner.value, owner.later, narrow.value);
+            console.log(update(owner), narrow.value);
+            const first: any = narrow;
+            const second: any = owner;
+            console.log(first === second, first.tail, second.value);
+            first.value = 8;
+            console.log(owner.value, narrow.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_nonprefix_alias"),
+        "1 12 1\n12 2\ntrue full 2\n8 8\n",
+    );
+}
+
+#[test]
+fn nested_native_aliases_keep_the_first_physical_field_layout() {
+    let source = r#"
+        interface Prefix { a: number; b: number; }
+        interface Reverse { b: number; a: number; }
+        interface Leaf { a: number; }
+        function main(): void {
+            const owner = { a: 1, b: 2, c: 3 };
+            const prefix: Prefix = owner;
+            const reverse: Reverse = prefix;
+            const leaf: Leaf = reverse;
+            reverse.b = 9;
+            leaf.a = 7;
+            console.log(owner.a, owner.b, owner.c, prefix.a, reverse.a, leaf.a);
+            const narrow: any = leaf;
+            const full: any = owner;
+            console.log(narrow === full, full.c, narrow.b);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_nested_nonprefix_alias"),
+        "7 9 3 7 7 7\ntrue 3 9\n",
+    );
+}
+
+#[test]
+fn native_accessor_nonprefix_alias_uses_original_setter() {
+    let source = r#"
+        interface Narrow { later: number; value: number; }
+        function main(): void {
+            let backing = 1;
+            const owner = {
+                get value(): number { return backing; },
+                set value(next: number) { backing = next; },
+                later: 9,
+            };
+            const narrow: Narrow = owner;
+            narrow.value = 5;
+            const first: any = narrow;
+            const second: any = owner;
+            console.log(first === second, first.later, narrow.value, backing);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_accessor_nonprefix_alias"),
+        "true 9 5 5\n",
+    );
+}
+
+#[test]
+fn projected_native_accessors_write_original_storage() {
+    let source = r#"
+        function main(): void {
+            let backing = 1;
+            const object = {
+                get value(): number { return backing; },
+                set value(next: number) { backing = next; },
+            };
+            const view: any = object;
+            console.log(view.value, backing);
+            view.value = 7;
+            console.log(view.value, backing);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_accessor_live_storage"),
+        "1 1\n7 7\n"
+    );
+}
+
+#[test]
+fn projected_native_data_descriptors_share_owner_attributes() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            const initial = Object.getOwnPropertyDescriptor(view, 'value');
+            console.log('value' in initial, 'get' in initial, initial.writable);
+            Object.defineProperty(view, 'value', { writable: false });
+            console.log(Object.getOwnPropertyDescriptor(owner, 'value').writable,
+                Object.getOwnPropertyDescriptor(view, 'value').writable);
+            try { owner.value = 2; console.log('write allowed'); }
+            catch (error) { console.log(error.name); }
+            console.log(owner.value, view.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "projected_native_data_descriptor_authority"),
+        "true false true\nfalse false\nTypeError\n1 1\n");
+}
+
+#[test]
+fn projected_native_data_descriptor_combines_value_and_attributes() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            Object.defineProperty(view, 'value', {
+                value: 4, writable: false, enumerable: false, configurable: false,
+            });
+            const descriptor = Object.getOwnPropertyDescriptor(view, 'value');
+            console.log(owner.value, view.value, descriptor.value,
+                descriptor.writable, descriptor.enumerable, descriptor.configurable);
+            console.log(Object.keys(view).length);
+            console.log(Reflect.defineProperty(view, 'value', { value: 8 }), owner.value);
+            try { Object.defineProperty(view, 'value', { writable: true }); }
+            catch (error) { console.log(error.name); }
+
+            const second = { value: 5 };
+            const secondView: any = second;
+            Object.defineProperty(secondView, 'value', { writable: false });
+            console.log(Object.getOwnPropertyDescriptor(secondView, 'value').value,
+                Object.getOwnPropertyDescriptor(second, 'value').writable);
+            console.log(Reflect.defineProperty(secondView, 'value', { value: 6 }),
+                second.value, secondView.value);
+
+            const frozen = { value: NaN };
+            const frozenView: any = frozen;
+            Object.freeze(frozenView);
+            console.log(Reflect.defineProperty(frozenView, 'value', { value: NaN }),
+                Reflect.defineProperty(frozenView, 'value', { value: 1 }));
+            const signed = { value: -0 };
+            const signedView: any = signed;
+            Object.freeze(signedView);
+            console.log(Reflect.defineProperty(signedView, 'value', { value: -0 }),
+                Reflect.defineProperty(signedView, 'value', { value: 0 }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_combined_data_descriptor"),
+        "4 4 4 false false false\n0\nfalse 4\nTypeError\n5 false\ntrue 6 6\ntrue false\ntrue false\n"
+    );
+}
+
+#[test]
+fn projected_native_define_rechecks_flags_after_rhs_coercion() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            let coercions = 0;
+            const incoming: any = {
+                valueOf(): number {
+                    coercions++;
+                    Object.freeze(owner);
+                    return 2;
+                },
+            };
+            console.log(Reflect.defineProperty(view, 'value', {
+                value: incoming, writable: false,
+            }));
+            console.log(coercions, owner.value, view.value,
+                Object.isFrozen(owner), Object.getOwnPropertyDescriptor(owner, 'value').writable);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_define_reentrant_freeze"),
+        "false\n1 1 1 true false\n",
+    );
+}
+
+#[test]
+fn projected_native_define_rechecks_flags_after_nested_host_getter() {
+    let source = r#"
+        function main(): void {
+            const owner: { value: { n: number } } = { value: { n: 1 } };
+            const view: any = owner;
+            let reads = 0;
+            const replacement: any = {
+                get n(): number {
+                    reads++;
+                    Object.freeze(view);
+                    return 2;
+                },
+            };
+            console.log(Reflect.defineProperty(view, 'value', { value: replacement }));
+            console.log(reads, owner.value.n, view.value.n,
+                Object.isFrozen(owner), Object.isFrozen(view));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_define_reentrant_host_getter"),
+        "false\n1 1 1 true true\n",
+    );
+}
+
+#[test]
+fn native_integrity_state_reaches_existing_projection_and_back() {
+    let source = r#"
+        function main(): void {
+            const first = { value: 1 };
+            const view: any = first;
+            Object.freeze(first);
+            console.log(Object.isFrozen(view), Object.isExtensible(view),
+                Object.getOwnPropertyDescriptor(view, 'value').configurable);
+            const second = { value: 2 };
+            const secondView: any = second;
+            Object.freeze(secondView);
+            console.log(Object.isFrozen(second), Object.isFrozen(secondView));
+            try { second.value = 3; console.log('write allowed'); }
+            catch (error) { console.log(error.name); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "projected_native_integrity_owner"),
+        "true false false\ntrue true\nTypeError\n");
+}
+
+#[test]
+fn native_object_declared_reorder_keeps_source_field_effect_order() {
+    let source = r#"
+        interface Owner { first: number; second: number; }
+        function main(): void {
+            let order = "";
+            function first(): number { order += "A"; return 1; }
+            function second(): number { order += "B"; return 2; }
+            const owner: Owner = { second: second(), first: first() };
+            console.log(order, owner.first, owner.second);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_source_field_order"),
+        "BA 1 2\n"
+    );
+}
+
+#[test]
+fn projected_native_delete_cannot_remove_only_shadow_field() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 7 };
+            const view: any = owner;
+            console.log(Reflect.deleteProperty(view, 'value'));
+            console.log(view.value, owner.value, Object.keys(view).includes('value'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_projection_delete_shadow"),
+        "false\n7 7 true\n"
+    );
+}
+
+#[test]
+fn projected_global_native_owner_is_tracked_before_module_initialization() {
+    let source = r#"
+        const owner = { value: 1 };
+        function main(): void {
+            const view: any = owner;
+            console.log(view.value, owner.value);
+            view.value = 4;
+            console.log(view.value, owner.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_projection_global_owner_tracing"),
+        "1 1\n4 4\n"
+    );
+}
+
+#[test]
+fn native_projection_method_registration_retains_physical_receiver_hir_type() {
+    let module = thaw_parser::parse_typescript(r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            console.log(view.value);
+        }
+    "#).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    fn visit_expr(expr: &thaw_hir::HirExpr, count: &mut usize) {
+        use thaw_hir::HirExpr;
+        match expr {
+            HirExpr::Call(callee, args) => {
+                if matches!(callee.as_ref(), HirExpr::Var(name)
+                    if name == "__thaw_register_native_method_callback_graph") {
+                    let [HirExpr::Lambda(_, params, _, _)] = args.as_slice() else {
+                        panic!("method registration must receive a physical Lambda");
+                    };
+                    assert!(matches!(params.first(), Some(param)
+                        if param.name == "__thaw_this"
+                            && matches!(&param.ty, thaw_hir::HirType::Object(_))));
+                    *count += 1;
+                }
+                visit_expr(callee, count);
+                for arg in args { visit_expr(arg, count); }
+            }
+            HirExpr::Block(body) => visit_stmts(body, count),
+            HirExpr::Lambda(_, _, _, body) | HirExpr::NonArrowFunction(body)
+            | HirExpr::TypedClosure(_, body) | HirExpr::OptionalSome(body, _)
+            | HirExpr::OptionalValue(body, _) | HirExpr::JsValueAsJson(body) =>
+                visit_expr(body, count),
+            HirExpr::EvalThen(first, second) => {
+                visit_expr(first, count);
+                visit_expr(second, count);
+            }
+            HirExpr::Conditional(test, yes, no, _) => {
+                visit_expr(test, count);
+                visit_expr(yes, count);
+                visit_expr(no, count);
+            }
+            HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
+                for (_, value) in fields { visit_expr(value, count); }
+            }
+            HirExpr::ArrayLit(items) => {
+                for item in items { visit_expr(item, count); }
+            }
+            _ => {}
+        }
+    }
+    fn visit_stmts(stmts: &[thaw_hir::HirStmt], count: &mut usize) {
+        use thaw_hir::HirStmt;
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Expr(expr) | HirStmt::Let(_, _, expr) | HirStmt::Throw(expr)
+                | HirStmt::Return(Some(expr)) => visit_expr(expr, count),
+                HirStmt::If(test, yes, no) => {
+                    visit_expr(test, count);
+                    visit_stmts(yes, count);
+                    visit_stmts(no, count);
+                }
+                HirStmt::While(test, body) => {
+                    visit_expr(test, count);
+                    visit_stmts(body, count);
+                }
+                HirStmt::Try(body, _, catch, _) => {
+                    visit_stmts(body, count);
+                    visit_stmts(catch, count);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut registrations = 0;
+    for function in &program.functions {
+        visit_stmts(&function.body, &mut registrations);
+    }
+    assert_eq!(registrations, 3, "one getter, one setter and one data-define callback");
+}
+
+#[test]
+fn symbol_absent_description_is_distinct_from_empty_and_evaluates_once() {
+    let source = r#"
+        let reads = 0;
+        function description(): string | undefined { reads++; return undefined; }
+        function nothing(): void { reads++; }
+        function main(): void {
+            console.log(Symbol().description === undefined,
+                Symbol(undefined).description === undefined, Symbol('').description === '');
+            console.log(Symbol(description()).description === undefined, reads);
+            console.log(Symbol(nothing()).description === undefined, reads);
+            console.log(Symbol().toString(), Symbol(null).description);
+            const absent = Symbol();
+            const object: any = {};
+            object[absent] = 9;
+            console.log(object[absent], Symbol.for('').description === '');
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "symbol_absent_description"),
+        "true true true\ntrue 1\ntrue 2\nSymbol() null\n9 true\n");
+}
+
+#[test]
+fn native_accessor_presence_hides_backing_closures_without_invoking_getter() {
+    let source = r#"
+        function main(): void {
+            let reads = 0;
+            const owner = {
+                get value(): number { reads++; return 1; },
+                set value(next: number) {},
+            };
+            console.log(Object.hasOwn(owner, 'value'), owner.hasOwnProperty('value'),
+                Reflect.has(owner, 'value'));
+            console.log(Object.hasOwn(owner, '__thaw_getter_value'),
+                owner.hasOwnProperty('__thaw_setter_value'),
+                Reflect.has(owner, '__thaw_getter_value'));
+            console.log(reads);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_accessor_presence"),
+        "true true true\nfalse false false\n0\n");
+}
+
+#[test]
+fn iterator_yield_delegate_preserves_done_value() {
+    let source = r#"
+        function values() {
+            let step = 0;
+            return {
+                [Symbol.iterator]() {
+                    return {
+                        next() {
+                            step++;
+                            return { value: step === 1 ? 2 : 7, done: step > 1 };
+                        }
+                    };
+                }
+            };
+        }
+        function* outer(): Generator<number> {
+            const completion = yield* values();
+            yield completion;
+        }
+        function main(): void {
+            const iterator = outer();
+            console.log(iterator.next().value);
+            console.log(iterator.next().value);
+            console.log(iterator.next().done);
+            loadScript("globalThis.dynamicYieldSource = { [Symbol.iterator]() { let step = 0; return { next() { step++; return step === 1 ? { value: 2, done: false } : { value: 7, done: true }; } }; } }; globalThis.dynamicForOfDoneValueReads = 0; globalThis.dynamicEmptySource = { [Symbol.iterator]() { return { next() { return { get value() { dynamicForOfDoneValueReads++; return 99; }, done: true }; } }; } };");
+            const dynamicYieldSource: JsValue = getDynamicValue("dynamicYieldSource");
+            function* dynamicOuter(): Generator<number> {
+                const completion = yield* dynamicYieldSource;
+                yield completion;
+            }
+            const dynamicIterator = dynamicOuter();
+            console.log(dynamicIterator.next().value);
+            console.log(dynamicIterator.next().value);
+            console.log(dynamicIterator.next().done);
+            const dynamicEmpty: JsValue = getDynamicValue("dynamicEmptySource");
+            for (const value of dynamicEmpty) { console.log(value); }
+            console.log(Number(getDynamicValue("dynamicForOfDoneValueReads")));
+            loadScript("globalThis.dynamicReturnSource = { [Symbol.iterator]() { let step = 0; return { next() { step++; return step === 1 ? { value: 3, done: false } : { value: 7, done: true }; }, return() { return { value: 4, done: false }; } }; } };");
+            const dynamicReturnSource: JsValue = getDynamicValue("dynamicReturnSource");
+            function* dynamicReturnOuter(): Generator<number> {
+                const completion = yield* dynamicReturnSource;
+                yield completion;
+            }
+            const dynamicReturnIterator = dynamicReturnOuter();
+            console.log(dynamicReturnIterator.next().value);
+            console.log(dynamicReturnIterator.return(99).value);
+            console.log(dynamicReturnIterator.next().value);
+            console.log(dynamicReturnIterator.next().done);
+            let reads = 0;
+            const empty = {
+                [Symbol.iterator]() {
+                    return {
+                        next() {
+                            return {
+                                get value(): number { reads++; return 99; },
+                                done: true
+                            };
+                        }
+                    };
+                }
+            };
+            for (const value of empty) { console.log(value); }
+            console.log(reads);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "iterator_yield_delegate_done_value"),
+        "2\n7\ntrue\n2\n7\ntrue\n0\n3\n4\n7\ntrue\n0\n"
+    );
+}
+#[test]
+fn non_graph_native_callback_results_preserve_nested_callable_fields_sync_and_async() {
+    let source = r#"
+        declare function __thaw_typed_js_636f6e73756d6553796e63(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d654173796e63(callback: JsValue): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.consumeSync = callback => { const result = callback(); const next = result.next; return [typeof next, next === result.next, next(), next()].join(':'); }; globalThis.consumeAsync = async callback => { const result = await callback(); const next = result.next; return [typeof next, next === result.next, next(), next()].join(':'); };");
+            let syncCalls = 0;
+            const syncCallback: JsValue = registerNativeCallback(() => ({
+                next() { syncCalls++; return syncCalls; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d6553796e63(syncCallback));
+            releaseDynamicValue(syncCallback);
+
+            let asyncCalls = 0;
+            const asyncCallback: JsValue = registerNativeCallback(async (): Promise<{ next: () => number }> => {
+                await sleep(0);
+                return { next() { asyncCalls++; return asyncCalls; } };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e63(asyncCallback));
+            releaseDynamicValue(asyncCallback);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_native_callback_result_functions"),
+        "function:true:1:2\nfunction:true:1:2\n"
+    );
+}
+
+#[test]
+fn callback_returned_accessor_objects_stay_lazy_sync_and_async() {
+    let source = r#"
+        declare function __thaw_typed_js_636f6e73756d65446f6e65(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d6556616c7565(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d654173796e63446f6e65(callback: JsValue): Promise<string>;
+        declare function __thaw_typed_js_636f6e73756d654173796e6356616c7565(callback: JsValue): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.consumeDone = callback => { const result = callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeValue = callback => { const result = callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeAsyncDone = async callback => { const result = await callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeAsyncValue = async callback => { const result = await callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); };");
+            let syncDoneReads = 0;
+            const syncDone: JsValue = registerNativeCallback(() => ({
+                next() { return { get value(): number { syncDoneReads++; return 9; }, done: true }; },
+                reads() { return syncDoneReads; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d65446f6e65(syncDone));
+            releaseDynamicValue(syncDone);
+
+            let syncValueReads = 0;
+            const syncValue: JsValue = registerNativeCallback(() => ({
+                next() { return { get value(): number { syncValueReads++; return 9; }, done: false }; },
+                reads() { return syncValueReads; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d6556616c7565(syncValue));
+            releaseDynamicValue(syncValue);
+
+            let asyncDoneReads = 0;
+            const asyncDone: JsValue = registerNativeCallback(async () => {
+                await sleep(0);
+                return {
+                    next() { return { get value(): number { asyncDoneReads++; return 9; }, done: true }; },
+                    reads() { return asyncDoneReads; }
+                };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e63446f6e65(asyncDone));
+            releaseDynamicValue(asyncDone);
+
+            let asyncValueReads = 0;
+            const asyncValue: JsValue = registerNativeCallback(async () => {
+                await sleep(0);
+                return {
+                    next() { return { get value(): number { asyncValueReads++; return 9; }, done: false }; },
+                    reads() { return asyncValueReads; }
+                };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e6356616c7565(asyncValue));
+            releaseDynamicValue(asyncValue);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_returned_accessor_objects_stay_lazy"),
+        "true:0\ntrue:1\ntrue:0\ntrue:1\n"
+    );
+}
+
+#[test]
+fn adapted_callback_identity_is_shared_across_registration_modes() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.runFirstPair = () => { const a = globalThis.__callbackFirstA; const b = globalThis.__callbackFirstB; const same = a === b; a(); b(); return same; }; globalThis.runSecondPair = () => { const a = globalThis.__callbackSecondA; const b = globalThis.__callbackSecondB; const same = a === b; a(); b(); return same; };");
+            const global: JsValue = getDynamicValue("globalThis");
+            let firstReads = 0;
+            const first = () => ({ get value(): number { firstReads++; return 1; } });
+            const ordinaryFirst: JsValue = registerNativeCallback(first);
+            const graphSecond: JsValue = registerNativeCallbackGraph(first);
+            setDynamicProperty(global, "__callbackFirstA", ordinaryFirst);
+            setDynamicProperty(global, "__callbackFirstB", graphSecond);
+            console.log(Number(callDynamic("runFirstPair", JSON.parse("[]"))), firstReads);
+
+            let secondReads = 0;
+            const second = () => ({ get value(): number { secondReads++; return 2; } });
+            const graphFirst: JsValue = registerNativeCallbackGraph(second);
+            const ordinarySecond: JsValue = registerNativeCallback(second);
+            setDynamicProperty(global, "__callbackSecondA", graphFirst);
+            setDynamicProperty(global, "__callbackSecondB", ordinarySecond);
+            console.log(Number(callDynamic("runSecondPair", JSON.parse("[]"))), secondReads);
+
+            releaseDynamicValue(ordinaryFirst);
+            releaseDynamicValue(graphSecond);
+            releaseDynamicValue(graphFirst);
+            releaseDynamicValue(ordinarySecond);
+            releaseDynamicValue(global);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "adapted_callback_cross_registration_identity"),
+        "1 0\n1 0\n"
+    );
+}
+
+#[test]
+fn array_from_length_mapper_receives_explicit_this_arg() {
+    let source = r#"
+        function main(): void {
+            const source = { length: 1 };
+            function third(): number { source.length = 2; return 10; }
+            const values = Array.from(source,
+                function(this: number, _value: undefined, index: number): number {
+                    return this + index;
+                }, third());
+            console.log(values.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_length_this_arg"),
+        "10,11\n"
+    );
+}
+
+#[test]
+fn array_from_length_undefined_mapper_still_evaluates_this_arg() {
+    let source = r#"
+        function main(): void {
+            const source = { length: 1 };
+            let calls = 0;
+            function third(): number { calls++; source.length = 2; return 10; }
+            const values = Array.from(source, undefined, third());
+            console.log(calls, values.length, values[0] === undefined);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_length_undefined_mapper"),
+        "1 2 true\n"
+    );
+}
+
+// Unrun regression: explicit undefined padding keeps argument side effects.
+#[test]
+fn string_padding_undefined_uses_space_once() {
+    let source = r#"
+        function main(): void {
+            let calls = 0;
+            function filler(): undefined { calls++; return undefined; }
+            console.log(JSON.stringify("x".padStart(3, filler())));
+            console.log(JSON.stringify("x".padEnd(3, undefined)));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "string_pad_undefined"), "\"  x\"\n\"x  \"\n1\n");
+}
+
+#[test]
+fn number_nonfinite_formatting_preserves_digits_evaluation() {
+    let source = r#"
+        function digits(): number { console.log("digits"); return 101; }
+        function main(): void {
+            console.log((1 / 0).toPrecision(digits()));
+            console.log((-1 / 0).toExponential(digits()));
+            console.log((0 / 0).toPrecision(0));
+            console.log((0 / 0).toExponential(-1));
+            try { (1).toPrecision(101); } catch (error) { console.log("finite precision range"); }
+            try { (1).toExponential(-1); } catch (error) { console.log("finite exponential range"); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_nonfinite_formatting"),
+        "digits\nInfinity\ndigits\n-Infinity\nNaN\nNaN\nfinite precision range\nfinite exponential range\n"
+    );
+}
+
+#[test]
+fn set_intersection_uses_smaller_operand_order() {
+    let source = r#"
+        function main(): void {
+            const large = new Set<number>([1, 2, 3]);
+            const small = new Set<number>([2, 1]);
+            console.log(Array.from(large.intersection(small)).join(","));
+            console.log(Array.from(small.intersection(large)).join(","));
+            const tied = new Set<number>([1, 2]);
+            console.log(Array.from(tied.intersection(small)).join(","));
+            const keys = new Map<number, number>([[2, 20], [1, 10]]);
+            console.log(Array.from(large.intersection(keys)).join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "set_intersection_order"), "2,1\n2,1\n1,2\n2,1\n");
+}
+
+/// `for...of` over an `any` value that is a live JS iterable follows the iteration
+/// protocol (custom `[Symbol.iterator]()`, a live Set, a live array), while a native
+/// JSON array keeps its direct loop.
+#[test]
+fn json_for_of_follows_the_iteration_protocol_for_live_iterables() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.itObj = { [Symbol.iterator]() { let i = 0; return { next() { i++; return i < 3 ? { value: i * 10, done: false } : { value: undefined, done: true }; } }; } }; globalThis.arr = [4,5]; globalThis.st = new Set([7,8]);");
+            const iterable: any = getDynamicValue("itObj");
+            for (const v of iterable) { console.log(v); }
+            const array: any = getDynamicValue("arr");
+            for (const v of array) { console.log(v); }
+            const set: any = getDynamicValue("st");
+            for (const v of set) { console.log(v); }
+            const parsed: any = JSON.parse("[1,2,3]");
+            let sum = 0;
+            for (const v of parsed) { sum += v; }
+            console.log(sum);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "json_for_of_iteration_protocol"), "10\n20\n4\n5\n7\n8\n6\n");
+}
+
+/// A value thrown by a live iterator's `next()` reaches the lexical catch unchanged.
+#[test]
+fn json_for_of_iterator_throws_keep_the_thrown_value() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.thr = { [Symbol.iterator]() { return { next() { throw 42; } }; } }; globalThis.thrObj = { [Symbol.iterator]() { return { next() { throw new RangeError('bad'); } }; } };");
+            const a: any = getDynamicValue("thr");
+            try { for (const v of a) { console.log(v); } } catch (e) { console.log("caught", e as number); }
+            const b: any = getDynamicValue("thrObj");
+            try { for (const v of b) { console.log(v); } } catch (e) { console.log("caught2", String(e)); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_for_of_iterator_throws"),
+        "caught 42\ncaught2 RangeError: bad\n"
+    );
+}
+
+// Unrun regression: exact iterator throws keep the original JS value through a lexical catch.
+#[test]
+fn exact_iterator_catch_preserves_thrown_identity() {
+    let source = r#"
+        function main(): void {
+            const reason = () => 1;
+            const iterable: any = {
+                [Symbol.iterator]() {
+                    return { next() { throw reason; } };
+                }
+            };
+            try {
+                for (const value of iterable) { console.log(value); }
+            } catch (error) {
+                console.log(error === reason);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "exact_iterator_catch_identity"), "true\n");
+}
+
+#[test]
+fn set_constructor_collects_an_explicitly_typed_map_values_iterator() {
+    let source = r#"
+        function main(): void {
+            const map = new Map<string, number>([['a', 20], ['b', 22]]);
+            const set = new Set<number>(map.values());
+            const entries = new Map<string, number>(map.entries());
+            let total = 0;
+            for (const value of set) total += value;
+            console.log(map.get('a'), set.has(22), total, entries.get('b'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_constructor_map_values_iterator"),
+        "20 true 42 22\n"
+    );
+}
+
+#[test]
+fn unannotated_symbol_iterator_function_property_drives_for_of() {
+    let source = r#"
+        function* inner(): Generator<number> { yield 2; yield 3; }
+        function main(): void {
+            const iterable = { [Symbol.iterator]: function(): Generator<number> { return inner(); } };
+            let total = 0;
+            for (const value of iterable) total += value;
+            console.log(total);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "symbol_iterator_function_property"), "5\n");
+}
+
+#[test]
+fn symbol_iterator_builder_key_preserves_lookalike_string_property() {
+    let source = r#"
+        function main(): void {
+            const iterable: any = {
+                "__thaw_symbol_iterator": 17,
+                "\u001f@@iterator": 29,
+                [Symbol.iterator]() {
+                    let done = false;
+                    return { next(): { value: number; done: boolean } {
+                        const result = { value: 23, done };
+                        done = true;
+                        return result;
+                    } };
+                }
+            };
+            let sum = 0;
+            let count = 0;
+            for (const value of iterable) {
+                sum += value;
+                count++;
+            }
+            console.log(iterable["__thaw_symbol_iterator"]);
+            console.log(iterable["\u001f@@iterator"]);
+            console.log(Object.keys(iterable).length);
+            console.log(Object.getOwnPropertySymbols(iterable).length);
+            console.log(count, sum);
+            console.log(localSymbolMethod({ iterator: "own" }));
+        }
+        function localSymbolMethod(Symbol: { iterator: string }): number {
+            const value: any = {
+                [Symbol.iterator]() { return 31; }
+            };
+            return value.own();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "symbol_iterator_builder_string_collision"),
+        "17\n29\n2\n1\n1 23\n31\n"
+    );
+}
+
+#[test]
+fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_object() {
+    // The annotation names `c` and `a` only (not a prefix, different order); the callback is
+    // lowered at the supplied layout, so its writes reach the original object.
+    let source = r#"
+        function run(callback: (r: { a: number; b: number; c: string }) => void): void {
+            const owner = { a: 1, b: 2, c: "x" };
+            callback(owner);
+            console.log(owner.a, owner.b, owner.c);
+        }
+        function main(): void {
+            run((r: { c: string; a: number }): void => {
+                r.a = 7;
+                r.c = r.c + "!";
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_field_subset_writes_through"),
+        "7 2 x!\n"
+    );
+}
+#[test]
+fn captured_fixed_two_argument_callback_alias_keeps_native_registration_type() {
+    use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
+
+    let callback_type = HirType::Function(
+        vec![HirType::Str, HirType::F64],
+        Box::new(HirType::Void),
+    );
+    let adapted_type = HirType::Function(
+        vec![HirType::Json, HirType::Json],
+        Box::new(HirType::Void),
+    );
+    let callback_param = HirParam { name: "callback".into(), ty: callback_type.clone() };
+    let adapter_callback = HirParam { name: "callback".into(), ty: callback_type.clone() };
+    let first = HirParam { name: "first".into(), ty: HirType::Json };
+    let second = HirParam { name: "second".into(), ty: HirType::Json };
+    let adapter = HirExpr::Lambda(
+        vec![adapter_callback],
+        vec![first.clone(), second.clone()],
+        HirType::Void,
+        Box::new(HirExpr::Block(vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("callback".into())),
+                vec![
+                    HirExpr::JsonAsString(Box::new(HirExpr::Var(first.name))),
+                    HirExpr::JsonAsNumber(Box::new(HirExpr::Var(second.name))),
+                ],
+            )),
+            HirStmt::Return(None),
+        ])),
+    );
+    let binder = HirExpr::Lambda(
+        vec![],
+        vec![callback_param],
+        adapted_type,
+        Box::new(HirExpr::Block(vec![HirStmt::Return(Some(adapter))])),
+    );
+    let adapted = HirExpr::Call(
+        Box::new(binder),
+        vec![HirExpr::Var("original".into())],
+    );
+    let aliased = HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+        vec![adapted, HirExpr::Var("original".into())],
+    );
+    let program = HirProgram {
+        functions: vec![
+            HirFunction {
+                name: "fixed".into(),
+                params: vec![
+                    HirParam { name: "value".into(), ty: HirType::Str },
+                    HirParam { name: "count".into(), ty: HirType::F64 },
+                ],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![HirStmt::Return(None)],
+            },
+            HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Let(
+                        "original".into(),
+                        callback_type,
+                        HirExpr::FunctionRef(
+                            "fixed".into(),
+                            vec![HirType::Str, HirType::F64],
+                            HirType::Void,
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                        vec![aliased],
+                    )),
+                ],
+            },
+        ],
+        ..HirProgram::default()
+    };
+
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "captured_callback_alias_type");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(
+        ir.lines().any(|line| {
+            line.contains("call ") && line.contains("@thaw_js_register_native_callback(")
+        }),
+        "{ir}"
     );
 }

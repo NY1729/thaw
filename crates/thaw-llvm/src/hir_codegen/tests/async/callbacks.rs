@@ -133,6 +133,63 @@ fn logical_operators_short_circuit_sync_and_awaited_operands() {
 }
 
 #[test]
+fn blocking_await_preserves_typed_rejection_reason_in_short_circuit_expressions() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const reason = { marker: 7 };
+            try { console.log(true && (await Promise.reject<number>(41))); }
+            catch (error) { console.log(typeof error, (error as number) + 1); }
+            try { console.log(true && (await Promise.reject<boolean>(false))); }
+            catch (error) { console.log(typeof error, error === false); }
+            try { console.log(true && (await Promise.reject<number>(reason))); }
+            catch (error) { console.log(typeof error, error === reason); }
+            console.log(true && (await Promise.resolve(9)));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "blocking_await_typed_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("blocking_await_failed"), "expected blocking fallback: {ir}");
+    assert!(ir.contains("@thaw_promise_exception_tag"), "{ir}");
+    assert_eq!(
+        compile_and_run(source, "blocking_await_typed_reasons"),
+        "number 42\nboolean true\nobject true\n9\n"
+    );
+}
+
+#[test]
+fn native_callback_void_blocking_await_preserves_boolean_rejection() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65566f6964(
+            callback: () => Promise<void>,
+        ): void;
+        function main(): void {
+            loadScript("globalThis.invokeVoid = callback => { try { callback(); } catch (error) { console.log(error instanceof Error, error.message === 'false'); } };");
+            __thaw_typed_js_696e766f6b65566f6964(
+                (): Promise<void> => Promise.reject<void>(false),
+            );
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "blocking_await_void_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("blocking_await_void_failed"), "expected void blocking fallback: {ir}");
+    // Real Node (22.x) does not throw synchronously from the callback: the rejected promise it
+    // returns is never handled, so the process ends with an unhandled rejection (exit code 1)
+    // that reports the `false` reason. The `catch` in the script is therefore never entered.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "blocking_await_void_reason");
+    assert_eq!(stdout, "");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("false"), "the rejection reason must be reported: {stderr}");
+}
+
+#[test]
 fn compiles_string_template_literals_with_ordered_and_awaited_interpolation() {
     let source = r#"
         function word(label: string, value: string): string {
@@ -375,7 +432,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         #include <stdio.h>
         #include <stdlib.h>
         typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
-        typedef void* napi_async_work;
+        typedef void* napi_async_work; typedef void* napi_ref; typedef void* napi_handle_scope;
         typedef int napi_status;
         extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
         extern napi_status napi_get_value_double(napi_env, napi_value, double*);
@@ -388,7 +445,12 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         extern napi_status napi_queue_async_work(napi_env, napi_async_work);
         extern napi_status napi_delete_async_work(napi_env, napi_async_work);
         extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
-        struct async_data { napi_env env; napi_async_work work; napi_value callback; int answer; };
+        extern napi_status napi_create_reference(napi_env, napi_value, unsigned int, napi_ref*);
+        extern napi_status napi_get_reference_value(napi_env, napi_ref, napi_value*);
+        extern napi_status napi_delete_reference(napi_env, napi_ref);
+        extern napi_status napi_open_handle_scope(napi_env, napi_handle_scope*);
+        extern napi_status napi_close_handle_scope(napi_env, napi_handle_scope);
+        struct async_data { napi_env env; napi_async_work work; napi_ref callback_ref; int answer; };
         static napi_value add(napi_env env, napi_callback_info info) {
             size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
             napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -404,19 +466,30 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         static void complete_async(napi_env env, napi_status status, void* raw) {
             struct async_data* data = raw;
             printf("async %d status %d\n", data->answer, status);
-            napi_value args[2], ignored;
-            napi_get_undefined(env, &args[0]);
-            napi_create_double(env, data->answer, &args[1]);
-            napi_call_function(env, args[0], data->callback, 2, args, &ignored);
-            napi_call_function(env, args[0], data->callback, 2, args, &ignored);
+            napi_handle_scope scope = 0;
+            napi_value callback = 0, args[2], ignored;
+            napi_status callback_status = napi_open_handle_scope(env, &scope);
+            if (callback_status == 0) callback_status = napi_get_reference_value(env, data->callback_ref, &callback);
+            if (callback_status == 0) callback_status = napi_get_undefined(env, &args[0]);
+            if (callback_status == 0) callback_status = napi_create_double(env, data->answer, &args[1]);
+            if (callback_status == 0) callback_status = napi_call_function(env, args[0], callback, 2, args, &ignored);
+            if (callback_status == 0) callback_status = napi_call_function(env, args[0], callback, 2, args, &ignored);
+            if (callback_status != 0) fprintf(stderr, "async callback N-API status %d\n", callback_status);
+            if (data->callback_ref) napi_delete_reference(env, data->callback_ref);
+            if (scope) napi_close_handle_scope(env, scope);
             napi_delete_async_work(env, data->work);
             free(data);
         }
         static napi_value schedule(napi_env env, napi_callback_info info) {
             struct async_data* data = calloc(1, sizeof(*data));
             size_t argc = 1;
-            napi_value result;
-            napi_get_cb_info(env, info, &argc, &data->callback, 0, 0);
+            napi_value callback, result;
+            if (napi_get_cb_info(env, info, &argc, &callback, 0, 0) != 0 ||
+                napi_create_reference(env, callback, 1, &data->callback_ref) != 0) {
+                fprintf(stderr, "async callback reference creation failed\n");
+                free(data);
+                return 0;
+            }
             data->env = env;
             napi_create_async_work(env, 0, 0, execute_async, complete_async, data, &data->work);
             napi_queue_async_work(env, data->work);
@@ -497,6 +570,45 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         String::from_utf8_lossy(&output.stdout),
         "42\nnative addon failed\nasync 42 status 0\n42\n42\n"
     );
+    // The scheduled addon invokes the generated callback after main has
+    // already thrown. Its successful callback must not consume or reframe
+    // main's earlier exception, including on the second invocation.
+    let pending_source = format!(r#"
+        function main(): void {{
+            loadNativeAddon("{}");
+            callNativeAddonWithCallback(
+                "schedule", JSON.parse("[]"),
+                (error: Json, result: Json): Json => {{
+                    console.log("callback ran");
+                    return result;
+                }}
+            );
+            throw "outer main failure";
+        }}
+    "#, addon.display());
+    let pending_module = thaw_parser::parse_typescript(&pending_source).unwrap();
+    let pending_program = thaw_hir::lower_module(&pending_module).unwrap();
+    let pending_context = Context::create();
+    let mut pending_compiler = HirCompiler::new(&pending_context, "napi_prior_pending");
+    pending_compiler.compile_program(&pending_program).unwrap();
+    let pending_obj = dir.join("pending.o");
+    let pending_exe = dir.join("pending");
+    pending_compiler.write_object_file(&pending_obj).unwrap();
+    assert!(cc_command()
+        .arg(&pending_obj)
+        .arg(&arena)
+        .arg(&std)
+        .arg(&runtime)
+        .arg(&napi)
+        .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
+        .arg(&pending_exe)
+        .status().unwrap().success());
+    let pending_output = Command::new(&pending_exe).output().unwrap();
+    let pending_stdout = String::from_utf8_lossy(&pending_output.stdout);
+    let pending_stderr = String::from_utf8_lossy(&pending_output.stderr);
+    assert!(pending_stdout.contains("async 42 status 0"), "{pending_stdout}");
+    assert_eq!(pending_stdout.matches("callback ran").count(), 2, "{pending_stdout}");
+    assert!(pending_stderr.contains("outer main failure"), "{pending_stderr}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -659,4 +771,182 @@ fn async_main_drains_napi_before_destroying_its_promise() {
     let resume = ir.find("resume_async_main_after_napi").unwrap();
     let destroy = ir[resume..].find("call void @thaw_promise_destroy").unwrap();
     assert!(drain < resume && destroy > 0);
+}
+
+#[test]
+fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_handles() {
+    let dir = std::env::temp_dir().join(format!("thaw-hir-codegen-test-napi-lookup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let addon_c = dir.join("throwing_getter.c");
+    let addon = dir.join("throwing-test.node");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        typedef void* napi_env;
+        typedef void* napi_value;
+        typedef void* napi_callback_info;
+        typedef int napi_status;
+        typedef napi_value (*napi_callback)(napi_env, napi_callback_info);
+        typedef struct {
+            const char* utf8name;
+            napi_value name;
+            napi_callback method;
+            napi_callback getter;
+            napi_callback setter;
+            napi_value value;
+            unsigned int attributes;
+            void* data;
+        } napi_property_descriptor;
+        extern napi_status napi_create_object(napi_env, napi_value*);
+        extern napi_status napi_create_function(napi_env, const char*, size_t, napi_callback, void*, napi_value*);
+        extern napi_status napi_define_properties(napi_env, napi_value, size_t, const napi_property_descriptor*);
+        extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+        extern napi_status napi_throw_error(napi_env, const char*, const char*);
+        static napi_value throwing_client(napi_env env, napi_callback_info info) {
+            (void)info;
+            napi_throw_error(env, 0, "original constructor lookup failure");
+            return 0;
+        }
+        static napi_value good_client(napi_env env, napi_callback_info info) {
+            (void)info;
+            napi_value result = 0;
+            if (napi_create_object(env, &result) != 0) return 0;
+            return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+            napi_value outer = 0;
+            napi_value good = 0;
+            const napi_property_descriptor client = {
+                "Client", 0, 0, throwing_client, 0, 0, 0, 0
+            };
+            if (napi_create_object(env, &outer) != 0 ||
+                napi_define_properties(env, outer, 1, &client) != 0 ||
+                napi_create_function(env, "Good", 4, good_client, 0, &good) != 0 ||
+                napi_set_named_property(env, outer, "Good", good) != 0 ||
+                napi_set_named_property(env, exports, "Outer", outer) != 0) return 0;
+            return exports;
+        }
+    "#).unwrap();
+    assert!(cc_command().args(["-shared", "-fPIC"]).arg(&addon_c).arg("-o").arg(&addon).status().unwrap().success());
+
+    let source = format!(r#"
+        declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747931(key: JsValue): JsValue;
+        declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_napi_246e6577244f757465722e476f6f6424617269747932(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_js_766572696679(value: Json): boolean;
+        function main(): void {{
+            loadScript("globalThis.__thaw_lookup_source = {{marker: 'source'}}; globalThis.__thaw_lookup_source_usable = () => globalThis.__thaw_lookup_source.marker === 'source'; globalThis.verify = value => value.marker === 'borrowed'; globalThis.__thaw_lookup_key_mark = () => {{ globalThis.__thaw_lookup_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }}; globalThis.__thaw_lookup_key_count_matches = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_lookup_key_base;");
+            const mark: JsValue = getDynamicValue("__thaw_lookup_key_mark");
+            const countMatches: JsValue = getDynamicValue("__thaw_lookup_key_count_matches");
+            const source: JsValue = getDynamicValue("__thaw_lookup_source");
+            const sourceUsable: JsValue = getDynamicValue("__thaw_lookup_source_usable");
+            if (!loadNativeAddon("{}")) {{
+                throw "test addon failed to load";
+            }}
+            callDynamicValue(mark, __thaw_json_argument_array());
+            let objectCaught = 0;
+            for (let index = 0; index < 10; index++) {{
+                try {{
+                    const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(source, "fresh key");
+                    releaseDynamicValue(ignored);
+                }} catch (error) {{
+                    if (error instanceof Error && error.message === "original constructor lookup failure") objectCaught++;
+                }}
+            }}
+            if (objectCaught !== 10 || !callDynamicValue(countMatches, __thaw_json_argument_array()) || !callDynamicValue(sourceUsable, __thaw_json_argument_array())) {{
+                throw "fresh JSON constructor lookup cleanup failed";
+            }}
+            const borrowed: Json = JSON.parse('{{"marker":"borrowed"}}');
+            let borrowedCaught = 0;
+            for (let index = 0; index < 3; index++) {{
+                try {{
+                    const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(borrowed, "fresh key");
+                    releaseDynamicValue(ignored);
+                }} catch (error) {{
+                    if (error instanceof Error && error.message === "original constructor lookup failure") borrowedCaught++;
+                }}
+            }}
+            if (borrowedCaught !== 3 || !__thaw_typed_js_766572696679(borrowed) || !callDynamicValue(countMatches, __thaw_json_argument_array())) {{
+                throw "borrowed JSON constructor lookup cleanup failed";
+            }}
+            const constructed: JsValue = __thaw_typed_napi_246e6577244f757465722e476f6f6424617269747932(source, "success key");
+            releaseDynamicValue(constructed);
+            if (!callDynamicValue(countMatches, __thaw_json_argument_array()) || !callDynamicValue(sourceUsable, __thaw_json_argument_array())) {{
+                throw "successful constructor argument array cleanup failed";
+            }}
+            let caught = false;
+            try {{
+                const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747931("fresh scalar key");
+                releaseDynamicValue(ignored);
+            }} catch (error) {{
+                caught = true;
+                console.log(error);
+            }}
+            // `countMatches` and `mark` are borrowed pre-existing handles. The
+            // result must equal the post-load baseline after the fresh scalar
+            // conversion was abandoned by the throwing N-API getter.
+            console.log(caught, callDynamicValue(countMatches, __thaw_json_argument_array()));
+            releaseDynamicValue(countMatches);
+            releaseDynamicValue(mark);
+            releaseDynamicValue(source);
+            releaseDynamicValue(sourceUsable);
+        }}
+    "#, addon.display());
+    let module = thaw_parser::parse_typescript(&source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("retainEventKey"), "{hir}");
+    assert!(hir.contains("napi-constructor"), "{hir}");
+    assert!(hir.contains("$new$Outer.Client$arity2"), "{hir}");
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_constructor_lookup_owned_scalar_cleanup");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+    let user_main = ir.find("define internal void @thaw_user_main(").expect(&ir);
+    let body = &ir[user_main..user_main + ir[user_main..].find("\n}").unwrap()];
+    let source_release = body.find("\nrelease_typed_wrapper_json_argument").expect(body);
+    let lookup = body.find("@thaw_napi_get_export_typed_result(").expect(body);
+    let lookup_array_release = body[lookup..]
+        .find("\nrelease_typed_dynamic_argument_array")
+        .map(|offset| lookup + offset)
+        .expect(body);
+    let array_release_end = body[lookup_array_release..]
+        .find("\ntyped_dynamic_argument_array_released")
+        .map(|offset| lookup_array_release + offset)
+        .expect(body);
+    let array_release_block = &body[lookup_array_release..array_release_end];
+    assert!(
+        array_release_block.contains("call void @thaw_json_destroy(ptr"),
+        "{array_release_block}"
+    );
+    let successful_graph = body[lookup..]
+        .find("@thaw_json_graph_encode(")
+        .map(|offset| lookup + offset)
+        .expect(body);
+    let constructor_call = body[successful_graph..]
+        .find("@thaw_napi_construct_handle_typed_graph_args_result(")
+        .map(|offset| successful_graph + offset)
+        .expect(body);
+    assert!(source_release < lookup, "{body}");
+    assert!(lookup < lookup_array_release, "{body}");
+    assert!(successful_graph < constructor_call, "{body}");
+    let obj = dir.join("out.o");
+    let exe = dir.join("out");
+    compiler.write_object_file(&obj).unwrap();
+    let arena = build_staticlib("thaw-arena");
+    let std = build_staticlib("thaw-std");
+    let runtime = build_staticlib("thaw-runtime");
+    let napi = build_staticlib("thaw-napi");
+    let quickjs = build_staticlib("thaw-quickjs");
+    // Match the mixed runtime link order: QuickJS/N-API refer back to std and runtime.
+    assert!(cc_command().arg(&obj).arg(&arena).arg(&std).arg(&runtime)
+        .arg(&std).arg(&runtime).arg(&napi).arg(&quickjs).arg(&std).arg(&runtime)
+        .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"]).arg(&exe)
+        .status().unwrap().success());
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("original constructor lookup failure"), "{stdout}");
+    assert!(stdout.ends_with("true true\n"), "{stdout}");
+    let _ = std::fs::remove_dir_all(dir);
 }

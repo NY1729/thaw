@@ -33,6 +33,9 @@ pub enum HirExpr {
     /// Strict equality between two values with the same tagged union type.
     UnionIsEqual(Box<HirExpr>, Box<HirExpr>, Vec<HirType>),
     Call(Box<HirExpr>, Vec<HirExpr>),
+    /// Evaluates the first operand exactly once for its effects, then returns
+    /// the second operand. Used when absence coercion replaces a value.
+    EvalThen(Box<HirExpr>, Box<HirExpr>),
     // Invokes a closure through its second entry with an explicit JavaScript `thisArg`.
     FunctionCallWithThis(
         Box<HirExpr>,
@@ -70,9 +73,23 @@ pub enum HirExpr {
     PromiseAllSettledArray(Box<HirExpr>, HirType),
     /// `new Promise<T>((resolve, reject) => ...)`.
     PromiseNew(Box<HirExpr>, HirType, bool, bool),
+    /// A constructor resolve callback that accepts either `T` or `Promise<T>`.
+    PromiseNewMixed(Box<HirExpr>, HirType, HirType),
     /// A typed `.then`/`.catch` continuation. `on_rejected` distinguishes
     /// catch from then while retaining the input and output native layouts.
     PromiseThen(Box<HirExpr>, Box<HirExpr>, HirType, HirType, bool, bool),
+    /// Both callbacks attach to the same source and settle one output.
+    /// The fulfillment callback may be omitted, in which case fulfillment
+    /// is forwarded without converting its value or exception provenance.
+    PromiseThenBoth(
+        Box<HirExpr>,
+        Option<Box<HirExpr>>,
+        Box<HirExpr>,
+        HirType,
+        HirType,
+        bool,
+        bool,
+    ),
     /// A `.finally` continuation. The callback return type records whether
     /// codegen must wait for a returned Promise before forwarding settlement.
     PromiseFinally(Box<HirExpr>, Box<HirExpr>, HirType, HirType),
@@ -91,10 +108,16 @@ pub enum HirExpr {
     RecursiveClosure(Symbol, HirType, Box<HirExpr>),
     // Preserves a logical callable shape around a physically ordinary closure.
     TypedClosure(HirType, Box<HirExpr>),
+    /// A non-arrow JavaScript function expression. Preserves dynamic `this`
+    /// provenance across lowering; its enclosed closure carries the call ABI.
+    NonArrowFunction(Box<HirExpr>),
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
+    FunctionRefThis(String, HirType, Vec<HirType>, HirType),
     /// A native method value with separate unbound and explicit-receiver entries.
-    MethodRef(String, String, Vec<HirType>, HirType, bool),
+    /// The optional nominal receiver is the class expected by an instance
+    /// method; static methods ignore their explicit receiver.
+    MethodRef(String, String, Vec<HirType>, HirType, bool, Option<Symbol>),
     Block(Vec<HirStmt>),
     /// Raises `error` from an expression position. `fallback` supplies the
     /// unreachable native value required by the surrounding typed expression.
@@ -170,10 +193,13 @@ pub enum HirExpr {
     /// (matching what it actually, genuinely produces), so both the
     /// re-validation gap and the segfault are closed at once.
     JsValueAsJson(Box<HirExpr>),
-    /// Allocates a fixed-shape object and initializes every field to its
-    /// native zero value before the reference escapes. Constructors use this
-    /// to establish instance identity before executing `this.field = ...`.
+    /// Allocates an ordinary fixed-shape object and initializes every field
+    /// to its native zero value before the reference escapes.
     ObjectAlloc(HirType),
+    /// Native class constructor allocation. Only this trusted origin may
+    /// register nominal class ancestry; an arbitrary object with a matching
+    /// field name remains an ordinary object.
+    ClassAlloc(HirType),
     /// `object.field`. Unlike `ArrayLen`/`EnvVar`, this *is* a general
     /// member-access node -- but it still isn't resolved by a real type
     /// checker at codegen time, so lowering bakes in the object's full
@@ -264,8 +290,7 @@ pub enum HirStmt {
     /// `throw` unwinds through generated Thaw function calls to the nearest
     /// lexical `try`. Codegen implements this with a pending-exception slot,
     /// preserving the ordinary function and C FFI ABIs. `finally` is expanded
-    /// around normal and abrupt exits during lowering, so it does not require
-    /// a separate HIR variant.
+    /// around normal and abrupt exits during lowering.
     ///
     /// `Try(body, visible_catch, catch_body, hidden_tag)`:
     /// - `visible_catch`: the catch binding the user wrote (`catch (e)`),
@@ -279,6 +304,249 @@ pub enum HirStmt {
     ///   string, so both representations stay available without one
     ///   clobbering the other. `None` when nothing reads the raw tag.
     Try(Vec<HirStmt>, Symbol, Vec<HirStmt>, Option<Symbol>),
+    /// Execute a cloned `finally` body after suspending the indicated number
+    /// of lexical handlers entered inside the protected scope. An abrupt
+    /// finalizer must reach the enclosing handler, never a catch whose try
+    /// body is already being exited. The handlers are restored after codegen
+    /// even when this body returns, throws, breaks, or continues.
+    Finally(Vec<HirStmt>, usize),
+}
+
+/// Reserve an ordinary value slot for a catch before entering its Try. The
+/// compiler replaces this initializer with the pending exception's active
+/// value when control reaches the handler; predeclaring the slot also lets
+/// async frame planning preserve it across suspension.
+pub fn caught_exception_carrier_prelude(name: Symbol) -> HirStmt {
+    let carrier = caught_exception_carrier_type();
+    let members = match &carrier {
+        HirType::Union(members) => members.clone(),
+        _ => unreachable!(),
+    };
+    HirStmt::Let(
+        name,
+        carrier,
+        HirExpr::UnionInject(Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members),
+    )
+}
+
+/// Json view of a caught native Object (carrier member 6): the registered
+/// describer, else the live projector. Fails when neither exists.
+pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
+    let call =
+        |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
+    let projector_type = HirType::Function(Vec::new(), Box::new(HirType::JsValue));
+    let optional_projector = HirType::Optional(Box::new(projector_type.clone()));
+    let projector_name = "__thaw_caught_adapter_projector".to_string();
+    let projector = HirExpr::Var(projector_name.clone());
+    let body = HirExpr::Conditional(
+        Box::new(HirExpr::OptionalIsNone(
+            Box::new(projector.clone()),
+            projector_type.clone(),
+        )),
+        Box::new(HirExpr::ThrowValue(
+            Box::new(HirExpr::Lit(HirLit::Str(
+                "caught native object has no live projection".into(),
+            ))),
+            Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+        )),
+        Box::new(call(
+            "__thaw_json_host_from_dynamic",
+            vec![HirExpr::Call(
+                Box::new(HirExpr::OptionalValue(Box::new(projector), projector_type)),
+                Vec::new(),
+            )],
+        )),
+        HirType::Json,
+    );
+    // A thrown Error record registers a Json describer; prefer it.
+    let describer_type = HirType::Function(Vec::new(), Box::new(HirType::Json));
+    let describer_name = "__thaw_caught_adapter_describer".to_string();
+    let describer = HirExpr::Var(describer_name.clone());
+    let described = HirExpr::Conditional(
+        Box::new(HirExpr::OptionalIsNone(
+            Box::new(describer.clone()),
+            describer_type.clone(),
+        )),
+        Box::new(body),
+        Box::new(HirExpr::Call(
+            Box::new(HirExpr::OptionalValue(
+                Box::new(describer),
+                describer_type.clone(),
+            )),
+            Vec::new(),
+        )),
+        HirType::Json,
+    );
+    HirExpr::Call(
+        Box::new(HirExpr::Lambda(
+            Vec::new(),
+            vec![
+                HirParam {
+                    name: describer_name,
+                    ty: HirType::Optional(Box::new(describer_type)),
+                },
+                HirParam {
+                    name: projector_name,
+                    ty: optional_projector,
+                },
+            ],
+            HirType::Json,
+            Box::new(described),
+        )),
+        vec![
+            call(
+                "__thaw_lookup_native_exception_describer",
+                vec![active.clone()],
+            ),
+            call(
+                "__thaw_lookup_native_projector",
+                vec![active, HirExpr::Lit(HirLit::Str(String::new()))],
+            ),
+        ],
+    )
+}
+
+/// Printing view of a caught native Object: the Json its throw registered
+/// (`__thaw_register_native_exception_describer`), else an empty object. It
+/// never touches the live-projection host, so a program that only prints a
+/// caught value does not become a QuickJS host program.
+pub fn caught_native_object_console_json(active: HirExpr) -> HirExpr {
+    let call =
+        |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
+    let describer_type = HirType::Function(Vec::new(), Box::new(HirType::Json));
+    let describer = || {
+        call(
+            "__thaw_lookup_native_exception_describer",
+            vec![active.clone()],
+        )
+    };
+    HirExpr::Conditional(
+        Box::new(HirExpr::OptionalIsNone(
+            Box::new(describer()),
+            describer_type.clone(),
+        )),
+        Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+        Box::new(HirExpr::Call(
+            Box::new(HirExpr::OptionalValue(
+                Box::new(describer()),
+                describer_type,
+            )),
+            Vec::new(),
+        )),
+        HirType::Json,
+    )
+}
+
+/// One source of truth for converting an active caught value to live Json.
+/// Compiler-generated consumers (including Promise.allSettled) can compile
+/// this capture-free HIR closure and feed it the same carrier as lexical
+/// catches.  Its result is arena-owned but borrowed by callers: a consumer
+/// that calls `thaw_json_destroy` must first acquire `thaw_json_share`.
+pub fn caught_exception_json_adapter() -> HirExpr {
+    fn call(name: &str, args: Vec<HirExpr>) -> HirExpr {
+        HirExpr::Call(Box::new(HirExpr::Var(name.into())), args)
+    }
+    let carrier = caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else {
+        unreachable!()
+    };
+    let value_name = "__thaw_caught_adapter_value".to_string();
+    let value = HirExpr::Var(value_name.clone());
+    let mut selected: Option<HirExpr> = None;
+    for index in (0..members.len()).rev() {
+        let active = HirExpr::UnionValue(Box::new(value.clone()), index, members.clone());
+        let arm = match index {
+            0 => call("__thaw_json_receiver_number", vec![active]),
+            1 => call("__thaw_json_receiver_bigint", vec![active]),
+            2 => call("__thaw_json_receiver_bool", vec![active]),
+            3 => call("__thaw_json_receiver_string", vec![active]),
+            4 => call("__thaw_json_undefined", Vec::new()),
+            5 => call("__thaw_json_null", Vec::new()),
+            6 => caught_native_object_json(active),
+            7 => active,
+            8 => call("__thaw_json_host_from_borrowed_dynamic", vec![active]),
+            // A native value (tags 20-29) has no contents a Json projection could read, so
+            // follow JSON.stringify where the contents are irrelevant (Symbol/Function ->
+            // undefined; Map/Set/WeakMap/WeakSet/Promise -> `{}`) and fail explicitly for
+            // Array/Bytes/Tuple, whose contents would need a throw-time snapshot.
+            9 => {
+                let tag_name = "__thaw_caught_adapter_tag".to_string();
+                let tag = HirExpr::Var(tag_name.clone());
+                let by_tag = |tag_value: i64, then: HirExpr, other: HirExpr| {
+                    HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(tag.clone()),
+                            Box::new(HirExpr::Lit(HirLit::I64(tag_value))),
+                        )),
+                        Box::new(then),
+                        Box::new(other),
+                        HirType::Json,
+                    )
+                };
+                let empty_object = || {
+                    call(
+                        "__thaw_json_object_from_json_entries",
+                        vec![HirExpr::ArrayAlloc(
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            HirType::Tuple(vec![HirType::Str, HirType::Json]),
+                        )],
+                    )
+                };
+                let mut body = HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(
+                        "caught native value has no Json projection".into(),
+                    ))),
+                    Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+                );
+                for tag_value in [29, 26, 25, 24, 23] {
+                    body = by_tag(tag_value, empty_object(), body);
+                }
+                for tag_value in [28, 20] {
+                    body = by_tag(tag_value, call("__thaw_json_undefined", Vec::new()), body);
+                }
+                HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam {
+                            name: tag_name,
+                            ty: HirType::I64,
+                        }],
+                        HirType::Json,
+                        Box::new(body),
+                    )),
+                    vec![call("__thaw_native_exception_tag", vec![active])],
+                )
+            }
+            _ => unreachable!("caught exception carrier has no member {index}"),
+        };
+        selected = Some(match selected {
+            None => arm,
+            Some(other) => HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                )),
+                Box::new(arm),
+                Box::new(other),
+                HirType::Json,
+            ),
+        });
+    }
+    let body = call(
+        "__thaw_json_track_owned",
+        vec![selected.expect("catch layout is nonempty")],
+    );
+    HirExpr::Lambda(
+        Vec::new(),
+        vec![HirParam {
+            name: value_name,
+            ty: carrier,
+        }],
+        HirType::Json,
+        Box::new(body),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -311,4 +579,30 @@ pub struct HirGlobal {
 pub enum HirInitStep {
     StoreGlobal(Symbol, HirExpr),
     Statement(HirStmt),
+    /// Compiler-owned shim region with declarations but no startup effect.
+    ExecutionBoundary(bool),
+    ModuleBoundary {
+        index: usize,
+        eager: bool,
+        runtime: bool,
+        static_dependencies: Vec<usize>,
+    },
+}
+
+pub fn promise_settled_result_type(value: HirType) -> HirType {
+    let value = if value == HirType::Void {
+        HirType::Undefined
+    } else {
+        value
+    };
+    HirType::Union(vec![
+        HirType::Object(vec![
+            ("status".into(), HirType::Str),
+            ("value".into(), value),
+        ]),
+        HirType::Object(vec![
+            ("status".into(), HirType::Str),
+            ("reason".into(), HirType::JsValue),
+        ]),
+    ])
 }

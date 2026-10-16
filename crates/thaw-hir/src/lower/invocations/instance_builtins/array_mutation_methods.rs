@@ -951,7 +951,7 @@ impl<'a> FnLowerer<'a> {
                             "substr" => "String.substr",
                             _ => "String.slice",
                         };
-                        let (arguments, bindings) =
+                        let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, label)?;
                         if arguments.len() > 2 {
                             return Err(format!("native `{label}` expects zero to two arguments"));
@@ -962,21 +962,28 @@ impl<'a> FnLowerer<'a> {
                             .map(|value| self.coerce_primitive_to_number(value))
                             .transpose()?
                             .unwrap_or(HirExpr::Lit(HirLit::F64(0.0)));
-                        let end = arguments
-                            .get(1)
-                            .cloned()
-                            .map(|value| self.coerce_primitive_to_number(value))
-                            .transpose()?
-                            .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        let end = if is_subarray {
+                            arguments.get(1).cloned()
+                                .map(|value| self.coerce_primitive_to_number(value))
+                                .transpose()?
+                                .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)))
+                        } else {
+                            self.number_format_end_or_infinity(arguments.get(1))?
+                        };
                         let intrinsic = match property.sym.as_ref() {
                             "substring" => "__thaw_string_substring",
                             "substr" => "__thaw_string_substr",
                             _ => "__thaw_string_slice",
                         };
+                        let receiver_name = format!("__thaw_string_slice_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var(intrinsic.into())),
-                            vec![receiver, start, end],
+                            vec![HirExpr::Var(receiver_name.clone()), start, end],
                         );
+                        let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                        bindings.extend(spread_bindings);
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if !matches!(receiver_type, HirType::Array(_) | HirType::Union(_)) {
@@ -989,16 +996,19 @@ impl<'a> FnLowerer<'a> {
                     if arguments.len() > 2 {
                         return Err("native `.slice()` expects zero to two arguments".into());
                     }
-                    let mut indices = Vec::with_capacity(2);
-                    for value in arguments {
-                        indices.push(self.coerce_primitive_to_number(value)?);
-                    }
-                    if indices.is_empty() {
-                        indices.push(HirExpr::Lit(HirLit::F64(0.0)));
-                    }
-                    if indices.len() == 1 {
-                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
-                    }
+                    let start = arguments.first().cloned()
+                        .map(|value| self.coerce_primitive_to_number(value))
+                        .transpose()?
+                        .unwrap_or(HirExpr::Lit(HirLit::F64(0.0)));
+                    let end = if is_subarray {
+                        arguments.get(1).cloned()
+                            .map(|value| self.coerce_primitive_to_number(value))
+                            .transpose()?
+                            .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)))
+                    } else {
+                        self.number_format_end_or_infinity(arguments.get(1))?
+                    };
+                    let indices = vec![start, end];
                     if let HirType::Union(members) = &receiver_type {
                         if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
                             return Err(format!(
@@ -1090,11 +1100,15 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.copyWithin()` expects two or three arguments".into());
                     }
                     let mut indices = Vec::with_capacity(3);
-                    for value in arguments {
-                        indices.push(self.coerce_primitive_to_number(value)?);
+                    for (position, value) in arguments.iter().enumerate() {
+                        indices.push(if position == 2 {
+                            self.number_format_end_or_infinity(Some(value))?
+                        } else {
+                            self.coerce_primitive_to_number(value.clone())?
+                        });
                     }
                     if indices.len() == 2 {
-                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        indices.push(self.number_format_end_or_infinity(None)?);
                     }
                     let receiver_name = format!("__thaw_copy_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1157,14 +1171,18 @@ impl<'a> FnLowerer<'a> {
                     }
                     let value_type = self.infer_expr_type(&value)?;
                     let mut indices = Vec::with_capacity(2);
-                    for argument in arguments.into_iter().skip(1) {
-                        indices.push(self.coerce_primitive_to_number(argument)?);
+                    for (position, argument) in arguments.into_iter().skip(1).enumerate() {
+                        indices.push(if position == 1 {
+                            self.number_format_end_or_infinity(Some(&argument))?
+                        } else {
+                            self.coerce_primitive_to_number(argument)?
+                        });
                     }
                     if indices.is_empty() {
                         indices.push(HirExpr::Lit(HirLit::F64(0.0)));
                     }
                     if indices.len() == 1 {
-                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        indices.push(self.number_format_end_or_infinity(None)?);
                     }
                     let receiver_name = format!("__thaw_fill_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1361,6 +1379,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_array_values(&call.args, "Array.splice")?;
+                    let has_start = !arguments.is_empty();
                     let mut arguments = arguments.into_iter();
                     let start = match arguments.next() {
                         Some(value) => self.coerce_primitive_to_number(value)?,
@@ -1368,7 +1387,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let delete_count = match arguments.next() {
                         Some(value) => self.coerce_primitive_to_number(value)?,
-                        None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                        None => HirExpr::Lit(HirLit::F64(if has_start { f64::INFINITY } else { 0.0 })),
                     };
                     let items = arguments.collect::<Vec<_>>();
                     for item in &items {
@@ -1432,7 +1451,16 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.join()` expects zero or one argument".into());
                     }
                     let separator = if let Some(argument) = arguments.first() {
-                        self.coerce_primitive_to_string(argument.clone())?
+                        let is_undefined = self.lower_strict_equality(
+                            argument.clone(),
+                            HirExpr::Lit(HirLit::Undefined),
+                        )?;
+                        HirExpr::Conditional(
+                            Box::new(is_undefined),
+                            Box::new(HirExpr::Lit(HirLit::Str(",".to_string()))),
+                            Box::new(self.coerce_primitive_to_string(argument.clone())?),
+                            HirType::Str,
+                        )
                     } else {
                         HirExpr::Lit(HirLit::Str(",".to_string()))
                     };
@@ -1499,23 +1527,13 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(receiver_name.clone(), array_type.clone());
                             self.scope.insert(separator_name.clone(), HirType::Str);
-                            let result = if let HirType::Json = element.as_ref() {
-                                // No native `__thaw_..._array_join` intrinsic
-                                // exists for a generic `Json` element (real
-                                // trigger: `Array.from(cache.keys())` on a
-                                // real npm class's `Generator<K>`-returning
-                                // method, e.g. `lru-cache`) -- built directly
-                                // out of existing HIR nodes instead of adding
-                                // a new one: a native `while` loop that reads
-                                // each element out via `TypedIndex`, converts
-                                // it the same way a template literal already
-                                // does (`coerce_primitive_to_string`, which
-                                // already handles `Json` via `JsonAsString`
-                                // -- real JS `String()` semantics, not just
-                                // "this JSON value happens to already be a
-                                // string"), and concatenates via the same
-                                // `__thaw_string_concat` a template literal's
-                                // own lowering already uses.
+                            let result = if matches!(element.as_ref(), HirType::Json | HirType::JsValue) {
+                                let slot_type = element.as_ref().clone();
+                                // A native Array<Json> uses this HIR loop. Its slots
+                                // have join semantics: null and undefined become empty,
+                                // while present values keep ordinary String conversion.
+                                // Reuse the shared join slot conversion to bind each
+                                // loaded Json value once before testing nullishness.
                                 let result_name =
                                     format!("__thaw_join_result_{}", self.next_binding);
                                 self.next_binding += 1;
@@ -1524,12 +1542,13 @@ impl<'a> FnLowerer<'a> {
                                 self.next_binding += 1;
                                 self.scope.insert(result_name.clone(), HirType::Str);
                                 self.scope.insert(index_name.clone(), HirType::F64);
-                                let element_str = self.coerce_primitive_to_string(
+                                let element_str = self.coerce_join_slot_to_string(
                                     HirExpr::TypedIndex(
                                         Box::new(HirExpr::Var(receiver_name.clone())),
                                         Box::new(HirExpr::Var(index_name.clone())),
-                                        HirType::Json,
+                                        slot_type.clone(),
                                     ),
+                                    &slot_type,
                                 )?;
                                 let concat = |lhs: HirExpr, rhs: HirExpr| {
                                     HirExpr::Call(
@@ -1635,6 +1654,14 @@ impl<'a> FnLowerer<'a> {
                             elements,
                             separator,
                         ),
+                        // A dynamically-obtained (`Json`) array -- e.g. a
+                        // dynamic call's result like
+                        // `Array.prototype.map.call(...)` -- joins through the
+                        // runtime's JS-semantics join.
+                        HirType::Json | HirType::Dictionary(_) => Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_array_join".to_string())),
+                            vec![HirExpr::Var(source_name.clone()), separator],
+                        )),
                         other => Err(format!(
                             "`.join()` requires an array receiver, got {other:?}"
                         )),
@@ -1683,11 +1710,121 @@ impl<'a> FnLowerer<'a> {
                         receiver = self.coerce_primitive_to_string(receiver)?;
                         receiver_type = HirType::Str;
                     }
+                    // `String.prototype.includes/startsWith/endsWith` reject a RegExp
+                    // argument (the regex literal's record shape) instead of searching
+                    // for its text.
+                    if matches!(property.sym.as_ref(), "includes" | "startsWith" | "endsWith")
+                        && receiver_type == HirType::Str
+                        && matches!(
+                            self.infer_expr_type(&arguments[0])?,
+                            HirType::Object(fields)
+                                if fields.len() == 3
+                                    && ["source", "flags", "lastIndex"]
+                                        .iter()
+                                        .all(|name| fields.iter().any(|(field, _)| field == name))
+                        )
+                    {
+                        let message = format!(
+                            "\u{1}TypeError\u{1}First argument to String.prototype.{} must not be a regular expression",
+                            property.sym
+                        );
+                        let result = HirExpr::ThrowValue(
+                            Box::new(HirExpr::Lit(HirLit::Str(message))),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                        );
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
+                    if receiver_type == HirType::Json {
+                        // A dynamic receiver is a string or an array only at run time:
+                        // search the string natively, or walk the JSON array comparing
+                        // elements with `===`.
+                        let method = property.sym.to_string();
+                        let names = (0..4).map(|offset| format!("__thaw_json_search_{}_{offset}", self.next_binding))
+                            .collect::<Vec<_>>();
+                        self.next_binding += 1;
+                        let [json, needle, index, length] = [&names[0], &names[1], &names[2], &names[3]];
+                        let needle_type = self.infer_expr_type(&arguments[0])?;
+                        for (name, ty) in [(json, HirType::Json), (needle, needle_type.clone()), (index, HirType::F64), (length, HirType::F64)] {
+                            self.scope.insert(name.clone(), ty);
+                        }
+                        let var = |name: &String| HirExpr::Var(name.clone());
+                        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+                        let from = match arguments.get(1) {
+                            Some(argument) => Some(self.coerce_primitive_to_number(argument.clone())?),
+                            None => None,
+                        };
+                        let string_result = {
+                            let needle_text = self.coerce_primitive_to_string(var(needle))?;
+                            let suffix = match method.as_str() {
+                                "indexOf" => "index_of",
+                                "lastIndexOf" => "last_index_of",
+                                _ => "includes",
+                            };
+                            let position = from.clone().unwrap_or_else(|| number(
+                                if method == "lastIndexOf" { f64::INFINITY } else { 0.0 }));
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                                vec![HirExpr::JsonAsString(Box::new(var(json))), needle_text, position],
+                            )
+                        };
+                        let element = HirExpr::JsonIndex(Box::new(var(json)), Box::new(var(index)));
+                        let matches = self.lower_strict_equality(element, var(needle))?;
+                        let found = if method == "includes" {
+                            HirExpr::Lit(HirLit::Bool(true))
+                        } else {
+                            var(index)
+                        };
+                        let missing = if method == "includes" {
+                            HirExpr::Lit(HirLit::Bool(false))
+                        } else {
+                            number(-1.0)
+                        };
+                        let relative = |value: HirExpr, length: &String| HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(BinOp::Lt, Box::new(value.clone()), Box::new(number(0.0)))),
+                            Box::new(HirExpr::BinOp(BinOp::Add, Box::new(var(length)), Box::new(value.clone()))),
+                            Box::new(value), HirType::F64,
+                        );
+                        let last = method == "lastIndexOf";
+                        let start = match (&from, last) {
+                            (Some(from), false) => relative(from.clone(), length),
+                            (None, false) => number(0.0),
+                            (Some(from), true) => relative(from.clone(), length),
+                            (None, true) => HirExpr::BinOp(BinOp::Sub, Box::new(var(length)), Box::new(number(1.0))),
+                        };
+                        let (condition, step) = if last {
+                            (HirExpr::BinOp(BinOp::GtEq, Box::new(var(index)), Box::new(number(0.0))), BinOp::Sub)
+                        } else {
+                            (HirExpr::BinOp(BinOp::Lt, Box::new(var(index)), Box::new(var(length))), BinOp::Add)
+                        };
+                        let array_result = HirExpr::Block(vec![
+                            HirStmt::Let(length.clone(), HirType::F64, HirExpr::JsonAsNumber(Box::new(
+                                HirExpr::JsonGet(Box::new(var(json)), "length".to_string())))),
+                            HirStmt::Let(index.clone(), HirType::F64, start),
+                            HirStmt::While(condition, vec![
+                                HirStmt::If(matches, vec![HirStmt::Return(Some(found))], Vec::new()),
+                                HirStmt::Expr(HirExpr::Assign(index.clone(), Box::new(HirExpr::BinOp(
+                                    step, Box::new(var(index)), Box::new(number(1.0)))))),
+                            ]),
+                            HirStmt::Return(Some(missing)),
+                        ]);
+                        let result_type = if method == "includes" { HirType::Bool } else { HirType::F64 };
+                        let is_string = HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![var(json)])),
+                            Box::new(HirExpr::Lit(HirLit::Str("string".into()))));
+                        let result = HirExpr::Conditional(
+                            Box::new(is_string), Box::new(string_result), Box::new(array_result), result_type);
+                        let mut bindings = vec![(json.clone(), HirType::Json, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle.clone(), needle_type, arguments[0].clone()));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if receiver_type == HirType::Str {
                         let needle = self.coerce_primitive_to_string(arguments[0].clone())?;
-                        let position = if let Some(argument) = arguments.get(1) {
+                        let position = if property.sym == *"endsWith" {
+                            self.number_format_end_or_infinity(arguments.get(1))?
+                        } else if let Some(argument) = arguments.get(1) {
                             self.coerce_primitive_to_number(argument.clone())?
-                        } else if property.sym == *"endsWith" || property.sym == *"lastIndexOf" {
+                        } else if property.sym == *"lastIndexOf" {
                             HirExpr::Lit(HirLit::F64(f64::INFINITY))
                         } else {
                             HirExpr::Lit(HirLit::F64(0.0))

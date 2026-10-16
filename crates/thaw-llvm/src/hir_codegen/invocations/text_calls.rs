@@ -26,6 +26,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     | "__thaw_unescape"
                     | "__thaw_template_strings_register"
                     | "__thaw_template_strings_raw"
+                    | "__thaw_template_site"
             );
         if !text_call {
             return None;
@@ -164,6 +165,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_string_trim_end"
             | "__thaw_string_to_lower_case"
             | "__thaw_string_to_upper_case"
+            | "__thaw_string_to_well_formed"
+            | "__thaw_string_is_well_formed"
             | "__thaw_atob"
             | "__thaw_btoa"
             | "__thaw_escape"
@@ -310,7 +313,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("RegExp.exec returned no value")?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap_nullable(result)?.into());
+                return Ok(result.into());
             }
             "__thaw_regex_exec_groups" => {
                 let [matches] = args else {
@@ -380,6 +383,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.f64_type().const_zero().into());
             }
+            "__thaw_template_site" => {
+                let [site, cooked, raw] = args else {
+                    return Err("template site expects three operands".into());
+                };
+                let site = self.compile_expr(site)?;
+                let cooked = self.compile_expr(cooked)?;
+                let raw = self.compile_expr(raw)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_template_site").unwrap(),
+                        &[site.into(), cooked.into(), raw.into()],
+                        "template_site",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("template site returned no value".into());
+            }
             "__thaw_template_strings_raw" => {
                 let [cooked] = args else {
                     return Err("template strings .raw expects one operand".into());
@@ -397,7 +419,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("template strings .raw returned no value")?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                // The runtime returns the original array handle, preserving .raw identity.
+                return Ok(result.into());
             }
             "__thaw_regex_exec_advance" => {
                 let [value, source, flags, last_index] = args else {
@@ -420,19 +443,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("RegExp.exec lastIndex advance returned no value".into());
             }
             "__thaw_regex_match" | "__thaw_regex_match_all" => {
-                let [value, source, flags] = args else {
-                    return Err(format!("{name} expects three operands"));
+                let [value, source, flags, last_index] = args else {
+                    return Err(format!("{name} expects four operands"));
                 };
                 let value = self.compile_expr(value)?;
                 let source = self.compile_expr(source)?;
                 let flags = self.compile_expr(flags)?;
+                let last_index = self.compile_expr(last_index)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
                 let result = self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
-                        &[value.into(), source.into(), flags.into()],
+                        &[value.into(), source.into(), flags.into(), last_index.into()],
                         "regex_call",
                     )
                     .map_err(|error| error.to_string())?
@@ -440,7 +464,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| format!("{name} returned no value"))?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap_nullable(result)?.into());
+                return Ok(result.into());
             }
             "__thaw_regex_split" => {
                 let [value, source, flags, limit] = args else {

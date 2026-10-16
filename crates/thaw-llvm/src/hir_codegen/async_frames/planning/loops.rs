@@ -63,6 +63,10 @@ impl<'ctx> HirCompiler<'ctx> {
             ]);
             handler
         });
+        if let Some(handler) = &loop_rejection_handler {
+            guarded_rethrow_handlers.insert(enabled_guard.clone(), handler.clone());
+        }
+        let condition_state = segments.len();
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
             enabled_guard.clone(),
@@ -93,9 +97,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 vec![HirExpr::Lit(HirLit::F64(0.0))],
             )
         };
-        current.awaited = Some(sleep_zero());
-        current.await_guard = Some((enabled_guard.clone(), true));
-        let condition_state = segments.len();
+        current.await_next = Some(condition_state);
         segments.push(AsyncSegment {
             stmts: Vec::new(),
             awaited: None,
@@ -103,6 +105,7 @@ impl<'ctx> HirCompiler<'ctx> {
             await_next: None,
             resume_target: None,
             rejection_handler: None,
+            rejection_handler_authoritative: false,
         });
 
         let mut rewritten_condition = cond.clone();
@@ -124,6 +127,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 await_next: None,
                 resume_target: Some((temporary, ty)),
                 rejection_handler: None,
+                rejection_handler_authoritative: false,
             });
         }
 
@@ -174,10 +178,11 @@ impl<'ctx> HirCompiler<'ctx> {
             await_next: None,
             resume_target: None,
             rejection_handler: None,
+            rejection_handler_authoritative: false,
         });
         if let Some(handler) = loop_rejection_handler {
             for segment in &mut segments[condition_state..] {
-                if segment.rejection_handler.is_none() {
+                if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
                     segment.rejection_handler = Some(handler.clone());
                 }
             }

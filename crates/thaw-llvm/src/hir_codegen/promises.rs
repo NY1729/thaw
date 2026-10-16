@@ -1,10 +1,1183 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn expression_returns_promise_union(&self, expression: &HirExpr) -> bool {
+        matches!(self.expr_hir_type(expression), Some(HirType::Union(members))
+            if members.iter().any(|member| matches!(member, HirType::Promise(_))))
+    }
+
+    pub(super) fn promise_expression_needs_discard(&self, expression: &HirExpr) -> bool {
+        matches!(self.expr_hir_type(expression), Some(HirType::Promise(_)))
+            || self.expression_returns_promise_union(expression)
+    }
+
+    pub(super) fn split_promise_conditional(
+        &self,
+        expression: &HirExpr,
+    ) -> Option<(HirExpr, HirExpr, HirExpr)> {
+        match expression {
+            HirExpr::Conditional(test, consequent, alternate, _) => Some((
+                (**test).clone(), (**consequent).clone(), (**alternate).clone(),
+            )),
+            HirExpr::TypedClosure(ty, inner) => self
+                .split_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::TypedClosure(ty.clone(), Box::new(consequent)),
+                    HirExpr::TypedClosure(ty.clone(), Box::new(alternate)),
+                )),
+            HirExpr::UnionInject(inner, index, members) => self
+                .split_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::UnionInject(Box::new(consequent), *index, members.clone()),
+                    HirExpr::UnionInject(Box::new(alternate), *index, members.clone()),
+                )),
+            HirExpr::UnionValue(inner, index, members) => self
+                .split_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::UnionValue(Box::new(consequent), *index, members.clone()),
+                    HirExpr::UnionValue(Box::new(alternate), *index, members.clone()),
+                )),
+            HirExpr::OptionalValue(inner, payload) => self
+                .split_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::OptionalValue(Box::new(consequent), payload.clone()),
+                    HirExpr::OptionalValue(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::NullableValue(inner, payload) => self
+                .split_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::NullableValue(Box::new(consequent), payload.clone()),
+                    HirExpr::NullableValue(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::NullishValue(inner, payload) => self
+                .split_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::NullishValue(Box::new(consequent), payload.clone()),
+                    HirExpr::NullishValue(Box::new(alternate), payload.clone()),
+                )),
+            _ => None,
+        }
+    }
+
+    pub(super) fn promise_expression_returns_owned(&self, expression: &HirExpr) -> bool {
+        match expression {
+            HirExpr::PromiseAll(..)
+            | HirExpr::PromiseAllArray(..)
+            | HirExpr::PromiseAllTuple(..)
+            | HirExpr::PromiseRace(..)
+            | HirExpr::PromiseRaceArray(..)
+            | HirExpr::PromiseAny(..)
+            | HirExpr::PromiseAnyArray(..)
+            | HirExpr::PromiseAllSettled(..)
+            | HirExpr::PromiseAllSettledArray(..)
+            | HirExpr::PromiseNew(..)
+            | HirExpr::PromiseNewMixed(..)
+            | HirExpr::PromiseThen(..)
+            | HirExpr::PromiseThenBoth(..)
+            | HirExpr::PromiseFinally(..) => true,
+            HirExpr::Call(_, _) if matches!(self.expr_hir_type(expression), Some(HirType::Promise(_)))
+                || self.expression_returns_promise_union(expression) => {
+                true
+            }
+            HirExpr::FunctionCallWithThis(_, _, _, _, result) => {
+                matches!(result, HirType::Promise(_))
+                    || matches!(result, HirType::Union(members)
+                        if members.iter().any(|member| matches!(member, HirType::Promise(_))))
+            }
+            HirExpr::UnionInject(value, _, _)
+            | HirExpr::UnionValue(value, _, _)
+            | HirExpr::OptionalValue(value, _)
+            | HirExpr::NullableValue(value, _)
+            | HirExpr::NullishValue(value, _)
+            | HirExpr::TypedClosure(_, value) => self.promise_expression_returns_owned(value),
+            HirExpr::Conditional(_, consequent, alternate, _) => {
+                self.promise_expression_returns_owned(consequent)
+                    && self.promise_expression_returns_owned(alternate)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn retain_borrowed_promise_for_consumption(
+        &mut self,
+        expression: &HirExpr,
+        promise: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        if self.promise_expression_returns_owned(expression) { return Ok(promise); }
+        let retained = self.builder.build_call(
+            self.module.get_function("thaw_promise_retain").unwrap(),
+            &[promise.into()], "retain_borrowed_await_promise",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native Promise retain returned no value")?.into_int_value();
+        let failed = self.builder.build_int_compare(
+            IntPredicate::EQ, retained, self.context.i8_type().const_zero(),
+            "borrowed_await_retain_failed",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed_block = self.context.append_basic_block(function, "borrowed_await_retain_error");
+        let ready_block = self.context.append_basic_block(function, "borrowed_await_retain_ready");
+        self.builder.build_conditional_branch(failed, failed_block, ready_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed_block);
+        self.compile_throw_type_error("Unable to retain borrowed Promise for await")?;
+        self.builder.position_at_end(ready_block);
+        Ok(promise)
+    }
+
+    fn compile_promise_for_consumption(
+        &mut self,
+        expression: &HirExpr,
+    ) -> Result<PointerValue<'ctx>, String> {
+        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(function, "await_promise_then");
+            let alternate_block = self.context.append_basic_block(function, "await_promise_else");
+            let merge_block = self.context.append_basic_block(function, "await_promise_end");
+            let condition = self.compile_expr(&test)?.into_int_value();
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(consequent_block);
+            let consequent = self.compile_promise_for_consumption(&consequent)?;
+            let consequent_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(alternate_block);
+            let alternate = self.compile_promise_for_consumption(&alternate)?;
+            let alternate_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(merge_block);
+            let phi = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()),
+                "await_owned_promise").map_err(|error| error.to_string())?;
+            phi.add_incoming(&[(&consequent, consequent_end), (&alternate, alternate_end)]);
+            return Ok(phi.as_basic_value().into_pointer_value());
+        }
+        let promise = self.compile_expr(expression)?.into_pointer_value();
+        self.retain_borrowed_promise_for_consumption(expression, promise)
+    }
+
+    fn split_discard_promise_conditional(
+        &self,
+        expression: &HirExpr,
+    ) -> Option<(HirExpr, HirExpr, HirExpr)> {
+        match expression {
+            HirExpr::Conditional(test, consequent, alternate, _) => Some((
+                (**test).clone(), (**consequent).clone(), (**alternate).clone(),
+            )),
+            HirExpr::TypedClosure(ty, inner) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::TypedClosure(ty.clone(), Box::new(consequent)),
+                    HirExpr::TypedClosure(ty.clone(), Box::new(alternate)),
+                )),
+            HirExpr::UnionInject(inner, index, members) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::UnionInject(Box::new(consequent), *index, members.clone()),
+                    HirExpr::UnionInject(Box::new(alternate), *index, members.clone()),
+                )),
+            HirExpr::UnionValue(inner, index, members) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::UnionValue(Box::new(consequent), *index, members.clone()),
+                    HirExpr::UnionValue(Box::new(alternate), *index, members.clone()),
+                )),
+            HirExpr::OptionalValue(inner, payload) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::OptionalValue(Box::new(consequent), payload.clone()),
+                    HirExpr::OptionalValue(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::NullableValue(inner, payload) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::NullableValue(Box::new(consequent), payload.clone()),
+                    HirExpr::NullableValue(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::NullishValue(inner, payload) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::NullishValue(Box::new(consequent), payload.clone()),
+                    HirExpr::NullishValue(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::OptionalSome(inner, payload) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::OptionalSome(Box::new(consequent), payload.clone()),
+                    HirExpr::OptionalSome(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::NullableSome(inner, payload) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::NullableSome(Box::new(consequent), payload.clone()),
+                    HirExpr::NullableSome(Box::new(alternate), payload.clone()),
+                )),
+            HirExpr::NullishSome(inner, payload) => self
+                .split_discard_promise_conditional(inner)
+                .map(|(test, consequent, alternate)| (
+                    test,
+                    HirExpr::NullishSome(Box::new(consequent), payload.clone()),
+                    HirExpr::NullishSome(Box::new(alternate), payload.clone()),
+                )),
+            _ => None,
+        }
+    }
+
+    fn split_discard_eval_then_prefix(
+        &self,
+        expression: &HirExpr,
+    ) -> Option<(HirExpr, HirExpr)> {
+        match expression {
+            HirExpr::EvalThen(first, second) => Some(((**first).clone(), (**second).clone())),
+            HirExpr::TypedClosure(ty, inner) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::TypedClosure(ty.clone(), Box::new(rest)),
+                )),
+            HirExpr::UnionInject(inner, index, members) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::UnionInject(Box::new(rest), *index, members.clone()),
+                )),
+            HirExpr::UnionValue(inner, index, members) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::UnionValue(Box::new(rest), *index, members.clone()),
+                )),
+            HirExpr::OptionalValue(inner, payload) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::OptionalValue(Box::new(rest), payload.clone()),
+                )),
+            HirExpr::NullableValue(inner, payload) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::NullableValue(Box::new(rest), payload.clone()),
+                )),
+            HirExpr::NullishValue(inner, payload) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::NullishValue(Box::new(rest), payload.clone()),
+                )),
+            HirExpr::OptionalSome(inner, payload) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::OptionalSome(Box::new(rest), payload.clone()),
+                )),
+            HirExpr::NullableSome(inner, payload) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::NullableSome(Box::new(rest), payload.clone()),
+                )),
+            HirExpr::NullishSome(inner, payload) => self
+                .split_discard_eval_then_prefix(inner)
+                .map(|(first, rest)| (
+                    first,
+                    HirExpr::NullishSome(Box::new(rest), payload.clone()),
+                )),
+            _ => None,
+        }
+    }
+
+    fn discard_explicit_some_value_is_owned(
+        &self,
+        expression: &HirExpr,
+        container_type: &HirType,
+    ) -> bool {
+        match expression {
+            HirExpr::OptionalSome(value, payload)
+                if matches!(container_type, HirType::Optional(inner) if inner.as_ref() == payload) =>
+            {
+                self.discard_expression_returns_owned(value)
+            }
+            HirExpr::NullableSome(value, payload)
+                if matches!(container_type, HirType::Nullable(inner) if inner.as_ref() == payload) =>
+            {
+                self.discard_expression_returns_owned(value)
+            }
+            HirExpr::NullishSome(value, payload)
+                if matches!(container_type, HirType::Nullish(inner) if inner.as_ref() == payload) =>
+            {
+                self.discard_expression_returns_owned(value)
+            }
+            HirExpr::TypedClosure(ty, inner) if ty == container_type => {
+                self.discard_explicit_some_value_is_owned(inner, container_type)
+            }
+            HirExpr::UnionValue(union, index, members)
+                if members.get(*index) == Some(container_type) =>
+            {
+                self.discard_explicit_some_union_value_is_owned(
+                    union,
+                    *index,
+                    members,
+                    container_type,
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn discard_explicit_some_union_value_is_owned(
+        &self,
+        expression: &HirExpr,
+        index: usize,
+        members: &[HirType],
+        container_type: &HirType,
+    ) -> bool {
+        match expression {
+            HirExpr::UnionInject(value, injected_index, injected_members)
+                if *injected_index == index
+                    && injected_members == members
+                    && self.expr_hir_type(value).as_ref() == Some(container_type) =>
+            {
+                self.discard_explicit_some_value_is_owned(value, container_type)
+            }
+            HirExpr::TypedClosure(ty, inner)
+                if ty == &HirType::Union(members.to_vec()) =>
+            {
+                self.discard_explicit_some_union_value_is_owned(
+                    inner,
+                    index,
+                    members,
+                    container_type,
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn discard_expression_returns_owned(&self, expression: &HirExpr) -> bool {
+        if self.promise_expression_returns_owned(expression) {
+            return true;
+        }
+        match expression {
+            HirExpr::TypedClosure(_, inner)
+            | HirExpr::UnionInject(inner, _, _)
+            | HirExpr::UnionValue(inner, _, _) => {
+                self.discard_expression_returns_owned(inner)
+            }
+            HirExpr::EvalThen(_, second) => self.discard_expression_returns_owned(second),
+            HirExpr::OptionalValue(optional, payload) => self
+                .discard_explicit_some_value_is_owned(
+                    optional,
+                    &HirType::Optional(Box::new(payload.clone())),
+                ),
+            HirExpr::NullableValue(nullable, payload) => self
+                .discard_explicit_some_value_is_owned(
+                    nullable,
+                    &HirType::Nullable(Box::new(payload.clone())),
+                ),
+            HirExpr::NullishValue(nullish, payload) => self
+                .discard_explicit_some_value_is_owned(
+                    nullish,
+                    &HirType::Nullish(Box::new(payload.clone())),
+                ),
+            HirExpr::Conditional(_, consequent, alternate, _) => {
+                self.discard_expression_returns_owned(consequent)
+                    && self.discard_expression_returns_owned(alternate)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn compile_and_store_arena_promise_expression(
+        &mut self,
+        owner: PointerValue<'ctx>,
+        slot: PointerValue<'ctx>,
+        ty: &HirType,
+        expression: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if !matches!(ty, HirType::Promise(_)) {
+            let value = self.compile_expr(expression)?;
+            self.store_arena_promise_slot(owner, slot, ty, value)?;
+            return Ok(value);
+        }
+        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(function, "promise_store_then");
+            let alternate_block = self.context.append_basic_block(function, "promise_store_else");
+            let merge_block = self.context.append_basic_block(function, "promise_store_end");
+            let condition = self.compile_expr(&test)?.into_int_value();
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(consequent_block);
+            let consequent_value = self.compile_and_store_arena_promise_expression(
+                owner, slot, ty, &consequent,
+            )?;
+            let consequent_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(alternate_block);
+            let alternate_value = self.compile_and_store_arena_promise_expression(
+                owner, slot, ty, &alternate,
+            )?;
+            let alternate_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(merge_block);
+            let phi = self.builder.build_phi(self.basic_type(ty)?, "stored_promise_value")
+                .map_err(|error| error.to_string())?;
+            phi.add_incoming(&[(&consequent_value, consequent_end), (&alternate_value, alternate_end)]);
+            return Ok(phi.as_basic_value());
+        }
+        let value = self.compile_expr(expression)?;
+        self.store_arena_promise_slot_with_token(
+            owner,
+            slot,
+            ty,
+            value,
+            self.promise_expression_returns_owned(expression),
+        )?;
+        Ok(value)
+    }
+
+    pub(super) fn compile_and_discard_promise_expression(
+        &mut self,
+        expression: &HirExpr,
+    ) -> Result<(), String> {
+        let parent_block = self.builder.get_insert_block();
+        let saved_variables = self.variables.clone();
+        let saved_scope_context = CodegenScopeContext {
+            catches: CatchContext { scopes: self.catch_stack.clone() },
+            stack_promise_slots: self.stack_promise_slots.clone(),
+            loops: self.loop_scopes.clone(),
+            loop_promotions: self.loop_promotion_scopes.clone(),
+            active_async_completion: self.active_async_completion,
+        };
+        let saved_for_iteration_frame_slots = self.for_iteration_frame_slots.clone();
+        let saved_catch_native_text = self.catch_native_text.clone();
+        let saved_variable_hir_types = self.variable_hir_types.clone();
+        let saved_arena_variables = self.arena_variables.clone();
+        let result = self.compile_and_discard_promise_expression_inner(expression);
+        if result.is_err() {
+            self.variables = saved_variables;
+            self.replace_codegen_scope_context(saved_scope_context);
+            self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
+            self.catch_native_text = saved_catch_native_text;
+            self.variable_hir_types = saved_variable_hir_types;
+            self.arena_variables = saved_arena_variables;
+            if let Some(parent_block) = parent_block {
+                self.builder.position_at_end(parent_block);
+            }
+        }
+        result
+    }
+
+    fn compile_and_discard_promise_expression_inner(
+        &mut self,
+        expression: &HirExpr,
+    ) -> Result<(), String> {
+        if let Some((first, rest)) = self.split_discard_eval_then_prefix(expression) {
+            self.compile_and_discard_promise_expression(&first)?;
+            return self.compile_and_discard_promise_expression(&rest);
+        }
+        if let Some((test, consequent, alternate)) =
+            self.split_discard_promise_conditional(expression)
+        {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(function, "discard_promise_then");
+            let alternate_block = self.context.append_basic_block(function, "discard_promise_else");
+            let merge_block = self.context.append_basic_block(function, "discard_promise_end");
+            let condition = self.compile_expr(&test)?.into_int_value();
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(consequent_block);
+            self.compile_and_discard_promise_expression(&consequent)?;
+            let consequent_end = self.builder.get_insert_block()
+                .ok_or("discarded Promise conditional has no consequent block")?;
+            if consequent_end.get_terminator().is_some() {
+                return Err("discarded Promise conditional consequent has no live continuation".into());
+            }
+            self.builder.position_at_end(consequent_end);
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(alternate_block);
+            self.compile_and_discard_promise_expression(&alternate)?;
+            let alternate_end = self.builder.get_insert_block()
+                .ok_or("discarded Promise conditional has no alternate block")?;
+            if alternate_end.get_terminator().is_some() {
+                return Err("discarded Promise conditional alternate has no live continuation".into());
+            }
+            self.builder.position_at_end(alternate_end);
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(merge_block);
+            return Ok(());
+        }
+        let value = self.compile_expr(expression)?;
+        if !self.discard_expression_returns_owned(expression) {
+            return Ok(());
+        }
+        match self.expr_hir_type(expression) {
+            Some(HirType::Promise(_)) => {
+                self.builder.build_call(
+                    self.module.get_function("thaw_promise_destroy").unwrap(),
+                    &[value.into_pointer_value().into()],
+                    "release_discarded_promise",
+                ).map_err(|error| error.to_string())?;
+            }
+            Some(HirType::Union(members))
+                if members.iter().any(|member| matches!(member, HirType::Promise(_))) =>
+            {
+                let union = value.into_struct_value();
+                let tag = self.builder.build_extract_value(union, 0, "discarded_union_tag")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let function = self.current_function();
+                let merge_block = self.context.append_basic_block(function, "discarded_union_end");
+                let mut test_block = self.builder.get_insert_block()
+                    .ok_or("discarded Promise union has no current insertion block")?;
+                for (index, member) in members.iter().enumerate() {
+                    let HirType::Promise(resolved) = member else { continue; };
+                    self.builder.position_at_end(test_block);
+                    let selected = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        tag.get_type().const_int(index as u64, false),
+                        "discarded_union_is_promise",
+                    ).map_err(|error| error.to_string())?;
+                    let selected_block = self.context.append_basic_block(function, "discard_union_promise");
+                    let next_block = self.context.append_basic_block(function, "discard_union_next");
+                    self.builder.build_conditional_branch(selected, selected_block, next_block)
+                        .map_err(|error| error.to_string())?;
+
+                    self.builder.position_at_end(selected_block);
+                    let payload = self.builder.build_extract_value(
+                        union, 1, "discarded_union_payload",
+                    ).map_err(|error| error.to_string())?.into_int_value();
+                    let promise = self.unpack_union_payload(
+                        payload, &HirType::Promise(resolved.clone()),
+                    )?.into_pointer_value();
+                    self.builder.build_call(
+                        self.module.get_function("thaw_promise_destroy").unwrap(),
+                        &[promise.into()],
+                        "release_discarded_union_promise",
+                    ).map_err(|error| error.to_string())?;
+                    let selected_end = self.builder.get_insert_block()
+                        .ok_or("discarded Promise tag has no selected block")?;
+                    if selected_end.get_terminator().is_some() {
+                        return Err("discarded Promise tag has no live continuation".into());
+                    }
+                    self.builder.position_at_end(selected_end);
+                    self.builder.build_unconditional_branch(merge_block)
+                        .map_err(|error| error.to_string())?;
+                    test_block = next_block;
+                }
+                self.builder.position_at_end(test_block);
+                self.builder.build_unconditional_branch(merge_block)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(merge_block);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn compile_promise_union_for_escape(
+        &mut self,
+        expression: &HirExpr,
+        members: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(function, "escape_union_then");
+            let alternate_block = self.context.append_basic_block(function, "escape_union_else");
+            let merge_block = self.context.append_basic_block(function, "escape_union_end");
+            let condition = self.compile_expr(&test)?.into_int_value();
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(consequent_block);
+            let consequent_value = self.compile_promise_union_for_escape(&consequent, members)?;
+            let consequent_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(alternate_block);
+            let alternate_value = self.compile_promise_union_for_escape(&alternate, members)?;
+            let alternate_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(merge_block);
+            let union_ty = HirType::Union(members.to_vec());
+            let phi = self.builder.build_phi(self.basic_type(&union_ty)?, "escaped_promise_union")
+                .map_err(|error| error.to_string())?;
+            phi.add_incoming(&[(&consequent_value, consequent_end), (&alternate_value, alternate_end)]);
+            return Ok(phi.as_basic_value());
+        }
+        if let HirExpr::UnionInject(value, index, _) = expression {
+            if matches!(members.get(*index), Some(HirType::Promise(_))) {
+                let promise = self.compile_promise_for_consumption(value)?;
+                return self.build_union_value(promise.into(), *index, members);
+            }
+            return self.compile_expr(expression);
+        }
+
+        let has_promise = members.iter().any(|member| matches!(member, HirType::Promise(_)));
+        let union_value = self.compile_expr(expression)?;
+        if !has_promise || self.promise_expression_returns_owned(expression) {
+            return Ok(union_value);
+        }
+        let union = union_value.into_struct_value();
+        let tag = self.builder.build_extract_value(union, 0, "escaped_union_tag")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let mut incoming = Vec::new();
+        let function = self.current_function();
+        let merge_block = self.context.append_basic_block(function, "escaped_union_merge");
+        let mut test_block = self.builder.get_insert_block().unwrap();
+        for (index, member) in members.iter().enumerate() {
+            let HirType::Promise(resolved) = member else { continue; };
+            self.builder.position_at_end(test_block);
+            let selected = self.builder.build_int_compare(
+                IntPredicate::EQ, tag, tag.get_type().const_int(index as u64, false),
+                "escaped_union_is_promise",
+            ).map_err(|error| error.to_string())?;
+            let selected_block = self.context.append_basic_block(function, "escape_union_promise");
+            let next_block = self.context.append_basic_block(function, "escape_union_next");
+            self.builder.build_conditional_branch(selected, selected_block, next_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(selected_block);
+            let payload = self.builder.build_extract_value(union, 1, "escaped_union_payload")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let promise = self.unpack_union_payload(
+                payload, &HirType::Promise(resolved.clone()),
+            )?.into_pointer_value();
+            let promise = self.retain_borrowed_promise_for_consumption(expression, promise)?;
+            let rebuilt = self.build_union_value(promise.into(), index, members)?;
+            let rebuilt_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            incoming.push((rebuilt, rebuilt_end));
+            test_block = next_block;
+        }
+        self.builder.position_at_end(test_block);
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        incoming.push((union_value, test_block));
+        self.builder.position_at_end(merge_block);
+        let union_ty = HirType::Union(members.to_vec());
+        let phi = self.builder.build_phi(self.basic_type(&union_ty)?, "escaped_union")
+            .map_err(|error| error.to_string())?;
+        let incoming_refs = incoming.iter()
+            .map(|(value, block)| (value as &dyn BasicValue<'ctx>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&incoming_refs);
+        Ok(phi.as_basic_value())
+    }
+
+    pub(super) fn compile_native_promise_result_for_return(
+        &mut self,
+        expression: &HirExpr,
+        result_type: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let parent_block = self.builder.get_insert_block();
+        let saved_variables = self.variables.clone();
+        let saved_scope_context = CodegenScopeContext {
+            catches: CatchContext { scopes: self.catch_stack.clone() },
+            stack_promise_slots: self.stack_promise_slots.clone(),
+            loops: self.loop_scopes.clone(),
+            loop_promotions: self.loop_promotion_scopes.clone(),
+            active_async_completion: self.active_async_completion,
+        };
+        let saved_for_iteration_frame_slots = self.for_iteration_frame_slots.clone();
+        let saved_catch_native_text = self.catch_native_text.clone();
+        let saved_variable_hir_types = self.variable_hir_types.clone();
+        let saved_arena_variables = self.arena_variables.clone();
+        let result = self.compile_native_promise_result_for_return_inner(expression, result_type)
+            .and_then(|value| match value {
+                Some(value) => Ok(value),
+                None => {
+                    let function = self.current_function();
+                    let return_sink = self.context.append_basic_block(
+                        function,
+                        "return_promise_no_normal_value",
+                    );
+                    self.builder.position_at_end(return_sink);
+                    Ok(self.basic_type(result_type)?.const_zero())
+                }
+            });
+        if result.is_err() {
+            self.variables = saved_variables;
+            self.replace_codegen_scope_context(saved_scope_context);
+            self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
+            self.catch_native_text = saved_catch_native_text;
+            self.variable_hir_types = saved_variable_hir_types;
+            self.arena_variables = saved_arena_variables;
+            if let Some(parent_block) = parent_block {
+                self.builder.position_at_end(parent_block);
+            }
+        }
+        result
+    }
+
+    fn return_block_reachable_from_entry(&self, target: BasicBlock<'ctx>) -> bool {
+        let function = self.current_function();
+        let Some(entry) = function.get_first_basic_block() else { return false; };
+        let mut pending = vec![entry];
+        let mut visited = HashSet::new();
+        while let Some(block) = pending.pop() {
+            if block == target { return true; }
+            if !visited.insert(block) { continue; }
+            let Some(terminator) = block.get_terminator() else { continue; };
+            for index in 0..terminator.get_num_operands() {
+                if let Some(successor) = terminator
+                    .get_operand(index)
+                    .and_then(|operand| operand.block())
+                {
+                    if successor.get_parent() == Some(function) {
+                        pending.push(successor);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn return_expression_always_throws(&self, expression: &HirExpr) -> bool {
+        match expression {
+            HirExpr::ThrowValue(..) => true,
+            HirExpr::EvalThen(first, rest) => {
+                self.return_expression_always_throws(first)
+                    || self.return_expression_always_throws(rest)
+            }
+            HirExpr::Conditional(test, consequent, alternate, _) => {
+                self.return_expression_always_throws(test)
+                    || (self.return_expression_always_throws(consequent)
+                        && self.return_expression_always_throws(alternate))
+            }
+            HirExpr::TypedClosure(_, inner)
+            | HirExpr::UnionInject(inner, _, _)
+            | HirExpr::UnionValue(inner, _, _)
+            | HirExpr::OptionalValue(inner, _)
+            | HirExpr::NullableValue(inner, _)
+            | HirExpr::NullishValue(inner, _)
+            | HirExpr::OptionalSome(inner, _)
+            | HirExpr::NullableSome(inner, _)
+            | HirExpr::NullishSome(inner, _) => {
+                self.return_expression_always_throws(inner)
+            }
+            _ => false,
+        }
+    }
+
+    fn close_return_normalizer_block(&mut self, block: BasicBlock<'ctx>) -> Result<(), String> {
+        if block.get_terminator().is_none() {
+            self.builder.position_at_end(block);
+            self.builder.build_unreachable().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn finish_return_normalizer_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let block = self.builder.get_insert_block()
+            .ok_or("return Promise value has no completion block")?;
+        if block.get_terminator().is_none() && self.return_block_reachable_from_entry(block) {
+            Ok(Some(value))
+        } else {
+            self.close_return_normalizer_block(block)?;
+            Ok(None)
+        }
+    }
+
+    fn compile_return_promise_union_value_for_escape(
+        &mut self,
+        expression: &HirExpr,
+        union_value: BasicValueEnum<'ctx>,
+        members: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let has_promise = members.iter().any(|member| matches!(member, HirType::Promise(_)));
+        if !has_promise || self.promise_expression_returns_owned(expression) {
+            return Ok(union_value);
+        }
+        let union = union_value.into_struct_value();
+        let tag = self.builder.build_extract_value(union, 0, "return_union_tag")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let mut incoming = Vec::new();
+        let function = self.current_function();
+        let merge_block = self.context.append_basic_block(
+            function,
+            "return_union_escape_merge",
+        );
+        let mut test_block = self.builder.get_insert_block()
+            .ok_or("return Promise union has no current insertion block")?;
+        for (index, member) in members.iter().enumerate() {
+            let HirType::Promise(resolved) = member else { continue; };
+            self.builder.position_at_end(test_block);
+            let selected = self.builder.build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                tag.get_type().const_int(index as u64, false),
+                "return_union_is_promise",
+            ).map_err(|error| error.to_string())?;
+            let selected_block = self.context.append_basic_block(
+                function,
+                "return_union_promise",
+            );
+            let next_block = self.context.append_basic_block(
+                function,
+                "return_union_next",
+            );
+            self.builder.build_conditional_branch(selected, selected_block, next_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(selected_block);
+            let payload = self.builder.build_extract_value(
+                union,
+                1,
+                "return_union_payload",
+            ).map_err(|error| error.to_string())?.into_int_value();
+            let promise = self.unpack_union_payload(
+                payload,
+                &HirType::Promise(resolved.clone()),
+            )?.into_pointer_value();
+            let promise = self.retain_borrowed_promise_for_consumption(expression, promise)?;
+            let rebuilt = self.build_union_value(promise.into(), index, members)?;
+            let rebuilt_end = self.builder.get_insert_block()
+                .ok_or("return Promise union retain has no ready block")?;
+            if rebuilt_end.get_terminator().is_some()
+                || !self.return_block_reachable_from_entry(rebuilt_end)
+            {
+                self.close_return_normalizer_block(rebuilt_end)?;
+                test_block = next_block;
+                continue;
+            }
+            self.builder.position_at_end(rebuilt_end);
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            incoming.push((rebuilt, rebuilt_end));
+            test_block = next_block;
+        }
+        self.builder.position_at_end(test_block);
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        incoming.push((union_value, test_block));
+        self.builder.position_at_end(merge_block);
+        let union_ty = HirType::Union(members.to_vec());
+        let phi = self.builder.build_phi(
+            self.basic_type(&union_ty)?,
+            "returned_promise_union",
+        ).map_err(|error| error.to_string())?;
+        let incoming_refs = incoming.iter()
+            .map(|(value, block)| (value as &dyn BasicValue<'ctx>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&incoming_refs);
+        Ok(phi.as_basic_value())
+    }
+
+    fn compile_native_promise_result_for_return_inner(
+        &mut self,
+        expression: &HirExpr,
+        result_type: &HirType,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let has_direct_promise_output = matches!(result_type, HirType::Promise(_))
+            || matches!(result_type, HirType::Union(members)
+                if members.iter().any(|member| matches!(member, HirType::Promise(_))));
+        if !has_direct_promise_output {
+            return self.compile_expr(expression).map(Some);
+        }
+
+        if let Some((first, rest)) = self.split_discard_eval_then_prefix(expression) {
+            if self.promise_expression_needs_discard(&first) {
+                self.compile_and_discard_promise_expression(&first)?;
+            } else {
+                self.compile_expr(&first)?;
+            }
+            let first_end = self.builder.get_insert_block()
+                .ok_or("return Promise EvalThen prefix has no completion block")?;
+            if first_end.get_terminator().is_some()
+                || !self.return_block_reachable_from_entry(first_end)
+            {
+                self.close_return_normalizer_block(first_end)?;
+                return Ok(None);
+            }
+            return self.compile_native_promise_result_for_return_inner(&rest, result_type);
+        }
+
+        if let Some((test, consequent, alternate)) =
+            self.split_discard_promise_conditional(expression)
+        {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let condition = self.compile_expr(&test)?.into_int_value();
+            let test_end = self.builder.get_insert_block()
+                .ok_or("return Promise conditional has no test block")?;
+            if test_end.get_terminator().is_some()
+                || !self.return_block_reachable_from_entry(test_end)
+            {
+                self.close_return_normalizer_block(test_end)?;
+                return Ok(None);
+            }
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(
+                function,
+                "return_promise_normalize_then",
+            );
+            let alternate_block = self.context.append_basic_block(
+                function,
+                "return_promise_normalize_else",
+            );
+            let merge_block = self.context.append_basic_block(
+                function,
+                "return_promise_normalize_end",
+            );
+            self.builder.position_at_end(test_end);
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+
+            let mut incoming = Vec::with_capacity(2);
+            self.builder.position_at_end(consequent_block);
+            let consequent_value = self.compile_native_promise_result_for_return_inner(
+                &consequent,
+                result_type,
+            )?;
+            if let Some(consequent_value) = consequent_value {
+                let consequent_end = self.builder.get_insert_block()
+                    .ok_or("return Promise conditional has no consequent block")?;
+                if consequent_end.get_terminator().is_none()
+                    && self.return_block_reachable_from_entry(consequent_end)
+                {
+                    self.builder.position_at_end(consequent_end);
+                    self.builder.build_unconditional_branch(merge_block)
+                        .map_err(|error| error.to_string())?;
+                    incoming.push((consequent_value, consequent_end));
+                } else {
+                    self.close_return_normalizer_block(consequent_end)?;
+                }
+            }
+
+            self.builder.position_at_end(alternate_block);
+            let alternate_value = self.compile_native_promise_result_for_return_inner(
+                &alternate,
+                result_type,
+            )?;
+            if let Some(alternate_value) = alternate_value {
+                let alternate_end = self.builder.get_insert_block()
+                    .ok_or("return Promise conditional has no alternate block")?;
+                if alternate_end.get_terminator().is_none()
+                    && self.return_block_reachable_from_entry(alternate_end)
+                {
+                    self.builder.position_at_end(alternate_end);
+                    self.builder.build_unconditional_branch(merge_block)
+                        .map_err(|error| error.to_string())?;
+                    incoming.push((alternate_value, alternate_end));
+                } else {
+                    self.close_return_normalizer_block(alternate_end)?;
+                }
+            }
+
+            if incoming.is_empty() {
+                self.builder.position_at_end(merge_block);
+                self.builder.build_unreachable().map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+            self.builder.position_at_end(merge_block);
+            let phi = self.builder.build_phi(
+                self.basic_type(result_type)?,
+                "returned_promise_result",
+            ).map_err(|error| error.to_string())?;
+            let incoming_refs = incoming.iter()
+                .map(|(value, block)| (value as &dyn BasicValue<'ctx>, *block))
+                .collect::<Vec<_>>();
+            phi.add_incoming(&incoming_refs);
+            return Ok(Some(phi.as_basic_value()));
+        }
+
+        if self.return_expression_always_throws(expression) {
+            self.compile_expr(expression)?;
+            let block = self.builder.get_insert_block()
+                .ok_or("return Promise throw has no fallback continuation")?;
+            self.close_return_normalizer_block(block)?;
+            return Ok(None);
+        }
+
+        if self.discard_expression_returns_owned(expression) {
+            let value = self.compile_expr(expression)?;
+            return self.finish_return_normalizer_value(value);
+        }
+        match result_type {
+            HirType::Promise(_) => {
+                let value = self.compile_expr(expression)?;
+                let block = self.builder.get_insert_block()
+                    .ok_or("return Promise leaf has no completion block")?;
+                if block.get_terminator().is_some()
+                    || !self.return_block_reachable_from_entry(block)
+                {
+                    self.close_return_normalizer_block(block)?;
+                    return Ok(None);
+                }
+                let promise = self.retain_borrowed_promise_for_consumption(
+                    expression,
+                    value.into_pointer_value(),
+                )?;
+                self.finish_return_normalizer_value(promise.into())
+            }
+            HirType::Union(members)
+                if members.iter().any(|member| matches!(member, HirType::Promise(_))) =>
+            {
+                if let HirExpr::UnionInject(value, index, _) = expression {
+                    let injected = self.compile_expr(value)?;
+                    let block = self.builder.get_insert_block()
+                        .ok_or("return Promise union injection has no completion block")?;
+                    if block.get_terminator().is_some()
+                        || !self.return_block_reachable_from_entry(block)
+                    {
+                        self.close_return_normalizer_block(block)?;
+                        return Ok(None);
+                    }
+                    let injected = if matches!(members.get(*index), Some(HirType::Promise(_))) {
+                        self.retain_borrowed_promise_for_consumption(
+                            value,
+                            injected.into_pointer_value(),
+                        )?.into()
+                    } else {
+                        injected
+                    };
+                    let union = self.build_union_value(injected, *index, members)?;
+                    return self.finish_return_normalizer_value(union);
+                }
+
+                let union_value = self.compile_expr(expression)?;
+                let block = self.builder.get_insert_block()
+                    .ok_or("return Promise union leaf has no completion block")?;
+                if block.get_terminator().is_some()
+                    || !self.return_block_reachable_from_entry(block)
+                {
+                    self.close_return_normalizer_block(block)?;
+                    return Ok(None);
+                }
+                let escaped = self.compile_return_promise_union_value_for_escape(
+                    expression,
+                    union_value,
+                    members,
+                )?;
+                self.finish_return_normalizer_value(escaped)
+            }
+            _ => {
+                let value = self.compile_expr(expression)?;
+                self.finish_return_normalizer_value(value)
+            }
+        }
+    }
+
+    pub(super) fn compile_and_store_stack_promise_expression(
+        &mut self,
+        slot: PointerValue<'ctx>,
+        expression: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(function, "stack_promise_then");
+            let alternate_block = self.context.append_basic_block(function, "stack_promise_else");
+            let merge_block = self.context.append_basic_block(function, "stack_promise_end");
+            let condition = self.compile_expr(&test)?.into_int_value();
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(consequent_block);
+            let consequent_value = self.compile_and_store_stack_promise_expression(slot, &consequent)?;
+            let consequent_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(alternate_block);
+            let alternate_value = self.compile_and_store_stack_promise_expression(slot, &alternate)?;
+            let alternate_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(merge_block);
+            let phi = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()),
+                "stack_stored_promise").map_err(|error| error.to_string())?;
+            phi.add_incoming(&[(&consequent_value, consequent_end), (&alternate_value, alternate_end)]);
+            return Ok(phi.as_basic_value());
+        }
+        let flag = *self.stack_promise_slots.get(&slot)
+            .ok_or("Promise stack slot was not registered as an owner")?;
+        let value = self.compile_expr(expression)?.into_pointer_value();
+        let value = self.retain_borrowed_promise_for_consumption(expression, value)?;
+        let previous_owned = self.builder.build_load(self.context.bool_type(), flag, "old_stack_promise_owned")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let function = self.current_function();
+        let release_old = self.context.append_basic_block(function, "release_replaced_stack_promise");
+        let replace_without_old = self.context.append_basic_block(function, "replace_unowned_stack_promise");
+        let store_done = self.context.append_basic_block(function, "stack_promise_replace_done");
+        self.builder.build_conditional_branch(previous_owned, release_old, replace_without_old)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(release_old);
+        let old = self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
+            slot, "replaced_stack_promise").map_err(|error| error.to_string())?.into_pointer_value();
+        self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
+        self.builder.build_store(flag, self.context.bool_type().const_all_ones())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[old.into()], "release_replaced_stack_promise_owner")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(store_done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(replace_without_old);
+        self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
+        self.builder.build_store(flag, self.context.bool_type().const_all_ones())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(store_done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(store_done);
+        Ok(value.into())
+    }
+
     fn compile_promise_resolver(
         &mut self,
         resolved: &HirType,
         reject: bool,
         assimilates: bool,
         typed_rejection: bool,
+        mixed: bool,
     ) -> Result<FunctionValue<'ctx>, String> {
         let name = format!(
             "__thaw_promise_{}_{}",
@@ -14,12 +1187,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.next_lambda += 1;
         let param = if reject {
             HirType::Str
+        } else if mixed && matches!(resolved, HirType::Void | HirType::Undefined) {
+            HirType::Optional(Box::new(HirType::Promise(Box::new(resolved.clone()))))
+        } else if mixed && resolved == &HirType::Null {
+            HirType::Nullable(Box::new(HirType::Promise(Box::new(HirType::Null))))
+        } else if mixed {
+            HirType::Union(vec![
+                resolved.clone(),
+                HirType::Promise(Box::new(resolved.clone())),
+            ])
         } else if assimilates {
             HirType::Promise(Box::new(resolved.clone()))
         } else {
             resolved.clone()
         };
-        let params = if !reject && !assimilates && resolved == &HirType::Void {
+        let params = if !reject && !assimilates && !mixed && resolved == &HirType::Void {
             &[][..]
         } else {
             std::slice::from_ref(&param)
@@ -36,31 +1218,82 @@ impl<'ctx> HirCompiler<'ctx> {
             .context
             .i64_type()
             .const_int(CLOSURE_CAPTURE_BASE, false);
-        let promise_slot = unsafe {
+        let state_slot = unsafe {
             self.builder
                 .build_in_bounds_gep(
                     self.context.i8_type(),
                     environment,
                     &[offset],
-                    "promise_capture",
+                    "resolver_state_capture",
                 )
                 .map_err(|error| error.to_string())?
         };
-        let promise = self
+        let state = self
             .builder
             .build_load(
                 self.context.ptr_type(AddressSpace::default()),
-                promise_slot,
-                "promise",
+                state_slot,
+                "resolver_state",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let called_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    state,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "resolver_called_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let called = self
+            .builder
+            .build_load(self.context.i8_type(), called_slot, "resolver_called")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let first_call = self
+            .context
+            .append_basic_block(function, "resolver_first_call");
+        let complete = self.context.append_basic_block(function, "resolver_complete");
+        let uncalled = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                called,
+                self.context.i8_type().const_zero(),
+                "resolver_uncalled",
             )
             .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(uncalled, first_call, complete)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(first_call);
+        self.builder
+            .build_store(called_slot, self.context.i8_type().const_int(1, false))
+            .map_err(|error| error.to_string())?;
+        let promise = self
+            .builder
+            .build_load(self.context.ptr_type(AddressSpace::default()), state, "promise")
+            .map_err(|error| error.to_string())?;
+        if mixed && !reject {
+            self.compile_mixed_promise_settlement(function, promise.into_pointer_value(), resolved)?;
+            self.builder
+                .build_unconditional_branch(complete)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(complete);
+            self.builder.build_return(None).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(return_block);
+            return Ok(function);
+        }
         let payload = if !reject && !assimilates && resolved == &HirType::Void {
             self.context.ptr_type(AddressSpace::default()).const_null()
         } else if reject || assimilates {
             function.get_nth_param(1).unwrap().into_pointer_value()
         } else {
             let value = function.get_nth_param(1).unwrap();
-            let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "promise_result")?;
+            let value_type = self.basic_type(resolved)?;
+            let slot = self.build_arena_cell(&self.builder, value_type, "promise_result")?;
             self.builder
                 .build_store(slot, value)
                 .map_err(|error| error.to_string())?;
@@ -72,7 +1305,17 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_promise_resolve"
         };
         if reject {
+            // The reject closure's argument is declared HirType::Str. Record
+            // that producer-proven NativeStr before settlement, including
+            // computed strings and values converted by Promise.reject.
+            // Public runtime rejection pointers remain opaque.
             if !typed_rejection {
+                // This resolver owns only a string packet. It must not attach
+                // a native descriptor left by an earlier typed producer.
+                self.clear_pending_native_text()?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
@@ -87,6 +1330,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
             }
+            self.mark_pending_native_text(payload)?;
             self.reject_promise_with_pending_exception(
                 promise.into_pointer_value(),
                 payload,
@@ -101,9 +1345,110 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        self.builder
+            .build_unconditional_branch(complete)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(complete);
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(return_block);
         Ok(function)
+    }
+
+    fn compile_mixed_promise_settlement(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        promise: PointerValue<'ctx>,
+        resolved: &HirType,
+    ) -> Result<(), String> {
+        let argument = function.get_nth_param(1).unwrap().into_struct_value();
+        let discriminator = self.builder
+            .build_extract_value(argument, 0, "resolve_kind")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let is_adoption = if matches!(resolved, HirType::Void | HirType::Undefined | HirType::Null) {
+            discriminator
+        } else {
+            self.builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    discriminator,
+                    discriminator.get_type().const_int(1, false),
+                    "resolve_is_adoption",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let adopt = self.context.append_basic_block(function, "resolve_adopt");
+        let plain = self.context.append_basic_block(function, "resolve_plain");
+        let done = self.context.append_basic_block(function, "resolve_done");
+        self.builder
+            .build_conditional_branch(is_adoption, adopt, plain)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(adopt);
+        let adopted = if matches!(resolved, HirType::Void | HirType::Undefined | HirType::Null) {
+            self.builder
+                .build_extract_value(argument, 1, "resolve_promise")
+                .map_err(|error| error.to_string())?
+                .into_pointer_value()
+        } else {
+            let bits = self.builder
+                .build_extract_value(argument, 1, "resolve_promise_bits")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            self.unpack_union_payload(bits, &HirType::Promise(Box::new(resolved.clone())))?
+                .into_pointer_value()
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_adopt").unwrap(),
+                &[promise.into(), adopted.into()],
+                "adopt_resolve_value",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(plain);
+        let payload = if resolved == &HirType::Void {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        } else if matches!(resolved, HirType::Undefined | HirType::Null) {
+            let slot = self.build_arena_cell(
+                &self.builder, self.basic_type(resolved)?, "mixed_undefined",
+            )?;
+            let absence = if resolved == &HirType::Null {
+                self.context.bool_type().const_int(1, false).into()
+            } else {
+                self.compile_zero_value(resolved)?
+            };
+            self.builder
+                .build_store(slot, absence)
+                .map_err(|error| error.to_string())?;
+            slot
+        } else {
+            let bits = self.builder
+                .build_extract_value(argument, 1, "resolve_value_bits")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            let value = self.unpack_union_payload(bits, resolved)?;
+            let slot = self.build_arena_cell(&self.builder, self.basic_type(resolved)?, "mixed_result")?;
+            self.builder
+                .build_store(slot, value)
+                .map_err(|error| error.to_string())?;
+            slot
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_resolve").unwrap(),
+                &[promise.into(), payload.into()],
+                "settle_resolve_value",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
     }
 
     fn compile_promise_new(
@@ -112,7 +1457,13 @@ impl<'ctx> HirCompiler<'ctx> {
         resolved: &HirType,
         assimilates: bool,
         typed_rejection: bool,
+        mixed_resolver: Option<&HirType>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // `new Promise(nonCallable)` throws synchronously. Evaluate the
+        // executor expression once before allocating the Promise, and do not
+        // dereference an absent Function closure.
+        let executor = self.compile_expr(executor)?.into_pointer_value();
+        self.guard_callable_closure(executor, "Promise executor is not a function")?;
         let promise = self
             .builder
             .build_call(
@@ -125,12 +1476,107 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap()
             .into_pointer_value();
-        let executor = self.compile_expr(executor)?.into_pointer_value();
-        let resolve_fn = self.compile_promise_resolver(resolved, false, assimilates, false)?;
+        let function = self.current_function();
+        let missing_promise = self.context.append_basic_block(function, "promise_new_failed");
+        let have_promise = self.context.append_basic_block(function, "promise_new_ready");
+        let promise_is_null = self.builder.build_is_null(promise, "promise_new_missing")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(promise_is_null, missing_promise, have_promise)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(missing_promise);
+        self.compile_throw_builtin_error("Error", "Promise allocation failed")?;
+        self.builder.position_at_end(have_promise);
+        // The two escaping resolver closures and the executor's thrown-error path
+        // must share the same first-call decision while adoption is still pending.
+        let resolver_state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.context.i64_type().const_int(16, false).into(),
+                    self.context.i64_type().const_int(8, false).into(),
+                ],
+                "resolver_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("resolver state allocation returned no value")?
+            .into_pointer_value();
+        let missing_state = self.context.append_basic_block(function, "resolver_state_failed");
+        let have_state = self.context.append_basic_block(function, "resolver_state_ready");
+        let state_is_null = self.builder.build_is_null(resolver_state, "resolver_state_missing")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(state_is_null, missing_state, have_state)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(missing_state);
+        self.builder.build_call(
+            self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "destroy_unescaped_promise",
+        ).map_err(|error| error.to_string())?;
+        self.compile_throw_builtin_error("Error", "Promise resolver allocation failed")?;
+        self.builder.position_at_end(have_state);
+        self.builder
+            .build_store(resolver_state, promise)
+            .map_err(|error| error.to_string())?;
+        let called_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    resolver_state,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "resolver_called_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(called_slot, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        let resolve_fn = self.compile_promise_resolver(
+            resolved, false, assimilates, false, mixed_resolver.is_some(),
+        )?;
         let reject_fn =
-            self.compile_promise_resolver(resolved, true, false, typed_rejection)?;
-        let resolve = self.allocate_special_closure(resolve_fn, promise, "resolve_closure")?;
-        let reject = self.allocate_special_closure(reject_fn, promise, "reject_closure")?;
+            self.compile_promise_resolver(resolved, true, false, typed_rejection, false)?;
+        let resolve_params = if let Some(resolver) = mixed_resolver {
+            match resolver {
+                HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => {
+                    params.clone()
+                }
+                _ => return Err("mixed Promise resolver must be a function".into()),
+            }
+        } else if assimilates {
+            vec![HirType::Promise(Box::new(resolved.clone()))]
+        } else if resolved == &HirType::Void {
+            Vec::new()
+        } else {
+            vec![resolved.clone()]
+        };
+        let resolve = self.allocate_special_closure(resolve_fn, resolver_state, &resolve_params, "resolve_closure")?;
+        let missing_resolve = self.builder.build_is_null(resolve, "missing_resolve_closure")
+            .map_err(|error| error.to_string())?;
+        let resolve_failed = self.context.append_basic_block(function, "promise_resolve_closure_failed");
+        let resolve_ready = self.context.append_basic_block(function, "promise_resolve_closure_ready");
+        self.builder.build_conditional_branch(missing_resolve, resolve_failed, resolve_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(resolve_failed);
+        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "destroy_failed_resolve_promise")
+            .map_err(|error| error.to_string())?;
+        self.compile_throw_builtin_error("Error", "Promise resolve closure allocation failed")?;
+        self.builder.position_at_end(resolve_ready);
+        let reject = self.allocate_special_closure(reject_fn, resolver_state, &[HirType::Str], "reject_closure")?;
+        let missing_reject = self.builder.build_is_null(reject, "missing_reject_closure")
+            .map_err(|error| error.to_string())?;
+        let reject_failed = self.context.append_basic_block(function, "promise_reject_closure_failed");
+        let reject_ready = self.context.append_basic_block(function, "promise_reject_closure_ready");
+        self.builder.build_conditional_branch(missing_reject, reject_failed, reject_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(reject_failed);
+        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "destroy_failed_reject_promise")
+            .map_err(|error| error.to_string())?;
+        self.compile_throw_builtin_error("Error", "Promise reject closure allocation failed")?;
+        self.builder.position_at_end(reject_ready);
         let code = self
             .builder
             .build_load(
@@ -140,14 +1586,9 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let resolve_params = if assimilates {
-            vec![HirType::Promise(Box::new(resolved.clone()))]
-        } else if resolved == &HirType::Void {
-            Vec::new()
-        } else {
-            vec![resolved.clone()]
-        };
-        let resolve_ty = HirType::Function(resolve_params, Box::new(HirType::Void));
+        let resolve_ty = mixed_resolver.cloned().unwrap_or_else(|| {
+            HirType::Function(resolve_params, Box::new(HirType::Void))
+        });
         let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let executor_type = self.function_type(&[resolve_ty, reject_ty], &HirType::Void)?;
         self.builder
@@ -188,13 +1629,41 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(has_error, rejected, complete)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(rejected);
+        let called = self
+            .builder
+            .build_load(self.context.i8_type(), called_slot, "executor_resolver_called")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let reject_first = self.context.append_basic_block(function, "executor_reject_first");
+        let clear_error = self.context.append_basic_block(function, "executor_clear_error");
+        let uncalled = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                called,
+                self.context.i8_type().const_zero(),
+                "executor_resolver_uncalled",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(uncalled, reject_first, clear_error)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(reject_first);
+        self.builder
+            .build_store(called_slot, self.context.i8_type().const_int(1, false))
+            .map_err(|error| error.to_string())?;
         self.reject_promise_with_pending_exception(promise, pending, "reject_executor_throw")?;
+        self.builder
+            .build_unconditional_branch(clear_error)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(clear_error);
         self.builder
             .build_store(
                 pending_slot,
                 self.context.ptr_type(AddressSpace::default()).const_null(),
             )
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder
             .build_store(
                 self.pending_exception_object().as_pointer_value(),
@@ -224,8 +1693,41 @@ impl<'ctx> HirCompiler<'ctx> {
         on_rejected: bool,
         flatten: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let source = self.compile_expr(source)?.into_pointer_value();
+        // The chain consumes its input handle: a borrowed source (a field or
+        // variable) must be retained first.
+        let source_promise = self.compile_expr(source)?.into_pointer_value();
+        let source = self.retain_borrowed_promise_for_consumption(source, source_promise)?;
         let closure = self.compile_expr(callback)?.into_pointer_value();
+        let adapter = self.compile_promise_chain_adapter(input, output, on_rejected, flatten)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_chain").unwrap(),
+                &[
+                    source.into(),
+                    adapter.as_global_value().as_pointer_value().into(),
+                    closure.into(),
+                    self.context
+                        .i8_type()
+                        .const_int(u64::from(on_rejected), false)
+                        .into(),
+                ],
+                "promise_chain",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_promise_chain returned no value".to_string())
+    }
+
+    /// Emits the selected settlement adapter without subscribing a source.
+    /// Both-handler `.then` uses this twice, then makes one native chain.
+    fn compile_promise_chain_adapter(
+        &mut self,
+        input: &HirType,
+        output: &HirType,
+        on_rejected: bool,
+        flatten: bool,
+    ) -> Result<FunctionValue<'ctx>, String> {
         let adapter_name = format!("__thaw_promise_chain_{}", self.next_lambda);
         self.next_lambda += 1;
         let ptr = self.context.ptr_type(AddressSpace::default());
@@ -250,6 +1752,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 ("thaw_promise_exception_i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL)),
                 ("thaw_promise_exception_bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL)),
                 ("thaw_promise_exception_object", self.pending_exception_object()),
+                ("thaw_promise_exception_aggregate_errors", self.pending_exception_aggregate_errors()),
             ] {
                 let value = self.builder
                     .build_call(
@@ -266,11 +1769,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
             }
         }
+        let rejected_text = if on_rejected {
+            let native_text = self.builder.build_call(
+                self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+                &[source_promise.into()], "chain_native_text",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("native text copy returned no value")?.into_pointer_value();
+            let has_text = self.builder.build_is_not_null(native_text, "chain_has_native_text")
+                .map_err(|error| error.to_string())?;
+            let text = self.builder.build_select(has_text, native_text, result, "chain_rejection_text")
+                .map_err(|error| error.to_string())?;
+            self.mark_pending_native_text(native_text)?;
+            Some(text)
+        } else { None };
         let callback_input = if on_rejected { &HirType::Str } else { input };
         let value = if !on_rejected && callback_input == &HirType::Void {
             None
         } else if on_rejected {
-            Some(result.into())
+            Some(rejected_text.expect("rejection text was captured"))
         } else {
             Some(
                 self.builder
@@ -333,8 +1849,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pending_slot, ptr.const_null())
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(succeeded);
+        if on_rejected {
+            self.clear_pending_native_text()?;
+        }
         if flatten {
             self.builder
                 .build_call(
@@ -367,24 +1887,52 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(return_block);
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_promise_chain").unwrap(),
-                &[
-                    source.into(),
-                    adapter.as_global_value().as_pointer_value().into(),
-                    closure.into(),
-                    self.context
-                        .i8_type()
-                        .const_int(u64::from(on_rejected), false)
-                        .into(),
-                ],
-                "promise_chain",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_promise_chain returned no value".to_string())
+        Ok(adapter)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_promise_then_both(
+        &mut self,
+        source: &HirExpr,
+        fulfilled: Option<&HirExpr>,
+        rejected: &HirExpr,
+        input: &HirType,
+        output: &HirType,
+        flatten_fulfilled: bool,
+        flatten_rejected: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // These source-visible expressions run once, in member-call order,
+        // before either adapter subscribes to the original promise.
+        let source_promise = self.compile_expr(source)?.into_pointer_value();
+        let source = self.retain_borrowed_promise_for_consumption(source, source_promise)?;
+        let fulfilled_closure = fulfilled
+            .map(|callback| self.compile_expr(callback).map(BasicValueEnum::into_pointer_value))
+            .transpose()?;
+        let rejected_closure = self.compile_expr(rejected)?.into_pointer_value();
+        let fulfilled_adapter = if fulfilled_closure.is_some() {
+            Some(self.compile_promise_chain_adapter(input, output, false, flatten_fulfilled)?)
+        } else {
+            None
+        };
+        let rejected_adapter =
+            self.compile_promise_chain_adapter(input, output, true, flatten_rejected)?;
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let fulfilled_code = fulfilled_adapter
+            .map(|adapter| adapter.as_global_value().as_pointer_value())
+            .unwrap_or(ptr.const_null());
+        let fulfilled_context = fulfilled_closure.unwrap_or(ptr.const_null());
+        self.builder.build_call(
+            self.module.get_function("thaw_promise_chain_both").unwrap(),
+            &[
+                source.into(),
+                fulfilled_code.into(),
+                fulfilled_context.into(),
+                rejected_adapter.as_global_value().as_pointer_value().into(),
+                rejected_closure.into(),
+            ],
+            "promise_chain_both",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or_else(|| "thaw_promise_chain_both returned no value".to_string())
     }
 
     fn compile_promise_finally(
@@ -395,6 +1943,7 @@ impl<'ctx> HirCompiler<'ctx> {
         callback_return: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let source_promise = self.compile_expr(source)?.into_pointer_value();
+        let source_promise = self.retain_borrowed_promise_for_consumption(source, source_promise)?;
         let closure = self.compile_expr(callback)?.into_pointer_value();
         let name = format!("__thaw_promise_finally_{}", self.next_lambda);
         self.next_lambda += 1;
@@ -461,6 +2010,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pending_slot, ptr.const_null())
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(succeeded);
         if matches!(callback_return, HirType::Promise(_)) {
@@ -494,10 +2044,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into(),
                 );
             }
+            args.push(source.into());
             self.builder
                 .build_call(
                     self.module
-                        .get_function("thaw_promise_finally_adopt")
+                        .get_function("thaw_promise_finally_adopt_with_source")
                         .unwrap(),
                     &args,
                     "wait_finally_promise",
@@ -576,6 +2127,32 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "thaw_sleep_ms did not return a promise".to_string())
     }
 
+    fn compile_promise_input_words(
+        &mut self, words: usize, name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        if words == 0 { return Ok(pointer.const_null()); }
+        let bytes = words.checked_mul(8).ok_or("Promise input storage size overflow")?;
+        let i64_type = self.context.i64_type();
+        let storage = self.builder.build_call(
+            self.module.get_function("thaw_arena_alloc").unwrap(),
+            &[i64_type.const_int(bytes as u64, false).into(), i64_type.const_int(8, false).into()],
+            name,
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("Promise input allocation returned void")?.into_pointer_value();
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "promise_input_allocation_failed");
+        let ready = self.context.append_basic_block(function, "promise_input_allocation_ready");
+        let missing = self.builder.build_is_null(storage, "promise_input_missing")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(missing, failed, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.compile_throw_builtin_error("Error", "Promise input allocation failed")?;
+        self.builder.position_at_end(ready);
+        Ok(storage)
+    }
+
     fn compile_promise_all(
         &mut self,
         args: &[HirExpr],
@@ -586,22 +2163,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let promises = if args.is_empty() {
             ptr_type.const_null()
         } else {
-            let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-            let storage = self
-                .builder
-                .build_call(
-                    arena_alloc,
-                    &[
-                        i64_type.const_int((args.len() * 8) as u64, false).into(),
-                        i64_type.const_int(8, false).into(),
-                    ],
-                    "promise_all_storage",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_pointer_value();
+            let storage = self.compile_promise_input_words(args.len(), "promise_all_storage")?;
             for (index, arg) in args.iter().enumerate() {
                 let promise = self.compile_expr(arg)?.into_pointer_value();
                 let slot = unsafe {
@@ -627,7 +2189,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     i64_type.const_int(args.len() as u64, false).into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element), false)
+                        .const_int(array_element_storage_bytes(element)?, false)
                         .into(),
                 ],
                 "promise_all",
@@ -668,7 +2230,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element), false)
+                        .const_int(array_element_storage_bytes(element)?, false)
                         .into(),
                 ],
                 "promise_all_array",
@@ -689,26 +2251,8 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i64_type = self.context.i64_type();
-        let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-        let allocate_words = |compiler: &mut Self, words: usize, name: &str| {
-            compiler
-                .builder
-                .build_call(
-                    arena_alloc,
-                    &[
-                        i64_type.const_int((words * 8) as u64, false).into(),
-                        i64_type.const_int(8, false).into(),
-                    ],
-                    name,
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| format!("{name} allocation returned void"))
-                .map(|value| value.into_pointer_value())
-        };
-        let promises = allocate_words(self, args.len(), "promise_all_tuple_promises")?;
-        let sizes = allocate_words(self, elements.len(), "promise_all_tuple_sizes")?;
+        let promises = self.compile_promise_input_words(args.len(), "promise_all_tuple_promises")?;
+        let sizes = self.compile_promise_input_words(elements.len(), "promise_all_tuple_sizes")?;
         for (index, (arg, element)) in args.iter().zip(elements).enumerate() {
             let offset = i64_type.const_int(index as u64, false);
             let promise_slot = unsafe {
@@ -728,7 +2272,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(
                     size_slot,
-                    i64_type.const_int(array_element_storage_bytes(element), false),
+                    i64_type.const_int(array_element_storage_bytes(element)?, false),
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -758,22 +2302,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let promises = if args.is_empty() {
             ptr_type.const_null()
         } else {
-            let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-            let storage = self
-                .builder
-                .build_call(
-                    arena_alloc,
-                    &[
-                        i64_type.const_int((args.len() * 8) as u64, false).into(),
-                        i64_type.const_int(8, false).into(),
-                    ],
-                    "promise_all_settled_storage",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or("Promise.allSettled storage allocation returned void")?
-                .into_pointer_value();
+            let storage = self.compile_promise_input_words(args.len(), "promise_all_settled_storage")?;
             for (index, arg) in args.iter().enumerate() {
                 let slot = unsafe {
                     self.builder
@@ -843,7 +2372,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element), false)
+                        .const_int(array_element_storage_bytes(element)?, false)
                         .into(),
                 ],
                 name,
@@ -870,22 +2399,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i64_type = self.context.i64_type();
-        let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-        let storage = self
-            .builder
-            .build_call(
-                arena_alloc,
-                &[
-                    i64_type.const_int((args.len() * 8) as u64, false).into(),
-                    i64_type.const_int(8, false).into(),
-                ],
-                &format!("{label}_storage"),
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| format!("{label} storage allocation returned void"))?
-            .into_pointer_value();
+        let storage = self.compile_promise_input_words(args.len(), &format!("{label}_storage"))?;
         for (index, arg) in args.iter().enumerate() {
             let slot = unsafe {
                 self.builder
@@ -1058,6 +2572,46 @@ impl<'ctx> HirCompiler<'ctx> {
         promise_index: usize,
         resolved: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let Some((test, consequent, alternate)) = self.split_promise_conditional(inner) {
+            self.prepromote_branch_captures(&test, &[
+                HirStmt::Expr(consequent.clone()),
+                HirStmt::Expr(alternate.clone()),
+            ])?;
+            let function = self.current_function();
+            let consequent_block = self.context.append_basic_block(function, "await_union_then");
+            let alternate_block = self.context.append_basic_block(function, "await_union_else");
+            let merge_block = self.context.append_basic_block(function, "await_union_conditional_end");
+            let condition = self.compile_expr(&test)?.into_int_value();
+            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(consequent_block);
+            let consequent = self.compile_await_promise_union(&consequent, promise_index, resolved)?;
+            let consequent_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(alternate_block);
+            let alternate = self.compile_await_promise_union(&alternate, promise_index, resolved)?;
+            let alternate_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(merge_block);
+            let phi = self.builder.build_phi(self.basic_type(resolved)?, "await_union_conditional_result")
+                .map_err(|error| error.to_string())?;
+            phi.add_incoming(&[(&consequent, consequent_end), (&alternate, alternate_end)]);
+            return Ok(phi.as_basic_value());
+        }
+
+        if let HirExpr::UnionInject(value, index, _) = inner {
+            if *index == promise_index {
+                let promise = self.compile_promise_for_consumption(value)?;
+                return self.drive_promise_to_resolved_value(promise, resolved);
+            }
+            return self.compile_expr(value);
+        }
+
         let union = self.compile_expr(inner)?.into_struct_value();
         let tag = self
             .builder
@@ -1091,6 +2645,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let promise_ptr = self
             .unpack_union_payload(payload, &HirType::Promise(Box::new(resolved.clone())))?
             .into_pointer_value();
+        let promise_ptr = self.retain_borrowed_promise_for_consumption(inner, promise_ptr)?;
         let promise_result = self.drive_promise_to_resolved_value(promise_ptr, resolved)?;
         let promise_bb_end = self.builder.get_insert_block().unwrap();
         self.builder
@@ -1126,8 +2681,40 @@ impl<'ctx> HirCompiler<'ctx> {
         inner: &HirExpr,
         resolved: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let promise = self.compile_expr(inner)?.into_pointer_value();
+        let promise = self.compile_promise_for_consumption(inner)?;
         self.drive_promise_to_resolved_value(promise, resolved)
+    }
+
+    /// Preserve the full rejection reason before the settled Promise is destroyed.
+    /// Both value-taking and void blocking awaits enter this only on failure.
+    fn copy_blocking_promise_exception_metadata(
+        &mut self,
+        promise: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        for (getter, target) in [
+            ("thaw_promise_exception_tag", self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)),
+            ("thaw_promise_exception_f64", self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL)),
+            ("thaw_promise_exception_i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL)),
+            ("thaw_promise_exception_bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL)),
+            ("thaw_promise_exception_object", self.pending_exception_object()),
+            ("thaw_promise_exception_aggregate_errors", self.pending_exception_aggregate_errors()),
+            ("thaw_promise_exception_native", self.pending_exception_native()),
+        ] {
+            let value = self.builder
+                .build_call(
+                    self.module.get_function(getter).unwrap(),
+                    &[promise.into()],
+                    "blocking_await_exception_value",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("{getter} returned no value"))?;
+            self.builder
+                .build_store(target.as_pointer_value(), value)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// The value-taking half of `compile_typed_blocking_await`, for a
@@ -1198,6 +2785,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), result)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        let native_text = self.builder.build_call(
+            self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+            &[promise.into()], "blocking_await_native_text",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native text copy returned no value")?.into_pointer_value();
+        let has_native_text = self.builder.build_is_not_null(native_text, "blocking_await_native_text_present")
+            .map_err(|error| error.to_string())?;
+        let pending_value = self.builder.build_select(
+            has_native_text, native_text, result, "blocking_await_native_text_pending",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
+            .map_err(|error| error.to_string())?;
+        self.mark_pending_native_text(native_text)?;
+        self.copy_blocking_promise_exception_metadata(promise)?;
         let default = llvm_type.const_zero();
         self.builder
             .build_unconditional_branch(merge)
@@ -1282,6 +2884,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), result)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        let native_text = self.builder.build_call(
+            self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+            &[promise.into()], "blocking_await_void_native_text",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native text copy returned no value")?.into_pointer_value();
+        let has_native_text = self.builder.build_is_not_null(native_text, "blocking_await_void_native_text_present")
+            .map_err(|error| error.to_string())?;
+        let pending_value = self.builder.build_select(
+            has_native_text, native_text, result, "blocking_await_void_native_text_pending",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
+            .map_err(|error| error.to_string())?;
+        self.mark_pending_native_text(native_text)?;
+        self.copy_blocking_promise_exception_metadata(promise)?;
         self.builder
             .build_unconditional_branch(merge)
             .map_err(|error| error.to_string())?;

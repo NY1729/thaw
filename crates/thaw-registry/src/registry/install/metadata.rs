@@ -49,49 +49,83 @@ fn package_export_target<'a>(
     select_export_condition(target, conditions)
 }
 
+enum ExportCondition<'a> {
+    Target(&'a str),
+    Blocked,
+    Unmatched,
+}
+
 fn select_export_condition<'a>(
     value: &'a serde_json::Value,
     conditions: &[&str],
 ) -> Option<&'a str> {
+    match select_export_condition_inner(value, conditions) {
+        ExportCondition::Target(path) => Some(path),
+        ExportCondition::Blocked | ExportCondition::Unmatched => None,
+    }
+}
+
+fn select_export_condition_inner<'a>(
+    value: &'a serde_json::Value,
+    conditions: &[&str],
+) -> ExportCondition<'a> {
+    if value.is_null() {
+        return ExportCondition::Blocked;
+    }
     if let Some(path) = value.as_str() {
         if conditions == ["types"]
             && ![".d.ts", ".d.cts", ".d.mts"]
                 .iter()
                 .any(|extension| path.ends_with(extension))
         {
-            return None;
+            return ExportCondition::Unmatched;
         }
-        return Some(path);
+        return ExportCondition::Target(path);
     }
     if let Some(candidates) = value.as_array() {
-        return candidates
-            .iter()
-            .find_map(|candidate| select_export_condition(candidate, conditions));
+        // Array entries may fall through, but a terminal null (or an empty
+        // array) still blocks later conditional keys.
+        let mut blocked = candidates.is_empty();
+        for candidate in candidates {
+            match select_export_condition_inner(candidate, conditions) {
+                ExportCondition::Target(path) => return ExportCondition::Target(path),
+                ExportCondition::Blocked => blocked = true,
+                ExportCondition::Unmatched => {}
+            }
+        }
+        return if blocked { ExportCondition::Blocked } else { ExportCondition::Unmatched };
     }
-    let object = value.as_object()?;
+    let Some(object) = value.as_object() else {
+        return ExportCondition::Unmatched;
+    };
     for (condition, value) in object {
         if conditions.contains(&condition.as_str()) {
-            if let Some(path) = select_export_condition(value, conditions) {
-                return Some(path);
+            match select_export_condition_inner(value, conditions) {
+                ExportCondition::Target(path) => return ExportCondition::Target(path),
+                ExportCondition::Blocked => return ExportCondition::Blocked,
+                ExportCondition::Unmatched => {}
             }
         }
     }
     if conditions == ["types"] {
         for condition in ["require", "node", "default", "import"] {
-            if let Some(path) = object
-                .get(condition)
-                .and_then(|value| select_export_condition(value, conditions))
-            {
-                return Some(path);
+            if let Some(value) = object.get(condition) {
+                match select_export_condition_inner(value, conditions) {
+                    ExportCondition::Target(path) => return ExportCondition::Target(path),
+                    ExportCondition::Blocked => return ExportCondition::Blocked,
+                    ExportCondition::Unmatched => {}
+                }
             }
         }
         for child in object.values() {
-            if let Some(path) = select_export_condition(child, conditions) {
-                return Some(path);
+            match select_export_condition_inner(child, conditions) {
+                ExportCondition::Target(path) => return ExportCondition::Target(path),
+                ExportCondition::Blocked => return ExportCondition::Blocked,
+                ExportCondition::Unmatched => {}
             }
         }
     }
-    None
+    ExportCondition::Unmatched
 }
 
 fn validate_export_subpath(subpath: &str) -> Result<(), String> {
@@ -136,10 +170,33 @@ fn collect_relative_files(root: &Path, dir: &Path, output: &mut Vec<String>) -> 
 fn wildcard_capture<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
     let pattern = pattern.strip_prefix("./").unwrap_or(pattern);
     let (prefix, suffix) = pattern.split_once('*')?;
-    if suffix.contains('*') || !path.starts_with(prefix) || !path.ends_with(suffix) {
+    if suffix.contains('*')
+        || path.len() < prefix.len() + suffix.len()
+        || !path.starts_with(prefix)
+        || !path.ends_with(suffix)
+    {
         return None;
     }
     Some(&path[prefix.len()..path.len() - suffix.len()])
+}
+
+fn matched_package_subpath_export<'a, 'b>(
+    exports: &'a serde_json::Map<String, serde_json::Value>,
+    subpath: &'b str,
+) -> Option<(&'a serde_json::Value, Option<&'b str>)> {
+    if let Some(exact) = exports.get(&format!("./{subpath}")) {
+        return Some((exact, None));
+    }
+    let mut matches = exports.iter().filter_map(|(key, value)| {
+        let pattern = key.strip_prefix("./")?;
+        let capture = wildcard_capture(pattern, subpath)?;
+        let (prefix, suffix) = pattern.split_once('*')?;
+        Some((prefix.len(), suffix.len(), value, capture))
+    }).collect::<Vec<_>>();
+    matches.sort_by_key(|(prefix, suffix, _, _)| {
+        (std::cmp::Reverse(*prefix), std::cmp::Reverse(*suffix))
+    });
+    matches.first().map(|(_, _, value, capture)| (*value, Some(*capture)))
 }
 
 fn package_subpath_exports(
@@ -178,24 +235,25 @@ fn package_subpath_exports(
                 };
                 let expanded = subpath.replacen('*', capture, 1);
                 validate_export_subpath(&expanded)?;
-                subpaths.push(PackageSubpathExport {
-                    subpath: expanded,
-                    runtime_entry: runtime.replace('*', capture),
-                    types_entry: types.replace('*', capture),
-                });
+                subpaths.push(expanded);
             }
             continue;
         }
         validate_export_subpath(subpath)?;
-        subpaths.push(PackageSubpathExport {
-            subpath: subpath.to_string(),
-            runtime_entry: runtime.to_string(),
-            types_entry: types.to_string(),
-        });
+        subpaths.push(subpath.to_string());
     }
-    subpaths.sort_by(|left, right| left.subpath.cmp(&right.subpath));
-    subpaths.dedup_by(|left, right| left.subpath == right.subpath);
-    Ok(subpaths)
+    subpaths.sort();
+    subpaths.dedup();
+    Ok(subpaths.into_iter().filter_map(|subpath| {
+        // The most specific key wins, including an exact or pattern `null`
+        // that excludes a file enumerated by a broader wildcard.
+        let (target, capture) = matched_package_subpath_export(exports, &subpath)?;
+        let runtime = select_export_condition(target, &["require", "node", "default"])?;
+        let types = select_export_condition(target, &["types"])?;
+        let runtime_entry = capture.map_or_else(|| runtime.to_string(), |value| runtime.replace('*', value));
+        let types_entry = capture.map_or_else(|| types.to_string(), |value| types.replace('*', value));
+        Some(PackageSubpathExport { subpath, runtime_entry, types_entry })
+    }).collect())
 }
 
 /// `package` has no bundled type declarations of its own -- fetch the
@@ -298,24 +356,35 @@ fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(Str
 /// Doesn't attempt the rest of Node's real algorithm (`package.json`
 /// `exports` maps, `.json`/`.node` candidates, etc.) -- just these two
 /// common shapes.
+fn is_directory_module_request(path: &str) -> bool {
+    path.ends_with('/')
+        || path == "."
+        || path == ".."
+        || path.ends_with("/.")
+        || path.ends_with("/..")
+}
+
 fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBuf), String> {
+    let mut active_directories = std::collections::HashSet::new();
+    let mut cyclic_entry = false;
+    let mut identity_error = None;
+    resolve_module_path_inner(
+        package_dir,
+        path,
+        &mut active_directories,
+        &mut cyclic_entry,
+        &mut identity_error,
+    )
+}
+
+fn resolve_module_path_inner(
+    package_dir: &Path,
+    path: &str,
+    active_directories: &mut std::collections::HashSet<PathBuf>,
+    cyclic_entry: &mut bool,
+    identity_error: &mut Option<String>,
+) -> Result<(String, PathBuf), String> {
     let trimmed = path.trim_end_matches('/');
-    let directory = package_dir.join(trimmed);
-    if directory.is_dir() {
-        if let Ok(manifest) = read_manifest(&directory) {
-            let entry =
-                package_export_target(&manifest, None, &["require", "node", "default"])
-                    .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
-            if let Some(entry) = entry {
-                if let Ok((relative, absolute)) = resolve_module_path(&directory, entry) {
-                    return Ok((
-                        normalize_path_string(&format!("{trimmed}/{relative}")),
-                        absolute,
-                    ));
-                }
-            }
-        }
-    }
     let candidates = [
         path.to_string(),
         format!("{trimmed}.js"),
@@ -330,11 +399,70 @@ fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBu
         format!("{trimmed}/index.mjs"),
         format!("{trimmed}/index.json"),
     ];
-    for candidate in &candidates {
+    // Explicit directory requests skip file extension probes (as in Node's
+    // CommonJS loader). Otherwise a sibling file beats a directory entry.
+    let directory_only = is_directory_module_request(path);
+    if !directory_only {
+        for candidate in &candidates[..5] {
+            let resolved = package_dir.join(candidate);
+            if resolved.is_file() {
+                return Ok((candidate.clone(), resolved));
+            }
+        }
+    }
+    let directory = package_dir.join(trimmed);
+    if directory.is_dir() {
+        // Canonical identity detects both lexical `.`/`..` cycles and symlink aliases.
+        // Keep only the active recursion chain: a candidate may be visited again
+        // after another branch has finished without forming a cycle.
+        match fs::canonicalize(&directory) {
+            Ok(identity) if active_directories.insert(identity.clone()) => {
+                let nested = read_manifest(&directory).ok().and_then(|manifest| {
+                    let entry =
+                        package_export_target(&manifest, None, &["require", "node", "default"])
+                            .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
+                    entry.and_then(|entry| {
+                        resolve_module_path_inner(
+                            &directory,
+                            entry,
+                            active_directories,
+                            cyclic_entry,
+                            identity_error,
+                        )
+                        .ok()
+                    })
+                });
+                active_directories.remove(&identity);
+                if let Some((relative, absolute)) = nested {
+                    return Ok((
+                        normalize_path_string(&format!("{trimmed}/{relative}")),
+                        absolute,
+                    ));
+                }
+            }
+            Ok(_) => *cyclic_entry = true,
+            Err(error) => {
+                *identity_error = Some(format!(
+                    "couldn't identify JS module directory `{}`: {error}",
+                    directory.display()
+                ));
+            },
+        }
+    }
+    for candidate in &candidates[5..] {
         let resolved = package_dir.join(candidate);
         if resolved.is_file() {
             return Ok((candidate.clone(), resolved));
         }
+    }
+    if let Some(error) = identity_error {
+        return Err(error.clone());
+    }
+    if *cyclic_entry {
+        return Err(format!(
+            "circular directory module entry for `\"{path}\"` (tried `{}`)",
+            candidates.join("`, `")
+        ));
     }
     Err(format!(
         "couldn't find a JS module for `\"{path}\"` (tried `{}`)",

@@ -36,6 +36,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_ptr_to_int(value, self.context.i64_type(), "union_pointer_bits")
                 .map_err(|error| error.to_string())?,
+            (_, BasicValueEnum::StructValue(value)) => {
+                let slot = self.build_arena_cell(
+                    &self.builder,
+                    value.get_type().into(),
+                    "union_struct_payload",
+                )?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_ptr_to_int(slot, self.context.i64_type(), "union_struct_bits")
+                    .map_err(|error| error.to_string())?
+            }
             _ => return Err(format!("cannot pack {member:?} into a union payload")),
         };
         let union_type = self
@@ -102,15 +115,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map(Into::into)
                 .map_err(|error| error.to_string()),
             HirType::I64 | HirType::JsValue => Ok(payload.into()),
-            _ => self
-                .builder
-                .build_int_to_ptr(
-                    payload,
-                    self.context.ptr_type(AddressSpace::default()),
-                    "union_pointer",
-                )
-                .map(Into::into)
-                .map_err(|error| error.to_string()),
+            _ => {
+                let pointer = self
+                    .builder
+                    .build_int_to_ptr(
+                        payload,
+                        self.context.ptr_type(AddressSpace::default()),
+                        "union_pointer",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let ty = self.basic_type(member)?;
+                if ty.is_struct_type() {
+                    self.builder
+                        .build_load(ty, pointer, "union_struct")
+                        .map_err(|error| error.to_string())
+                } else {
+                    Ok(pointer.into())
+                }
+            }
         }
     }
 
@@ -203,11 +225,31 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_int_compare(IntPredicate::EQ, left, right, "union_int_equal")
                 .map_err(|error| error.to_string()),
             (BasicValueEnum::PointerValue(left), BasicValueEnum::PointerValue(right)) => {
-                if ty == &HirType::Str {
+                if ty == &HirType::NativeException {
+                    let compared = self.builder.build_call(
+                        self.module.get_function("thaw_exception_native_same").unwrap(),
+                        &[left.into(), right.into()], "union_native_exception_identity",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("native exception identity check returned no value")?.into_int_value();
+                    self.builder.build_int_compare(IntPredicate::NE, compared,
+                        self.context.i8_type().const_zero(), "union_native_exception_equal")
+                        .map_err(|error| error.to_string())
+                } else if ty == &HirType::Json {
+                    let compared = self.builder.build_call(
+                        self.module.get_function("thaw_json_strict_equal").unwrap(),
+                        &[left.into(), right.into()],
+                        "union_json_strict_equal",
+                    ).map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic().ok_or("JSON union equality returned no value")?
+                    .into_int_value();
+                    self.builder.build_int_compare(
+                        IntPredicate::NE, compared, self.context.i8_type().const_zero(), "union_json_equal",
+                    ).map_err(|error| error.to_string())
+                } else if matches!(ty, HirType::Str | HirType::Symbol) {
                     let compared = self
                         .builder
                         .build_call(
-                            self.module.get_function("strcmp").unwrap(),
+                            self.module.get_function("thaw_string_compare").unwrap(),
                             &[left.into(), right.into()],
                             "union_string_compare",
                         )
@@ -383,7 +425,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.module.get_function("thaw_arena_alloc").unwrap(),
                         &[
                             i64_type
-                                .const_int(object_storage_bytes(fields).max(1), false)
+                                .const_int((object_storage_bytes(fields)?).max(1), false)
                                 .into(),
                             i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
                         ],
@@ -401,7 +443,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_in_bounds_gep(
                                 self.context.i8_type(),
                                 allocation,
-                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                &[i64_type.const_int(object_field_offset(fields, index)?, false)],
                                 "zero_object_field",
                             )
                             .map_err(|error| error.to_string())?

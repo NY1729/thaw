@@ -226,13 +226,13 @@ fn extracts_quoted_and_numeric_class_property_keys() {
 }
 
 #[test]
-fn records_optional_and_default_constructor_arities() {
+fn records_optional_constructor_arities() {
     let classes = parse_dts_classes(
         r#"export class Client {
                 constructor(url: string, timeout?: number, retries?: number);
             }
             export class Cache {
-                constructor(size: number, enabled = true);
+                constructor(size: number, enabled?: boolean);
             }"#,
     )
     .unwrap();
@@ -575,5 +575,311 @@ fn deduplicates_a_value_name_declared_more_than_once() {
             name: "count".into(),
             ty: DtsType::Native(HirType::F64)
         }]
+    );
+}
+
+#[test]
+fn constructor_rest_parameter_keeps_element_type() {
+    let classes = parse_dts_classes("declare class C { constructor(...parts: string[]); }").unwrap();
+    assert!(classes[0].constructors[0].params.is_empty());
+    assert_eq!(
+        classes[0].constructors[0].rest_param,
+        Some(("parts".to_string(), DtsType::Native(HirType::Str)))
+    );
+}
+
+#[test]
+fn merged_constructible_interface_keeps_each_constructor() {
+    let classes = parse_dts_classes(
+        "interface Maker { new(x: string): Item } interface Maker { new(x: number): Item } declare const Factory: Maker;",
+    )
+    .unwrap();
+    let factory = classes.iter().find(|class| class.name == "Factory").unwrap();
+    assert_eq!(factory.constructors.len(), 2);
+    assert!(factory.constructors.iter().all(|constructor| constructor.overloaded));
+}
+
+#[test]
+fn merged_namespace_constructor_interface_keeps_each_signature() {
+    let classes = parse_dts_classes(
+        "interface Maker { new(x: string): Item } interface Maker { new(x: number): Item } declare namespace makers { export { Maker as Public }; }",
+    )
+    .unwrap();
+    let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
+    assert_eq!(maker.constructors.len(), 2);
+}
+
+#[test]
+fn namespace_constructible_interfaces_with_same_bare_name_stay_distinct() {
+    let classes = parse_dts_classes(
+        "declare namespace A { interface Client { new(x: string): Client } export { Client as Public }; } \
+         declare namespace B { interface Client { new(x: number): Client } export { Client as Public }; }",
+    ).unwrap();
+    let a = classes.iter().find(|class| class.name == "A.Client").unwrap();
+    let b = classes.iter().find(|class| class.name == "B.Client").unwrap();
+    assert_eq!(a.constructors[0].params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(b.constructors[0].params[0].1, DtsType::Native(HirType::F64));
+}
+#[test]
+fn class_return_identity_excludes_scalar_aliases_and_ambiguous_namespace_classes() {
+    let classes = parse_dts_classes(r#"
+        type Label = string;
+        declare namespace A { class Label {} }
+        declare namespace A { class Client {} }
+        declare namespace B { class Client {} }
+        declare namespace A { class Solo {} }
+        declare class Provider {
+            label(): Label;
+            ambiguous(): A.Client;
+            unique(): A.Solo;
+            self(): this;
+        }
+    "#).unwrap();
+    let provider = classes.iter().find(|class| class.name == "Provider").unwrap();
+    let label = provider.methods.iter().find(|method| method.name == "label").unwrap();
+    assert_eq!(label.ret, DtsType::Native(HirType::Str));
+    assert_eq!(label.return_instance_class, None);
+    let ambiguous = provider.methods.iter().find(|method| method.name == "ambiguous").unwrap();
+    assert_eq!(ambiguous.return_instance_class.as_deref(), Some("A.Client"));
+    let unique = provider.methods.iter().find(|method| method.name == "unique").unwrap();
+    assert_eq!(unique.return_instance_class.as_deref(), Some("A.Solo"));
+    let this = provider.methods.iter().find(|method| method.name == "self").unwrap();
+    assert_eq!(this.return_instance_class.as_deref(), Some("Provider"));
+}
+
+#[test]
+fn duplicate_namespace_classes_keep_independent_identity_and_inheritance() {
+    let classes = parse_dts_classes(r#"
+        declare namespace A {
+            class Base { fromA(): string; }
+            class Client extends Base {
+                constructor(value: number);
+                chain(): this;
+                other(): B.Client;
+            }
+        }
+        declare namespace B {
+            class Base { fromB(): number; }
+            class Client extends Base {
+                constructor(value: string);
+                chain(): this;
+                other(): A.Client;
+            }
+        }
+    "#).unwrap();
+    let a = classes.iter().find(|class| class.name == "A.Client").unwrap();
+    let b = classes.iter().find(|class| class.name == "B.Client").unwrap();
+    assert_eq!(a.extends.as_deref(), Some("A.Base"));
+    assert_eq!(b.extends.as_deref(), Some("B.Base"));
+    assert!(a.methods.iter().any(|method| method.name == "fromA"));
+    assert!(!a.methods.iter().any(|method| method.name == "fromB"));
+    assert!(b.methods.iter().any(|method| method.name == "fromB"));
+    assert!(!b.methods.iter().any(|method| method.name == "fromA"));
+    assert_eq!(a.constructors[0].params[0].1, DtsType::Native(HirType::F64));
+    assert_eq!(b.constructors[0].params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(a.methods.iter().find(|method| method.name == "chain").unwrap().return_instance_class.as_deref(), Some("A.Client"));
+    assert_eq!(b.methods.iter().find(|method| method.name == "chain").unwrap().return_instance_class.as_deref(), Some("B.Client"));
+    assert_eq!(a.methods.iter().find(|method| method.name == "other").unwrap().return_instance_class.as_deref(), Some("B.Client"));
+    assert_eq!(b.methods.iter().find(|method| method.name == "other").unwrap().return_instance_class.as_deref(), Some("A.Client"));
+}
+
+#[test]
+fn imported_base_alias_preserves_inheritance_and_self_return() {
+    // Unrun regression for a flattened `import { Base as Parent }`.
+    let classes = parse_dts_classes(r#"
+        declare class Parent { base(): string; self(): Parent; }
+        declare namespace Parent { type Key = string; }
+        export type { Parent };
+        export declare class Derived extends Parent { own(): boolean; }
+    "#).unwrap();
+    let derived = classes.iter().find(|class| class.name == "Derived").unwrap();
+    assert_eq!(derived.extends.as_deref(), Some("Parent"));
+    assert!(derived.methods.iter().any(|method| method.name == "base"));
+    assert_eq!(derived.methods.iter().find(|method| method.name == "self")
+        .unwrap().return_instance_class.as_deref(), Some("Parent"));
+}
+
+#[test]
+fn type_only_class_alias_keeps_instance_shape_and_separate_value_alias() {
+    // Unrun regression: the public type alias and live constructor alias
+    // can name the same declaration without turning the type alias into a
+    // runtime class value.
+    let source = r#"
+        declare class Client {
+            constructor(name: string);
+            getName(): string;
+            chain(): this;
+            static create(): Client;
+        }
+        export type { Client as TypeClient };
+        export { Client as LiveClient };
+    "#;
+    let classes = parse_dts_classes(source).unwrap();
+    for name in ["TypeClient", "LiveClient"] {
+        let class = classes.iter().find(|class| class.name == name).unwrap();
+        assert!(class.methods.iter().any(|method| method.name == "getName" && !method.is_static));
+        assert_eq!(class.methods.iter().find(|method| method.name == "chain").unwrap()
+            .return_instance_class.as_deref(), Some(name));
+    }
+    let type_names = exported_type_names(source);
+    let value_names = exported_value_names(source);
+    assert!(type_names.contains("TypeClient"));
+    assert!(!value_names.contains("TypeClient"));
+    assert!(value_names.contains("LiveClient"));
+}
+
+#[test]
+fn namespace_class_alias_keeps_constructor_and_self_return_identity() {
+    // Unrun regression for a named class re-export moved into a value
+    // namespace. Both class shape and runtime member key stay qualified.
+    let source = r#"
+        declare namespace api {
+            class Hidden {
+                constructor(name: string);
+                self(): Hidden;
+            }
+            export type { Hidden };
+            export { Hidden as Client };
+        }
+    "#;
+    let classes = parse_dts_classes(source).unwrap();
+    let client = classes.iter().find(|class| class.name == "api.Client").unwrap();
+    assert!(client.constructible);
+    assert_eq!(client.methods.iter().find(|method| method.name == "self").unwrap()
+        .return_instance_class.as_deref(), Some("api.Client"));
+    let members = nested_namespace_members(source);
+    assert_eq!(members["api"]["Client"], "Hidden");
+    let type_names = exported_type_names(source);
+    let value_names = exported_value_names(source);
+    assert!(type_names.contains("api.Hidden"));
+    assert!(!value_names.contains("api.Hidden"));
+    assert!(value_names.contains("api.Client"));
+    assert!(!exported_value_names(
+        "declare namespace api { interface Secret {} export { Secret as PublicShape }; }"
+    ).contains("api.PublicShape"));
+}
+
+#[test]
+fn reserved_class_and_value_exports_keep_public_runtime_names() {
+    // Unrun regression for the registry's valid synthetic identifiers.
+    let source = r#"
+        export declare class __thaw_public_6e756c6c_deadbeef {
+            constructor(value: number);
+            label(): string;
+        }
+        export { __thaw_public_6e756c6c_deadbeef as null };
+        export declare const __thaw_public_766f6964_deadbeef: number;
+        export { __thaw_public_766f6964_deadbeef as void };
+    "#;
+    let classes = parse_dts_classes(source).unwrap();
+    assert!(classes.iter().any(|class| class.name == "null"
+        && class.methods.iter().any(|method| method.name == "label")));
+    assert!(!classes.iter().any(|class| class.name.starts_with("__thaw_public_")));
+    let values = parse_dts_values(source).unwrap();
+    assert!(values.iter().any(|value| value.name == "void"));
+    assert!(!values.iter().any(|value| value.name.starts_with("__thaw_public_")));
+}
+
+#[test]
+fn interface_alias_without_type_modifier_is_not_a_value_export() {
+    let source = "interface Shape { size: number; } export { Shape as PublicShape };";
+    assert!(!exported_value_names(source).contains("PublicShape"));
+}
+
+#[test]
+fn namespace_class_method_uses_local_interface_layout() {
+    let classes = parse_dts_classes(r#"
+        declare namespace A {
+            interface Options { x: number; }
+            class Provider { use(value: Options): void; get(): Options; }
+        }
+        declare namespace B { interface Options { y: string; } class Options {} }
+    "#).unwrap();
+    let provider = classes.iter().find(|class| class.name == "A.Provider").unwrap();
+    let method = provider.methods.iter().find(|method| method.name == "use").unwrap();
+    assert_eq!(method.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+    let getter = provider.methods.iter().find(|method| method.name == "get").unwrap();
+    assert_eq!(getter.return_instance_class, None);
+}
+
+#[test]
+fn namespace_construct_signature_uses_local_parameter_layout() {
+    let classes = parse_dts_classes(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            interface Factory { new(value: Options): Client; }
+        }
+        declare const Client: API.Factory;
+    "#).unwrap();
+    let client = classes.iter().find(|class| class.name == "Client").unwrap();
+    assert_eq!(client.constructors[0].params[0].1,
+        DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn namespace_alias_construct_signature_uses_target_scope() {
+    let classes = parse_dts_classes(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            interface Maker { new(value: Options): Client; }
+            export { Maker as Public };
+        }
+    "#).unwrap();
+    let maker = classes.iter().find(|class| class.name == "API.Maker").unwrap();
+    assert_eq!(maker.constructors[0].params[0].1,
+        DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn named_declaration_helpers_keep_one_source_map_identity_through_reparses() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let source = "declare namespace N { export function make(): number; } export { N as Public };";
+    let filename = FileName::Real(std::path::PathBuf::from("/fixture/package.d.ts"));
+    let (module, map) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &filename);
+    assert_eq!(parse_dts_named(source, filename.clone()).unwrap(), parse_dts(source).unwrap());
+    assert_eq!(parse_dts_classes_named(source, &filename).unwrap(), parse_dts_classes(source).unwrap());
+    assert_eq!(parse_dts_values_named(source, &filename).unwrap(), parse_dts_values(source).unwrap());
+    assert_eq!(nested_namespace_members_named(source, &filename), nested_namespace_members(source));
+    assert_eq!(exported_value_names_named(source, &filename), exported_value_names(source));
+    assert_eq!(nonpublic_namespace_sources_named(source, &filename), nonpublic_namespace_sources(source));
+
+    let malformed = "declare function ;";
+    assert!(parse_dts_named(malformed, filename.clone()).is_err());
+    assert!(parse_dts_values_named(malformed, &filename).is_err());
+    assert!(type_only_namespace_names_named(malformed, &filename).is_empty());
+    assert!(nested_namespace_members_named(malformed, &filename).is_empty());
+}
+
+/// `query<T extends Submittable>(stream: T): T` only bounds what the
+/// parameter accepts; the return type is whatever the call site infers `T`
+/// to be. Decoding it as the constraint (an object with a `submit` function)
+/// made `client.query("SELECT 1")` fail: the real result is a Promise.
+#[test]
+fn a_bare_constrained_type_parameter_return_is_not_the_constraint() {
+    let classes = parse_dts_classes(
+        r#"
+            interface Submittable { submit: (connection: string) => void; }
+            export class ClientBase {
+                query<T extends Submittable>(queryStream: T): T;
+                query(text: string): Promise<number>;
+            }
+            "#,
+    )
+    .unwrap();
+    let queries = classes[0]
+        .methods
+        .iter()
+        .filter(|method| method.name == "query")
+        .collect::<Vec<_>>();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(
+        queries[0].ret,
+        DtsType::Native(thaw_hir::HirType::JsValue),
+        "{:?}",
+        queries[0].ret
     );
 }

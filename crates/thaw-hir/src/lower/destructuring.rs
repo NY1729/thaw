@@ -1,11 +1,101 @@
 impl<'a> FnLowerer<'a> {
+    // A recursive object/array pattern can read several children from one
+    // parent expression. Bind that expression before the first child read so
+    // an accessor, array index, or default is evaluated only once.
+    fn bind_destructure_source_once(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> HirExpr {
+        let union = match &value {
+            HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
+            _ => None,
+        };
+        // Preserve the same nested array/function metadata a named binding
+        // carries. The recursive pattern reads child properties from this
+        // Var, so metadata tied to the original PropAccess must follow it.
+        let array = self.hir_array_element_discriminants(&value);
+        let object_array = self.hir_object_array_property_discriminants(&value);
+        let function = self.hir_function_property_discriminants(&value);
+        let object_function = self.hir_object_function_property_discriminants(&value);
+        let name = format!("__thaw_destructure_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        if let Some(metadata) = union {
+            self.union_discriminants.insert(name.clone(), metadata);
+        }
+        if let Some(metadata) = array {
+            self.array_element_discriminants.insert(name.clone(), metadata);
+        }
+        if let Some(metadata) = object_array {
+            self.object_array_property_discriminants.insert(name.clone(), metadata);
+        }
+        if let Some(metadata) = function {
+            if let Some(value) = metadata.value {
+                self.function_value_discriminants.insert(name.clone(), value);
+            }
+            if let Some(array) = metadata.array {
+                self.function_value_array_discriminants.insert(name.clone(), array);
+            }
+            if !metadata.nested_array.is_empty() {
+                self.function_value_nested_array_discriminants
+                    .insert(name.clone(), metadata.nested_array);
+            }
+            if !metadata.object.is_empty() {
+                self.function_value_object_array_property_discriminants
+                    .insert(name.clone(), metadata.object);
+            }
+            if !metadata.functions.is_empty() {
+                self.function_value_object_function_property_discriminants
+                    .insert(name.clone(), metadata.functions);
+            }
+        }
+        if let Some(metadata) = object_function {
+            self.object_function_property_discriminants.insert(name.clone(), metadata);
+        }
+        statements.push(HirStmt::Let(name.clone(), ty.clone(), value));
+        let source = HirExpr::Var(name);
+        let nullish = match ty {
+            HirType::Json | HirType::Dictionary(_) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![source.clone()],
+            )),
+            HirType::JsValue => Some(self.dynamic_value_is_nullish(source.clone())),
+            _ => None,
+        };
+        if let Some(nullish) = nullish {
+            statements.push(HirStmt::If(
+                nullish,
+                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot destructure null or undefined".into(),
+                )))],
+                Vec::new(),
+            ));
+        }
+        source
+    }
+
     fn lower_binding_pattern(
+        &mut self, pattern: &Pat, value: HirExpr, ty: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        self.lower_binding_pattern_impl(pattern, value, ty, statements, false)
+    }
+
+    fn lower_binding_pattern_impl(
         &mut self,
         pattern: &Pat,
         value: HirExpr,
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
+        let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
+            self.bind_destructure_source_once(value, ty, statements)
+        } else {
+            value
+        };
         if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             if let HirType::Optional(payload) = ty {
                 let discriminants = match &value {
@@ -32,12 +122,11 @@ impl<'a> FnLowerer<'a> {
                     payload.as_ref().clone(),
                     HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
                 ));
-                return self.lower_binding_pattern(
+                return self.lower_binding_pattern_impl(
                     pattern,
                     HirExpr::Var(unwrapped),
                     payload,
-                    statements,
-                );
+                    statements, immutable);
             }
         }
         match pattern {
@@ -58,7 +147,7 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty.clone()
                 };
-                let name = self.bind_local(binding.id.sym.as_ref(), binding_type.clone());
+                let name = self.bind_decl_local(binding.id.sym.as_ref(), binding_type.clone(), immutable);
                 if let Some(discriminants) = array_discriminants {
                     self.array_element_discriminants
                         .insert(name.clone(), discriminants);
@@ -102,8 +191,7 @@ impl<'a> FnLowerer<'a> {
                         pattern,
                         value,
                         element,
-                        statements,
-                    );
+                        statements, immutable);
                 }
                 if ty == &HirType::Json {
                     // A `Json`-typed (`any`) object has no compile-time-
@@ -121,12 +209,11 @@ impl<'a> FnLowerer<'a> {
                         pattern,
                         value,
                         &HirType::Json,
-                        statements,
-                    );
+                        statements, immutable);
                 }
                 if let HirType::Union(elements) = ty {
                     return self
-                        .lower_union_object_binding_pattern(pattern, value, elements, statements);
+                        .lower_union_object_binding_pattern(pattern, value, elements, statements, immutable);
                 }
                 let HirType::Object(fields) = ty else {
                     return Err(format!("object pattern cannot destructure {ty:?}"));
@@ -146,12 +233,11 @@ impl<'a> FnLowerer<'a> {
                                     .ok_or_else(|| format!("object has no field `{key}`"))?;
                                 let default = self.lower_expr(default)?;
                                 let default_type = self.infer_expr_type(&default)?;
-                                self.lower_binding_pattern(
+                                self.lower_binding_pattern_impl(
                                     &Pat::Ident(property.key.clone()),
                                     default,
                                     &default_type,
-                                    statements,
-                                )?;
+                                    statements, immutable)?;
                                 continue;
                             }
                             let field_type = field_type.expect("missing field handled above");
@@ -163,12 +249,11 @@ impl<'a> FnLowerer<'a> {
                                 field_value = self.lower_undefined_default(field_value, default)?;
                                 binding_type = self.infer_expr_type(&field_value)?;
                             }
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &Pat::Ident(property.key.clone()),
                                 field_value,
                                 &binding_type,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                         }
                         ObjectPatProp::KeyValue(property) => {
                             let key = self
@@ -183,59 +268,32 @@ impl<'a> FnLowerer<'a> {
                                 };
                                 let value = self.lower_expr(&default.right)?;
                                 let value_type = self.infer_expr_type(&value)?;
-                                self.lower_binding_pattern(
+                                self.lower_binding_pattern_impl(
                                     &default.left,
                                     value,
                                     &value_type,
-                                    statements,
-                                )?;
+                                    statements, immutable)?;
                                 continue;
                             }
                             let field_type = field_type.expect("missing field handled above");
                             let field_value = self
                                 .lower_fixed_object_property_read(value.clone(), fields, &key)?;
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &property.value,
                                 field_value,
                                 &field_type,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                         }
                         ObjectPatProp::Rest(rest) => {
-                            let remaining = ecmascript_field_order(fields)
-                                .into_iter()
-                                .filter_map(|index| {
-                                    let (name, _) = &fields[index];
-                                    (!used.contains(name)).then(|| {
-                                        Ok((
-                                            name.clone(),
-                                            Self::fixed_object_property_read_type(fields, name)?,
-                                        ))
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, String>>()?;
-                            let rest_value = HirExpr::ObjectLit(
-                                remaining
-                                    .iter()
-                                    .map(|(name, _)| {
-                                        (
-                                            name.clone(),
-                                            self.lower_fixed_object_property_read(
-                                                value.clone(),
-                                                fields,
-                                                name,
-                                            )
-                                            .expect("rest field was taken from its source type"),
-                                        )
-                                    })
-                                    .collect(),
-                            );
-                            self.lower_binding_pattern(
+                            let omitted = used.iter().cloned().collect::<Vec<_>>();
+                            let (rest_value, rest_type) = self.lower_fixed_object_rest_copy(
+                                value.clone(), fields, &omitted,
+                            )?;
+                            self.lower_binding_pattern_impl(
                                 &rest.arg,
                                 rest_value,
-                                &HirType::Object(remaining),
-                                statements,
-                            )?;
+                                &rest_type,
+                                statements, immutable)?;
                         }
                     }
                 }
@@ -248,8 +306,7 @@ impl<'a> FnLowerer<'a> {
                         .all(|element| matches!(element, HirType::Tuple(_)))
                     {
                         return self.lower_union_tuple_binding_pattern(
-                            pattern, value, elements, statements,
-                        );
+                            pattern, value, elements, statements, immutable);
                     }
                     if elements
                         .iter()
@@ -261,12 +318,11 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), flattened_type.clone());
                         statements.push(HirStmt::Let(name.clone(), flattened_type.clone(), flattened));
-                        return self.lower_binding_pattern(
+                        return self.lower_binding_pattern_impl(
                             &Pat::Array(pattern.clone()),
                             HirExpr::Var(name),
                             &flattened_type,
-                            statements,
-                        );
+                            statements, immutable);
                     }
                 }
                 if let HirType::Array(element) = ty {
@@ -295,19 +351,18 @@ impl<'a> FnLowerer<'a> {
                         };
                         if let Pat::Rest(rest) = element_pattern {
                             let rest_value = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                Box::new(HirExpr::Var("__thaw_array_rest".into())),
                                 vec![
                                     value.clone(),
                                     HirExpr::Lit(HirLit::F64(index as f64)),
                                     HirExpr::Lit(HirLit::F64(f64::INFINITY)),
                                 ],
                             );
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &rest.arg,
                                 rest_value,
                                 ty,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                             break;
                         }
                         let read_type = Self::array_read_type(element);
@@ -317,12 +372,11 @@ impl<'a> FnLowerer<'a> {
                             element.as_ref().clone(),
                             HirExpr::Lit(HirLit::F64(index as f64)),
                         )?;
-                        self.lower_binding_pattern(
+                        self.lower_binding_pattern_impl(
                             element_pattern,
                             read,
                             &read_type,
-                            statements,
-                        )?;
+                            statements, immutable)?;
                     }
                     return Ok(());
                 }
@@ -332,7 +386,7 @@ impl<'a> FnLowerer<'a> {
                             continue;
                         };
                         if let Pat::Rest(rest) = element_pattern {
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &rest.arg,
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_json_array_slice".into())),
@@ -342,19 +396,17 @@ impl<'a> FnLowerer<'a> {
                                     ],
                                 ),
                                 &HirType::Json,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                             break;
                         }
-                        self.lower_binding_pattern(
+                        self.lower_binding_pattern_impl(
                             element_pattern,
                             HirExpr::JsonIndex(
                                 Box::new(value.clone()),
                                 Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                             ),
                             &HirType::Json,
-                            statements,
-                        )?;
+                            statements, immutable)?;
                     }
                     return Ok(());
                 }
@@ -368,7 +420,7 @@ impl<'a> FnLowerer<'a> {
                         continue;
                     };
                     if let Pat::Rest(rest) = element_pattern {
-                        let remaining = elements[index..].to_vec();
+                        let remaining = elements.get(index..).unwrap_or_default().to_vec();
                         let rest_value = HirExpr::ArrayLit(
                             remaining
                                 .iter()
@@ -384,7 +436,9 @@ impl<'a> FnLowerer<'a> {
                                 })
                                 .collect(),
                         );
-                        let rest_type = if remaining
+                        let rest_type = if remaining.is_empty() {
+                            HirType::Array(Box::new(HirType::F64))
+                        } else if remaining
                             .first()
                             .is_some_and(|first| remaining.iter().all(|element| element == first))
                         {
@@ -394,14 +448,14 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             HirType::Tuple(remaining)
                         };
-                        self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                        self.lower_binding_pattern_impl(&rest.arg, rest_value, &rest_type, statements, immutable)?;
                         break;
                     }
                     let element_type = elements
                         .get(index)
                         .cloned()
                         .ok_or_else(|| format!("tuple pattern index {index} is out of bounds"))?;
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         element_pattern,
                         HirExpr::TypedIndex(
                             Box::new(value.clone()),
@@ -409,8 +463,7 @@ impl<'a> FnLowerer<'a> {
                             element_type.clone(),
                         ),
                         &element_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
                 Ok(())
             }
@@ -419,7 +472,7 @@ impl<'a> FnLowerer<'a> {
                 let default_type = self.infer_expr_type(&default)?;
                 let value = self.lower_undefined_default(value, default)?;
                 let value_type = self.infer_expr_type(&value)?;
-                self.lower_binding_pattern(&assign.left, value, &value_type, statements)?;
+                self.lower_binding_pattern_impl(&assign.left, value, &value_type, statements, immutable)?;
                 if let Pat::Ident(binding) = assign.left.as_ref() {
                     self.destructuring_default_types
                         .insert(self.resolve_binding(binding.id.sym.as_ref()), default_type);
@@ -437,6 +490,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         elements: &[HirType],
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         let discriminants = match &value {
             HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
@@ -465,12 +519,11 @@ impl<'a> FnLowerer<'a> {
                             &default_type,
                         )?;
                     }
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &Pat::Ident(property.key.clone()),
                         field_value,
                         &field_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                     if property.value.is_none() {
                         let name = self.resolve_binding(property.key.id.sym.as_ref());
                         discriminant_bindings.push((key, name.clone()));
@@ -491,12 +544,11 @@ impl<'a> FnLowerer<'a> {
                         self.lower_union_property_read(value.clone(), elements, &key)?;
                     let field_type = self.infer_expr_type(&field_value)?;
                     used.insert(key.clone());
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &property.value,
                         field_value,
                         &field_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                     if let Pat::Ident(binding) = property.value.as_ref() {
                         discriminant_bindings
                             .push((key.clone(), self.resolve_binding(binding.id.sym.as_ref())));
@@ -511,7 +563,7 @@ impl<'a> FnLowerer<'a> {
                     let source_types = Self::union_destructured_rest_source_types(elements, &used)?;
                     let (rest_value, rest_type) =
                         self.lower_union_object_rest(value.clone(), elements, &used)?;
-                    self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                    self.lower_binding_pattern_impl(&rest.arg, rest_value, &rest_type, statements, immutable)?;
                     self.collect_correlated_destructured_bindings(
                         &rest.arg,
                         &source_types,
@@ -537,6 +589,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         elements: &[HirType],
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         for (index, element_pattern) in pattern.elems.iter().enumerate() {
             let Some(element_pattern) = element_pattern else {
@@ -545,13 +598,13 @@ impl<'a> FnLowerer<'a> {
             if let Pat::Rest(rest) = element_pattern {
                 let (rest_value, rest_type) =
                     self.lower_union_tuple_rest(value.clone(), elements, index)?;
-                self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                self.lower_binding_pattern_impl(&rest.arg, rest_value, &rest_type, statements, immutable)?;
                 break;
             }
             let element_value =
                 self.lower_union_tuple_index_read(value.clone(), elements, index)?;
             let element_type = self.infer_expr_type(&element_value)?;
-            self.lower_binding_pattern(element_pattern, element_value, &element_type, statements)?;
+            self.lower_binding_pattern_impl(element_pattern, element_value, &element_type, statements, immutable)?;
         }
         Ok(())
     }
@@ -766,11 +819,10 @@ impl<'a> FnLowerer<'a> {
             let HirType::Tuple(tuple) = element else {
                 return Err("union array rest requires tuple members".into());
             };
-            if start > tuple.len() {
-                return Err(format!("tuple rest index {start} is out of bounds"));
-            }
-            let remaining = tuple[start..].to_vec();
-            let rest_type = if remaining
+            let remaining = tuple.get(start..).unwrap_or_default().to_vec();
+            let rest_type = if remaining.is_empty() {
+                HirType::Array(Box::new(HirType::F64))
+            } else if remaining
                 .first()
                 .is_some_and(|first| remaining.iter().all(|element| element == first))
             {
@@ -798,7 +850,7 @@ impl<'a> FnLowerer<'a> {
                 elements.to_vec(),
             );
             let rest = HirExpr::ArrayLit(
-                tuple[start..]
+                tuple.get(start..).unwrap_or_default()
                     .iter()
                     .enumerate()
                     .map(|(offset, ty)| {
@@ -1061,11 +1113,10 @@ impl<'a> FnLowerer<'a> {
                         let HirType::Tuple(tuple) = option else {
                             return Err(format!("nested array rest cannot destructure {option:?}"));
                         };
-                        if start > tuple.len() {
-                            return Err(format!("tuple rest index {start} is out of bounds"));
-                        }
-                        let remaining = tuple[start..].to_vec();
-                        let rest = if remaining
+                        let remaining = tuple.get(start..).unwrap_or_default().to_vec();
+                        let rest = if remaining.is_empty() {
+                            HirType::Array(Box::new(HirType::F64))
+                        } else if remaining
                             .first()
                             .is_some_and(|first| remaining.iter().all(|element| element == first))
                         {
@@ -1362,6 +1413,7 @@ impl<'a> FnLowerer<'a> {
         };
         let parameter = "__thaw_union_rest_value".to_string();
         let mut body = Vec::new();
+        let omitted = used.iter().cloned().collect::<Vec<_>>();
         for (index, element) in elements.iter().enumerate() {
             let HirType::Object(fields) = element else {
                 unreachable!()
@@ -1371,24 +1423,7 @@ impl<'a> FnLowerer<'a> {
                 index,
                 elements.to_vec(),
             );
-            let rest = HirExpr::ObjectLit(
-                ecmascript_field_order(fields)
-                    .into_iter()
-                    .filter(|index| !used.contains(&fields[*index].0))
-                    .map(|index| {
-                        let (name, _) = &fields[index];
-                        (
-                            name.clone(),
-                            self.lower_fixed_object_property_read(
-                                member.clone(),
-                                fields,
-                                name,
-                            )
-                            .expect("rest field was taken from its source type"),
-                        )
-                    })
-                    .collect(),
-            );
+            let (rest, _) = self.lower_fixed_object_rest_copy(member, fields, &omitted)?;
             let rest = self.coerce_to_declared(&result_type, rest)?;
             if index + 1 == elements.len() {
                 body.push(HirStmt::Return(Some(rest)));
@@ -1430,6 +1465,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         element: &HirType,
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         let has_rest = pattern
             .props
@@ -1446,23 +1482,15 @@ impl<'a> FnLowerer<'a> {
                     if let Some(default) = &property.value {
                         let default = self.lower_expr(default)?;
                         let default = self.coerce_to_declared(element, default)?;
-                        let present = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_json_has_own".into())),
-                            vec![value.clone(), key],
-                        );
                         field = self.lower_dictionary_default(
-                            present,
-                            field,
-                            default,
-                            element,
-                        );
+                            value.clone(), key, default, element,
+                        )?;
                     }
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &Pat::Ident(property.key.clone()),
                         field,
                         element,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
                 ObjectPatProp::KeyValue(property) => {
                     let key = match self.static_object_property_name(&property.key) {
@@ -1486,12 +1514,11 @@ impl<'a> FnLowerer<'a> {
                     };
                     used_keys.push(key.clone());
                     let field = self.typed_dictionary_read(value.clone(), key, element)?;
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &property.value,
                         field,
                         element,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
                 ObjectPatProp::Rest(rest) => {
                     let rest_type = HirType::Dictionary(Box::new(element.clone()));
@@ -1500,12 +1527,11 @@ impl<'a> FnLowerer<'a> {
                         &rest_type,
                         &used_keys,
                     );
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &rest.arg,
                         rest_value,
                         &rest_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
             }
         }
@@ -1513,32 +1539,40 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_dictionary_default(
-        &self,
-        present: HirExpr,
-        value: HirExpr,
+        &mut self,
+        object: HirExpr,
+        key: HirExpr,
         default: HirExpr,
         result_type: &HirType,
-    ) -> HirExpr {
-        let body = HirExpr::Block(vec![HirStmt::If(
-            present,
-            vec![HirStmt::Return(Some(value))],
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_dictionary_default_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Json);
+        let raw = HirExpr::Var(name.clone());
+        let present = match result_type {
+            HirType::Optional(payload) => HirExpr::OptionalSome(
+                Box::new(Self::dictionary_value_from_json(raw.clone(), payload)?),
+                payload.as_ref().clone(),
+            ),
+            HirType::Nullable(payload) => Self::lower_nullable_dictionary_value(
+                raw.clone(), payload, false,
+            )?,
+            HirType::Nullish(payload) => Self::lower_nullable_dictionary_value(
+                raw.clone(), payload, true,
+            )?,
+            _ => Self::dictionary_value_from_json(raw.clone(), result_type)?,
+        };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                vec![raw],
+            ),
             vec![HirStmt::Return(Some(default))],
+            vec![HirStmt::Return(Some(present))],
         )]);
-        let mut referenced = BTreeSet::new();
-        collect_referenced_bindings(&body, &mut referenced);
-        let captures = referenced
-            .into_iter()
-            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
-            .collect();
-        HirExpr::Call(
-            Box::new(HirExpr::Lambda(
-                captures,
-                Vec::new(),
-                result_type.clone(),
-                Box::new(body),
-            )),
-            Vec::new(),
-        )
+        self.wrap_call_argument_bindings(result, &[(
+            name, HirType::Json, HirExpr::JsonKey(Box::new(object), Box::new(key)),
+        )])
     }
 
     fn lower_dictionary_object_rest(

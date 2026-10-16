@@ -1311,6 +1311,15 @@ macro_rules! jit_returns {
     ) -> Option<()> {
         let left_kind = jit_expression_kind(&left)?.0;
         let right_kind = jit_expression_kind(&right)?.0;
+        // `string + dynamic` is always string concatenation: stringify the dynamic side.
+        if (left_kind == JitKind::String && right_kind == JitKind::Dynamic)
+            || (left_kind == JitKind::Dynamic && right_kind == JitKind::String)
+        {
+            append_string(left, output)?;
+            append_string(right, output)?;
+            output.push("concat".into());
+            return Some(());
+        }
         if left_kind == JitKind::Dynamic || right_kind == JitKind::Dynamic {
             append_dynamic(left, output)?;
             append_dynamic(right, output)?;

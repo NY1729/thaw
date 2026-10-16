@@ -1,4 +1,84 @@
 #[test]
+fn native_array_json_join_uses_empty_nullish_slots() {
+    let source = r#"
+        let order = "";
+        function source(): any[] { order += "R"; return [null, undefined, "null", 0]; }
+        function separator(): string { order += "S"; return "|"; }
+        function main(): void {
+            const values: any[] = [null, undefined, "null", 0];
+            console.log(values.join("|"));
+            console.log(values.join());
+            console.log(values.join(null));
+            console.log(values.join(""));
+            const empty: any[] = [];
+            console.log(empty.join("|"));
+            console.log(String(null), String(undefined));
+            console.log(source().join(separator()), order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_json_join_nullish_slots"),
+        "||null|0\n,,null,0\nnullnullnullnull0\nnull0\n\nnull undefined\n||null|0 RS\n"
+    );
+}
+
+#[test]
+fn join_uses_default_comma_for_explicit_undefined_separator() {
+    let source = r#"
+        let order = "";
+        function receiver(): number[] { order += "R"; return [1, 2]; }
+        function separator(): undefined { order += "S"; return undefined; }
+        function spread(): [undefined] { order += "T"; return [undefined]; }
+        function optional(flag: boolean): string | undefined {
+            return flag ? "|" : undefined;
+        }
+        function nullish(kind: number): string | null | undefined {
+            if (kind === 0) return undefined;
+            if (kind === 1) return null;
+            return "";
+        }
+        function union(kind: number): number | string | undefined {
+            if (kind === 0) return undefined;
+            if (kind === 1) return 0;
+            return "-";
+        }
+        function choose(flag: boolean): number[] | string[] {
+            return flag ? [1, 2] : ["a", "b"];
+        }
+        function main(): void {
+            const numbers: number[] = [1, 2];
+            const words: string[] = ["a", "b"];
+            const flags: boolean[] = [true, false];
+            const objects: { x: number }[] = [{ x: 1 }, { x: 2 }];
+            const tagged: (number | undefined)[] = [1, undefined, 2];
+            const tuple: [number, string] = [1, "x"];
+            const jsonElements: any[] = [1, 2];
+            const dynamic: any = JSON.parse("[1,2]");
+            console.log(numbers.join(undefined), numbers.join(), numbers.join(null), numbers.join(""));
+            console.log(words.join(undefined), flags.join(undefined), objects.join(undefined));
+            console.log(tagged.join(undefined), tuple.join(undefined), jsonElements.join(undefined));
+            console.log(dynamic.join(undefined), choose(true).join(undefined), choose(false).join(undefined));
+            console.log(numbers.join(optional(false)), numbers.join(optional(true)));
+            console.log(numbers.join(nullish(0)), numbers.join(nullish(1)), numbers.join(nullish(2)));
+            console.log(numbers.join(union(0)), numbers.join(union(1)), numbers.join(union(2)));
+            const jsonMissing: any = undefined;
+            const jsonNull: any = JSON.parse("null");
+            console.log(numbers.join(jsonMissing), numbers.join(jsonNull));
+            loadScript("globalThis.joinMissing = undefined; globalThis.joinNull = null;");
+            const liveMissing: JsValue = getDynamicValue("joinMissing");
+            const liveNull: JsValue = getDynamicValue("joinNull");
+            console.log(numbers.join(liveMissing), numbers.join(liveNull));
+            console.log(receiver().join(separator()), order);
+            console.log(numbers.join(...spread()), order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "join_explicit_undefined_separator"),
+        "1,2 1,2 1null2 12\na,b true,false [object Object],[object Object]\n1,,2 1,x 1,2\n1,2 1,2 a,b\n1,2 1|2\n1,2 1null2 12\n1,2 102 1-2\n1,2 1null2\n1,2 1null2\n1,2 RS\n1,2 RST\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_join() {
     let source = r#"
         function separator(): string {
@@ -407,7 +487,7 @@ fn compiles_native_array_find_and_find_last() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_find"),
-        "2\nundefined\nb\nfalse\n{\"value\":2}\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
+        "2\nundefined\nb\nfalse\n{ value: 2 }\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
     );
 }
 
@@ -455,7 +535,7 @@ fn compiles_native_array_at() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_at"),
-        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{\"value\":1}\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
+        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{ value: 1 }\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
     );
 }
 
@@ -992,6 +1072,165 @@ fn compiles_dynamic_array_flat() {
     );
 }
 
+#[test]
+fn dynamic_flat_skips_deleted_slots_and_preserves_present_nullish_values() {
+    let source = r#"
+        function main(): void {
+            const sparse: any[] = [, null, undefined, [2]];
+            console.log(JSON.stringify(sparse.flat(0)));
+            console.log(JSON.stringify(sparse.flat()));
+            console.log(JSON.stringify(sparse.flat(2)));
+
+            const nested: any[] = [[4, 5], 6];
+            delete nested[0][0];
+            console.log(JSON.stringify(nested.flat()));
+            console.log(JSON.stringify(nested.flat(0)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_flat_holes"),
+        "[null,null,[2]]\n[null,null,2]\n[null,null,2]\n[5,6]\n[[null,5],6]\n"
+    );
+}
+
+#[test]
+fn native_array_delete_keeps_length_and_presence_distinct() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] = [1, 2, 3];
+            console.log(delete numbers[1], numbers.length, Object.hasOwn(numbers, 1), "1" in numbers);
+            console.log(numbers[1] === undefined, JSON.stringify(numbers), JSON.stringify(numbers.flat()));
+            console.log(JSON.stringify(numbers.toSpliced(0, 0)));
+            let visited = "";
+            console.log(numbers.reduce((total, value) => { visited += String(value); return total + value; }, 0), visited);
+            try { Math.sumPrecise(numbers); console.log("sum accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            const keys: string[] = ["a", "b"];
+            delete keys[0];
+            console.log(JSON.stringify({ a: 1, b: 2 }, keys));
+            numbers[1] = undefined;
+            console.log(Object.hasOwn(numbers, 1), JSON.stringify(numbers.flat()));
+            const words: string[] = ["a", "b"];
+            console.log(delete words[0], Object.hasOwn(words, 0), JSON.stringify(words));
+            const mixed: any[] = [1, null, undefined];
+            console.log(delete mixed[1], Object.hasOwn(mixed, 1), Object.hasOwn(mixed, 2), JSON.stringify(mixed.flat()));
+            console.log(delete numbers[999], delete numbers[-1], delete numbers["01"], delete numbers.extra, numbers.length);
+            console.log(delete numbers[Symbol.iterator], Reflect.has(numbers, Symbol.iterator));
+            try { delete numbers.length; } catch (error) { console.log(error.name); }
+            console.log(Reflect.deleteProperty(numbers, "length"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_delete_presence"),
+        "true 3 false false\ntrue [1,null,3] [1,3]\n[1,null,3]\n4 13\ntrue\n{\"b\":2}\ntrue [1,null,3]\ntrue false [null,\"b\"]\ntrue false true [1,null]\ntrue true true true 3\ntrue true\nTypeError\nfalse\n"
+    );
+}
+
+#[test]
+fn assigning_undefined_stores_a_present_undefined_slot_for_any_primitive_element_type() {
+    // Expected output taken from real Node (22.x): `a[i] = undefined` keeps the index present.
+    let source = r#"
+        function main(): void {
+            const names: string[] = ["a", "b"];
+            names[0] = undefined;
+            console.log(Object.hasOwn(names, 0), names.length, JSON.stringify(names), names.includes(undefined), 0 in names);
+            const nums: number[] = [1, 2, 3];
+            nums[2] = undefined;
+            nums[0] = 5;
+            console.log(Object.hasOwn(nums, 2), nums.length, JSON.stringify(nums), nums.join(","), nums.indexOf(undefined));
+            let calls = 0;
+            const pick = (): number[] => { calls++; return nums; };
+            console.log(pick()[1] = undefined, calls, JSON.stringify(nums));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "assign_undefined_present_slot"),
+        "true 2 [null,\"b\"] true true\ntrue 3 [5,2,null] 5,2, 2\nundefined 1 [5,null,null]\n"
+    );
+}
+
+#[test]
+fn native_array_delete_reflect_integrity_and_evaluation_order() {
+    let source = r#"
+        function main(): void {
+            const sealed: number[] = [1, , 3];
+            Object.seal(sealed);
+            console.log(Reflect.deleteProperty(sealed, "1"), Reflect.deleteProperty(sealed, "0"), Reflect.deleteProperty(sealed, "99"));
+            try { delete sealed[0]; } catch (error) { console.log(error.name); }
+            const frozen: number[] = [undefined, 5];
+            Object.freeze(frozen);
+            console.log(Reflect.deleteProperty(frozen, "0"), Object.hasOwn(frozen, 0));
+            const stopped: number[] = [4, 5];
+            Object.preventExtensions(stopped);
+            console.log(delete stopped[0], Object.hasOwn(stopped, 0), stopped.length);
+            let order = "";
+            const values: number[] = [7, 8];
+            function getArray(): number[] { order += "A"; return values; }
+            function getKey(): number { order += "K"; return 0; }
+            console.log(delete getArray()[getKey()], order, values.length);
+            order = "";
+            console.log(Reflect.deleteProperty(getArray(), getKey()), order, Object.hasOwn(values, 0));
+            order = "";
+            function badKey(): number { order += "K"; throw new Error("bad key"); }
+            try { delete getArray()[badKey()]; }
+            catch (error) { console.log(order, Object.hasOwn(values, 1)); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_delete_integrity"),
+        "true false true\nTypeError\nfalse true\ntrue false 2\ntrue AK 2\ntrue AK false\nAK true\n"
+    );
+}
+
+#[test]
+fn native_array_to_json_retains_holes_for_nested_dynamic_values() {
+    let source = r#"
+        declare function __thaw_typed_js_70726f6265486f6c65(values: number[]): string;
+        function main(): void {
+            const sparse: number[] = [, 5];
+            const nested: any[] = [sparse, 6];
+            console.log(Object.hasOwn(nested[0], 0), Object.hasOwn(nested[0], 1));
+            console.log(JSON.stringify(nested), JSON.stringify(nested.flat()));
+            const field: any = { values: sparse };
+            console.log(Object.hasOwn(field.values, 0), JSON.stringify(field.values));
+            const explicit: any[] = [, 5];
+            explicit[0] = undefined;
+            const explicitNested: any[] = [explicit, 6];
+            console.log(Object.hasOwn(explicitNested[0], 0), JSON.stringify(explicitNested.flat()));
+            const nativeExplicit: number[] = [undefined, 5];
+            const nativeExplicitNested: any[] = [nativeExplicit, 6];
+            console.log(Object.hasOwn(nativeExplicitNested[0], 0), nativeExplicitNested[0][0] === undefined, JSON.stringify(nativeExplicitNested.flat()));
+            loadScript("globalThis.probeHole = values => [Object.hasOwn(values, 0), values[0] === undefined, values.length].join(',');");
+            console.log(__thaw_typed_js_70726f6265486f6c65(sparse));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_json_hole_transfer"),
+        "false true\n[[null,5],6] [5,6]\nfalse [null,5]\ntrue [null,5,6]\ntrue true [null,5,6]\nfalse,true,2\n"
+    );
+}
+
+#[test]
+fn stringify_replacer_array_skips_sparse_keys_with_and_without_space() {
+    let source = r#"
+        function main(): void {
+            const value: any = { "": 99, secret: 1, keep: 2 };
+            const sparse: string[] = [, "keep"];
+            console.log(JSON.stringify(value, sparse));
+            console.log(JSON.stringify(value, sparse, 2));
+            console.log(JSON.stringify(value, sparse, "--"));
+            const ordered: string[] = ["keep", , "keep", "secret"];
+            console.log(JSON.stringify(value, ordered));
+            sparse[0] = "secret";
+            console.log(JSON.stringify(value, sparse));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "stringify_sparse_replacer_keys"),
+        "{\"keep\":2}\n{\n  \"keep\": 2\n}\n{\n--\"keep\": 2\n}\n{\"keep\":2,\"secret\":1}\n{\"secret\":1,\"keep\":2}\n"
+    );
+}
+
 /// Sibling of `compiles_dynamic_array_flat` for `.flatMap()`: a callback
 /// whose return value is itself dynamically-typed (`Json`, not a
 /// statically nested `T[][]`) hit `lower_array_flat_map_result`'s final
@@ -1073,6 +1312,124 @@ fn compiles_dynamic_array_flat_map_with_a_tuple_returning_callback() {
     assert_eq!(
         compile_and_run(source, "any_array_flat_map_tuple_callback"),
         "[1,2,2,4,3,6]\n[1,\"number\",\"x\",\"string\",3,\"number\"]\n[1,1,1]\n[]\n[1,[1],2,[2]]\n"
+    );
+}
+
+#[test]
+fn compiles_sparse_optional_json_flat_map_and_preserves_callback_snapshots() {
+    let source = r#"
+        function flat(): number[] { const shared: number[] = [1]; return [0, 1].flatMap((_, index) => { if (index === 1) shared[0] = 9; return shared; }); }
+        function flatSnapshotAndSource(): [number[], number[]] { const shared: number[] = [1]; const snapshot = [0, 1].flatMap((_, index) => { if (index === 1) shared[0] = 9; return shared; }); return [snapshot, shared]; }
+        function plainMap(): number[][] { const shared: number[] = [1]; return [0, 1].map(() => shared); }
+        function flatLength(): number[] { const shared: number[] = [1]; return [0, 1].flatMap((_, index) => { if (index === 1) shared[1] = 9; return shared; }); }
+        function unionReceiver(values: number[] | string[]): number[] { return values.flatMap(() => [1]); }
+        function spreadArgument(): number[] { const callback: (value: number) => number[] = value => [value]; const args: [(value: number) => number[]] = [callback]; return [1].flatMap(...args); }
+        function jsonResult(values: any[]): any[] { return values.flatMap(value => value); }
+        function tupleResult(values: number[]): any[] { const callback: (value: number) => [number, number] = value => [value, value]; return values.flatMap(callback); }
+        function mixedResult(values: number[]): number[] { return values.flatMap(value => value === 0 ? [value] : value); }
+        function scalarResult(values: number[]): number[] { return values.flatMap(value => value); }
+        function voidResult(values: number[]): undefined[] { return values.flatMap(value => { console.log(value); }); }
+        function main(): void {
+            console.log(JSON.stringify(flat()));
+            console.log(JSON.stringify(flatLength()));
+            const numberInput: number[] = [1]; const stringInput: string[] = ["x"];
+            console.log(JSON.stringify([...unionReceiver(numberInput), ...unionReceiver(stringInput)]));
+            console.log(JSON.stringify(spreadArgument()));
+            console.log(JSON.stringify(jsonResult([1, [2, 3], 4])));
+            console.log(JSON.stringify(tupleResult([1, 2])));
+            console.log(JSON.stringify(mixedResult([0, 1])));
+            console.log(JSON.stringify(scalarResult([1, 2])));
+            const voids = voidResult([1, 2]);
+            console.log(voids.length, Object.hasOwn(voids, 0), Object.hasOwn(voids, 1), typeof voids[0], typeof voids[1]);
+            const mapped = plainMap(); mapped[0][0] = 9;
+            console.log(mapped[0] === mapped[1], JSON.stringify(mapped[0]), JSON.stringify(mapped[1]));
+            const snapshotPair = flatSnapshotAndSource(); snapshotPair[1][0] = 7;
+            console.log(JSON.stringify(snapshotPair[0]), JSON.stringify(snapshotPair[1]));
+            const sparse: any[] = []; sparse.length = 4; sparse[1] = undefined; sparse[2] = null;
+            let calls = 0; const sparseResult: any[] = sparse.flatMap(value => { calls++; return value; });
+            console.log(JSON.stringify(sparseResult), calls, sparseResult.length, Object.hasOwn(sparseResult, 0), typeof sparseResult[0], Object.hasOwn(sparseResult, 1), sparseResult[1] === null);
+            console.log(sparse.flatMap(() => []).length);
+            const empty: any[] = []; console.log(empty.flatMap(value => value).length);
+            const nestedSource: any[] = [1]; const nestedResult: any[] = nestedSource.flatMap(value => [value, [value]]);
+            console.log(nestedResult.length, nestedResult[0], Array.isArray(nestedResult[1]), nestedResult[1][0]);
+            const shared: any[] = [1]; const sharedSource: any[] = [shared, shared]; let sharedCalls = 0;
+            const snapshots: any[] = sharedSource.flatMap((value, index) => { sharedCalls++; if (index === 1) shared[0] = 9; return index === 1 ? shared : value; });
+            console.log(JSON.stringify(snapshots), sharedCalls);
+            const growing: any[] = [1]; const growingSource: any[] = [growing, growing]; let growingCalls = 0;
+            const grown: any[] = growingSource.flatMap((value, index) => { growingCalls++; if (index === 1) growing.push(9); return index === 1 ? growing : value; });
+            console.log(JSON.stringify(grown), growingCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_optional_json_flat_map_snapshots"),
+        "[1,9]\n[1,1,9]\n[1,1]\n[1]\n[1,2,3,4]\n[1,1,2,2]\n[0,1]\n[1,2]\n1\n2\n2 true true undefined undefined\ntrue [9] [9]\n[1,9] [7]\n[null,null] 2 2 true undefined true true\n0\n0\n2 1 true 1\n[1,9] 2\n[1,1,9] 2\n"
+    );
+}
+
+#[test]
+fn compiles_sparse_named_numeric_map_and_flat_map_callbacks() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [];
+            values.length = 3;
+            values[1] = 2;
+            const mapCallback: (value: number) => number = value => value + 1;
+            const mapped = values.map(mapCallback);
+            console.log(JSON.stringify(mapped), mapped.length,
+                Object.hasOwn(mapped, 0), Object.hasOwn(mapped, 1), Object.hasOwn(mapped, 2));
+            const flatMapCallback: (value: number) => number = value => value + 1;
+            const flattened = values.flatMap(flatMapCallback);
+            console.log(JSON.stringify(flattened), flattened.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_named_numeric_map_and_flat_map_callbacks"),
+        "[null,3,null] 3 false true false\n[3] 1\n"
+    );
+}
+
+#[test]
+fn compiles_nested_optional_json_flat_map_wrappers() {
+    let source = r#"
+        function naturalNullable(values: Json[], calls: number[]): Json[] {
+            return values.flatMap(value => { calls.push(1); return value === undefined ? null : value; });
+        }
+        function naturalNullish(values: Json[], calls: number[]): Json[] {
+            return values.flatMap(value => { calls.push(1); return value === null ? undefined : value; });
+        }
+        function nullableTyped(values: Json[], calls: number[]): Json[] {
+            const callback: (value: Json) => Json | null = value => { calls.push(1); return value === null ? null : value; };
+            return values.flatMap(callback);
+        }
+        function nullishTyped(values: Json[], calls: number[]): Json[] {
+            const callback: (value: Json) => Json | null | undefined = value => { calls.push(1); return value === null ? null : value === undefined ? undefined : value; };
+            return values.flatMap(callback);
+        }
+        function main(): void {
+            const naturalInput: Json[] = [null, undefined, [1, 2]];
+            const naturalNullableCalls: number[] = [];
+            const naturalNullableResult = naturalNullable(naturalInput, naturalNullableCalls);
+            console.log(JSON.stringify(naturalNullableResult), naturalNullableResult.length,
+                naturalNullableResult[0] === null, naturalNullableResult[1] === null,
+                Object.hasOwn(naturalNullableResult, 1), typeof naturalNullableResult[1], naturalNullableCalls.length);
+            const naturalNullishCalls: number[] = [];
+            const naturalNullishResult = naturalNullish(naturalInput, naturalNullishCalls);
+            console.log(JSON.stringify(naturalNullishResult), naturalNullishResult.length,
+                Object.hasOwn(naturalNullishResult, 0), Object.hasOwn(naturalNullishResult, 1),
+                typeof naturalNullishResult[0], typeof naturalNullishResult[1], naturalNullishCalls.length);
+            const nullableCalls: number[] = [];
+            const nullableResult = nullableTyped([1, [2, 3], null], nullableCalls);
+            console.log(JSON.stringify(nullableResult), nullableResult.length,
+                nullableResult[3] === null, Object.hasOwn(nullableResult, 3), typeof nullableResult[3], nullableCalls.length);
+            const nullishCalls: number[] = [];
+            const nullishResult = nullishTyped([1, [2, 3], null, undefined], nullishCalls);
+            console.log(JSON.stringify(nullishResult), nullishResult.length,
+                nullishResult[3] === null, Object.hasOwn(nullishResult, 4), typeof nullishResult[4], nullishCalls.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_optional_json_flat_map_wrappers"),
+        "[null,null,1,2] 4 true true true object 3\n[null,null,1,2] 4 true true undefined undefined 3\n[1,2,3,null] 4 true true object 3\n[1,2,3,null,null] 5 true true undefined 4\n"
     );
 }
 
@@ -1272,6 +1629,40 @@ fn compiles_native_array_from_a_map_or_set() {
     );
 }
 
+#[test]
+fn native_map_and_set_for_of_observe_mutations_during_iteration() {
+    let source = r#"
+        function main(): void {
+            const appended = new Set<number>([1]);
+            for (const value of appended) {
+                console.log("append", value);
+                if (value === 1) appended.add(2);
+            }
+            const set = new Set<number>([1, 2, 3]);
+            for (const value of set) {
+                console.log("set", value);
+                if (value === 1) { set.delete(2); set.add(4); }
+                if (value === 3) { set.clear(); set.add(5); }
+            }
+            const map = new Map<string, number>([["a", 1], ["b", 2], ["c", 3]]);
+            for (const [key, value] of map) {
+                console.log("map", key, value);
+                if (key === "a") { map.delete("b"); map.set("d", 4); }
+                if (key === "c") { map.clear(); map.set("e", 5); }
+            }
+            const appendedMap = new Map<string, number>([["a", 1]]);
+            for (const [key, value] of appendedMap) {
+                console.log("append-map", key, value);
+                if (key === "a") appendedMap.set("b", 2);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_set_live_for_of"),
+        "append 1\nappend 2\nset 1\nset 3\nset 5\nmap a 1\nmap c 3\nmap e 5\nappend-map a 1\nappend-map b 2\n"
+    );
+}
+
 /// `Map`/`Set` values used to reject `I64`/`JsValue` outright ("Map/Set
 /// values of type ... are not supported") -- both already fit the same
 /// opaque 64-bit storage word `F64`/`Bool` values decode from, with no
@@ -1288,6 +1679,7 @@ fn compiles_map_with_bigint_values() {
             m.set("b", 9007199254740993n);
             const missing: bigint | undefined = m.get("c");
             console.log(m.has("c"), missing === undefined);
+            console.log(m.get("a"), m.get("b"), missing);
             console.log(m.size);
             m.forEach((value: bigint, key: string) => {
                 console.log(key, value, typeof value);
@@ -1296,7 +1688,7 @@ fn compiles_map_with_bigint_values() {
     "#;
     assert_eq!(
         compile_and_run(source, "map_bigint_values"),
-        "false true\n2\na 10n bigint\nb 9007199254740993n bigint\n"
+        "false true\n10n 9007199254740993n undefined\n2\na 10n bigint\nb 9007199254740993n bigint\n"
     );
 }
 
@@ -1426,6 +1818,62 @@ fn compiles_object_group_by_a_native_array() {
             "key 1 0\n", "key 2 1\n", "key 3 2\n", "key 4 3\n", "key 5 4\n",
             "2,4\n", "1,3,5\n", "odd,even\n", "0\n",
         )
+    );
+}
+
+#[test]
+fn static_group_by_follows_live_array_length_while_legacy_group_snapshots_it() {
+    let source = r#"
+        let sourceCalls = 0;
+        function provide(items: number[]): number[] { sourceCalls++; return items; }
+        function main(): void {
+            const mapGrow: number[] = [1, 2];
+            const mapGrown: Map<string, number[]> = Map.groupBy(provide(mapGrow), (value, index) => {
+                if (index === 0) mapGrow.push(3);
+                return "all";
+            });
+            console.log(mapGrown.get("all")!.join(","));
+            console.log(sourceCalls);
+
+            const mapShrink: number[] = [1, 2, 3];
+            const mapShrunk: Map<string, number[]> = Map.groupBy(mapShrink, (value, index) => {
+                if (index === 0) { mapShrink.pop(); mapShrink.pop(); }
+                return "all";
+            });
+            console.log(mapShrunk.get("all")!.join(","));
+
+            const objectGrow: number[] = [1, 2];
+            const objectGrown: Record<string, number[]> = Object.groupBy(objectGrow, (value, index) => {
+                if (index === 0) objectGrow.push(3);
+                return "all";
+            });
+            console.log(objectGrown.all.join(","));
+
+            const objectShrink: number[] = [1, 2, 3];
+            const objectShrunk: Record<string, number[]> = Object.groupBy(objectShrink, (value, index) => {
+                if (index === 0) { objectShrink.pop(); objectShrink.pop(); }
+                return "all";
+            });
+            console.log(objectShrunk.all.join(","));
+
+            const legacyObject: number[] = [1, 2];
+            const oldObject = legacyObject.group((value, index) => {
+                if (index === 0) legacyObject.push(3);
+                return "all";
+            });
+            console.log(oldObject.all.join(","));
+
+            const legacyMap: number[] = [1, 2];
+            const oldMap = legacyMap.groupToMap((value, index) => {
+                if (index === 0) legacyMap.push(3);
+                return "all";
+            });
+            console.log(oldMap.get("all")!.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "group_by_live_length"),
+        "1,2,3\n1\n1\n1,2,3\n1\n1,2\n1,2\n"
     );
 }
 
@@ -1750,4 +2198,70 @@ fn console_log_renders_a_map_or_set_crossing_an_any_boundary_in_node_inspect_sty
          { a: 1, b: 'x', c: [ 1, 2 ], d: { e: 3 } }\n{ 'weird-key': 1, normalKey: 2 }\n\
          [ 1, { a: 1 }, 'text' ]\n"
     );
+}
+
+#[test]
+fn to_spliced_saves_length_after_arguments_before_numeric_conversion() {
+    let source = r#"
+        function main(): void {
+            const values = [1, 2];
+            const start = {
+                [Symbol.toPrimitive](hint: string): number {
+                    values.push(3);
+                    return 1;
+                },
+            };
+            console.log(values.toSpliced(start, 0).join(","), values.join(","));
+            const spreadValues = [1, 2];
+            const spreadStart = {
+                [Symbol.toPrimitive](hint: string): number {
+                    spreadValues.push(3);
+                    return 1;
+                },
+            };
+            console.log(spreadValues.toSpliced(...[spreadStart, 0]).join(","));
+            const argumentsFirst = [1, 2];
+            function argument(): number {
+                argumentsFirst.push(3);
+                return 0;
+            }
+            console.log(argumentsFirst.toSpliced(argument(), 0).join(","));
+
+            const deleteValues = [1, 2];
+            let startCalls = 0;
+            let deleteCalls = 0;
+            const deleteStart = {
+                [Symbol.toPrimitive](hint: string): number {
+                    startCalls++;
+                    deleteValues.push(3);
+                    return 0;
+                },
+            };
+            const deleteCount = {
+                [Symbol.toPrimitive](hint: string): number {
+                    deleteCalls++;
+                    deleteValues.push(4);
+                    return 0;
+                },
+            };
+            console.log(
+                deleteValues.toSpliced(deleteStart, deleteCount).join(","),
+                deleteValues.join(","),
+                startCalls,
+                deleteCalls,
+            );
+
+            loadScript("globalThis.toSplicedBigInt = 1n;");
+            const big: JsValue = getDynamicValue("toSplicedBigInt");
+            console.log(Number(big));
+            try {
+                [1, 2].toSpliced(big, 0);
+                console.log("missing TypeError");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "to_spliced_length_order"),
+        "1,2 1,2,3\n1,2\n1,2,3\n1,2 1,2,3,4 1 1\n1\ntrue\n");
 }

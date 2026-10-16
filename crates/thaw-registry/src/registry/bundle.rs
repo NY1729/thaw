@@ -1,21 +1,27 @@
 /// One file pulled into a `bundle_commonjs_package` bundle. `key` is
-/// `"<owning package name>/<path resolved by resolve_module_path,
-/// relative to that package's own root>"` -- package-qualified so two
-/// different packages' identically-named files (`index.js` is extremely
-/// common) can't collide in the same bundle. Used both as the emitted
-/// module map's key and, by stripping the package-name prefix and
-/// resolving against that package's own directory, to read the file.
-/// `requires` is every `require` spec this file's source contains that
-/// was actually resolved (same-package relative, or a bare specifier
-/// resolved to another bundled package), each mapped to its own target
-/// `key`.
+/// `"<package instance locator>/<path resolved by resolve_module_path>"`.
+/// A nested dependency includes its owning `node_modules` path in the
+/// locator, so two installations with the same name cannot share a factory.
+/// `requires` and `imports` keep the source request condition for each
+/// resolved specifier, since one spelling can select distinct package
+/// exports for CommonJS and ESM.
 struct BundledModule {
     key: String,
     source: String,
+    source_name: thaw_parser::common::FileName,
+    export_graph: Option<serde_json::Value>,
+    origin_parameter: Option<String>,
     requires: Vec<(String, String)>,
+    imports: Vec<(String, String)>,
+    known_packages: Vec<String>,
     static_esm_specs: Vec<String>,
     has_esm: bool,
     has_top_level_await: bool,
+    commonjs_context: bool,
+    native_esm_context: bool,
+    uses_legacy_bundle_globals: bool,
+    has_nonliteral_module_load: bool,
+    uses_import_meta: bool,
     async_module: bool,
     /// The file this module was read from, when it is a real file (a Node
     /// builtin polyfill has none). Keys the shared ESM->CommonJS rewrite
@@ -55,9 +61,10 @@ fn split_module_suffix(specifier: &str) -> (&str, &str) {
         .unwrap_or((specifier, ""))
 }
 
-fn runtime_export_specifiers(
+fn runtime_export_specifiers_with_conditions(
     package_name: &str,
     package_dir: &Path,
+    conditions: &[&str],
 ) -> Result<Vec<String>, String> {
     let Ok(source) = fs::read_to_string(package_dir.join("package.json")) else {
         return Ok(Vec::new());
@@ -106,7 +113,7 @@ fn runtime_export_specifiers(
         let Some(subpath) = key.strip_prefix("./") else {
             continue;
         };
-        let Some(runtime) = select_export_condition(target, &["require", "node", "default"])
+        let Some(runtime) = select_export_condition(target, conditions)
         else {
             continue;
         };
@@ -117,7 +124,13 @@ fn runtime_export_specifiers(
             for file in &files {
                 if let Some(capture) = wildcard_capture(runtime, file) {
                     let expanded = subpath.replacen('*', capture, 1);
-                    if validate_export_subpath(&expanded).is_ok() {
+                    if validate_export_subpath(&expanded).is_ok()
+                        && package_subpath_runtime_target(
+                            &manifest,
+                            &expanded,
+                            conditions,
+                        ).is_some()
+                    {
                         specifiers.push(format!("{package_name}/{expanded}"));
                     }
                 }
@@ -129,6 +142,11 @@ fn runtime_export_specifiers(
     specifiers.sort();
     specifiers.dedup();
     Ok(specifiers)
+}
+
+#[cfg(test)]
+fn runtime_export_specifiers(package_name: &str, package_dir: &Path) -> Result<Vec<String>, String> {
+    runtime_export_specifiers_with_conditions(package_name, package_dir, &["require", "node", "default"])
 }
 
 include!("module_transform.rs");

@@ -133,8 +133,10 @@ fn extracts_functions_from_a_nested_namespace() {
         "#;
     let funcs = parse_dts(source).unwrap();
     assert_eq!(funcs.len(), 2);
-    assert!(funcs.iter().any(|f| f.name == "deep"));
-    assert!(funcs.iter().any(|f| f.name == "shallow"));
+    assert!(funcs.iter().any(|f| f.name == "Outer.Inner.deep"));
+    assert!(funcs.iter().any(|f| f.name == "Outer.shallow"));
+    let members = nested_namespace_members(source);
+    assert_eq!(members["Outer"]["Inner.deep"], "Inner.deep");
 }
 
 /// The `export = obj` shape backed by an *interface* rather than a
@@ -220,6 +222,48 @@ fn extracts_a_callable_const_export_from_its_interfaces_call_signatures() {
         .iter()
         .any(|f| f.params.len() == 1 && f.required_params == 1));
     assert!(funcs.iter().any(|f| f.name == "plain"));
+}
+
+#[test]
+fn namespace_callable_consts_use_their_own_interface_and_type_scope() {
+    // Unrun regression: identical bare names in two namespaces must keep
+    // distinct signatures, while the existing top-level path still works.
+    let source = r#"
+        declare namespace Left {
+            interface Options { label: string; }
+            class Client { constructor(options: Options); }
+            interface Callable { (options: Options): Client; }
+            const make: Callable;
+            const borrowed: Right.Callable;
+            const borrowedAlias: Right.Chain;
+            const unresolved: Missing.Callable;
+        }
+        declare namespace Right {
+            interface Options { count: number; }
+            class Client { constructor(options: Options); }
+            interface Callable { (options: Options): Client; }
+            type Target = (options: Options) => Client;
+            type Chain = Target;
+            const make: Callable;
+        }
+        interface TopCallable { (value: boolean): boolean; }
+        declare const top: TopCallable;
+    "#;
+    let functions = parse_dts(source).unwrap();
+    let left = functions.iter().find(|function| function.name == "Left.make").unwrap();
+    let right = functions.iter().find(|function| function.name == "Right.make").unwrap();
+    let borrowed = functions.iter().find(|function| function.name == "Left.borrowed").unwrap();
+    let borrowed_alias = functions.iter().find(|function| function.name == "Left.borrowedAlias").unwrap();
+    assert!(!functions.iter().any(|function| function.name == "Left.unresolved"));
+    let top = functions.iter().find(|function| function.name == "top").unwrap();
+    assert_eq!(left.params[0].1, DtsType::Native(HirType::Object(vec![("label".into(), HirType::Str)])));
+    assert_eq!(right.params[0].1, DtsType::Native(HirType::Object(vec![("count".into(), HirType::F64)])));
+    assert_eq!(borrowed.params[0].1, DtsType::Native(HirType::Object(vec![("count".into(), HirType::F64)])));
+    assert_eq!(borrowed_alias.params[0].1, DtsType::Native(HirType::Object(vec![("count".into(), HirType::F64)])));
+    assert_eq!(top.params[0].1, DtsType::Native(HirType::Bool));
+    let nested = nested_namespace_members(source);
+    assert_eq!(nested["Left"]["make"], "make");
+    assert_eq!(nested["Right"]["make"], "make");
 }
 
 /// A `declare const` whose declared type does *not* resolve to a call-
@@ -366,8 +410,8 @@ fn namespaced_functions_classify_normally() {
             }
         "#;
     let funcs = parse_dts(source).unwrap();
-    let add = funcs.iter().find(|f| f.name == "add").unwrap();
-    let identity = funcs.iter().find(|f| f.name == "identity").unwrap();
+    let add = funcs.iter().find(|f| f.name == "Ns.add").unwrap();
+    let identity = funcs.iter().find(|f| f.name == "Ns.identity").unwrap();
     assert!(matches!(classify(add), Classification::FastPath(_)));
     assert!(matches!(
         classify(identity),
@@ -689,6 +733,129 @@ fn factory_return_type_resolves_through_a_generic_type_alias_to_its_real_class()
     assert_eq!(returns.get("createTransport"), Some(&"Mail".to_string()));
 }
 
+#[test]
+fn namespace_function_identity_survives_equal_bare_names() {
+    // Unrun regression: the type-only namespace must not erase either
+    // live namespace's independent signature or factory identity.
+    let source = r#"
+        declare namespace Types { function make(value: boolean): Ghost; }
+        export type { Types };
+        declare namespace Left { function make(value: string): LeftResult; }
+        declare namespace Right { function make(value: number): RightResult; }
+        export { Left, Right };
+        declare class LeftResult {}
+        declare class RightResult {}
+        declare class Ghost {}
+    "#;
+    let functions = parse_dts(source).unwrap();
+    let names = functions.iter().map(|function| function.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["Left.make", "Right.make"]);
+    let returns = function_return_named_types(source);
+    assert_eq!(returns.get("Left.make"), Some(&"LeftResult".to_string()));
+    assert_eq!(returns.get("Right.make"), Some(&"RightResult".to_string()));
+    assert!(!returns.contains_key("Types.make"));
+    let classifications = effective_classifications(&functions, true);
+    assert!(classifications.iter().all(|(_, classification)|
+        matches!(classification, Classification::Fallback { .. })));
+    let qualified = classifications.iter().map(|(name, _)| QualifiedFallback {
+        name: name.clone(),
+        alias: format!("pkg_{}", name.replace('.', "_")),
+        qualified_key: format!("pkg::{name}"),
+        suppress_bare: false,
+    }).collect::<Vec<_>>();
+    let shim = generate_shim(&functions, true, &qualified, &HashSet::new());
+    assert!(shim.contains("pkg::Left.make"), "{shim}");
+    assert!(shim.contains("pkg::Right.make"), "{shim}");
+    assert!(!shim.contains("function Left.make"), "{shim}");
+    assert!(!shim.contains("function Right.make"), "{shim}");
+}
+
+#[test]
+fn namespace_factories_keep_lexical_class_identity_and_type_alias_provenance() {
+    // Unrun regression: equal bare class/function names in live namespaces
+    // must not share a factory result, while an aliased type export stays inert.
+    let source = r#"
+        declare namespace Types { function make(): Missing; }
+        export type { Types as TypeAlias };
+        declare namespace Left {
+            class Result { left(): string; }
+            function make(): Result;
+        }
+        declare namespace Right {
+            class Result { right(): number; }
+            function make(): Result;
+        }
+        export { Left, Right };
+    "#;
+    let functions = parse_dts(source).unwrap();
+    assert!(functions.iter().all(|function| !function.name.starts_with("Types.")));
+    assert_eq!(function_return_named_types(source).get("Left.make"), Some(&"Left.Result".to_string()));
+    assert_eq!(function_return_named_types(source).get("Right.make"), Some(&"Right.Result".to_string()));
+    assert_eq!(type_only_namespace_names(source), HashSet::from(["Types".to_string()]));
+}
+
+#[test]
+fn namespace_value_alias_keeps_runtime_when_type_alias_is_also_exported() {
+    // Unrun regression: type-only and value edges can share an original
+    // namespace under different public aliases.
+    let source = r#"
+        declare namespace Shared {
+            class Result { method(): string; }
+            function make(): Result;
+        }
+        export type { Shared as Shape };
+        export { Shared as Runtime };
+    "#;
+    assert!(!type_only_namespace_names(source).contains("Shared"));
+    assert!(nonpublic_namespace_sources(source).contains("Shared"));
+    assert!(!parse_dts(source).unwrap().iter().any(|function| function.name == "Shared.make"));
+    assert!(parse_dts(source).unwrap().iter().any(|function| function.name == "Runtime.make"));
+    assert_eq!(function_return_named_types(source).get("Runtime.make"), Some(&"Runtime.Result".to_string()));
+    assert!(!function_return_named_types(source).contains_key("Shared.make"));
+    let classes = parse_dts_classes(source).unwrap();
+    assert!(classes.iter().any(|class| class.name == "Runtime.Result" && class.methods.iter().any(|method| method.name == "method")));
+    assert!(classes.iter().any(|class| class.name == "Shared.Result"));
+    assert!(!nested_namespace_members(source).contains_key("Shared"));
+    assert_eq!(nested_namespace_members(source)["Runtime"]["make"], "make");
+}
+
+#[test]
+fn namespace_source_stays_live_when_it_is_also_value_exported() {
+    let source = r#"
+        declare namespace Shared { function make(): string; }
+        export { Shared, Shared as Runtime };
+        export type { Shared as Shape };
+    "#;
+    assert!(!nonpublic_namespace_sources(source).contains("Shared"));
+    let functions = parse_dts(source).unwrap();
+    assert!(functions.iter().any(|function| function.name == "Shared.make"));
+    assert!(functions.iter().any(|function| function.name == "Runtime.make"));
+}
+
+#[test]
+fn commonjs_export_assignment_only_removes_its_root_namespace() {
+    // Unrun regression: `export = NS` exposes direct methods as bare keys,
+    // but a deeper namespace still has its own qualified runtime path.
+    let source = r#"
+        declare namespace API {
+            function direct(): string;
+            namespace Inner { function deep(): number; }
+        }
+        export = API;
+    "#;
+    let names = parse_dts(source).unwrap().into_iter().map(|function| function.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"direct".to_string()));
+    assert!(names.contains(&"Inner.deep".to_string()));
+}
+
+#[test]
+fn export_assignment_namespace_keeps_commonjs_bare_method_abi() {
+    let source = "declare namespace QueryString { function parse(input: string): string; }\nexport = QueryString;\n";
+    let functions = parse_dts(source).unwrap();
+    assert_eq!(functions[0].name, "parse");
+}
+
 /// Two same-arity overloads whose sole parameter is a real npm
 /// package's own option-bag interface, differing only by whether a
 /// `file` key is required or forced absent -- real example: `tar`'s
@@ -793,4 +960,364 @@ fn resolves_a_callable_alias_const_with_an_optional_call_signature_parameter() {
     let helmet = funcs.iter().find(|f| f.name == "helmet").unwrap();
     assert_eq!(helmet.params.len(), 1);
     assert_eq!(helmet.required_params, 0, "{helmet:?}");
+}
+
+#[test]
+fn collects_each_named_callable_intersection_signature() {
+    let functions = parse_dts(
+        "interface A { (x: string): string } interface B { (x: number): number } declare const f: A & B;",
+    )
+    .unwrap();
+    assert_eq!(functions.iter().filter(|function| function.name == "f").count(), 2);
+}
+
+#[test]
+fn optional_native_function_uses_fallback_arity() {
+    let functions = parse_dts("declare function f(x?: number): number;").unwrap();
+    assert!(matches!(classify(&functions[0]), Classification::Fallback { .. }));
+}
+
+#[test]
+fn namespace_export_without_alias_keeps_member_name() {
+    let members = nested_namespace_members(
+        "declare namespace N { class Foo {} export { Foo }; }",
+    );
+    assert_eq!(members["N"]["Foo"], "Foo");
+}
+
+#[test]
+fn non_nullable_removes_nested_null_from_union_member() {
+    let functions = parse_dts(
+        "type Value = NonNullable<(string | null) | undefined>; declare function f(): Value;",
+    )
+    .unwrap();
+    assert_eq!(functions[0].ret, DtsType::Native(HirType::Str));
+}
+
+#[test]
+fn merged_callable_interface_keeps_each_signature() {
+    let functions = parse_dts(
+        "interface Callable { (x: string): string } interface Callable { (x: number): number } declare const f: Callable;",
+    )
+    .unwrap();
+    assert_eq!(functions.iter().filter(|function| function.name == "f").count(), 2);
+}
+#[test]
+fn namespace_qualified_interfaces_keep_separate_object_layouts() {
+    let functions = parse_dts(r#"
+        declare namespace A { interface Options { a: number; } }
+        declare namespace B { interface Options { b: string; } }
+        export declare function useA(value: A.Options): void;
+        export declare function useB(value: B.Options): void;
+    "#).unwrap();
+    let a = functions.iter().find(|function| function.name == "useA").unwrap();
+    let b = functions.iter().find(|function| function.name == "useB").unwrap();
+    assert_eq!(a.params[0].1, DtsType::Native(HirType::Object(vec![("a".into(), HirType::F64)])));
+    assert_eq!(b.params[0].1, DtsType::Native(HirType::Object(vec![("b".into(), HirType::Str)])));
+}
+
+#[test]
+fn export_assignment_inherits_interface_methods() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            interface Base { foo(): string; }
+            interface Public extends Base { bar(): number; }
+        }
+        declare const api: API.Public;
+        export = api;
+    "#).unwrap();
+    assert!(functions.iter().any(|function| function.name == "foo"));
+    assert!(functions.iter().any(|function| function.name == "bar"));
+}
+
+#[test]
+fn namespace_aliases_resolve_in_their_lexical_scope() {
+    let functions = parse_dts(r#"
+        type Value = number;
+        declare namespace A {
+            type Value = string;
+            type Options = { value: Value };
+        }
+        export declare function f(value: A.Options): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("value".into(), HirType::Str)])));
+}
+
+#[test]
+fn namespace_alias_shadows_outer_interface_in_member_type() {
+    let functions = parse_dts(r#"
+        interface Value { wrong: number; }
+        declare namespace A {
+            type Value = string;
+            interface Options { value: Value; }
+        }
+        export declare function f(value: A.Options): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("value".into(), HirType::Str)])));
+}
+
+#[test]
+fn qualified_generic_alias_preserves_outer_substitution() {
+    let functions = parse_dts(r#"
+        declare namespace A { interface Box<T> { value: T; } }
+        declare namespace B { interface Box<T> { wrong: string; } }
+        type Wrapped<T> = A.Box<T>;
+        export declare function f(value: Wrapped<number>): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("value".into(), HirType::F64)])));
+}
+
+#[test]
+fn inherited_export_method_uses_its_declaration_namespace() {
+    let functions = parse_dts(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            interface Base { foo(value: Options): void; }
+            namespace V2 { interface Public extends Base {} }
+        }
+        declare namespace Other { interface Options { other: string; } }
+        declare const api: API.V2.Public;
+        export = api;
+    "#).unwrap();
+    let foo = functions.iter().find(|function| function.name == "foo").unwrap();
+    assert_eq!(foo.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn method_type_parameter_precedes_same_named_namespace_alias() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            type T = string;
+            interface Public { echo<T>(value: T): T; }
+        }
+        declare const api: API.Public;
+        export = api;
+    "#).unwrap();
+    let echo = functions.iter().find(|function| function.name == "echo").unwrap();
+    assert_eq!(echo.params[0].1, DtsType::Native(HirType::Json));
+}
+
+#[test]
+fn namespace_function_signature_uses_local_type_layout() {
+    let functions = parse_dts(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            function run(value: Options): void;
+        }
+    "#).unwrap();
+    let run = functions.iter().find(|function| function.name == "API.run").unwrap();
+    assert_eq!(run.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn nested_namespace_interface_extends_parent_scope() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            interface Base { x: number; }
+            namespace V2 { interface Public extends Base { y: string; } }
+        }
+        export declare function f(value: API.V2.Public): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![
+        ("x".into(), HirType::F64), ("y".into(), HirType::Str),
+    ])));
+}
+
+#[test]
+fn relative_qualified_type_reference_uses_enclosing_namespace() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            namespace V2 { interface Options { x: number; } }
+            type Selected = V2.Options;
+        }
+        export declare function f(value: API.Selected): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn reserved_public_function_alias_keeps_internal_signature_and_public_overloads() {
+    // Unrun regression: the declaration name must remain parseable while
+    // the qualified package call uses the public property key `null`.
+    let functions = parse_dts(
+        "declare function _null(value: string): string;\n\
+         declare function _null(value: number): number;\n\
+         export { _null as null };\n\
+         export { _null as default };\n\
+         export type { _null as TypeOnly };\n",
+    )
+    .unwrap();
+    assert_eq!(functions.iter().filter(|function| function.name == "_null").count(), 2);
+    let public = functions.iter().filter(|function| function.name == "null").collect::<Vec<_>>();
+    assert_eq!(public.len(), 2);
+    assert_eq!(public[0].params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(public[1].params[0].1, DtsType::Native(HirType::F64));
+    assert_eq!(functions.iter().filter(|function| function.name == "default").count(), 2);
+    assert!(!functions.iter().any(|function| function.name == "TypeOnly"));
+}
+
+#[test]
+fn reserved_aliases_do_not_mix_same_named_source_functions() {
+    // Unrun regression for two re-exported files both originally declaring
+    // `f`: the flattening gives the two public names separate bindings.
+    let functions = parse_dts(
+        "declare function __thaw_public_6e756c6c(value: string): string;\n\
+         export { __thaw_public_6e756c6c as null };\n\
+         declare function __thaw_public_766f6964(value: number): number;\n\
+         export { __thaw_public_766f6964 as void };\n",
+    )
+    .unwrap();
+    let null = functions.iter().find(|function| function.name == "null").unwrap();
+    let void = functions.iter().find(|function| function.name == "void").unwrap();
+    assert_eq!(null.params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(void.params[0].1, DtsType::Native(HirType::F64));
+    assert!(!functions.iter().any(|function| function.name.starts_with("__thaw_public_")));
+    assert!(parse_dts_values(
+        "declare const __thaw_public_6e756c6c: () => string;\n\
+         export { __thaw_public_6e756c6c as null };\n"
+    ).unwrap().iter().all(|value| !value.name.starts_with("__thaw_public_")));
+}
+
+#[test]
+fn reserved_callable_let_and_var_aliases_keep_their_own_types() {
+    // Unrun regression: callable `let` and interface-backed `var` follow
+    // the same public-key mapping as callable `const` and functions.
+    let functions = parse_dts(
+        "interface NumberCall { (): number; }\n\
+         declare let __thaw_public_766f6964_a: () => string;\n\
+         export { __thaw_public_766f6964_a as void };\n\
+         declare var __thaw_public_6e756c6c_b: NumberCall;\n\
+         export { __thaw_public_6e756c6c_b as null };\n",
+    ).unwrap();
+    let void = functions.iter().find(|function| function.name == "void").unwrap();
+    let null = functions.iter().find(|function| function.name == "null").unwrap();
+    assert_eq!(void.ret, DtsType::Native(HirType::Str));
+    assert_eq!(null.ret, DtsType::Native(HirType::F64));
+    assert!(!functions.iter().any(|function| function.name.starts_with("__thaw_public_")));
+}
+
+#[test]
+fn internal_support_namespace_retains_class_shape_without_runtime_members() {
+    // Unrun regression: an exact internal marker hides only the generated
+    // namespace's values. An ordinary unexported namespace stays observable.
+    let source = "declare namespace __thaw_support_abc {\n\
+        type __thaw_private_support_marker__ = never;\n\
+        export class Base { inherited(): string; }\n\
+    }\n\
+    export declare class Public extends __thaw_support_abc.Base {}\n\
+    declare namespace Normal { export class Live {} }\n";
+    let filename = thaw_parser::common::FileName::Custom("support-test.d.ts".into());
+    let support = internal_support_namespace_names_named(source, &filename);
+    assert_eq!(support, std::collections::HashSet::from(["__thaw_support_abc".to_string()]));
+    let nested = nested_namespace_members_named(source, &filename);
+    assert!(!nested.contains_key("__thaw_support_abc"));
+    assert!(nested.contains_key("Normal"));
+    let classes = parse_dts_classes_named(source, &filename).unwrap();
+    let public = classes.iter().find(|class| class.name == "Public").unwrap();
+    assert!(public.methods.iter().any(|method| method.name == "inherited"));
+    assert!(classes.iter().any(|class| class.name == "__thaw_support_abc.Base"));
+}
+
+#[test]
+fn marked_owned_origin_namespace_keeps_shape_without_runtime_capture() {
+    // Unrun: exact marker, not the reserved prefix, suppresses runtime
+    // namespace enumeration; public alias remains available separately.
+    let source = "declare namespace __thaw_owned_abcd {\n\
+        type __thaw_owned_origin_marker_abcd = never;\n\
+        export namespace Source { export class Client { run(): string; } }\n\
+    }\n\
+    declare namespace __thaw_owned_user { export class Live {} }\n\
+    declare namespace api { export import Client = __thaw_owned_abcd.Source.Client; }\n";
+    let filename = thaw_parser::common::FileName::Custom("owned-origin-marker.d.ts".into());
+    let owned = internal_owned_namespace_names_named(source, &filename);
+    assert_eq!(owned, std::collections::HashSet::from(["__thaw_owned_abcd".to_string()]));
+    let nested = nested_namespace_members_named(source, &filename);
+    assert!(!nested.contains_key("__thaw_owned_abcd"));
+    assert!(nested.contains_key("__thaw_owned_user"));
+    assert!(nested.contains_key("api"));
+    let classes = parse_dts_classes_named(source, &filename).unwrap();
+    assert!(classes.iter().any(|class| class.name == "__thaw_owned_abcd.Source.Client"));
+}
+
+#[test]
+fn nested_type_only_namespace_class_has_shape_without_runtime_member() {
+    // Unrun: a public parent does not turn an explicitly type-only child
+    // into a runtime class property.
+    let source = "declare namespace parts {\n\
+        export namespace Shapes {\n\
+            type __thaw_type_only_namespace_marker_0123456789abcdef = never;\n\
+            export class Model { id: string; }\n\
+        }\n\
+        export class Live {}\n\
+    }\n";
+    let filename = thaw_parser::common::FileName::Custom("nested-type-only.d.ts".into());
+    let type_only = type_only_namespace_names_named(source, &filename);
+    assert!(type_only.contains("parts.Shapes"), "{type_only:?}");
+    let nested = nested_namespace_members_named(source, &filename);
+    assert!(!nested.get("parts").is_some_and(|members| members.contains_key("Shapes.Model")));
+    assert!(nested.get("parts").is_some_and(|members| members.contains_key("Live")));
+    let classes = parse_dts_classes_named(source, &filename).unwrap();
+    assert!(classes.iter().any(|class| class.name == "parts.Shapes.Model"));
+}
+
+#[test]
+fn qualified_import_equals_exposes_direct_function() {
+    // Unrun: copying only `Owner.make.*` descendants misses `make` itself.
+    let source = "declare namespace __thaw_owned_a {\n\
+        type __thaw_owned_origin_marker_a = never;\n\
+        export function make(value: string): string;\n\
+    }\n\
+    declare namespace api { export import create = __thaw_owned_a.make; }\n";
+    let functions = parse_dts(source).unwrap();
+    assert!(functions.iter().any(|function| function.name == "api.create"));
+}
+
+#[test]
+fn scoped_composite_properties_keep_instance_and_generic_constructor_roles() {
+    // Unrun: a projected generic property retains its type arguments.
+    // Only the property explicitly declared `typeof C` is constructible;
+    // the adjacent `instance: C` remains an ordinary value.
+    let source = "declare namespace __thaw_support_abc {\n\
+        type __thaw_private_support_marker__ = never;\n\
+        export class C { constructor(name: string); }\n\
+        export interface Constructor<U> { new (value: U): C; }\n\
+        export interface Members<T> { item: T; instance: C; ctor: typeof __thaw_support_abc.C; factory: Constructor<T>; }\n\
+    }\n\
+    declare namespace api {\n\
+        export const item: __thaw_support_abc.Members<string>[\"item\"];\n\
+        export const instance: __thaw_support_abc.Members<string>[\"instance\"];\n\
+        export const ctor: __thaw_support_abc.Members<string>[\"ctor\"];\n\
+        export const factory: __thaw_support_abc.Members<string>[\"factory\"];\n\
+    }\n";
+    let classes = parse_dts_classes(source).unwrap();
+    assert!(classes.iter().any(|class|
+        class.name == "api.ctor" && class.constructible));
+    let factory = classes.iter().find(|class| class.name == "api.factory").unwrap();
+    assert!(factory.constructible);
+    assert_eq!(factory.constructors[0].params[0].1, DtsType::Native(HirType::Str));
+    assert!(!classes.iter().any(|class|
+        class.name == "api.instance" && class.constructible));
+    assert!(!classes.iter().any(|class|
+        class.name == "api.item" && class.constructible));
+}
+
+#[test]
+fn scoped_import_equals_alias_preserves_ordinary_value_type() {
+    // Unrun: selected owner containers expose an ordinary const through
+    // a public qualified import-equals alias, not only functions/classes.
+    let source = "declare namespace __thaw_owned_a {\n\
+        type __thaw_owned_origin_marker_a = never;\n\
+        export const version: string;\n\
+    }\n\
+    declare namespace api { export import version = __thaw_owned_a.version; }\n";
+    let values = parse_dts_values(source).unwrap();
+    assert!(values.iter().any(|value|
+        value.name == "api.version" && value.ty == DtsType::Native(HirType::Str)));
 }

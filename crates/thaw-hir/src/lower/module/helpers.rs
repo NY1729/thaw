@@ -15,9 +15,30 @@ fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
 /// `declarations`/`interfaces` (see `module/classes.rs`'s synthetic
 /// base-layout branch).
 fn is_error_family_name(name: &str) -> bool {
+    crate::is_error_family_name(name)
+}
+
+/// Standard-library constructors whose `.prototype` the realm exposes as a
+/// real object. thaw models several of these only as call/new targets, so a
+/// bare `Object`/`Array`/`Date`/... reference is otherwise an "unknown
+/// variable"; `<name>.prototype` reads the live constructor off the realm
+/// instead (see `crates/thaw-hir/src/lower/objects.rs`'s `prototype`
+/// member-read branch) -- the shape most of test262's prototype tests use
+/// (`Object.prototype.hasOwnProperty.call`, `Array.prototype.map.call`, ...).
+fn is_builtin_prototype_owner(name: &str) -> bool {
     matches!(
         name,
-        "Error"
+        "Object"
+            | "Function"
+            | "Array"
+            | "String"
+            | "Number"
+            | "Boolean"
+            | "Symbol"
+            | "BigInt"
+            | "Date"
+            | "RegExp"
+            | "Error"
             | "TypeError"
             | "RangeError"
             | "SyntaxError"
@@ -26,6 +47,28 @@ fn is_error_family_name(name: &str) -> bool {
             | "URIError"
             | "AggregateError"
             | "SuppressedError"
+            | "Map"
+            | "Set"
+            | "WeakMap"
+            | "WeakSet"
+            | "ArrayBuffer"
+            | "SharedArrayBuffer"
+            | "DataView"
+            | "Int8Array"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "Int16Array"
+            | "Uint16Array"
+            | "Int32Array"
+            | "Uint32Array"
+            | "Float16Array"
+            | "Float32Array"
+            | "Float64Array"
+            | "BigInt64Array"
+            | "BigUint64Array"
+            | "Promise"
+            | "Iterator"
+            | "AsyncIterator"
     )
 }
 
@@ -105,7 +148,36 @@ fn is_opaque_global_type(name: &str) -> bool {
             | "SharedArrayBuffer"
             | "DataView"
             | "BufferSource"
+            // Non-`Uint8Array` typed arrays stay real QuickJS typed
+            // arrays (`JsValue`): that keeps their per-element-width
+            // coercion (Int8 wrap, Uint8Clamped clamp, Float32 rounding,
+            // ...) exact, which a flat `Bytes`/`Array(F64)` model cannot
+            // reproduce. `Uint8Array`/`Buffer` are the only spellings
+            // routed to native `Bytes`.
+            | "Int8Array"
+            | "Uint8ClampedArray"
+            | "Int16Array"
+            | "Uint16Array"
+            | "Int32Array"
+            | "Uint32Array"
+            | "Float16Array"
+            | "Float32Array"
+            | "Float64Array"
+            | "BigInt64Array"
+            | "BigUint64Array"
     )
+}
+
+/// Builds the HIR literal for a source string given its WTF-8 bytes: a
+/// plain `HirLit::Str` when the text is valid UTF-8, or `HirLit::Wtf8`
+/// when it contains a lone UTF-16 surrogate (which a Rust `String`
+/// cannot hold). SWC's AST already carries the WTF-8 bytes, so this is
+/// where a literal like `"\uD800"` stops being replaced with U+FFFD.
+fn hir_string_literal_from_wtf8(bytes: &[u8]) -> HirLit {
+    match std::str::from_utf8(bytes) {
+        Ok(valid) => HirLit::Str(valid.to_string()),
+        Err(_) => HirLit::Wtf8(bytes.to_vec()),
+    }
 }
 
 /// An object-literal accessor's backing closure is stored as a hidden
@@ -116,12 +188,17 @@ fn is_hidden_accessor_field(name: &str) -> bool {
     name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_")
 }
 
+/// A class `#private` member is lowered to a field with this prefix; it is
+/// storage only and is never an own property (keys, JSON, spread, clone).
+const PRIVATE_SLOT_PREFIX: &str = "__thaw_private_";
+
 fn ecmascript_field_order<T>(fields: &[(Symbol, T)]) -> Vec<usize> {
     let mut indices = fields
         .iter()
         .enumerate()
         .filter_map(|(index, (name, _))| {
-            (!is_hidden_accessor_field(name)).then_some((index, array_index_key(name)))
+            (!is_hidden_accessor_field(name) && !name.starts_with(PRIVATE_SLOT_PREFIX))
+                .then_some((index, array_index_key(name)))
         })
         .collect::<Vec<_>>();
     indices.sort_by_key(|(index, array_index)| {
@@ -138,6 +215,16 @@ fn array_index_key(name: &str) -> Option<u32> {
 /// Whether an object type's identity chain (see `module/classes.rs`) makes
 /// it an `Error`-family instance -- the built-ins themselves, or any user
 /// class transitively `extends`ing one of them.
+/// The shared physical prefix of every Error-family record: identity marker,
+/// then `message` and `name`.
+fn builtin_error_object_type() -> HirType {
+    HirType::Object(vec![
+        ("__thaw_class_identity_\u{1e}Error".to_string(), HirType::Bool),
+        ("message".to_string(), HirType::Json),
+        ("name".to_string(), HirType::Json),
+    ])
+}
+
 fn object_type_is_error_family(ty: &HirType) -> bool {
     let HirType::Object(fields) = ty else {
         return false;
@@ -145,8 +232,8 @@ fn object_type_is_error_family(ty: &HirType) -> bool {
     fields.first().is_some_and(|(marker, ty)| {
         *ty == HirType::Bool
             && marker
-                .strip_prefix("__thaw_class_identity_")
-                .is_some_and(|chain| chain.split('$').any(is_error_family_name))
+                .strip_prefix("__thaw_class_identity_\u{1e}")
+                .is_some_and(|chain| chain.split('\u{1f}').any(is_error_family_name))
     })
 }
 
@@ -278,8 +365,38 @@ fn default_arity_symbol(symbol: &str, arity: usize) -> Symbol {
     format!("{symbol}__thawdefault_arity_{arity}")
 }
 
-fn omitted_parameter_symbol(symbol: &str, mask: usize) -> Symbol {
-    format!("{symbol}__thawomitted_mask_{mask:x}")
+fn omitted_parameter_symbol(symbol: &str, mask: &HirOptionalMask) -> Symbol {
+    let suffix = match mask {
+        HirOptionalMask::Inline(bits) => format!("{bits:x}"),
+        HirOptionalMask::Extended(words) => format!(
+            "x{}",
+            words.iter().map(|word| format!("{word:x}")).collect::<Vec<_>>().join("_")
+        ),
+    };
+    format!("{symbol}__thawomitted_mask_{suffix}")
+}
+
+fn omitted_parameter_mask_from_symbol(symbol: &str, base: &str) -> Option<HirOptionalMask> {
+    let suffix = symbol.strip_prefix(&format!("{base}__thawomitted_mask_"))?;
+    if let Some(words) = suffix.strip_prefix('x') {
+        let words = words
+            .split('_')
+            .map(|word| u64::from_str_radix(word, 16).ok())
+            .collect::<Option<Vec<_>>>()?;
+        return (words.len() > 1 && words.last().copied() != Some(0))
+            .then_some(HirOptionalMask::Extended(Box::new(words)));
+    }
+    u64::from_str_radix(suffix, 16).ok().map(HirOptionalMask::Inline)
+}
+
+fn omitted_parameter_masks_in_signatures(
+    signatures: &HashMap<Symbol, FnSignature>,
+    base: &str,
+) -> Vec<HirOptionalMask> {
+    signatures
+        .keys()
+        .filter_map(|symbol| omitted_parameter_mask_from_symbol(symbol, base))
+        .collect()
 }
 
 fn pattern_is_omittable(pattern: &Pat) -> bool {
@@ -334,7 +451,10 @@ fn trailing_omittable_start(patterns: &[Pat]) -> Option<usize> {
     (start < patterns.len()).then_some(start)
 }
 
-fn omitted_parameter_masks(patterns: &[Pat], receiver_count: usize) -> Result<Vec<usize>, String> {
+fn omitted_parameter_masks(
+    patterns: &[Pat],
+    receiver_count: usize,
+) -> Result<Vec<HirOptionalMask>, String> {
     let omittable = patterns
         .iter()
         .enumerate()
@@ -347,10 +467,10 @@ fn omitted_parameter_masks(patterns: &[Pat], receiver_count: usize) -> Result<Ve
     }
     let mut masks = Vec::with_capacity((1usize << omittable.len()).saturating_sub(1));
     for subset in 1usize..(1usize << omittable.len()) {
-        let mut mask = 0usize;
+        let mut mask = HirOptionalMask::default();
         for (bit, parameter) in omittable.iter().enumerate() {
             if subset & (1usize << bit) != 0 {
-                mask |= 1usize << parameter;
+                mask.insert(*parameter);
             }
         }
         masks.push(mask);
@@ -406,9 +526,9 @@ fn insert_omitted_parameter_signatures(
             .params
             .into_iter()
             .enumerate()
-            .filter_map(|(index, parameter)| (mask & (1usize << index) == 0).then_some(parameter))
+            .filter_map(|(index, parameter)| (!mask.contains(index)).then_some(parameter))
             .collect();
-        signatures.insert(omitted_parameter_symbol(symbol, mask), wrapper);
+        signatures.insert(omitted_parameter_symbol(symbol, &mask), wrapper);
     }
     Ok(())
 }
@@ -473,9 +593,9 @@ fn class_name_from_type(ty: &HirType) -> Option<&str> {
     };
     fields.first().and_then(|(name, ty)| {
         (*ty == HirType::Bool)
-            .then(|| name.strip_prefix("__thaw_class_identity_"))
+            .then(|| name.strip_prefix("__thaw_class_identity_\u{1e}"))
             .flatten()
-            .and_then(|identities| identities.split('$').next())
+            .and_then(|identities| identities.split('\u{1f}').next())
     })
 }
 
@@ -486,8 +606,8 @@ fn class_type_has_identity(ty: &HirType, expected: &str) -> bool {
     fields.first().is_some_and(|(name, ty)| {
         *ty == HirType::Bool
             && name
-                .strip_prefix("__thaw_class_identity_")
-                .is_some_and(|identities| identities.split('$').any(|name| name == expected))
+                .strip_prefix("__thaw_class_identity_\u{1e}")
+                .is_some_and(|identities| identities.split('\u{1f}').any(|name| name == expected))
     })
 }
 

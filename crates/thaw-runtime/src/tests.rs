@@ -7,6 +7,391 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
+// Lambda invocations update a process-wide variable. Keep every direct
+// invocation fixture serial and restore the parent test process's value.
+static LAMBDA_TRACE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct LambdaTraceEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for LambdaTraceEnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("_X_AMZN_TRACE_ID", value),
+            None => std::env::remove_var("_X_AMZN_TRACE_ID"),
+        }
+    }
+}
+
+fn guard_lambda_trace_env() -> LambdaTraceEnvGuard {
+    let lock = LAMBDA_TRACE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    LambdaTraceEnvGuard {
+        previous: std::env::var_os("_X_AMZN_TRACE_ID"),
+        _lock: lock,
+    }
+}
+
+#[test]
+fn bytes_encoding_preserves_native_units_and_stops_at_invalid_hex() {
+    let face = thaw_arena::arena_string("😀".as_bytes());
+    let latin1 = c"latin1".as_ptr();
+    assert_eq!(
+        unsafe { read_byte_array(thaw_bytes_from_string(face, latin1)) }.unwrap(),
+        [0x3d, 0x00]
+    );
+    assert_eq!(unsafe { thaw_bytes_byte_length(face, latin1) }, 2.0);
+    let lone = thaw_string_from_char_code(0xD83D as f64);
+    assert_eq!(
+        unsafe { read_byte_array(thaw_bytes_from_string(lone, latin1)) }.unwrap(),
+        [0x3d]
+    );
+    let nul = thaw_arena::arena_string(b"a\0b");
+    assert_eq!(
+        unsafe { read_byte_array(thaw_bytes_from_string(nul, c"utf8".as_ptr())) }.unwrap(),
+        b"a\0b"
+    );
+    assert_eq!(
+        unsafe { thaw_bytes_byte_length(nul, c"utf8".as_ptr()) },
+        3.0
+    );
+    assert_eq!(
+        unsafe { thaw_bytes_byte_length(c"1ag123".as_ptr(), c"hex".as_ptr()) },
+        3.0
+    );
+    assert_eq!(
+        unsafe { thaw_bytes_byte_length(c"Zg==".as_ptr(), c"base64".as_ptr()) },
+        1.0
+    );
+    assert_eq!(
+        unsafe { read_byte_array(thaw_bytes_from_string(c"1a7".as_ptr(), c"hex".as_ptr())) }
+            .unwrap(),
+        [0x1a]
+    );
+    assert_eq!(
+        unsafe { read_byte_array(thaw_bytes_from_string(c"1ag123".as_ptr(), c"hex".as_ptr())) }
+            .unwrap(),
+        [0x1a]
+    );
+    let output = unsafe { write_byte_array(&[0, 0, 0]) };
+    let set_result =
+        unsafe { thaw_bytes_set_from_string(output, c"1ag123".as_ptr(), c"hex".as_ptr()) };
+    assert_eq!(unsafe { set_result.cast::<f64>().read_unaligned() }, 2.0);
+    assert_eq!(
+        unsafe { set_result.add(8).cast::<f64>().read_unaligned() },
+        1.0
+    );
+    assert_eq!(unsafe { read_byte_array(output) }.unwrap(), [0x1a, 0, 0]);
+    let ascii =
+        unsafe { thaw_bytes_to_string(unsafe { write_byte_array(&[0xc1]) }, c"ascii".as_ptr()) };
+    assert_eq!(unsafe { CStr::from_ptr(ascii) }.to_bytes(), b"A");
+}
+
+#[test]
+fn bytes_set_from_base64_reports_committed_source_units() {
+    let one = unsafe { write_byte_array(&[0]) };
+    let short = unsafe { thaw_bytes_set_from_string(one, c"YQ".as_ptr(), c"base64".as_ptr()) };
+    assert_eq!(unsafe { short.cast::<f64>().read_unaligned() }, 2.0);
+    assert_eq!(unsafe { short.add(8).cast::<f64>().read_unaligned() }, 1.0);
+    assert_eq!(unsafe { read_byte_array(one) }.unwrap(), [b'a']);
+
+    let three = unsafe { write_byte_array(&[0, 0, 0]) };
+    let stopped =
+        unsafe { thaw_bytes_set_from_string(three, c"YWJj ".as_ptr(), c"base64".as_ptr()) };
+    assert_eq!(unsafe { stopped.cast::<f64>().read_unaligned() }, 4.0);
+    assert_eq!(
+        unsafe { stopped.add(8).cast::<f64>().read_unaligned() },
+        3.0
+    );
+    assert_eq!(unsafe { read_byte_array(three) }.unwrap(), b"abc");
+
+    let four = unsafe { write_byte_array(&[0, 0, 0, 0]) };
+    let complete =
+        unsafe { thaw_bytes_set_from_string(four, c"YWJj ".as_ptr(), c"base64".as_ptr()) };
+    assert_eq!(unsafe { complete.cast::<f64>().read_unaligned() }, 5.0);
+    assert_eq!(
+        unsafe { complete.add(8).cast::<f64>().read_unaligned() },
+        3.0
+    );
+}
+
+#[test]
+fn bytes_accessors_reject_overflowed_offsets() {
+    let buffer = unsafe { write_byte_array(&[1, 2, 3, 4, 5, 6, 7, 8]) };
+    assert_eq!(
+        unsafe { thaw_bytes_read(buffer, f64::MAX, 4.0, 0.0, 1.0) },
+        0.0
+    );
+    assert_eq!(unsafe { thaw_bytes_read_i64(buffer, f64::MAX, 1.0) }, 0);
+    unsafe { thaw_bytes_write(buffer, f64::MAX, 42.0, 4.0, 0.0, 1.0) };
+    unsafe { thaw_bytes_write_i64(buffer, f64::MAX, 42, 1.0) };
+    assert_eq!(
+        unsafe { read_byte_array(buffer) }.unwrap(),
+        [1, 2, 3, 4, 5, 6, 7, 8]
+    );
+}
+
+#[test]
+fn bytes_forward_search_distinguishes_infinity_and_nan() {
+    let haystack = unsafe { write_byte_array(&[1, 2, 1]) };
+    let needle = unsafe { write_byte_array(&[1]) };
+    assert_eq!(
+        unsafe { thaw_bytes_index_of(haystack, needle, f64::INFINITY, 0.0) },
+        -1.0
+    );
+    assert_eq!(
+        unsafe { thaw_bytes_index_of(haystack, needle, f64::NEG_INFINITY, 0.0) },
+        0.0
+    );
+    assert_eq!(
+        unsafe { thaw_bytes_index_of(haystack, needle, f64::NAN, 0.0) },
+        0.0
+    );
+    assert_eq!(
+        unsafe { thaw_bytes_index_of(haystack, needle, f64::INFINITY, 1.0) },
+        2.0
+    );
+}
+
+#[test]
+fn native_string_operations_preserve_utf16_units() {
+    let lone = thaw_string_from_char_code(0xD800 as f64);
+    let low = thaw_string_from_char_code(0xDC00 as f64);
+    let mut pair_bytes = unsafe { wtf8_bytes(lone) }.to_vec();
+    pair_bytes.extend_from_slice(unsafe { wtf8_bytes(low) });
+    let pair = arena_wtf8(&pair_bytes).unwrap().cast();
+    assert!(unsafe { thaw_string_is_well_formed(pair) });
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(lone) }), [0xD800]);
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_string_trim(lone) }) }),
+        [0xD800]
+    );
+    assert_eq!(
+        wtf8_decode_utf16(unsafe {
+            wtf8_bytes(unsafe { thaw_string_normalize(lone, c"NFC".as_ptr()) })
+        }),
+        [0xD800]
+    );
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_unescape(c"%uD800".as_ptr()) }) }),
+        [0xD800]
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(thaw_escape(lone)) }
+            .to_str()
+            .unwrap(),
+        "%uD800"
+    );
+    assert_eq!(
+        unsafe { thaw_string_char_code_at(thaw_string_from_char_code(2f64.powi(63)), 0.0) },
+        0.0
+    );
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(thaw_string_from_code_point(0xD800 as f64)) }),
+        [0xD800]
+    );
+    assert!(unsafe { thaw_encode_uri(lone) }.is_null());
+    assert!(unsafe { thaw_decode_uri_component(c"%+1".as_ptr()) }.is_null());
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_decode_uri_component(lone) }) }),
+        [0xD800]
+    );
+    assert_eq!(
+        unsafe { thaw_string_last_index_of(c"aba".as_ptr(), c"a".as_ptr(), f64::NAN) },
+        2.0
+    );
+    let face = thaw_string_from_code_point(0x1F600 as f64);
+    let replaced = unsafe { thaw_string_replace_all(face, c"".as_ptr(), c"x".as_ptr()) };
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(replaced) }),
+        [b'x' as u16, 0xD83D, b'x' as u16, 0xDE00, b'x' as u16]
+    );
+    let symbol = unsafe { thaw_symbol_new(c"x".as_ptr()) };
+    assert!(unsafe { thaw_symbol_key_for(symbol) }.is_null());
+    let first = unsafe { thaw_symbol_for(lone) };
+    let second = unsafe { thaw_symbol_for(thaw_string_from_char_code(0xD801 as f64)) };
+    assert_ne!(unsafe { wtf8_bytes(first) }, unsafe { wtf8_bytes(second) });
+    assert!(unsafe { wtf8_bytes(first) }.starts_with(b"\x03R"));
+    let registered = unsafe { thaw_symbol_for(c"key:with:colon".as_ptr()) };
+    let repeated = unsafe { thaw_symbol_for(c"key:with:colon".as_ptr()) };
+    assert_eq!(unsafe { wtf8_bytes(registered) }, unsafe {
+        wtf8_bytes(repeated)
+    });
+    assert_eq!(
+        unsafe { wtf8_bytes(thaw_symbol_key_for(registered)) },
+        b"key:with:colon"
+    );
+    assert_eq!(
+        unsafe { wtf8_bytes(thaw_symbol_description(registered)) },
+        b"key:with:colon"
+    );
+    assert_eq!(
+        unsafe { wtf8_bytes(thaw_symbol_to_string(registered)) },
+        b"Symbol(key:with:colon)"
+    );
+    let empty = unsafe { thaw_symbol_for(c"".as_ptr()) };
+    assert_eq!(unsafe { wtf8_bytes(thaw_symbol_key_for(empty)) }, b"");
+    let with_nul = thaw_arena::arena_string(b"before\0after");
+    let registered_nul = unsafe { thaw_symbol_for(with_nul) };
+    assert_eq!(
+        unsafe { wtf8_bytes(thaw_symbol_key_for(registered_nul)) },
+        b"before\0after"
+    );
+    assert_eq!(
+        unsafe { wtf8_bytes(thaw_symbol_description(registered_nul)) },
+        b"before\0after"
+    );
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(thaw_symbol_description(first)) }),
+        [0xD800]
+    );
+    let sigma = unsafe { thaw_string_to_lower_case(c"ΟΣ".as_ptr()) };
+    assert_eq!(unsafe { CStr::from_ptr(sigma) }.to_str().unwrap(), "ος");
+    let turkic = unsafe { thaw_string_to_locale_lower_case(c"I\u{0307}".as_ptr(), c"tr".as_ptr()) };
+    assert_eq!(unsafe { CStr::from_ptr(turkic) }.to_str().unwrap(), "i");
+    let embedded_nul = thaw_arena::arena_string(b" a\0b ");
+    let trimmed = unsafe { thaw_string_trim(embedded_nul) };
+    assert_eq!(unsafe { wtf8_bytes(trimmed) }, b"a\0b");
+}
+
+#[test]
+fn dependency_compile_uri_byte_iteration() {
+    let unreserved = c"AZaz09-_.!~*'()";
+    let component = unsafe { thaw_encode_uri_component(unreserved.as_ptr()) };
+    assert!(!component.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(component) }.to_bytes(),
+        b"AZaz09-_.!~*'()"
+    );
+    let uri = unsafe { thaw_encode_uri(unreserved.as_ptr()) };
+    assert!(!uri.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(uri) }.to_bytes(),
+        b"AZaz09-_.!~*'()"
+    );
+
+    let reserved = c";/?:@&=+$,#";
+    let component = unsafe { thaw_encode_uri_component(reserved.as_ptr()) };
+    assert!(!component.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(component) }.to_bytes(),
+        b"%3B%2F%3F%3A%40%26%3D%2B%24%2C%23"
+    );
+    let uri = unsafe { thaw_encode_uri(reserved.as_ptr()) };
+    assert!(!uri.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(uri) }.to_bytes(), b";/?:@&=+$,#");
+
+    let native = thaw_arena::arena_string("é😀\0".as_bytes());
+    let encoded = unsafe { thaw_encode_uri_component(native.cast()) };
+    assert!(!encoded.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(encoded) }.to_bytes(),
+        b"%C3%A9%F0%9F%98%80%00"
+    );
+    let encoded = unsafe { thaw_encode_uri(native.cast()) };
+    assert!(!encoded.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(encoded) }.to_bytes(),
+        b"%C3%A9%F0%9F%98%80%00"
+    );
+
+    let high = thaw_string_from_char_code(0xD83D as f64);
+    let low = thaw_string_from_char_code(0xDE00 as f64);
+    let mut pair_bytes = unsafe { wtf8_bytes(high) }.to_vec();
+    pair_bytes.extend_from_slice(unsafe { wtf8_bytes(low) });
+    let pair = arena_wtf8(&pair_bytes).unwrap().cast();
+    let encoded = unsafe { thaw_encode_uri_component(pair) };
+    assert!(!encoded.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(encoded) }.to_bytes(),
+        b"%F0%9F%98%80"
+    );
+    let encoded = unsafe { thaw_encode_uri(pair) };
+    assert!(!encoded.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(encoded) }.to_bytes(),
+        b"%F0%9F%98%80"
+    );
+
+    for lone in [
+        thaw_string_from_char_code(0xD800 as f64),
+        thaw_string_from_char_code(0xDC00 as f64),
+    ] {
+        assert!(unsafe { thaw_encode_uri_component(lone) }.is_null());
+        assert!(unsafe { thaw_encode_uri(lone) }.is_null());
+    }
+    assert!(unsafe { thaw_encode_uri_component(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_encode_uri(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_decode_uri_component(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_decode_uri(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn dependency_compile_root_locale_case() {
+    let root_lower = unsafe { thaw_string_to_lower_case(c"Iİß".as_ptr()) };
+    assert!(!root_lower.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(root_lower) }.to_str().unwrap(),
+        "ii\u{0307}ß"
+    );
+    let root_upper = unsafe { thaw_string_to_upper_case(c"Iİß".as_ptr()) };
+    assert!(!root_upper.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(root_upper) }.to_str().unwrap(),
+        "IİSS"
+    );
+
+    let turkish_lower =
+        unsafe { thaw_string_to_locale_lower_case(c"Iİiı".as_ptr(), c"tr-TR".as_ptr()) };
+    assert!(!turkish_lower.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(turkish_lower) }.to_str().unwrap(),
+        "ıiiı"
+    );
+    let turkish_upper =
+        unsafe { thaw_string_to_locale_upper_case(c"Iİiı".as_ptr(), c"tr-TR".as_ptr()) };
+    assert!(!turkish_upper.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(turkish_upper) }.to_str().unwrap(),
+        "IİİI"
+    );
+
+    for locale in [c"!", c""] {
+        let lower = unsafe { thaw_string_to_locale_lower_case(c"Iİß".as_ptr(), locale.as_ptr()) };
+        assert!(!lower.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(lower) }.to_str().unwrap(),
+            "ii\u{0307}ß"
+        );
+        let upper = unsafe { thaw_string_to_locale_upper_case(c"Iİß".as_ptr(), locale.as_ptr()) };
+        assert!(!upper.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(upper) }.to_str().unwrap(), "IİSS");
+    }
+
+    let units = [0xD800, b'I' as u16, 0xDC00];
+    let segmented = arena_wtf8(&wtf8_encode_utf16(&units)).unwrap().cast();
+    let mapped = unsafe { thaw_string_to_locale_lower_case(segmented, c"tr".as_ptr()) };
+    assert!(!mapped.is_null());
+    assert_eq!(
+        wtf8_decode_utf16(unsafe { wtf8_bytes(mapped) }),
+        [0xD800, 0x0131, 0xDC00]
+    );
+
+    assert!(unsafe { thaw_string_to_lower_case(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_string_to_upper_case(std::ptr::null()) }.is_null());
+    assert!(
+        unsafe { thaw_string_to_locale_lower_case(std::ptr::null(), c"tr".as_ptr()) }.is_null()
+    );
+    assert!(
+        unsafe { thaw_string_to_locale_upper_case(std::ptr::null(), c"tr".as_ptr()) }.is_null()
+    );
+    assert!(unsafe { thaw_string_to_locale_lower_case(c"I".as_ptr(), std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_string_to_locale_upper_case(c"I".as_ptr(), std::ptr::null()) }.is_null());
+}
+
 static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -178,6 +563,40 @@ extern "C" fn record_resume(frame: *mut u8, result: *const u8) {
     let record = unsafe { &mut *(frame as *mut ResumeRecord) };
     record.calls += 1;
     record.result = result;
+}
+
+#[test]
+fn pending_promise_subscription_keeps_arena_frame_until_resume() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let frame = thaw_arena::thaw_arena_alloc(
+        std::mem::size_of::<ResumeRecord>(),
+        std::mem::align_of::<ResumeRecord>(),
+    )
+    .cast::<ResumeRecord>();
+    assert!(!frame.is_null());
+    unsafe {
+        frame.write(ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        })
+    };
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_subscribe(promise, record_resume, frame.cast()) },
+        1
+    );
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(frame as usize));
+    let result = std::ptr::dangling::<u8>();
+    assert_eq!(thaw_promise_resolve(promise, result), 1);
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(frame as usize));
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(unsafe { (*frame).calls }, 1);
+    assert_eq!(unsafe { (*frame).result }, result);
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(frame as usize));
 }
 
 struct ChainNumberContext {
@@ -549,6 +968,140 @@ fn rejected_promise_preserves_typed_exception_metadata() {
 }
 
 #[test]
+fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
+    let mut pending = std::ptr::null();
+    let opaque = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(opaque, &mut pending) },
+        1
+    );
+    assert_eq!(thaw_promise_reject(opaque, std::ptr::dangling::<u8>()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
+        b"Unhandled opaque Promise rejection"
+    );
+
+    let later = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(later, &mut pending) },
+        1
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                later,
+                std::ptr::dangling::<u8>(),
+                2,
+                0.0,
+                42,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
+        b"Unhandled opaque Promise rejection"
+    );
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+
+    let mut pending = std::ptr::null();
+    let typed = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(typed, &mut pending) },
+        1
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                typed,
+                std::ptr::dangling::<u8>(),
+                2,
+                0.0,
+                42,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(), b"42");
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+
+    let mut pending = std::ptr::null();
+    let native = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_detach_for_report(native, &mut pending) },
+        1
+    );
+    let text = b"native source\0".to_vec();
+    assert_eq!(
+        unsafe { thaw_promise_reject_native_text(native, text.as_ptr()) },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    drop(text);
+    assert_eq!(
+        unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
+        b"native source"
+    );
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+}
+
+#[test]
+fn compiler_text_reporter_snapshots_opaque_and_typed_rejections() {
+    thread_local! { static SEEN: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) }; }
+    extern "C" fn reporter(text: *const u8) -> PromiseReportResult {
+        SEEN.with(|seen| {
+            seen.borrow_mut()
+                .push(unsafe { CStr::from_ptr(text.cast()) }.to_bytes().to_vec())
+        });
+        PromiseReportResult {
+            value: 1,
+            error: std::ptr::null(),
+        }
+    }
+    SEEN.with(|seen| seen.borrow_mut().clear());
+    thaw_promise_set_unhandled_reporter_text_result(Some(reporter));
+    let opaque = thaw_promise_new();
+    assert_eq!(thaw_promise_reject(opaque, std::ptr::dangling::<u8>()), 1);
+    let typed = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                typed,
+                std::ptr::dangling::<u8>(),
+                2,
+                0.0,
+                42,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    SEEN.with(|seen| {
+        assert_eq!(
+            &*seen.borrow(),
+            &[
+                b"Unhandled opaque Promise rejection".to_vec(),
+                b"42".to_vec()
+            ]
+        )
+    });
+    thaw_promise_set_unhandled_reporter_text_result(None);
+    unsafe {
+        thaw_promise_destroy(opaque);
+        thaw_promise_destroy(typed)
+    };
+}
+
+#[test]
 fn promise_forwarders_preserve_typed_exception_metadata() {
     fn rejected(error: &u8, object: &u8) -> *mut ThawPromise {
         let promise = thaw_promise_new();
@@ -774,6 +1327,108 @@ fn invocation_deadline_rejects_a_pending_promise_without_waiting_for_it() {
 }
 
 #[test]
+fn expired_invocation_abandons_race_children_instead_of_draining_them() {
+    // A handler awaiting Promise.race hit its deadline: the race output is
+    // rejected and released, but its children are still pending. Draining
+    // detached work must not sleep through them nor resume them into the
+    // released output.
+    let children = [timed_value(300, 1.0), timed_value(400, 2.0)];
+    let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
+    set_invocation_deadline(Some(20));
+    thaw_runtime_run_until_resolved(raced);
+    assert_eq!(thaw_promise_state(raced), 2);
+    unsafe { thaw_promise_destroy(raced) };
+
+    let started = Instant::now();
+    thaw_runtime_drain_detached();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "an expired invocation must not wait for abandoned children: {:?}",
+        started.elapsed()
+    );
+    purge_pending_async_state();
+    assert!(TIMERS.with(|timers| timers.borrow().is_empty()));
+}
+
+#[test]
+fn aggregates_survive_their_output_being_released_before_the_children_settle() {
+    // The consumer of an aggregate's output may drop it (an abandoned await);
+    // children that settle later must find a valid, unobserved Promise and the
+    // join count must unwind. Covers race, allSettled, all and any.
+    type Build = unsafe extern "C" fn(*const *mut ThawPromise, usize) -> *mut ThawPromise;
+    unsafe extern "C" fn all_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_f64(p, n) }
+    }
+    unsafe extern "C" fn settled_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_settled(p, n, size_of::<f64>()) }
+    }
+    let builds: [(&str, Build); 4] = [
+        ("race", thaw_promise_race),
+        ("any", thaw_promise_any),
+        ("all", all_f64),
+        ("allSettled", settled_f64),
+    ];
+    for (name, build) in builds {
+        let children = [timed_value(15, 1.0), timed_value(25, 2.0)];
+        let aggregate = unsafe { build(children.as_ptr(), children.len()) };
+        unsafe { thaw_promise_destroy(aggregate) };
+        thaw_runtime_drain_detached();
+        assert_eq!(
+            ACTIVE_PROMISE_JOINS.with(Cell::get),
+            0,
+            "{name}: join count"
+        );
+        assert!(
+            TIMERS.with(|timers| timers.borrow().is_empty()),
+            "{name}: timers"
+        );
+    }
+}
+
+#[test]
+fn aggregates_whose_children_never_settle_unwind_on_purge() {
+    // R2: a child that never settles keeps the aggregate state alive; the
+    // invocation purge must still reset the join count and leave no timers.
+    type Build = unsafe extern "C" fn(*const *mut ThawPromise, usize) -> *mut ThawPromise;
+    unsafe extern "C" fn all_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_f64(p, n) }
+    }
+    unsafe extern "C" fn settled_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_settled(p, n, size_of::<f64>()) }
+    }
+    let builds: [(&str, Build); 4] = [
+        ("race", thaw_promise_race),
+        ("any", thaw_promise_any),
+        ("all", all_f64),
+        ("allSettled", settled_f64),
+    ];
+    for (name, build) in builds {
+        let never = thaw_promise_new();
+        let aggregate = unsafe { build([never].as_ptr(), 1) };
+        unsafe { thaw_promise_destroy(aggregate) };
+        purge_pending_async_state();
+        assert_eq!(
+            ACTIVE_PROMISE_JOINS.with(Cell::get),
+            0,
+            "{name}: join count"
+        );
+        // The purged state must tolerate the child settling afterwards.
+        let value = 3.0f64;
+        assert_eq!(
+            thaw_promise_resolve(never, (&value as *const f64).cast()),
+            1,
+            "{name}"
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(
+            ACTIVE_PROMISE_JOINS.with(Cell::get),
+            0,
+            "{name}: after late settle"
+        );
+    }
+}
+
+#[test]
 fn invocation_deadline_does_not_affect_a_promise_that_settles_in_time() {
     set_invocation_deadline(Some(500));
     let fast = timed_value(10, 42.0);
@@ -841,6 +1496,20 @@ fn promise_any_ignores_rejections_and_uses_the_first_fulfillment() {
     assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
 }
 
+/// The framed `AggregateError` text of a fully rejected `Promise.any`: the
+/// message frame followed by the own-property bag carrying `errors`.
+fn aggregate_rejection_text(bag: &str) -> Vec<u8> {
+    let mut text = thaw_arena::error_wire::encode_tagged(
+        b"AggregateError",
+        b"All promises were rejected",
+        None,
+    )
+    .unwrap();
+    text.push(5);
+    text.extend_from_slice(bag.as_bytes());
+    text
+}
+
 #[test]
 fn promise_any_rejects_only_after_every_input_rejects() {
     let first = thaw_promise_new();
@@ -855,9 +1524,10 @@ fn promise_any_rejects_only_after_every_input_rejects() {
     assert_eq!(thaw_promise_reject(second, second_error.as_ptr()), 1);
     thaw_runtime_run_until_idle();
     assert_eq!(thaw_promise_state(any), 2);
+    let text = thaw_runtime_run_until_resolved(any);
     assert_eq!(
-        thaw_runtime_run_until_resolved(any),
-        PROMISE_ANY_REJECTED_ERROR.as_ptr()
+        unsafe { CStr::from_ptr(text.cast()) }.to_bytes(),
+        aggregate_rejection_text(r#"{"errors":[null,null]}"#)
     );
     unsafe { thaw_promise_destroy(any) };
 }
@@ -866,9 +1536,10 @@ fn promise_any_rejects_only_after_every_input_rejects() {
 fn promise_any_rejects_an_empty_input() {
     let any = unsafe { thaw_promise_any(std::ptr::null(), 0) };
     assert_eq!(thaw_promise_state(any), 2);
+    let text = thaw_runtime_run_until_resolved(any);
     assert_eq!(
-        thaw_runtime_run_until_resolved(any),
-        PROMISE_ANY_REJECTED_ERROR.as_ptr()
+        unsafe { CStr::from_ptr(text.cast()) }.to_bytes(),
+        aggregate_rejection_text(r#"{"errors":[]}"#)
     );
     unsafe { thaw_promise_destroy(any) };
 }
@@ -963,6 +1634,345 @@ fn promise_all_settled_fulfills_when_every_input_rejects() {
     thaw_runtime_run_until_idle();
     assert_eq!(thaw_promise_state(settled), 1);
     unsafe { thaw_promise_destroy(settled) };
+}
+
+struct ArenaCaptureProbe {
+    payload: *mut u64,
+    live_value: u64,
+    observed: bool,
+}
+
+fn allocated_probe_payload(value: u64) -> *mut u64 {
+    let pointer = thaw_arena::thaw_arena_alloc(size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    assert!(!pointer.is_null());
+    unsafe { pointer.write(value) };
+    pointer
+}
+
+fn allocated_capture_probe(payload: *mut u64) -> *mut ArenaCaptureProbe {
+    let pointer = thaw_arena::thaw_arena_alloc(
+        size_of::<ArenaCaptureProbe>(),
+        align_of::<ArenaCaptureProbe>(),
+    )
+    .cast::<ArenaCaptureProbe>();
+    assert!(!pointer.is_null());
+    unsafe {
+        pointer.write(ArenaCaptureProbe {
+            payload,
+            live_value: 0,
+            observed: false,
+        })
+    };
+    pointer
+}
+
+fn assert_live_arena_pointer<T>(pointer: *const T) {
+    assert!(thaw_arena::contains_allocation(pointer as usize));
+    assert!(!thaw_arena::was_reclaimed(pointer as usize));
+}
+
+fn run_in_fresh_tracing_thread(test: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        thaw_arena::thaw_arena_enable_tracing();
+        assert!(thaw_arena::is_tracing());
+        test();
+    })
+    .join()
+    .unwrap();
+}
+
+extern "C" fn observe_chain_capture(
+    context: *mut u8,
+    output: *mut ThawPromise,
+    _input: *mut ThawPromise,
+    result: *const u8,
+) {
+    let context = context.cast::<ArenaCaptureProbe>();
+    if thaw_arena::contains_allocation(context as usize)
+        && !thaw_arena::was_reclaimed(context as usize)
+    {
+        assert_live_arena_pointer(context);
+        let probe = unsafe { &mut *context };
+        if thaw_arena::contains_allocation(probe.payload as usize)
+            && !thaw_arena::was_reclaimed(probe.payload as usize)
+        {
+            assert_live_arena_pointer(probe.payload);
+            probe.live_value = unsafe { probe.payload.read() };
+            probe.observed = true;
+        }
+    }
+    thaw_promise_resolve(output, result);
+}
+
+extern "C" fn observe_finally_capture(
+    context: *mut u8,
+    output: *mut ThawPromise,
+    _input: *mut ThawPromise,
+    result: *const u8,
+    _rejected: u8,
+) {
+    let context = context.cast::<ArenaCaptureProbe>();
+    if thaw_arena::contains_allocation(context as usize)
+        && !thaw_arena::was_reclaimed(context as usize)
+    {
+        assert_live_arena_pointer(context);
+        let probe = unsafe { &mut *context };
+        if thaw_arena::contains_allocation(probe.payload as usize)
+            && !thaw_arena::was_reclaimed(probe.payload as usize)
+        {
+            assert_live_arena_pointer(probe.payload);
+            probe.live_value = unsafe { probe.payload.read() };
+            probe.observed = true;
+        }
+    }
+    thaw_promise_resolve(output, result);
+}
+
+#[test]
+fn pending_chain_and_finally_contexts_retain_captured_arena_values() {
+    run_in_fresh_tracing_thread(|| {
+        let chain_payload = allocated_probe_payload(101);
+        let chain_context = allocated_capture_probe(chain_payload);
+        let input = thaw_promise_new();
+        let chained =
+            unsafe { thaw_promise_chain(input, observe_chain_capture, chain_context.cast(), 0) };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(chain_context);
+        assert_live_arena_pointer(chain_payload);
+        let result = 11u64;
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        assert_live_arena_pointer(chain_context);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_live_arena_pointer(chain_context);
+        assert!(unsafe { (*chain_context).observed });
+        assert_live_arena_pointer(chain_context);
+        assert_eq!(unsafe { (*chain_context).live_value }, 101);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(chain_payload as usize));
+        assert!(thaw_arena::was_reclaimed(chain_context as usize));
+        unsafe { thaw_promise_destroy(chained) };
+
+        let fulfilled_payload = allocated_probe_payload(151);
+        let rejected_payload = allocated_probe_payload(152);
+        let fulfilled_context = allocated_capture_probe(fulfilled_payload);
+        let rejected_context = allocated_capture_probe(rejected_payload);
+        let input = thaw_promise_new();
+        let chained = unsafe {
+            thaw_promise_chain_both(
+                input,
+                Some(observe_chain_capture),
+                fulfilled_context.cast(),
+                observe_chain_capture,
+                rejected_context.cast(),
+            )
+        };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(fulfilled_context);
+        assert_live_arena_pointer(rejected_context);
+        assert_live_arena_pointer(fulfilled_payload);
+        assert_live_arena_pointer(rejected_payload);
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        assert_live_arena_pointer(fulfilled_context);
+        assert_live_arena_pointer(rejected_context);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_live_arena_pointer(fulfilled_context);
+        assert!(unsafe { (*fulfilled_context).observed });
+        assert_live_arena_pointer(fulfilled_context);
+        assert_eq!(unsafe { (*fulfilled_context).live_value }, 151);
+        assert_live_arena_pointer(rejected_context);
+        assert!(!unsafe { (*rejected_context).observed });
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(fulfilled_payload as usize));
+        assert!(thaw_arena::was_reclaimed(rejected_payload as usize));
+        assert!(thaw_arena::was_reclaimed(fulfilled_context as usize));
+        assert!(thaw_arena::was_reclaimed(rejected_context as usize));
+        unsafe { thaw_promise_destroy(chained) };
+
+        let finally_payload = allocated_probe_payload(202);
+        let finally_context = allocated_capture_probe(finally_payload);
+        let input = thaw_promise_new();
+        let finalized =
+            unsafe { thaw_promise_finally(input, observe_finally_capture, finally_context.cast()) };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(finally_context);
+        assert_live_arena_pointer(finally_payload);
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        assert_live_arena_pointer(finally_context);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_live_arena_pointer(finally_context);
+        assert!(unsafe { (*finally_context).observed });
+        assert_live_arena_pointer(finally_context);
+        assert_eq!(unsafe { (*finally_context).live_value }, 202);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(finally_payload as usize));
+        assert!(thaw_arena::was_reclaimed(finally_context as usize));
+        unsafe { thaw_promise_destroy(finalized) };
+    });
+}
+
+#[test]
+fn pending_all_settled_children_keep_result_buffers_until_output_transfer() {
+    run_in_fresh_tracing_thread(|| {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let settled = unsafe {
+            thaw_promise_all_settled(children.as_ptr(), children.len(), size_of::<u64>())
+        };
+        let child_frame = unsafe {
+            (&(*first).subscribers)[0]
+                .frame
+                .cast::<PromiseAllSettledChild>()
+        };
+        let state = unsafe { (*child_frame).state };
+        let result_slot = unsafe { (*state).result_slot };
+        let objects = unsafe { (*state).objects };
+
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::was_reclaimed(result_slot as usize));
+        assert!(!thaw_arena::was_reclaimed(objects as usize));
+
+        let first_value = 303u64;
+        assert_eq!(
+            thaw_promise_resolve(first, (&first_value as *const u64).cast()),
+            1
+        );
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::was_reclaimed(result_slot as usize));
+        assert!(!thaw_arena::was_reclaimed(objects as usize));
+        assert_live_arena_pointer(objects);
+        assert_eq!(
+            unsafe { objects.add(size_of::<u64>()).cast::<u64>().read() },
+            303
+        );
+
+        let second_value = 304u64;
+        assert_eq!(
+            thaw_promise_resolve(second, (&second_value as *const u64).cast()),
+            1
+        );
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_eq!(thaw_promise_state(settled), 1);
+        unsafe { thaw_promise_destroy(settled) };
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(result_slot as usize));
+        assert!(thaw_arena::was_reclaimed(objects as usize));
+    });
+}
+
+struct ReadyResultProbe {
+    live_during_reentrant_reset: bool,
+    value: Option<u64>,
+}
+
+extern "C" fn observe_ready_result(frame: *mut u8, result: *const u8) {
+    let frame = unsafe { &mut *frame.cast::<ReadyResultProbe>() };
+    let result = result.cast::<u64>();
+    if thaw_arena::contains_allocation(result as usize)
+        && !thaw_arena::was_reclaimed(result as usize)
+    {
+        assert_live_arena_pointer(result);
+        thaw_arena::thaw_arena_reset();
+        frame.live_during_reentrant_reset = !thaw_arena::was_reclaimed(result as usize);
+        if frame.live_during_reentrant_reset {
+            frame.value = Some(unsafe { result.read() });
+        }
+    }
+}
+
+#[test]
+fn queued_result_is_rooted_through_reentrant_reset_and_released_on_purge() {
+    run_in_fresh_tracing_thread(|| {
+        let promise = thaw_promise_new();
+        let payload = allocated_probe_payload(404);
+        assert_eq!(thaw_promise_resolve(promise, payload.cast()), 1);
+        thaw_arena::forget_references(promise as usize);
+        let mut probe = Box::new(ReadyResultProbe {
+            live_during_reentrant_reset: false,
+            value: None,
+        });
+        assert_eq!(
+            unsafe {
+                thaw_promise_subscribe(
+                    promise,
+                    observe_ready_result,
+                    (&mut *probe as *mut ReadyResultProbe).cast(),
+                )
+            },
+            1
+        );
+        thaw_arena::forget_references(promise as usize);
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::was_reclaimed(payload as usize));
+        assert_live_arena_pointer(payload);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert!(probe.live_during_reentrant_reset);
+        assert_eq!(probe.value, Some(404));
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(payload as usize));
+        unsafe { thaw_promise_destroy(promise) };
+
+        let promise = thaw_promise_new();
+        let cancelled_payload = allocated_probe_payload(505);
+        assert_eq!(thaw_promise_resolve(promise, cancelled_payload.cast()), 1);
+        thaw_arena::forget_references(promise as usize);
+        let mut cancelled_probe = ReadyResultProbe {
+            live_during_reentrant_reset: false,
+            value: None,
+        };
+        assert_eq!(
+            unsafe {
+                thaw_promise_subscribe(
+                    promise,
+                    observe_ready_result,
+                    (&mut cancelled_probe as *mut ReadyResultProbe).cast(),
+                )
+            },
+            1
+        );
+        thaw_arena::forget_references(promise as usize);
+        purge_pending_async_state();
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(cancelled_payload as usize));
+        unsafe { thaw_promise_destroy(promise) };
+
+        let cancelled_payload = allocated_probe_payload(606);
+        let cancelled_context = allocated_capture_probe(cancelled_payload);
+        let input = thaw_promise_new();
+        let output = unsafe {
+            thaw_promise_chain(input, observe_chain_capture, cancelled_context.cast(), 0)
+        };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(cancelled_payload);
+        assert_live_arena_pointer(cancelled_context);
+        let result = 17u64;
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        thaw_arena::forget_references(input as usize);
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(cancelled_payload);
+        assert_live_arena_pointer(cancelled_context);
+        purge_pending_async_state();
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(cancelled_payload as usize));
+        assert!(thaw_arena::was_reclaimed(cancelled_context as usize));
+        unsafe {
+            thaw_promise_destroy(input);
+            thaw_promise_destroy(output);
+        }
+    });
 }
 
 #[test]
@@ -1117,6 +2127,12 @@ fn dns_resolution_completes_through_the_fd_event_loop() {
     let readiness = thaw_runtime_wait_fd_timeout(fd, THAW_FD_READABLE, 5_000);
     assert!(!thaw_runtime_run_until_resolved(readiness).is_null());
     assert_eq!(thaw_promise_state(readiness), 1);
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) },
+        1
+    );
+    assert_eq!(byte, [1]);
     let resolved = result
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1128,6 +2144,25 @@ fn dns_resolution_completes_through_the_fd_event_loop() {
         thaw_promise_destroy(readiness);
         libc::close(fd);
     }
+}
+
+#[test]
+fn dns_completion_after_cancellation_does_not_raise_sigpipe() {
+    let mut ends = [-1; 2];
+    assert_eq!(
+        unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+                ends.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    unsafe { libc::close(ends[0]) };
+    let error = notify_dns_completion(ends[1]).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
 }
 
 #[test]
@@ -1170,6 +2205,64 @@ fn parses_async_http_urls() {
         parse_http_url("https://[::1]/").unwrap(),
         (true, "::1".to_string(), 443, "/".to_string())
     );
+    assert_eq!(
+        parse_http_url("http://example.com?x=1#fragment").unwrap(),
+        (false, "example.com".to_string(), 80, "/?x=1".to_string())
+    );
+    assert_eq!(
+        parse_http_url("https://[::1]:8443?x=1#fragment").unwrap(),
+        (true, "::1".to_string(), 8443, "/?x=1".to_string())
+    );
+    assert_eq!(
+        parse_http_url("http://example.com#fragment").unwrap().3,
+        "/"
+    );
+    assert_eq!(
+        parse_http_url("http://example.com/a/./b/../?x=1")
+            .unwrap()
+            .3,
+        "/a/?x=1"
+    );
+}
+
+#[test]
+fn resolves_async_http_redirect_paths_without_losing_query_or_slashes() {
+    let redirect = |current_path: &str, location: &str| {
+        redirect_url(false, "example.com", 80, current_path, location).unwrap()
+    };
+    assert_eq!(
+        redirect("/a/page?next=/x/y", "child"),
+        "http://example.com/a/child"
+    );
+    assert_eq!(
+        redirect("/a/page?next=/x/y", "#fragment"),
+        "http://example.com/a/page?next=/x/y#fragment"
+    );
+    assert_eq!(
+        parse_http_url(&redirect("/a/page?next=/x/y", "#fragment"))
+            .unwrap()
+            .3,
+        "/a/page?next=/x/y"
+    );
+    assert_eq!(
+        redirect("/a/page?old=1", "?new=2"),
+        "http://example.com/a/page?new=2"
+    );
+    assert_eq!(
+        redirect("/a/page?old=1", ""),
+        "http://example.com/a/page?old=1"
+    );
+    assert_eq!(redirect("/a/page", "/dir/"), "http://example.com/dir/");
+    assert_eq!(redirect("/a/page", "child/../"), "http://example.com/a/");
+    assert_eq!(redirect("/a/page", "../"), "http://example.com/");
+    assert_eq!(
+        redirect("/a/page", "/a//b/./../c/"),
+        "http://example.com/a//c/"
+    );
+    assert_eq!(
+        redirect("/a/page", "//other.example/dir/"),
+        "http://other.example/dir/"
+    );
 }
 
 #[test]
@@ -1187,12 +2280,77 @@ fn incrementally_parses_content_length_response() {
 }
 
 #[test]
+fn skips_complete_interim_responses_until_final_http_response() {
+    let interim = b"HTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\nHTTP/1.1 102 Processing\r\n\r\nHTTP/1.1 103 Early Hints\r\nLocation: /interim\r\n\r\n";
+    let partial_interim = b"HTTP/1.1 100 Continue\r\nX-Interim:";
+    assert!(parse_http_response(partial_interim, false)
+        .unwrap()
+        .is_none());
+    assert!(parse_http_response(partial_interim, true).is_err());
+    let partial_head = [&interim[..], &b"HTTP/1.1 302 Found\r\nLoc"[..]].concat();
+    assert!(parse_http_response(&partial_head, false).unwrap().is_none());
+    assert!(parse_http_response(&partial_head, true).is_err());
+
+    let final_head = b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 5\r\n\r\n";
+    let partial_body = [&interim[..], &final_head[..], &b"he"[..]].concat();
+    assert!(parse_http_response(&partial_body, false).unwrap().is_none());
+    let complete = [&interim[..], &final_head[..], &b"hello"[..]].concat();
+    let parsed = parse_http_response(&complete, false).unwrap().unwrap();
+    assert_eq!(parsed.status, 302);
+    assert_eq!(parsed.body, b"hello");
+    assert_eq!(parsed.location.as_deref(), Some("/final"));
+}
+
+#[test]
+fn interim_response_waits_for_complete_chunked_final_response() {
+    let interim = b"HTTP/1.1 103 Early Hints\r\n\r\n";
+    let final_head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let partial = [&interim[..], &final_head[..], &b"4\r\nWi"[..]].concat();
+    assert!(parse_http_response(&partial, false).unwrap().is_none());
+    let complete = [
+        &interim[..],
+        &final_head[..],
+        &b"4\r\nWiki\r\n0\r\n\r\n"[..],
+    ]
+    .concat();
+    let parsed = parse_http_response(&complete, false).unwrap().unwrap();
+    assert_eq!(parsed.status, 200);
+    assert_eq!(parsed.body, b"Wiki");
+    assert_eq!(parsed.location, None);
+}
+
+#[test]
+fn interim_only_eof_and_protocol_upgrade_are_errors() {
+    let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+    assert!(parse_http_response(interim, false).unwrap().is_none());
+    assert!(parse_http_response(interim, true).is_err());
+    let upgrade = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+    assert!(parse_http_response(upgrade, false)
+        .err()
+        .unwrap()
+        .contains("upgrade"));
+    let invalid_interim = b"HTTP/1.1 103 Early Hints\r\nContent-Length: invalid\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    assert!(parse_http_response(invalid_interim, false).is_err());
+}
+
+#[test]
 fn incrementally_decodes_chunked_response() {
     let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWi";
     assert!(parse_http_response(partial, false).unwrap().is_none());
     let complete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;name=value\r\nWiki\r\n5\r\npedia\r\n0\r\nX-End: yes\r\n\r\n";
     let parsed = parse_http_response(complete, false).unwrap().unwrap();
     assert_eq!(parsed.body, b"Wikipedia");
+}
+
+#[test]
+fn chunk_size_near_address_limit_does_not_overflow_terminator_offset() {
+    // Unrun regression for the shared decoder's chunk_end + CRLF boundary.
+    let header_len = format!("{:x}", usize::MAX).len() + 2;
+    let size = usize::MAX - header_len;
+    let chunk = format!("{size:x}\r\n");
+    assert!(decode_chunked(chunk.as_bytes())
+        .unwrap_err()
+        .contains("overflows address space"));
 }
 
 #[test]
@@ -1232,6 +2390,109 @@ fn async_http_and_timer_share_the_event_loop() {
         thaw_promise_destroy(timer);
         thaw_promise_destroy(http);
     }
+}
+
+#[test]
+fn async_http_ready_response_cannot_complete_after_absolute_deadline() {
+    let mut fds = [-1; 2];
+    assert_eq!(
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+        0
+    );
+    let body = vec![b'x'; 16_384];
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(&body);
+    assert_eq!(
+        unsafe {
+            libc::send(
+                fds[1],
+                response.as_ptr().cast(),
+                response.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        },
+        response.len() as isize
+    );
+    let completion = thaw_promise_new();
+    let readiness = thaw_promise_new();
+    assert_eq!(
+        thaw_promise_resolve(readiness, std::ptr::dangling::<u8>()),
+        1
+    );
+    let task = Box::into_raw(Box::new(AsyncHttpGet {
+        fd: fds[0],
+        request: Vec::new(),
+        written: 0,
+        response: Vec::new(),
+        state: AsyncHttpState::Reading,
+        completion,
+        readiness,
+        deadline: Instant::now() - Duration::from_millis(1),
+        tls: None,
+        tls_config: tls_client_config(),
+        use_tls: false,
+        host: "localhost".to_string(),
+        port: 80,
+        path: "/".to_string(),
+        redirects: 0,
+        resolution: None,
+        remaining_addresses: Vec::new(),
+    }));
+    resume_async_http(task.cast(), std::ptr::null());
+    assert_eq!(thaw_promise_state(completion), 2);
+    unsafe {
+        libc::close(fds[1]);
+        thaw_promise_destroy(completion);
+    }
+}
+
+#[test]
+fn async_http_retries_remaining_address_after_connect_so_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let good_address = listener.local_addr().unwrap();
+    let refused_address = std::net::SocketAddr::from(([127, 0, 0, 2], good_address.port()));
+    let first_fd = open_nonblocking_socket(refused_address)
+        .expect("loopback connection refusal should complete asynchronously");
+    let server = std::thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        let mut request = [0u8; 1024];
+        let read = connection.read(&mut request).unwrap();
+        assert!(request[..read].starts_with(b"GET /retry HTTP/1.1\r\n"));
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+    });
+    let completion = thaw_promise_new();
+    let task = Box::into_raw(Box::new(AsyncHttpGet {
+        fd: first_fd,
+        request: format!(
+            "GET /retry HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: */*\r\n\r\n",
+            good_address
+        )
+        .into_bytes(),
+        written: 0,
+        response: Vec::new(),
+        state: AsyncHttpState::Connecting,
+        completion,
+        readiness: std::ptr::null_mut(),
+        deadline: Instant::now() + Duration::from_secs(5),
+        tls: None,
+        tls_config: tls_client_config(),
+        use_tls: false,
+        host: "127.0.0.1".to_string(),
+        port: good_address.port(),
+        path: "/retry".to_string(),
+        redirects: 0,
+        resolution: None,
+        remaining_addresses: vec![good_address],
+    }));
+    schedule_async_http(task, THAW_FD_WRITABLE);
+    let result_slot = thaw_runtime_run_until_resolved(completion) as *const *const c_char;
+    assert_eq!(thaw_promise_state(completion), 1);
+    assert_eq!(unsafe { CStr::from_ptr(*result_slot) }.to_bytes(), b"ok");
+    server.join().unwrap();
+    unsafe { thaw_promise_destroy(completion) };
 }
 
 #[test]
@@ -1326,6 +2587,46 @@ fn async_https_handshakes_and_reads_a_verified_response() {
     assert_eq!(
         unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy(),
         "secure"
+    );
+    server.join().unwrap();
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn async_https_drains_plaintext_while_receiving_large_response() {
+    let (client_config, server_config) = local_tls_configs();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = vec![b'x'; 256 * 1024];
+    let expected = body.clone();
+    let server = std::thread::spawn(move || {
+        let (connection, _) = listener.accept().unwrap();
+        let tls = ServerConnection::new(server_config).unwrap();
+        let mut stream = StreamOwned::new(tls, connection);
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+    });
+
+    let url = CString::new(format!("https://{addr}/large")).unwrap();
+    let promise = thaw_http_get_async_with_config(url.as_ptr(), 5_000, Some(client_config));
+    let result = thaw_runtime_run_until_resolved(promise);
+    assert_eq!(
+        thaw_promise_state(promise),
+        1,
+        "large TLS fetch rejected: {}",
+        unsafe { CStr::from_ptr(result.cast()) }.to_string_lossy()
+    );
+    let result_slot = result as *const *const c_char;
+    assert_eq!(
+        unsafe { CStr::from_ptr(*result_slot) }.to_bytes(),
+        expected.as_slice()
     );
     server.join().unwrap();
     unsafe { thaw_promise_destroy(promise) };
@@ -1527,6 +2828,7 @@ fn invocation_guard_resets_request_arena() {
 
 #[test]
 fn polls_an_invocation_and_posts_the_handler_result() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
 
@@ -1565,7 +2867,132 @@ fn polls_an_invocation_and_posts_the_handler_result() {
 }
 
 #[test]
+fn lambda_decodes_chunked_utf8_event_before_handler_and_post_response() {
+    let _trace_guard = guard_lambda_trace_env();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        let body = "{\"name\":\"é\"}".as_bytes();
+        let split = body.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+        let mut response = b"HTTP/1.1 200 OK\r\nlambda-runtime-aws-request-id: chunk-utf8\r\nTransfer-Encoding: ChUnKeD\r\nConnection: close\r\n\r\n".to_vec();
+        for chunk in [&body[..split], &body[split..]] {
+            response.extend_from_slice(format!("{:x};part=test\r\n", chunk.len()).as_bytes());
+            response.extend_from_slice(chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\nX-End: yes\r\n\r\n");
+        conn.write_all(&response).unwrap();
+        drop(conn);
+
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        tx.send(String::from_utf8_lossy(&request).into_owned())
+            .unwrap();
+        conn.write_all(b"HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n").unwrap();
+    });
+    handle_one_invocation(&addr, echo_handler, std::ptr::null_mut()).unwrap();
+    server.join().unwrap();
+    let posted = rx.recv().unwrap();
+    assert!(posted.starts_with("POST /2018-06-01/runtime/invocation/chunk-utf8/response"));
+    assert!(posted.ends_with("echo:{\"name\":\"é\"}"));
+}
+
+#[test]
+fn lambda_rejects_incomplete_and_malformed_chunked_responses() {
+    for (wire, expected) in [
+        (b"4\r\nWi".as_slice(), "incomplete chunked HTTP response"),
+        (
+            b"4\r\nWikiX\n0\r\n\r\n".as_slice(),
+            "missing its CRLF terminator",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            conn.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+            conn.write_all(wire).unwrap();
+        });
+        let error = http_request(&addr, "GET", "/2018-06-01/runtime/invocation/next", None)
+            .err()
+            .expect("malformed chunked response must fail");
+        assert!(error.contains(expected), "{error}");
+        server.join().unwrap();
+    }
+}
+
+thread_local! {
+    static LAMBDA_TAGGED_ERROR: Cell<*const c_char> = const { Cell::new(std::ptr::null()) };
+    static LAMBDA_TAGGED_SLOT: Cell<*mut *const c_char> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+extern "C" fn tagged_lambda_error_handler(_: *const c_char) -> *const c_char {
+    let error = LAMBDA_TAGGED_ERROR.with(Cell::get);
+    LAMBDA_TAGGED_SLOT.with(|slot| unsafe { *slot.get() = error });
+    std::ptr::null()
+}
+
+#[test]
+fn lambda_error_type_uses_public_name_instead_of_internal_ancestry() {
+    let _trace_guard = guard_lambda_trace_env();
+    for (raw, expected) in [
+        (
+            b"\x01\x1eSub\x1fMyError\x1fError\x01boom\0".as_slice(),
+            "Sub",
+        ),
+        (
+            b"\x01\x1eSub\x1fMyError\x1fError\x01boom\x04Visible\0".as_slice(),
+            "Visible",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            conn.write_all(b"HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: tagged-error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+        let mut error_slot = std::ptr::null();
+        LAMBDA_TAGGED_ERROR.with(|value| value.set(raw.as_ptr().cast()));
+        LAMBDA_TAGGED_SLOT.with(|value| value.set(&raw mut error_slot));
+        handle_one_invocation(&addr, tagged_lambda_error_handler, &raw mut error_slot).unwrap();
+        LAMBDA_TAGGED_SLOT.with(|value| value.set(std::ptr::null_mut()));
+        server.join().unwrap();
+        let posted = rx.recv().unwrap();
+        assert!(posted.starts_with("POST /2018-06-01/runtime/invocation/tagged-error/error"));
+        assert!(posted.contains(&format!(
+            "{{\"errorMessage\":\"boom\",\"errorType\":\"{expected}\"}}"
+        )));
+        assert!(!posted.contains("MyError"));
+    }
+}
+
+#[test]
 fn posts_uncaught_handler_exception_to_the_lambda_error_endpoint() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
@@ -1618,6 +3045,7 @@ extern "C" fn slow_async_handler(_: *const c_char) -> *const c_char {
 
 #[test]
 fn posts_a_timeout_error_when_the_deadline_header_elapses_before_the_handler_settles() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
@@ -1657,6 +3085,7 @@ fn posts_a_timeout_error_when_the_deadline_header_elapses_before_the_handler_set
 
 #[test]
 fn surfaces_http_error_status_as_an_error() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
 
@@ -1676,4 +3105,2051 @@ fn surfaces_http_error_status_as_an_error() {
     let err = handle_one_invocation(&addr, echo_handler, std::ptr::null_mut()).unwrap_err();
     assert!(err.contains("500"));
     server.join().unwrap();
+}
+
+#[test]
+fn idle_drain_includes_work_created_by_rejection_reporters() {
+    thread_local! {
+        static MODE: Cell<u8> = const { Cell::new(0) };
+        static CALLS: Cell<u32> = const { Cell::new(0) };
+        static RAN: Cell<bool> = const { Cell::new(false) };
+        static CHILDREN: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
+    }
+    extern "C" fn resume(_: *mut u8, _: *const u8) {
+        RAN.with(|ran| ran.set(true));
+    }
+    extern "C" fn report(_: *const u8) -> u8 {
+        let first = CALLS.with(|calls| {
+            let first = calls.get() == 0;
+            calls.set(calls.get() + 1);
+            first
+        });
+        if first {
+            let child = thaw_promise_new();
+            if MODE.with(Cell::get) == 0 {
+                assert_eq!(
+                    unsafe { thaw_promise_subscribe(child, resume, std::ptr::null_mut()) },
+                    1
+                );
+                thaw_promise_resolve(child, std::ptr::null());
+            } else {
+                thaw_promise_reject(child, c"listener-created".as_ptr().cast());
+            }
+            CHILDREN.with(|children| children.borrow_mut().push(child));
+        }
+        1
+    }
+    for mode in [0, 1] {
+        MODE.with(|value| value.set(mode));
+        CALLS.with(|calls| calls.set(0));
+        RAN.with(|ran| ran.set(false));
+        thaw_promise_set_unhandled_reporter(Some(report));
+        let original = thaw_promise_new();
+        thaw_promise_reject(original, c"original".as_ptr().cast());
+        assert!(thaw_runtime_run_until_idle() > 0);
+        assert_eq!(RAN.with(Cell::get), mode == 0);
+        assert_eq!(CALLS.with(Cell::get), if mode == 0 { 1 } else { 2 });
+        assert_eq!(thaw_runtime_poll_one(), 0);
+        thaw_promise_set_unhandled_reporter(None);
+        unsafe { thaw_promise_destroy(original) };
+        for child in CHILDREN.with(|children| children.take()) {
+            unsafe { thaw_promise_destroy(child) };
+        }
+    }
+}
+
+#[test]
+fn result_reporters_keep_multiple_listener_failures_and_latch_status() {
+    thread_local! { static REPORTS: Cell<u32> = const { Cell::new(0) }; }
+    extern "C" fn failed_listener(_: *const u8) -> PromiseReportResult {
+        REPORTS.with(|reports| reports.set(reports.get() + 1));
+        PromiseReportResult {
+            value: 1,
+            error: CString::new("listener failed").unwrap().into_raw(),
+        }
+    }
+    extern "C" fn failed_handled_listener() -> PromiseReportResult {
+        PromiseReportResult {
+            value: 0,
+            error: CString::new("handled listener failed").unwrap().into_raw(),
+        }
+    }
+    REPORTS.with(|reports| reports.set(0));
+    thaw_promise_set_unhandled_reporter_result(Some(failed_listener));
+    thaw_promise_set_rejection_handled_reporter_result(Some(failed_handled_listener));
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    thaw_promise_reject(first, c"first".as_ptr().cast());
+    thaw_promise_reject(second, c"second".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    REPORTS.with(|reports| assert_eq!(reports.get(), 2));
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+    assert_eq!(unsafe { thaw_promise_mark_handled(first) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+    thaw_promise_set_unhandled_reporter_result(None);
+    thaw_promise_set_rejection_handled_reporter_result(None);
+    unsafe {
+        thaw_promise_destroy(first);
+        thaw_promise_destroy(second);
+    }
+}
+
+#[test]
+fn reporter_setters_replace_the_other_abi_including_none() {
+    thread_local! {
+        static CALLS: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+        static HANDLED_CALLS: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+    }
+    extern "C" fn legacy(_: *const u8) -> u8 {
+        CALLS.with(|calls| {
+            let (old, new) = calls.get();
+            calls.set((old + 1, new));
+        });
+        1
+    }
+    extern "C" fn result(_: *const u8) -> PromiseReportResult {
+        CALLS.with(|calls| {
+            let (old, new) = calls.get();
+            calls.set((old, new + 1));
+        });
+        PromiseReportResult {
+            value: 1,
+            error: std::ptr::null(),
+        }
+    }
+    extern "C" fn handled_legacy() {
+        HANDLED_CALLS.with(|calls| {
+            let (old, new) = calls.get();
+            calls.set((old + 1, new));
+        });
+    }
+    extern "C" fn handled_result() -> PromiseReportResult {
+        HANDLED_CALLS.with(|calls| {
+            let (old, new) = calls.get();
+            calls.set((old, new + 1));
+        });
+        PromiseReportResult {
+            value: 0,
+            error: std::ptr::null(),
+        }
+    }
+    CALLS.with(|calls| calls.set((0, 0)));
+    HANDLED_CALLS.with(|calls| calls.set((0, 0)));
+    thaw_promise_set_unhandled_reporter_result(Some(result));
+    thaw_promise_set_unhandled_reporter(Some(legacy));
+    assert!(UNHANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    let first = thaw_promise_new();
+    thaw_promise_reject(first, c"first".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    thaw_promise_set_unhandled_reporter_result(Some(result));
+    assert!(UNHANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    let second = thaw_promise_new();
+    thaw_promise_reject(second, c"second".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    CALLS.with(|calls| assert_eq!(calls.get(), (1, 1)));
+    thaw_promise_set_unhandled_reporter(None);
+    assert!(UNHANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    thaw_promise_set_unhandled_reporter(Some(legacy));
+    thaw_promise_set_unhandled_reporter_result(None);
+    assert!(UNHANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    thaw_promise_set_rejection_handled_reporter_result(Some(handled_result));
+    thaw_promise_set_rejection_handled_reporter(Some(handled_legacy));
+    assert!(REJECTION_HANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    assert_eq!(unsafe { thaw_promise_mark_handled(first) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    HANDLED_CALLS.with(|calls| assert_eq!(calls.get(), (1, 0)));
+    thaw_promise_set_rejection_handled_reporter_result(Some(handled_result));
+    assert!(REJECTION_HANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    assert_eq!(unsafe { thaw_promise_mark_handled(second) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    HANDLED_CALLS.with(|calls| assert_eq!(calls.get(), (1, 1)));
+    thaw_promise_set_rejection_handled_reporter(None);
+    assert!(REJECTION_HANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    thaw_promise_set_rejection_handled_reporter(Some(handled_legacy));
+    thaw_promise_set_rejection_handled_reporter_result(None);
+    assert!(REJECTION_HANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    unsafe {
+        thaw_promise_destroy(first);
+        thaw_promise_destroy(second);
+    }
+    assert_eq!(thaw_promise_take_unhandled_failure(), 0);
+}
+
+#[test]
+fn reporter_drain_snapshots_later_rejection_before_callback_destroys_its_owner() {
+    thread_local! {
+        static LATER: Cell<(*mut ThawPromise, *mut c_char)> = const { Cell::new((std::ptr::null_mut(), std::ptr::null_mut())) };
+        static SEEN: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(error: *const u8) {
+        SEEN.with(|seen| {
+            seen.borrow_mut()
+                .push(unsafe { CStr::from_ptr(error.cast()).to_bytes().to_vec() })
+        });
+        if unsafe { CStr::from_ptr(error.cast()).to_bytes() } == b"first" {
+            LATER.with(|later| {
+                let (promise, message) =
+                    later.replace((std::ptr::null_mut(), std::ptr::null_mut()));
+                unsafe {
+                    thaw_promise_destroy(promise);
+                    thaw_arena::destroy_string(message);
+                }
+            });
+        }
+    }
+    extern "C" fn legacy(error: *const u8) -> u8 {
+        record(error);
+        1
+    }
+    extern "C" fn result(error: *const u8) -> PromiseReportResult {
+        record(error);
+        PromiseReportResult {
+            value: 1,
+            error: std::ptr::null(),
+        }
+    }
+    for result_abi in [false, true] {
+        SEEN.with(|seen| seen.borrow_mut().clear());
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let later_error = thaw_arena::owned_string(b"second");
+        thaw_promise_reject(first, c"first".as_ptr().cast());
+        reject_native_text(second, later_error.cast());
+        LATER.with(|later| later.set((second, later_error)));
+        assert_eq!(
+            if result_abi {
+                thaw_promise_drain_unhandled_result(Some(result))
+            } else {
+                thaw_promise_drain_unhandled(Some(legacy))
+            },
+            0
+        );
+        SEEN.with(|seen| assert_eq!(&*seen.borrow(), &[b"first".to_vec(), b"second".to_vec()]));
+        unsafe { thaw_promise_destroy(first) };
+    }
+}
+
+#[test]
+fn opaque_promise_rejection_is_forwarded_without_string_dereference() {
+    thread_local! { static EXPECTED: Cell<*const u8> = const { Cell::new(std::ptr::null()) }; }
+    extern "C" fn legacy(error: *const u8) -> u8 {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        1
+    }
+    extern "C" fn result(error: *const u8) -> PromiseReportResult {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        PromiseReportResult {
+            value: 1,
+            error: std::ptr::null(),
+        }
+    }
+    let value = 99u8;
+    EXPECTED.with(|expected| expected.set(&value));
+    for result_abi in [false, true] {
+        let promise = thaw_promise_new();
+        assert_eq!(thaw_promise_reject(promise, &value), 1);
+        assert_eq!(
+            if result_abi {
+                thaw_promise_drain_unhandled_result(Some(result))
+            } else {
+                thaw_promise_drain_unhandled(Some(legacy))
+            },
+            0
+        );
+        unsafe { thaw_promise_destroy(promise) };
+    }
+}
+
+#[test]
+fn unhandled_opaque_promise_rejections_use_safe_fallback_for_every_reporter_abi() {
+    thread_local! { static EXPECTED: Cell<*const u8> = const { Cell::new(std::ptr::null()) }; }
+    extern "C" fn unhandled(error: *const u8) -> u8 {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        0
+    }
+    extern "C" fn unhandled_result(error: *const u8) -> PromiseReportResult {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        PromiseReportResult {
+            value: 0,
+            error: std::ptr::null(),
+        }
+    }
+    extern "C" fn throwing(error: *const u8) -> PromiseReportResult {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        PromiseReportResult {
+            value: 1,
+            error: thaw_arena::owned_string("listener failed"),
+        }
+    }
+    let value = 99u8;
+    EXPECTED.with(|expected| expected.set(&value));
+    let diagnostic = unhandled_rejection_report_text(&value, false);
+    assert_eq!(
+        unsafe { CStr::from_ptr(diagnostic) }.to_bytes(),
+        b"Unhandled opaque Promise rejection"
+    );
+    assert_ne!(diagnostic.cast::<u8>(), &value as *const u8);
+    for mode in 0..4 {
+        let promise = thaw_promise_new();
+        assert_eq!(thaw_promise_reject(promise, &value), 1);
+        let failed = match mode {
+            0 => thaw_promise_drain_unhandled(None),
+            1 => thaw_promise_drain_unhandled(Some(unhandled)),
+            2 => thaw_promise_drain_unhandled_result(Some(unhandled_result)),
+            _ => thaw_promise_drain_unhandled_result(Some(throwing)),
+        };
+        assert_eq!(failed, 1);
+        unsafe { thaw_promise_destroy(promise) };
+    }
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+}
+
+#[test]
+fn generated_native_text_and_promise_forwarding_preserve_diagnostic_provenance() {
+    let source = thaw_promise_new();
+    let output = thaw_promise_new();
+    let error = c"\u{1}TypeError\u{1}Invalid native callback graph";
+    assert_eq!(
+        unsafe { thaw_promise_reject_native_text(source, error.as_ptr().cast()) },
+        1
+    );
+    assert_eq!(
+        unsafe { thaw_promise_forward_rejection(output, source, error.as_ptr().cast()) },
+        1
+    );
+    assert_eq!(
+        unsafe { (*output).rejection_text.as_deref() },
+        Some(error.to_bytes())
+    );
+    unsafe { thaw_promise_destroy(source) };
+    assert_eq!(
+        unsafe { (*output).rejection_text.as_deref() },
+        Some(error.to_bytes())
+    );
+    let copied = unsafe { thaw_promise_exception_native_text_copy(output) };
+    unsafe { thaw_promise_destroy(output) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(copied.cast()) }.to_bytes(),
+        error.to_bytes()
+    );
+
+    let typed_native = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_native_text(
+                typed_native,
+                error.as_ptr().cast(),
+                1,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                error.as_ptr().cast(),
+            )
+        },
+        1
+    );
+    assert_eq!(
+        unsafe { (*typed_native).rejection_text.as_deref() },
+        Some(error.to_bytes())
+    );
+    unsafe { thaw_promise_destroy(typed_native) };
+
+    let scalar = 99u8;
+    let opaque = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_native_text(
+                opaque,
+                &scalar,
+                1,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                error.as_ptr().cast(),
+            )
+        },
+        1
+    );
+    assert!(unsafe { (*opaque).rejection_text.is_none() });
+    unsafe { thaw_promise_destroy(opaque) };
+}
+
+#[test]
+fn trusted_promise_rejection_text_copy_preserves_embedded_nul_bytes() {
+    let bytes = b"before\0after";
+    let text = thaw_arena::arena_string(bytes).cast::<u8>();
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_native_text(
+                promise,
+                text,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                text,
+            )
+        },
+        1
+    );
+    assert_eq!(
+        unsafe { (*promise).rejection_text.as_deref() },
+        Some(bytes.as_slice())
+    );
+    let copy = unsafe { thaw_promise_exception_native_text_copy(promise) };
+    assert_eq!(
+        unsafe { thaw_arena::NativeStr::from_ptr(copy.cast()) }.to_bytes(),
+        bytes
+    );
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn finally_adopt_snapshots_original_native_text_before_source_destruction() {
+    let source = thaw_promise_new();
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    let error = c"\u{1}TypeError\u{1}original native failure";
+    assert_eq!(
+        unsafe { thaw_promise_reject_native_text(source, error.as_ptr().cast()) },
+        1
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                output,
+                returned,
+                error.as_ptr().cast(),
+                1,
+                1,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                source,
+            )
+        },
+        1
+    );
+    unsafe { thaw_promise_destroy(source) };
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(output) }, 2);
+    assert_eq!(
+        unsafe { (*output).rejection_text.as_deref() },
+        Some(error.to_bytes())
+    );
+    unsafe { thaw_promise_destroy(output) };
+}
+
+#[test]
+fn dependency_compile_finally_adopt_deferred_frame() {
+    let states_before = PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len());
+    let ready_before = READY_CONTINUATIONS.with(|ready| ready.borrow().len());
+    let output = thaw_promise_new();
+    let input = thaw_promise_new();
+    let source = thaw_promise_new();
+    assert_ne!(output, input);
+    assert_ne!(output, source);
+    assert_ne!(input, source);
+
+    let original = thaw_arena::thaw_arena_alloc(size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    unsafe { original.write(0xCAFE_BABE_D00D_F00D) };
+    assert_eq!(thaw_promise_resolve(input, std::ptr::null()), 1);
+    assert_eq!(thaw_promise_resolve(source, original.cast()), 1);
+    assert_eq!(unsafe { (*input).references }, 1);
+    assert_eq!(thaw_promise_state(input), 1);
+
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                output,
+                input,
+                original.cast(),
+                0,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                source,
+            )
+        },
+        1
+    );
+    assert_eq!(
+        PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()),
+        states_before + 1
+    );
+    assert_eq!(
+        READY_CONTINUATIONS.with(|ready| ready.borrow().len()),
+        ready_before + 1
+    );
+    assert_eq!(thaw_promise_state(output), 0);
+
+    // The source is read only while the helper snapshots its fields.
+    unsafe { thaw_promise_destroy(source) };
+    assert_eq!(thaw_promise_state(output), 0);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(
+        PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()),
+        states_before
+    );
+    assert_eq!(
+        READY_CONTINUATIONS.with(|ready| ready.borrow().len()),
+        ready_before
+    );
+    assert_eq!(thaw_promise_state(output), 1);
+    assert_eq!(
+        unsafe { (*output).result },
+        Some(original.cast::<u8>().cast_const())
+    );
+    assert!(!ACTIVE_PROMISES.with(|active| active.borrow().contains(&input)));
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&output)));
+    unsafe { thaw_promise_destroy(output) };
+
+    let guard_input = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                std::ptr::null_mut(),
+                guard_input,
+                std::ptr::null(),
+                0,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    assert_eq!(
+        PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()),
+        states_before
+    );
+    assert_eq!(unsafe { (*guard_input).references }, 1);
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&guard_input)));
+
+    let guard_output = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt(
+                guard_output,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                0,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    assert_eq!(
+        PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()),
+        states_before
+    );
+    assert_eq!(unsafe { (*guard_output).references }, 1);
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&guard_output)));
+
+    let equal = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                equal,
+                equal,
+                std::ptr::null(),
+                0,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    assert_eq!(
+        PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()),
+        states_before
+    );
+    assert_eq!(unsafe { (*equal).references }, 1);
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&equal)));
+    unsafe {
+        thaw_promise_destroy(guard_input);
+        thaw_promise_destroy(guard_output);
+        thaw_promise_destroy(equal);
+    }
+}
+
+#[test]
+fn terminal_reporting_activity_is_distinct_from_work_and_failure() {
+    thaw_promise_take_report_activity();
+    thaw_promise_take_unhandled_failure();
+    thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
+    let promise = thaw_promise_new();
+    thaw_promise_reject(promise, c"reported".as_ptr().cast());
+    // Reporting a settled rejection need not run a continuation.
+    assert_eq!(thaw_runtime_run_until_idle(), 0);
+    assert_eq!(thaw_promise_take_report_activity(), 1);
+    assert_eq!(thaw_promise_take_report_activity(), 0);
+    assert_eq!(thaw_promise_take_unhandled_failure(), 0);
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_promise_set_unhandled_reporter(None);
+}
+
+#[test]
+fn future_native_timer_remains_pending_after_an_idle_drain() {
+    let timer = thaw_sleep_ms(5);
+    assert_eq!(thaw_runtime_run_until_idle(), 0);
+    assert_eq!(thaw_runtime_async_work_pending(), 1);
+    thaw_runtime_run_until_resolved(timer);
+    assert_eq!(thaw_runtime_async_work_pending(), 0);
+    unsafe { thaw_promise_destroy(timer) };
+}
+
+#[test]
+fn terminal_exception_report_uses_provenance_or_typed_scalar_without_reading_opaque_pointer() {
+    let opaque = std::ptr::dangling::<std::os::raw::c_char>();
+    let scalar =
+        unsafe { thaw_runtime_exception_report_text(opaque, std::ptr::null(), 2, 0.0, 42, false) };
+    assert_eq!(
+        unsafe { thaw_arena::NativeStr::from_ptr(scalar) }.to_bytes(),
+        b"42"
+    );
+    unsafe { thaw_arena::destroy_string(scalar) };
+
+    let native = thaw_arena::owned_string(b"a\0b");
+    let copy = unsafe { thaw_runtime_exception_report_text(native, native, 4, 0.0, 0, false) };
+    assert_eq!(
+        unsafe { thaw_arena::NativeStr::from_ptr(copy) }.to_bytes(),
+        b"a\0b"
+    );
+    unsafe {
+        thaw_arena::destroy_string(copy);
+        thaw_arena::destroy_string(native);
+    }
+}
+
+#[test]
+fn terminal_and_detached_f64_reports_use_javascript_number_spelling() {
+    let cases = [
+        (f64::INFINITY, "Infinity"),
+        (f64::NEG_INFINITY, "-Infinity"),
+        (-0.0, "0"),
+        (1e20, "100000000000000000000"),
+        (1e21, "1e+21"),
+        (1e-6, "0.000001"),
+        (1e-7, "1e-7"),
+    ];
+    for (value, expected) in cases {
+        let opaque = std::ptr::dangling::<u8>();
+        let terminal = unsafe {
+            thaw_runtime_exception_report_text(opaque.cast(), std::ptr::null(), 1, value, 0, false)
+        };
+        assert_eq!(
+            unsafe { thaw_arena::NativeStr::from_ptr(terminal) }.to_bytes(),
+            expected.as_bytes()
+        );
+        unsafe { thaw_arena::destroy_string(terminal) };
+
+        let promise = thaw_promise_new();
+        assert_eq!(
+            unsafe {
+                thaw_promise_reject_typed(promise, opaque, 1, value, 0, false, std::ptr::null())
+            },
+            1
+        );
+        assert_eq!(
+            promise_report_bytes(unsafe { &*promise }).as_slice(),
+            expected.as_bytes()
+        );
+        let mut pending: *const u8 = std::ptr::null();
+        assert_eq!(
+            unsafe { thaw_promise_detach_for_report(promise, &mut pending) },
+            1
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(
+            unsafe { thaw_arena::NativeStr::from_ptr(pending.cast()) }.to_bytes(),
+            expected.as_bytes()
+        );
+        unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+    }
+}
+
+extern "C" fn lambda_trace_env_handler(_: *const c_char) -> *const c_char {
+    let trace = std::env::var("_X_AMZN_TRACE_ID").unwrap_or_else(|_| "<absent>".into());
+    CString::new(trace).unwrap().into_raw()
+}
+
+#[test]
+fn lambda_sets_and_clears_the_trace_environment_per_invocation() {
+    let _trace_guard = guard_lambda_trace_env();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for (index, trace) in [Some("Root=first"), Some("Root=second"), None]
+            .into_iter()
+            .enumerate()
+        {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            assert!(request.starts_with(b"GET /2018-06-01/runtime/invocation/next"));
+            let trace_header = trace
+                .map(|value| format!("Lambda-Runtime-Trace-Id: {value}\r\n"))
+                .unwrap_or_default();
+            conn.write_all(format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-{index}\r\n{trace_header}Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                "{}",
+            ).as_bytes()).unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        }
+    });
+    for expected in ["Root=first", "Root=second", "<absent>"] {
+        handle_one_invocation(&addr, lambda_trace_env_handler, std::ptr::null_mut()).unwrap();
+        assert!(rx.recv().unwrap().ends_with(expected));
+    }
+    server.join().unwrap();
+    assert!(std::env::var_os("_X_AMZN_TRACE_ID").is_none());
+}
+
+#[test]
+fn lambda_rejects_nul_trace_header_before_handler() {
+    let _trace_guard = guard_lambda_trace_env();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        conn.write_all(b"HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: invalid-trace\r\nLambda-Runtime-Trace-Id: Root=bad\0value\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+    });
+    let error =
+        handle_one_invocation(&addr, lambda_trace_env_handler, std::ptr::null_mut()).unwrap_err();
+    assert!(error.contains("invalid trace id header"), "{error}");
+    server.join().unwrap();
+}
+
+// Source-only precursor coverage: the HIR accessor/cast stage is separate.
+unsafe fn promise_any_reason_at(handle: *const u8, index: usize) -> (u8, u64) {
+    let buffer = unsafe { handle.cast::<*const u8>().read_unaligned() };
+    let slot = unsafe { buffer.add(8 + 16 * index) };
+    unsafe { (slot.read(), slot.add(8).cast::<u64>().read_unaligned()) }
+}
+
+#[test]
+fn promise_any_reason_slots_keep_input_order_duplicate_positions_and_empty_array() {
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    let children = [first, second, first];
+    let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                second,
+                std::ptr::dangling::<u8>(),
+                3,
+                0.0,
+                0,
+                true,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 0);
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                first,
+                std::ptr::dangling::<u8>(),
+                1,
+                42.5,
+                0,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 2);
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
+    assert!(!errors.is_null());
+    let buffer = unsafe { errors.cast::<*const u8>().read_unaligned() };
+    assert_eq!(unsafe { buffer.cast::<u64>().read_unaligned() }, 3);
+    assert_eq!(
+        unsafe { promise_any_reason_at(errors, 0) },
+        (0, 42.5f64.to_bits())
+    );
+    assert_eq!(unsafe { promise_any_reason_at(errors, 1) }, (2, 1));
+    assert_eq!(
+        unsafe { promise_any_reason_at(errors, 2) },
+        (0, 42.5f64.to_bits())
+    );
+    unsafe { thaw_promise_destroy(any) };
+
+    let empty = unsafe { thaw_promise_any(std::ptr::null(), 0) };
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(empty) };
+    assert!(!errors.is_null());
+    let buffer = unsafe { errors.cast::<*const u8>().read_unaligned() };
+    assert_eq!(unsafe { buffer.cast::<u64>().read_unaligned() }, 0);
+    unsafe { thaw_promise_destroy(empty) };
+}
+
+#[test]
+fn promise_any_nested_reason_and_native_text_outlive_child_handles() {
+    let leaf = thaw_promise_new();
+    let inner = unsafe { thaw_promise_any([leaf].as_ptr(), 1) };
+    let native = thaw_promise_new();
+    let outer = unsafe { thaw_promise_any([inner, native, inner].as_ptr(), 3) };
+    let text = b"temporary native failure\0".to_vec();
+    assert_eq!(
+        unsafe { thaw_promise_reject_native_text(native, text.as_ptr()) },
+        1
+    );
+    drop(text);
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                leaf,
+                std::ptr::dangling::<u8>(),
+                2,
+                0.0,
+                77,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(outer) }, 2);
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(outer) };
+    let (first_tag, first_payload) = unsafe { promise_any_reason_at(errors, 0) };
+    let (native_tag, native_payload) = unsafe { promise_any_reason_at(errors, 1) };
+    assert_eq!(first_tag, 7);
+    assert_eq!(
+        unsafe { promise_any_reason_at(errors, 2) },
+        (first_tag, first_payload)
+    );
+    let nested = unsafe { &*(first_payload as *const PromiseAnyErrorRecord) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(nested.text.cast()) }.to_bytes(),
+        aggregate_rejection_text(r#"{"errors":[77]}"#)
+    );
+    assert_eq!(unsafe { promise_any_reason_at(nested.errors, 0) }, (1, 77));
+    assert_eq!(native_tag, 9);
+    let native = unsafe { &*(native_payload as *const PromiseAnyErrorRecord) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(native.text.cast()) }.to_bytes(),
+        b"temporary native failure"
+    );
+    assert!(native.errors.is_null());
+    unsafe { thaw_promise_destroy(outer) };
+}
+
+#[test]
+fn promise_any_forwarding_and_finally_keep_only_successfully_settled_metadata() {
+    let child = thaw_promise_new();
+    let aggregate = unsafe { thaw_promise_any([child].as_ptr(), 1) };
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                child,
+                std::ptr::dangling::<u8>(),
+                5,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(aggregate) };
+    let forwarded = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_forward_rejection(
+                forwarded,
+                aggregate,
+                PROMISE_ANY_REJECTED_ERROR.as_ptr(),
+            )
+        },
+        1
+    );
+    assert_eq!(
+        unsafe { thaw_promise_exception_aggregate_errors(forwarded) },
+        errors
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_forward_rejection(
+                forwarded,
+                aggregate,
+                PROMISE_ANY_REJECTED_ERROR.as_ptr(),
+            )
+        },
+        0
+    );
+    assert_eq!(
+        unsafe { thaw_promise_exception_aggregate_errors(forwarded) },
+        errors
+    );
+
+    let returned = thaw_promise_new();
+    let after_finally = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                after_finally,
+                returned,
+                PROMISE_ANY_REJECTED_ERROR.as_ptr(),
+                1,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                aggregate,
+            )
+        },
+        1
+    );
+    unsafe { thaw_promise_destroy(aggregate) };
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        unsafe { thaw_promise_exception_aggregate_errors(after_finally) },
+        errors
+    );
+    unsafe {
+        thaw_promise_destroy(forwarded);
+        thaw_promise_destroy(after_finally)
+    };
+}
+
+#[test]
+fn compiler_aggregate_rejection_abi_attaches_only_on_first_settlement() {
+    let promise = thaw_promise_new();
+    let first = 1u8;
+    let second = 2u8;
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_aggregate(
+                promise,
+                std::ptr::null(),
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                std::ptr::null(),
+                &first,
+            )
+        },
+        1
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_aggregate(
+                promise,
+                std::ptr::null(),
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                std::ptr::null(),
+                &second,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        unsafe { thaw_promise_exception_aggregate_errors(promise) },
+        &first
+    );
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
+    let object = 17u8;
+    let object_child = thaw_promise_new();
+    let null_child = thaw_promise_new();
+    let opaque_child = thaw_promise_new();
+    let children = [object_child, null_child, opaque_child];
+    let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                object_child,
+                std::ptr::dangling::<u8>(),
+                0,
+                0.0,
+                0,
+                false,
+                &object,
+            )
+        },
+        1
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(
+                null_child,
+                std::ptr::dangling::<u8>(),
+                6,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+            )
+        },
+        1
+    );
+    assert_eq!(
+        thaw_promise_reject(opaque_child, std::ptr::dangling::<u8>()),
+        1
+    );
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
+    assert_eq!(
+        unsafe { promise_any_reason_at(errors, 0) },
+        (6, &object as *const u8 as u64)
+    );
+    assert_eq!(unsafe { promise_any_reason_at(errors, 1) }, (5, 0));
+    assert_eq!(unsafe { promise_any_reason_at(errors, 2) }, (8, 1));
+    unsafe { thaw_promise_destroy(any) };
+}
+
+#[test]
+fn explicit_null_exception_tag_reports_null_without_reading_an_opaque_pointer() {
+    let opaque = std::ptr::dangling::<u8>();
+    let terminal = unsafe {
+        thaw_runtime_exception_report_text(opaque.cast(), std::ptr::null(), 6, 0.0, 0, false)
+    };
+    assert_eq!(
+        unsafe { thaw_arena::NativeStr::from_ptr(terminal) }.to_bytes(),
+        b"null"
+    );
+    unsafe { thaw_arena::destroy_string(terminal) };
+
+    let promise = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_reject_typed(promise, opaque, 6, 0.0, 0, false, std::ptr::null(),) },
+        1
+    );
+    assert_eq!(
+        promise_report_bytes(unsafe { &*promise }).as_slice(),
+        b"null"
+    );
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn promise_any_errors_handle_is_rooted_with_live_promise() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let promise = thaw_promise_new();
+    let root = thaw_arena::ArenaRoot::new(promise as usize);
+    let errors = promise_any_errors(&[]);
+    assert!(!errors.is_null());
+    let text = c"AggregateError".as_ptr().cast::<u8>();
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_aggregate(
+                promise,
+                text,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                text,
+                errors,
+            )
+        },
+        1
+    );
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(errors as usize));
+    assert_eq!(
+        unsafe { thaw_promise_exception_aggregate_errors(promise) },
+        errors
+    );
+    unsafe { thaw_promise_destroy(promise) };
+    drop(root);
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(errors as usize));
+}
+
+#[test]
+fn promise_any_stages_arena_backed_opaque_reason_across_reset() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let opaque = thaw_arena::thaw_arena_alloc(8, 8);
+    assert!(!opaque.is_null());
+    unsafe { opaque.cast::<u64>().write(0x51a7_e2d3_f4b5_c6d7) };
+    let first = thaw_promise_new();
+    let last = thaw_promise_new();
+    let any = unsafe { thaw_promise_any([first, last, first].as_ptr(), 3) };
+    assert_eq!(thaw_promise_reject(first, opaque), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 0);
+
+    // The first child has been destroyed; only the join's staging root can
+    // retain this otherwise opaque arena allocation until the final array.
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(opaque as usize));
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(last, std::ptr::null(), 6, 0.0, 0, false, std::ptr::null())
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
+    assert!(!errors.is_null());
+    assert_eq!(
+        unsafe { promise_any_reason_at(errors, 0) },
+        (8, opaque as u64)
+    );
+    assert_eq!(
+        unsafe { promise_any_reason_at(errors, 2) },
+        (8, opaque as u64)
+    );
+    assert_eq!(
+        unsafe { opaque.cast::<u64>().read() },
+        0x51a7_e2d3_f4b5_c6d7
+    );
+    unsafe { thaw_promise_destroy(any) };
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(opaque as usize));
+}
+
+#[test]
+fn finally_adopt_roots_original_result_object_and_aggregate_until_output_owns_them() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let leaf = thaw_promise_new();
+    let aggregate = unsafe { thaw_promise_any([leaf].as_ptr(), 1) };
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed(leaf, std::ptr::null(), 6, 0.0, 0, false, std::ptr::null())
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(aggregate) };
+    assert!(!errors.is_null());
+
+    let original = thaw_arena::thaw_arena_alloc(8, 8);
+    let object = thaw_arena::thaw_arena_alloc(8, 8);
+    unsafe {
+        original.cast::<u64>().write(0x1234_5678);
+        object.cast::<u64>().write(0x8765_4321);
+    }
+    let source = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_reject_typed_with_aggregate(
+                source,
+                original,
+                0,
+                0.0,
+                0,
+                false,
+                object,
+                std::ptr::null(),
+                errors,
+            )
+        },
+        1
+    );
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                output, returned, original, 1, 0, 0.0, 0, false, object, source,
+            )
+        },
+        1
+    );
+    unsafe {
+        thaw_promise_destroy(source);
+        thaw_promise_destroy(aggregate)
+    };
+    thaw_arena::thaw_arena_reset();
+    for pointer in [original, object, errors.cast_mut()] {
+        assert!(!thaw_arena::was_reclaimed(pointer as usize));
+    }
+
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(output) }, 2);
+    assert_eq!(unsafe { thaw_promise_exception_object(output) }, object);
+    assert_eq!(
+        unsafe { thaw_promise_exception_aggregate_errors(output) },
+        errors
+    );
+    let output_root = thaw_arena::ArenaRoot::new(output as usize);
+    thaw_arena::thaw_arena_reset();
+    for pointer in [original, object, errors.cast_mut()] {
+        assert!(!thaw_arena::was_reclaimed(pointer as usize));
+    }
+    assert_eq!(unsafe { original.cast::<u64>().read() }, 0x1234_5678);
+    assert_eq!(unsafe { object.cast::<u64>().read() }, 0x8765_4321);
+    assert_eq!(unsafe { promise_any_reason_at(errors, 0) }, (5, 0));
+    unsafe { thaw_promise_destroy(output) };
+    drop(output_root);
+    thaw_arena::thaw_arena_reset();
+    for pointer in [original, object, errors.cast_mut()] {
+        assert!(thaw_arena::was_reclaimed(pointer as usize));
+    }
+}
+
+#[test]
+fn purged_aggregate_callbacks_ignore_late_child_results_and_release_roots() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let first = thaw_promise_new();
+    let last = thaw_promise_new();
+    let any = unsafe { thaw_promise_any([first, last].as_ptr(), 2) };
+    let reason = thaw_arena::thaw_arena_alloc(8, 8);
+    assert_eq!(thaw_promise_reject(first, reason), 1);
+    thaw_runtime_run_until_idle();
+    purge_pending_async_state();
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(reason as usize));
+    assert_eq!(thaw_promise_reject(last, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 0);
+    assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    unsafe { thaw_promise_destroy(any) };
+
+    let source = thaw_promise_new();
+    let original = thaw_arena::thaw_arena_alloc(8, 8);
+    assert_eq!(thaw_promise_reject(source, original), 1);
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                output,
+                returned,
+                original,
+                1,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                source,
+            )
+        },
+        1
+    );
+    unsafe { thaw_promise_destroy(source) };
+    purge_pending_async_state();
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(original as usize));
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(output) }, 0);
+    unsafe { thaw_promise_destroy(output) };
+    thaw_arena::thaw_arena_reset();
+}
+
+#[test]
+fn private_exception_provenance_has_stable_nine_word_layout() {
+    assert_eq!(std::mem::size_of::<ExceptionProvenance>(), 72);
+    assert_eq!(std::mem::align_of::<ExceptionProvenance>(), 8);
+    let original = thaw_arena::thaw_arena_alloc(8, 8);
+    let text = thaw_arena::thaw_arena_alloc(8, 8);
+    let errors = thaw_arena::thaw_arena_alloc(8, 8);
+    let object = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(original, text, errors, 7, 1.25, 19, 1, object);
+    assert!(!record.is_null());
+    let record = unsafe { &*record };
+    assert_eq!(record.original, original.cast_const());
+    assert_eq!(record.native_text, text.cast_const());
+    assert_eq!(record.aggregate_errors, errors.cast_const());
+    assert_eq!(record.tag, 7);
+    assert_eq!(record.f64_value, 1.25);
+    assert_eq!(record.i64_value, 19);
+    assert_eq!(record.bool_value, 1);
+    assert_eq!(record.object, object.cast_const());
+    assert!(record.native_layout.is_null());
+}
+
+#[test]
+fn fulfilled_provenance_follows_exact_result_and_first_settlement() {
+    let value = thaw_arena::thaw_arena_alloc(8, 8);
+    let unrelated = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(
+        value,
+        std::ptr::null(),
+        std::ptr::null(),
+        5,
+        0.0,
+        0,
+        0,
+        std::ptr::null(),
+    );
+    let other_record = thaw_exception_provenance_new(
+        unrelated,
+        std::ptr::null(),
+        std::ptr::null(),
+        5,
+        0.0,
+        0,
+        0,
+        std::ptr::null(),
+    );
+    let child = thaw_promise_new();
+    assert!(unsafe { thaw_promise_fulfilled_provenance(child) }.is_null());
+    extern "C" fn unused_callback(
+        _: *mut u8,
+        _: *mut ThawPromise,
+        _: *mut ThawPromise,
+        _: *const u8,
+    ) {
+    }
+    let chained = unsafe { thaw_promise_chain(child, unused_callback, std::ptr::null_mut(), 1) };
+    assert_eq!(
+        unsafe { thaw_promise_resolve_with_provenance(child, value, record) },
+        1
+    );
+    assert_eq!(
+        unsafe { thaw_promise_resolve_with_provenance(child, unrelated, other_record) },
+        0
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        unsafe { thaw_promise_fulfilled_provenance(chained) },
+        record
+    );
+    unsafe { thaw_promise_destroy(chained) };
+
+    let rejected = thaw_promise_new();
+    assert_eq!(thaw_promise_reject(rejected, value), 1);
+    assert!(unsafe { thaw_promise_fulfilled_provenance(rejected) }.is_null());
+    unsafe { thaw_promise_destroy(rejected) };
+}
+
+#[test]
+fn rooted_fulfilled_record_retains_its_arena_children_until_destroy() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let result = thaw_arena::thaw_arena_alloc(8, 8);
+    let nested = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(
+        result,
+        std::ptr::null(),
+        nested,
+        7,
+        0.0,
+        0,
+        0,
+        std::ptr::null(),
+    );
+    let promise = thaw_promise_new();
+    let root = thaw_arena::ArenaRoot::new(promise as usize);
+    assert_eq!(
+        unsafe { thaw_promise_resolve_with_provenance(promise, result, record) },
+        1
+    );
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(record as usize));
+    assert!(!thaw_arena::was_reclaimed(nested as usize));
+    assert_eq!(
+        unsafe { thaw_promise_fulfilled_provenance(promise) },
+        record
+    );
+    unsafe { thaw_promise_destroy(promise) };
+    drop(root);
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(record as usize));
+    assert!(thaw_arena::was_reclaimed(nested as usize));
+}
+
+#[test]
+fn finally_adopt_retains_fulfilled_provenance_after_source_destroy() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let value = thaw_arena::thaw_arena_alloc(8, 8);
+    let errors = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(
+        value,
+        std::ptr::null(),
+        errors,
+        7,
+        0.0,
+        0,
+        0,
+        std::ptr::null(),
+    );
+    let source = thaw_promise_new();
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    let output_root = thaw_arena::ArenaRoot::new(output as usize);
+    assert_eq!(
+        unsafe { thaw_promise_resolve_with_provenance(source, value, record) },
+        1
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_finally_adopt_with_source(
+                output,
+                returned,
+                value,
+                0,
+                0,
+                0.0,
+                0,
+                false,
+                std::ptr::null(),
+                source,
+            )
+        },
+        1
+    );
+    unsafe { thaw_promise_destroy(source) };
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(record as usize));
+    assert!(!thaw_arena::was_reclaimed(errors as usize));
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_fulfilled_provenance(output) }, record);
+    unsafe { thaw_promise_destroy(output) };
+    drop(output_root);
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(record as usize));
+}
+
+#[test]
+fn native_adopt_race_and_any_forward_fulfilled_record_without_reinterpreting_result() {
+    for kind in 0..3 {
+        let value = thaw_arena::thaw_arena_alloc(8, 8);
+        let record = thaw_exception_provenance_new(
+            value,
+            std::ptr::null(),
+            std::ptr::null(),
+            5,
+            0.0,
+            0,
+            0,
+            std::ptr::null(),
+        );
+        let input = thaw_promise_new();
+        let output = match kind {
+            0 => {
+                let output = thaw_promise_new();
+                assert_eq!(unsafe { thaw_promise_adopt(output, input) }, 1);
+                output
+            }
+            1 => unsafe { thaw_promise_race([input].as_ptr(), 1) },
+            _ => unsafe { thaw_promise_any([input].as_ptr(), 1) },
+        };
+        assert_eq!(
+            unsafe { thaw_promise_resolve_with_provenance(input, value, record) },
+            1
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(unsafe { thaw_promise_state(output) }, 1);
+        assert_eq!(unsafe { thaw_promise_fulfilled_provenance(output) }, record);
+        unsafe { thaw_promise_destroy(output) };
+    }
+}
+
+#[test]
+fn private_array_provenance_reserves_before_visible_write_and_clears_truncated_slots() {
+    let buffer = thaw_arena::thaw_arena_alloc(8 + 3 * 8, 8);
+    let handle = thaw_arena::thaw_arena_alloc(16, 8);
+    assert!(!buffer.is_null() && !handle.is_null());
+    unsafe {
+        buffer.cast::<u64>().write(3);
+        handle.cast::<*mut u8>().write(buffer);
+        handle.add(8).cast::<*mut u8>().write(std::ptr::null_mut());
+    }
+    let original = 7usize as *const u8;
+    let record = thaw_exception_provenance_new(
+        original,
+        std::ptr::null(),
+        std::ptr::null(),
+        2,
+        0.0,
+        7,
+        0,
+        std::ptr::null(),
+    );
+    assert!(!record.is_null());
+    assert_eq!(unsafe { thaw_array_provenance_set(handle, 2, record) }, 0);
+    assert_eq!(unsafe { thaw_array_provenance_prepare(handle, 3) }, 1);
+    assert_eq!(unsafe { thaw_array_provenance_set(handle, 2, record) }, 1);
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 2) }, record);
+    unsafe { thaw_array_provenance_truncate(handle, 1) };
+    assert!(unsafe { thaw_array_provenance_get(handle, 2) }.is_null());
+    // A later visible regrowth within the old sidecar capacity cannot
+    // resurrect the removed record.
+    assert_eq!(unsafe { thaw_array_provenance_prepare(handle, 3) }, 1);
+    assert!(unsafe { thaw_array_provenance_get(handle, 2) }.is_null());
+}
+
+#[test]
+fn promise_all_copies_fulfilled_record_to_every_duplicate_array_index() {
+    let child = thaw_promise_new();
+    let children = [child, child];
+    let sizes = [8usize, 8];
+    let joined = unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), 2) };
+    let value = 9u64;
+    let record = thaw_exception_provenance_new(
+        (&value as *const u64).cast(),
+        std::ptr::null(),
+        std::ptr::null(),
+        2,
+        0.0,
+        9,
+        0,
+        std::ptr::null(),
+    );
+    assert!(!record.is_null());
+    assert_eq!(
+        unsafe {
+            thaw_promise_resolve_with_provenance(child, (&value as *const u64).cast(), record)
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(joined) }, 1);
+    let slot = unsafe { (*joined).result.unwrap() };
+    let handle = unsafe { slot.cast::<*const u8>().read() };
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 0) }, record);
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 1) }, record);
+    unsafe { thaw_promise_destroy(joined) };
+}
+
+#[test]
+fn pending_promise_all_record_array_survives_invocation_arena_reset() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let child = thaw_promise_new();
+    let children = [child];
+    let sizes = [8usize];
+    let joined = unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), 1) };
+    // Model the request-local drain counter reset without discarding a
+    // globally reusable Promise.all result or its pinned result slot.
+    uncount_pending_promise_all_states_for_invocation();
+    ACTIVE_PROMISE_JOINS.with(|active| active.set(0));
+    thaw_arena::thaw_arena_reset();
+    let value = 23u64;
+    let record = thaw_exception_provenance_new(
+        (&value as *const u64).cast(),
+        std::ptr::null(),
+        std::ptr::null(),
+        2,
+        0.0,
+        23,
+        0,
+        std::ptr::null(),
+    );
+    assert_eq!(
+        unsafe {
+            thaw_promise_resolve_with_provenance(child, (&value as *const u64).cast(), record)
+        },
+        1
+    );
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(joined) }, 1);
+    let slot = unsafe { (*joined).result.unwrap() };
+    let handle = unsafe { slot.cast::<*const u8>().read() };
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 0) }, record);
+    assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    unsafe { thaw_promise_destroy(joined) };
+}
+
+#[test]
+fn all_settled_consumes_distinct_inputs_on_early_failure() {
+    for invalid_size in [false, true] {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let inputs = if invalid_size {
+            [first, first, second, second]
+        } else {
+            [first, std::ptr::null_mut(), first, second]
+        };
+        let output = unsafe {
+            thaw_promise_all_settled(
+                inputs.as_ptr(),
+                inputs.len(),
+                if invalid_size { 0 } else { 8 },
+            )
+        };
+        assert_eq!(unsafe { thaw_promise_state(output) }, 2);
+        ACTIVE_PROMISES.with(|active| {
+            let active = active.borrow();
+            assert!(!active.contains(&first));
+            assert!(!active.contains(&second));
+        });
+        unsafe { thaw_promise_destroy(output) };
+    }
+}
+
+#[test]
+fn fd_poll_rounds_only_fractional_milliseconds_and_skips_removed_watchers() {
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::ZERO)), 0);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::from_millis(1))), 1);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::from_nanos(1))), 1);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::from_micros(1001))), 2);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::MAX)), i32::MAX);
+    assert_eq!(fd_poll_timeout_ms(None), -1);
+    extern "C" fn remove_other(context: *mut u8, _events: i16) {
+        let id = unsafe { *(context as *const u64) };
+        assert!(thaw_runtime_unwatch_fd(id));
+    }
+    extern "C" fn count_call(context: *mut u8, _events: i16) {
+        unsafe {
+            *(context as *mut usize) += 1;
+        }
+    }
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let mut other_id = 0u64;
+    let mut calls = 0usize;
+    let first = thaw_runtime_watch_fd(
+        fds[0],
+        THAW_FD_READABLE,
+        remove_other,
+        (&mut other_id as *mut u64).cast(),
+    );
+    other_id = thaw_runtime_watch_fd(
+        fds[0],
+        THAW_FD_READABLE,
+        count_call,
+        (&mut calls as *mut usize).cast(),
+    );
+    assert_ne!(first, 0);
+    assert_ne!(other_id, 0);
+    assert_eq!(unsafe { libc::write(fds[1], b"x".as_ptr().cast(), 1) }, 1);
+    assert_eq!(poll_fd_waits(Some(Duration::ZERO)), 1);
+    assert_eq!(calls, 0);
+    assert!(thaw_runtime_unwatch_fd(first));
+    assert!(!thaw_runtime_unwatch_fd(other_id));
+    unsafe {
+        libc::close(fds[0]);
+        libc::close(fds[1]);
+    }
+}
+
+#[test]
+fn native_promise_reason_cycle_releases_after_arena_reclaims_its_descriptor() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let promise = thaw_promise_new();
+    let layout = b"Promise\0";
+    let descriptor =
+        unsafe { thaw_exception_native_provenance_new(29, promise.cast(), layout.as_ptr().cast()) };
+    assert!(!descriptor.is_null());
+    assert_eq!(
+        unsafe { thaw_promise_set_exception_native(promise, descriptor) },
+        1
+    );
+    assert_eq!(unsafe { (*promise).internal_references }, 1);
+    assert_eq!(unsafe { (*promise).references }, 2);
+
+    // The descriptor and Promise refer to each other. Dropping the sole
+    // external owner unpins the Box; arena sweep then releases the internal
+    // reason owner without retaining a cycle forever.
+    unsafe { thaw_promise_destroy(promise) };
+    assert_eq!(unsafe { (*promise).references }, 1);
+    thaw_arena::thaw_arena_reset();
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+    NATIVE_PROMISE_REASON_OWNERS.with(|owners| assert!(owners.borrow().is_empty()));
+}
+
+#[test]
+fn external_native_promise_owner_keeps_its_exception_descriptor_live() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let promise = thaw_promise_new();
+    let layout = b"Promise\0";
+    let descriptor =
+        unsafe { thaw_exception_native_provenance_new(29, promise.cast(), layout.as_ptr().cast()) };
+    assert!(!descriptor.is_null());
+    assert_eq!(
+        unsafe { thaw_promise_set_exception_native(promise, descriptor) },
+        1
+    );
+
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(descriptor as usize));
+    assert_eq!(
+        unsafe { thaw_exception_native_owner(descriptor, 29, layout.as_ptr().cast(),) },
+        promise.cast()
+    );
+
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(descriptor as usize));
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+}
+
+#[test]
+fn native_exception_descriptor_preserves_category_identity_and_checked_layout() {
+    let mut owners = [0u8; 9];
+    for (owner_index, (name, tag)) in [
+        ("Symbol", 20),
+        ("Array", 21),
+        ("Bytes", 22),
+        ("Map", 23),
+        ("WeakMap", 24),
+        ("Set", 25),
+        ("WeakSet", 26),
+        ("Tuple", 27),
+        ("FunctionWithThis", 28),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let owner = (&mut owners[owner_index]) as *mut u8;
+        let layout = format!("{name}\0");
+        let same_layout = format!("{name}\0");
+        let other_layout = format!("Other{name}\0");
+        let first =
+            unsafe { thaw_exception_native_provenance_new(tag, owner, layout.as_ptr().cast()) };
+        let duplicate = unsafe {
+            thaw_exception_native_provenance_new(tag, owner, same_layout.as_ptr().cast())
+        };
+        assert!(!first.is_null());
+        assert!(!duplicate.is_null());
+        assert_eq!(unsafe { thaw_exception_native_tag(first) }, tag);
+        assert_eq!(
+            unsafe { thaw_exception_native_owner(first, tag, layout.as_ptr().cast(),) },
+            owner
+        );
+        assert!(
+            unsafe { thaw_exception_native_owner(first, tag + 1, layout.as_ptr().cast(),) }
+                .is_null()
+        );
+        assert!(
+            unsafe { thaw_exception_native_owner(first, tag, other_layout.as_ptr().cast(),) }
+                .is_null()
+        );
+        assert_eq!(unsafe { thaw_exception_native_same(first, duplicate) }, 1);
+    }
+}
+
+#[test]
+fn arena_promise_slot_replacement_is_balanced_and_reclaimed_with_its_owner() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let owner = unsafe { thaw_arena::thaw_arena_alloc(32, std::mem::align_of::<usize>()) };
+    assert!(!owner.is_null());
+    let first_slot = owner.cast::<*mut ThawPromise>();
+    let second_slot = unsafe { owner.add(std::mem::size_of::<usize>()) }.cast::<*mut ThawPromise>();
+    unsafe {
+        first_slot.write(std::ptr::null_mut());
+        second_slot.write(std::ptr::null_mut());
+    }
+    let promise = thaw_promise_new();
+
+    assert_eq!(
+        unsafe { thaw_promise_arena_slot_replace(owner, first_slot, promise) },
+        1
+    );
+    assert_eq!(
+        unsafe { thaw_promise_arena_slot_replace(owner, second_slot, promise) },
+        1
+    );
+    assert_eq!(unsafe { (*promise).internal_references }, 2);
+    assert_eq!(unsafe { (*promise).references }, 3);
+    assert_eq!(
+        unsafe { thaw_promise_arena_slot_replace(owner, first_slot, promise) },
+        1
+    );
+    assert_eq!(unsafe { (*promise).internal_references }, 2);
+
+    let replacement = thaw_promise_new();
+    assert_eq!(
+        unsafe { thaw_promise_arena_slot_replace(owner, first_slot, replacement) },
+        1
+    );
+    assert_eq!(unsafe { (*promise).internal_references }, 1);
+    assert_eq!(unsafe { (*replacement).internal_references }, 1);
+    unsafe { thaw_promise_destroy(promise) };
+    assert_eq!(
+        unsafe { thaw_promise_arena_slot_replace(owner, second_slot, std::ptr::null_mut()) },
+        1
+    );
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+    unsafe { thaw_promise_destroy(replacement) };
+    let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
+    thaw_arena::thaw_arena_reset();
+    ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&replacement)));
+    assert_eq!(unsafe { (*replacement).internal_references }, 1);
+    drop(owner_root);
+    thaw_arena::thaw_arena_reset();
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&replacement)));
+    PROMISE_ARENA_SLOT_OWNERS.with(|owners| assert!(owners.borrow().is_empty()));
+}
+
+#[test]
+fn arena_promise_slot_rejects_untracked_same_pointer_as_a_noop() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let owner = unsafe { thaw_arena::thaw_arena_alloc(32, std::mem::align_of::<usize>()) };
+    assert!(!owner.is_null());
+    let slot = owner.cast::<*mut ThawPromise>();
+    let promise = thaw_promise_new();
+    unsafe { slot.write(promise) };
+
+    assert_eq!(
+        unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+        0
+    );
+    assert_eq!(unsafe { (*promise).internal_references }, 0);
+    assert_eq!(unsafe { (*promise).references }, 1);
+    unsafe {
+        slot.write(std::ptr::null_mut());
+        thaw_promise_destroy(promise);
+    }
+    thaw_arena::thaw_arena_reset();
+}
+
+fn allocated_promise_slot_with_root() -> (*mut u8, *mut *mut ThawPromise, thaw_arena::ArenaRoot) {
+    let owner = unsafe {
+        thaw_arena::thaw_arena_alloc(
+            size_of::<*mut ThawPromise>(),
+            align_of::<*mut ThawPromise>(),
+        )
+    };
+    assert!(!owner.is_null());
+    let slot = owner.cast::<*mut ThawPromise>();
+    unsafe { slot.write(std::ptr::null_mut()) };
+    let root = thaw_arena::ArenaRoot::new(owner as usize);
+    (owner, slot, root)
+}
+
+#[test]
+fn pending_timer_promise_survives_arena_reset_and_retires_after_slot_clear() {
+    run_in_fresh_tracing_thread(|| {
+        let (owner, slot, owner_root) = allocated_promise_slot_with_root();
+        let promise = thaw_sleep_ms(60_000);
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+            1
+        );
+        unsafe { thaw_promise_destroy(promise) };
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert_eq!(unsafe { (*promise).internal_references }, 1);
+        assert!(TIMERS.with(|timers| timers.borrow().iter().any(|timer| timer.promise == promise)));
+
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(owner);
+        assert_eq!(unsafe { slot.read() }, promise);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert!(TIMERS.with(|timers| timers.borrow().iter().any(|timer| timer.promise == promise)));
+
+        TIMERS.with(|timers| {
+            let mut timers = timers.borrow_mut();
+            let timer = timers
+                .iter_mut()
+                .find(|timer| timer.promise == promise)
+                .unwrap();
+            timer.deadline = std::time::Instant::now();
+        });
+        promote_due_timers();
+        assert_eq!(unsafe { thaw_promise_state(promise) }, 1);
+        assert!(TIMERS.with(|timers| !timers.borrow().iter().any(|timer| timer.promise == promise)));
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, std::ptr::null_mut()) },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+        drop(owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(owner as usize));
+    });
+}
+
+#[test]
+fn pending_fd_wait_promise_survives_reset_and_destroy_removes_stale_waits() {
+    run_in_fresh_tracing_thread(|| {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (owner, slot, owner_root) = allocated_promise_slot_with_root();
+        let promise = thaw_runtime_wait_fd(fds[0], THAW_FD_READABLE);
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+            1
+        );
+        unsafe { thaw_promise_destroy(promise) };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(owner);
+        assert_eq!(unsafe { slot.read() }, promise);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert!(FD_WAITS.with(|waits| waits.borrow().iter().any(|wait| wait.promise == promise)));
+
+        assert_eq!(
+            unsafe { libc::write(fds[1], b"ready".as_ptr().cast(), 5) },
+            5
+        );
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_eq!(unsafe { thaw_promise_state(promise) }, 1);
+        assert!(FD_WAITS.with(|waits| !waits.borrow().iter().any(|wait| wait.promise == promise)));
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, std::ptr::null_mut()) },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+        drop(owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(owner as usize));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+
+        let mut stale_fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(stale_fds.as_mut_ptr()) }, 0);
+        let (stale_owner, stale_slot, stale_owner_root) = allocated_promise_slot_with_root();
+        let stale = thaw_runtime_wait_fd(stale_fds[0], THAW_FD_READABLE);
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(stale_owner, stale_slot, stale) },
+            1
+        );
+        unsafe { thaw_promise_destroy(stale) };
+        assert_eq!(
+            unsafe {
+                thaw_promise_arena_slot_replace(stale_owner, stale_slot, std::ptr::null_mut())
+            },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&stale)));
+        assert!(FD_WAITS.with(|waits| !waits.borrow().iter().any(|wait| wait.promise == stale)));
+        assert_eq!(
+            unsafe { libc::write(stale_fds[1], b"x".as_ptr().cast(), 1) },
+            1
+        );
+        assert_eq!(thaw_runtime_poll_one(), 0);
+        drop(stale_owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(stale_owner as usize));
+        unsafe {
+            libc::close(stale_fds[0]);
+            libc::close(stale_fds[1]);
+        }
+    });
+}
+
+#[test]
+fn promise_slot_retains_settled_arena_result_until_owner_is_released() {
+    run_in_fresh_tracing_thread(|| {
+        let (owner, slot, owner_root) = allocated_promise_slot_with_root();
+        let promise = thaw_promise_new();
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+            1
+        );
+        unsafe { thaw_promise_destroy(promise) };
+        let payload = allocated_probe_payload(707);
+        assert_eq!(thaw_promise_resolve(promise, payload.cast()), 1);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(owner);
+        assert_live_arena_pointer(payload);
+        assert_eq!(unsafe { slot.read() }, promise);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert_eq!(unsafe { payload.read() }, 707);
+
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, std::ptr::null_mut()) },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+        drop(owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(owner as usize));
+        assert!(thaw_arena::was_reclaimed(payload as usize));
+    });
+}
+
+/// An abandoned combinator output (its consumer released it before any child
+/// settled) must not be written to by a child that settles later: the freed
+/// allocation is reused by the next Promise, which has to stay pending.
+fn assert_abandoned_output_is_not_settled_by_late_child(
+    combine: impl FnOnce(*const *mut ThawPromise, usize) -> *mut ThawPromise,
+) {
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    let children = [first, second];
+    let output = combine(children.as_ptr(), children.len());
+    unsafe { thaw_promise_destroy(output) };
+    let reused = thaw_promise_new();
+    let value = 1.0f64;
+    thaw_promise_resolve(first, (&value as *const f64).cast());
+    thaw_promise_resolve(second, (&value as *const f64).cast());
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        thaw_promise_state(reused),
+        0,
+        "a late child settled an output the consumer had already released"
+    );
+    unsafe { thaw_promise_destroy(reused) };
+    thaw_runtime_drain_detached();
+    purge_pending_async_state();
+}
+
+#[test]
+fn late_race_child_does_not_settle_a_released_output() {
+    assert_abandoned_output_is_not_settled_by_late_child(|p, n| unsafe { thaw_promise_race(p, n) });
+}
+
+#[test]
+fn late_all_settled_child_does_not_settle_a_released_output() {
+    assert_abandoned_output_is_not_settled_by_late_child(|p, n| unsafe {
+        thaw_promise_all_settled(p, n, size_of::<f64>())
+    });
+}
+
+#[test]
+fn late_any_child_does_not_settle_a_released_output() {
+    assert_abandoned_output_is_not_settled_by_late_child(|p, n| unsafe { thaw_promise_any(p, n) });
+}
+
+#[test]
+fn late_adopted_input_does_not_settle_a_released_output() {
+    let input = thaw_promise_new();
+    let output = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_adopt(output, input) }, 1);
+    unsafe { thaw_promise_destroy(output) };
+    let reused = thaw_promise_new();
+    let value = 1.0f64;
+    thaw_promise_resolve(input, (&value as *const f64).cast());
+    thaw_runtime_run_until_idle();
+    assert_eq!(thaw_promise_state(reused), 0);
+    unsafe { thaw_promise_destroy(reused) };
 }

@@ -1,6 +1,14 @@
 type EnumValues = HashMap<(Symbol, Symbol), HirLit>;
 type EnumReverseValues = HashMap<Symbol, Vec<(f64, Symbol)>>;
 
+fn enum_to_uint32(value: f64) -> u32 {
+    if !value.is_finite() || value == 0.0 {
+        0
+    } else {
+        value.trunc().rem_euclid(4_294_967_296.0) as u32
+    }
+}
+
 fn enum_member_name(id: &swc_ecma_ast::TsEnumMemberId) -> Symbol {
     match id {
         swc_ecma_ast::TsEnumMemberId::Ident(id) => id.sym.to_string(),
@@ -15,7 +23,9 @@ fn eval_enum_initializer(
 ) -> Result<HirLit, String> {
     match expr {
         Expr::Lit(Lit::Num(value)) => Ok(HirLit::F64(value.value)),
-        Expr::Lit(Lit::Str(value)) => Ok(HirLit::Str(value.value.to_string_lossy().into_owned())),
+        Expr::Lit(Lit::Str(value)) => {
+            Ok(hir_string_literal_from_wtf8(value.value.as_wtf8().as_bytes()))
+        }
         Expr::Paren(value) => eval_enum_initializer(&value.expr, enum_name, values),
         Expr::Unary(unary) => {
             let HirLit::F64(value) = eval_enum_initializer(&unary.arg, enum_name, values)? else {
@@ -26,7 +36,7 @@ fn eval_enum_initializer(
             match unary.op {
                 UnaryOp::Plus => Ok(HirLit::F64(value)),
                 UnaryOp::Minus => Ok(HirLit::F64(-value)),
-                UnaryOp::Tilde => Ok(HirLit::F64((!(value as i32)) as f64)),
+                UnaryOp::Tilde => Ok(HirLit::F64((!(enum_to_uint32(value) as i32)) as f64)),
                 other => Err(format!(
                     "enum `{enum_name}` has unsupported unary initializer {other:?}"
                 )),
@@ -91,13 +101,16 @@ fn eval_enum_initializer(
                 BinaryOp::Mul => left * right,
                 BinaryOp::Div => left / right,
                 BinaryOp::Mod => left % right,
+                BinaryOp::Exp if right.is_nan() || (right.is_infinite() && left.abs() == 1.0) => {
+                    f64::NAN
+                }
                 BinaryOp::Exp => left.powf(right),
-                BinaryOp::BitOr => ((left as i32) | (right as i32)) as f64,
-                BinaryOp::BitXor => ((left as i32) ^ (right as i32)) as f64,
-                BinaryOp::BitAnd => ((left as i32) & (right as i32)) as f64,
-                BinaryOp::LShift => ((left as i32) << ((right as u32) & 31)) as f64,
-                BinaryOp::RShift => ((left as i32) >> ((right as u32) & 31)) as f64,
-                BinaryOp::ZeroFillRShift => ((left as u32) >> ((right as u32) & 31)) as f64,
+                BinaryOp::BitOr => ((enum_to_uint32(left) as i32) | (enum_to_uint32(right) as i32)) as f64,
+                BinaryOp::BitXor => ((enum_to_uint32(left) as i32) ^ (enum_to_uint32(right) as i32)) as f64,
+                BinaryOp::BitAnd => ((enum_to_uint32(left) as i32) & (enum_to_uint32(right) as i32)) as f64,
+                BinaryOp::LShift => ((enum_to_uint32(left) as i32) << (enum_to_uint32(right) & 31)) as f64,
+                BinaryOp::RShift => ((enum_to_uint32(left) as i32) >> (enum_to_uint32(right) & 31)) as f64,
+                BinaryOp::ZeroFillRShift => (enum_to_uint32(left) >> (enum_to_uint32(right) & 31)) as f64,
                 other => {
                     return Err(format!(
                         "enum `{enum_name}` has unsupported binary initializer {other:?}"
@@ -584,4 +597,1249 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
     let mut normalized = module.clone();
     normalized.body = body;
     Ok(normalized)
+}
+
+/// True if a function's own body uses `this` -- the classic constructor
+/// shape (`function F(...) { this.x = ...; }`).
+fn constructor_function_uses_this(function: &swc_ecma_ast::Function) -> bool {
+    struct Finder(bool);
+    impl swc_ecma_visit::Visit for Finder {
+        fn visit_expr(&mut self, expr: &Expr) {
+            if matches!(expr, Expr::This(_)) {
+                self.0 = true;
+            }
+            expr.visit_children_with(self);
+        }
+        // A nested (non-arrow) function has its own `this`; a `this` inside
+        // it doesn't make the *enclosing* function a constructor. An arrow
+        // keeps the enclosing `this`, so it is still descended into.
+        fn visit_function(&mut self, _function: &swc_ecma_ast::Function) {}
+    }
+    let mut finder = Finder(false);
+    if let Some(body) = &function.body {
+        body.visit_with(&mut finder);
+    }
+    finder.0
+}
+
+/// The `(owner, on_prototype, name, right)` of an assignment expression whose
+/// target is `F.name` (static) or `F.prototype.name` (instance).
+fn constructor_assignment_target(expr: &Expr) -> Option<(Symbol, bool, Symbol, &Expr)> {
+    let Expr::Assign(assign) = expr else {
+        return None;
+    };
+    if assign.op != swc_ecma_ast::AssignOp::Assign {
+        return None;
+    }
+    let swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Member(member)) =
+        &assign.left
+    else {
+        return None;
+    };
+    let name: Symbol = match &member.prop {
+        swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.to_string(),
+        _ => return None,
+    };
+    match member.obj.as_ref() {
+        Expr::Ident(owner) => (name != "prototype").then_some((
+            owner.sym.to_string(),
+            false,
+            name,
+            assign.right.as_ref(),
+        )),
+        Expr::Member(inner) => {
+            let Expr::Ident(owner) = inner.obj.as_ref() else {
+                return None;
+            };
+            if !matches!(&inner.prop, swc_ecma_ast::MemberProp::Ident(prop) if prop.sym == *"prototype")
+            {
+                return None;
+            }
+            Some((owner.sym.to_string(), true, name, assign.right.as_ref()))
+        }
+        _ => None,
+    }
+}
+
+fn ts_any_type() -> swc_ecma_ast::TsType {
+    use swc_ecma_ast::*;
+    TsType::TsKeywordType(TsKeywordType {
+        span: swc_common::DUMMY_SP,
+        kind: TsKeywordTypeKind::TsAnyKeyword,
+    })
+}
+
+/// A best-effort TS type for a field from its assigned RHS (a string/number/
+/// boolean literal, or `a || b`/`a + b`/a ternary of those). `None` means the
+/// caller uses `any`.
+fn inferred_field_type(
+    right: &Expr,
+    param_types: &HashMap<Symbol, swc_ecma_ast::TsType>,
+) -> Option<swc_ecma_ast::TsType> {
+    use swc_ecma_ast::*;
+    let keyword = |kind| {
+        Some(TsType::TsKeywordType(TsKeywordType {
+            span: swc_common::DUMMY_SP,
+            kind,
+        }))
+    };
+    match right {
+        Expr::Lit(Lit::Str(_)) => keyword(TsKeywordTypeKind::TsStringKeyword),
+        Expr::Lit(Lit::Num(_)) => keyword(TsKeywordTypeKind::TsNumberKeyword),
+        Expr::Lit(Lit::Bool(_)) => keyword(TsKeywordTypeKind::TsBooleanKeyword),
+        // `this.x = x` where `x` is a typed constructor parameter: reuse the
+        // parameter's own annotation as the field type.
+        Expr::Ident(ident) => param_types.get(&ident.sym.to_string()).cloned(),
+        Expr::Paren(paren) => inferred_field_type(&paren.expr, param_types),
+        Expr::Bin(bin) => inferred_field_type(&bin.left, param_types)
+            .or_else(|| inferred_field_type(&bin.right, param_types)),
+        Expr::Cond(cond) => inferred_field_type(&cond.cons, param_types)
+            .or_else(|| inferred_field_type(&cond.alt, param_types)),
+        Expr::TsAs(assertion) => inferred_field_type(&assertion.expr, param_types),
+        _ => None,
+    }
+}
+
+/// Collects the `this.<field>` names (and a best-effort type) a constructor
+/// body uses, excluding prototype-assigned method names. Any `this.p` read
+/// but never assigned becomes an `any` field, so a method that reads it still
+/// compiles.
+fn constructor_fields(
+    function: &swc_ecma_ast::Function,
+    methods: &std::collections::HashSet<Symbol>,
+    param_types: &HashMap<Symbol, swc_ecma_ast::TsType>,
+) -> Vec<(Symbol, swc_ecma_ast::TsType)> {
+    struct Collect<'a> {
+        methods: std::collections::HashSet<Symbol>,
+        param_types: &'a HashMap<Symbol, swc_ecma_ast::TsType>,
+        assigned: Vec<(Symbol, swc_ecma_ast::TsType)>,
+        read: Vec<Symbol>,
+    }
+    impl swc_ecma_visit::Visit for Collect<'_> {
+        fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+            if let swc_ecma_ast::AssignTarget::Simple(
+                swc_ecma_ast::SimpleAssignTarget::Member(member),
+            ) = &assign.left
+            {
+                if let Expr::This(_) = member.obj.as_ref() {
+                    if let swc_ecma_ast::MemberProp::Ident(ident) = &member.prop {
+                        let name: Symbol = ident.sym.to_string();
+                        if !self.methods.contains(&name)
+                            && !self.assigned.iter().any(|(existing, _)| *existing == name)
+                        {
+                            let ty = inferred_field_type(&assign.right, self.param_types)
+                                .unwrap_or_else(ts_any_type);
+                            self.assigned.push((name, ty));
+                        }
+                    }
+                }
+            }
+            assign.visit_children_with(self);
+        }
+        fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+            if let Expr::This(_) = member.obj.as_ref() {
+                if let swc_ecma_ast::MemberProp::Ident(ident) = &member.prop {
+                    self.read.push(ident.sym.to_string());
+                }
+            }
+            member.visit_children_with(self);
+        }
+    }
+    let mut collect = Collect {
+        methods: methods.clone(),
+        param_types,
+        assigned: Vec::new(),
+        read: Vec::new(),
+    };
+    function.visit_with(&mut collect);
+    for name in collect.read {
+        if !methods.contains(&name) && !collect.assigned.iter().any(|(existing, _)| *existing == name) {
+            collect.assigned.push((name, ts_any_type()));
+        }
+    }
+    collect.assigned
+}
+
+/// Gives every plain parameter a `= undefined` default, matching
+/// JavaScript's "a missing argument is `undefined`" for the converted
+/// constructor-function members (e.g. `assert.throws(Ctor, fn)` omitting the
+/// optional `message`). A default -- unlike an `?` optional -- leaves the
+/// declared type unchanged, so the body still sees `any`/`number`, not
+/// `T | undefined`.
+fn make_params_default_undefined(params: &mut [swc_ecma_ast::Param]) {
+    use swc_ecma_ast::*;
+    for parameter in params {
+        let Pat::Ident(binding) = &parameter.pat else {
+            continue;
+        };
+        // Only an untyped/`any`/`unknown` parameter tolerates a `= undefined`
+        // default; a concretely typed one (e.g. `boolean`) would then reject
+        // the default at the assignment site.
+        let permissive = match &binding.type_ann {
+            None => true,
+            Some(annotation) => matches!(
+                annotation.type_ann.as_ref(),
+                TsType::TsKeywordType(TsKeywordType {
+                    kind: TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword,
+                    ..
+                })
+            ),
+        };
+        if !permissive {
+            continue;
+        }
+        parameter.pat = Pat::Assign(AssignPat {
+            span: swc_common::DUMMY_SP,
+            left: Box::new(Pat::Ident(binding.clone())),
+            right: Box::new(Expr::Ident(Ident::new_no_ctxt(
+                "undefined".into(),
+                swc_common::DUMMY_SP,
+            ))),
+        });
+    }
+}
+
+/// Converts a prototype-assigned RHS (a function expression or arrow) into a
+/// method's `Function`, or `None` if it isn't callable.
+fn rhs_function(right: &Expr) -> Option<swc_ecma_ast::Function> {
+    use swc_ecma_ast::*;
+    match right {
+        Expr::Fn(function) => Some((*function.function).clone()),
+        Expr::Arrow(arrow) => {
+            let params = arrow
+                .params
+                .iter()
+                .cloned()
+                .map(|pat| Param {
+                    span: swc_common::DUMMY_SP,
+                    decorators: Vec::new(),
+                    pat,
+                })
+                .collect();
+            let body = match arrow.body.as_ref() {
+                ArrowFunctionBody::FunctionBody(block) => Some(block.clone()),
+                ArrowFunctionBody::Expr(expr) => Some(FunctionBody {
+                    span: swc_common::DUMMY_SP,
+                    stmts: vec![Stmt::Return(ReturnStmt {
+                        span: swc_common::DUMMY_SP,
+                        arg: Some(expr.clone()),
+                    })],
+                }),
+            };
+            Some(Function {
+                params,
+                decorators: Vec::new(),
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                body,
+                is_generator: arrow.is_generator,
+                is_async: arrow.is_async,
+                type_params: arrow.type_params.clone(),
+                return_type: arrow.return_type.clone(),
+                this_param: None,
+            })
+        }
+        Expr::Paren(paren) => rhs_function(&paren.expr),
+        _ => None,
+    }
+}
+
+/// Builds the class that replaces a constructor-function declaration.
+fn constructor_class(
+    function: &swc_ecma_ast::FnDecl,
+    assignments: &[(bool, Symbol, &Expr)],
+    is_constructor: bool,
+    prototype_replacement: Option<&Expr>,
+    functions: &HashMap<Symbol, &swc_ecma_ast::Function>,
+) -> Result<swc_ecma_ast::ClassDecl, String> {
+    use swc_ecma_ast::*;
+
+    // A member assigned an existing function's *name* (`assert._toString =
+    // formatSimpleValue`) becomes a method that reuses that function.
+    let resolve_function = |right: &Expr| -> Option<Function> {
+        match right {
+            Expr::Ident(ident) => functions.get(&ident.sym.to_string()).map(|f| (*f).clone()),
+            _ => rhs_function(right),
+        }
+    };
+
+    let mut instance_methods = Vec::new();
+    let mut statics = Vec::new();
+    for (on_prototype, name, right) in assignments {
+        if *on_prototype {
+            instance_methods.push((name.clone(), *right));
+        } else {
+            statics.push((name.clone(), *right));
+        }
+    }
+    let method_names: std::collections::HashSet<Symbol> =
+        instance_methods.iter().map(|(name, _)| name.clone()).collect();
+    let mut param_types: HashMap<Symbol, TsType> = HashMap::new();
+    for parameter in &function.function.params {
+        if let Pat::Ident(binding) = &parameter.pat {
+            if let Some(annotation) = &binding.type_ann {
+                param_types.insert(
+                    binding.id.sym.to_string(),
+                    annotation.type_ann.as_ref().clone(),
+                );
+            }
+        }
+    }
+    let fields = constructor_fields(&function.function, &method_names, &param_types);
+
+    let property = |name: &Symbol| {
+        PropName::Ident(IdentName::new(name.as_str().into(), swc_common::DUMMY_SP))
+    };
+    let mut body: Vec<ClassMember> = Vec::new();
+    for (name, ty) in fields {
+        body.push(ClassMember::ClassProp(ClassProp {
+            span: swc_common::DUMMY_SP,
+            key: property(&name),
+            value: None,
+            type_ann: Some(Box::new(TsTypeAnn {
+                span: swc_common::DUMMY_SP,
+                type_ann: Box::new(ty),
+            })),
+            is_static: false,
+            decorators: Vec::new(),
+            accessibility: None,
+            is_abstract: false,
+            is_optional: false,
+            is_override: false,
+            readonly: false,
+            declare: false,
+            definite: false,
+        }));
+    }
+    if is_constructor {
+        let mut params = function.function.params.clone();
+        make_params_default_undefined(&mut params);
+        body.push(ClassMember::Constructor(Constructor {
+            span: swc_common::DUMMY_SP,
+            ctxt: Default::default(),
+            key: property(&"constructor".to_string()),
+            params: params.into_iter().map(ParamOrTsParamProp::Param).collect(),
+            body: function.function.body.clone(),
+            accessibility: None,
+            is_optional: false,
+        }));
+    } else {
+        // A namespace-shaped function (`assert`): keep its body as the static
+        // `__call__`, and rewrite its plain call sites to `F.__call__(...)`.
+        let mut call_function = (*function.function).clone();
+        make_params_default_undefined(&mut call_function.params);
+        body.push(ClassMember::Method(ClassMethod {
+            span: swc_common::DUMMY_SP,
+            key: property(&"__call__".to_string()),
+            function: Box::new(call_function),
+            kind: MethodKind::Method,
+            is_static: true,
+            accessibility: None,
+            is_abstract: false,
+            is_optional: false,
+            is_override: false,
+        }));
+    }
+    for (name, right) in &instance_methods {
+        let Some(mut method_function) = resolve_function(right) else {
+            return Err(format!(
+                "constructor-function prototype member `{name}` is not a function"
+            ));
+        };
+        make_params_default_undefined(&mut method_function.params);
+        body.push(ClassMember::Method(ClassMethod {
+            span: swc_common::DUMMY_SP,
+            key: property(name),
+            function: Box::new(method_function),
+            kind: MethodKind::Method,
+            is_static: false,
+            accessibility: None,
+            is_abstract: false,
+            is_optional: false,
+            is_override: false,
+        }));
+    }
+    let mut declared_static_fields = std::collections::HashSet::new();
+    for (name, right) in &statics {
+        if let Some(mut function) = resolve_function(right) {
+            make_params_default_undefined(&mut function.params);
+            body.push(ClassMember::Method(ClassMethod {
+                span: swc_common::DUMMY_SP,
+                key: property(name),
+                function: Box::new(function),
+                kind: MethodKind::Method,
+                is_static: true,
+                accessibility: None,
+                is_abstract: false,
+                is_optional: false,
+                is_override: false,
+            }));
+        } else if declared_static_fields.insert(name.clone()) {
+            // Keep each assignment at its original module position.  The
+            // declaration only reserves storage; it must not evaluate RHS.
+            let values: Vec<&Expr> = statics.iter()
+                .filter(|(member, value)| member == name && resolve_function(value).is_none())
+                .map(|(_, value)| *value)
+                .collect();
+            let inferred: Vec<TsType> = values.iter()
+                .map(|value| inferred_field_type(value, &param_types).unwrap_or_else(ts_any_type))
+                .collect();
+            let same_keyword = |kind: TsKeywordTypeKind| inferred.iter().all(|ty|
+                matches!(ty, TsType::TsKeywordType(keyword) if keyword.kind == kind));
+            let ty = if inferred.len() == 1
+                || same_keyword(TsKeywordTypeKind::TsNumberKeyword)
+                || same_keyword(TsKeywordTypeKind::TsStringKeyword)
+                || same_keyword(TsKeywordTypeKind::TsBooleanKeyword) {
+                inferred.into_iter().next().unwrap()
+            } else {
+                // Distinct inferred value kinds need one shared writable
+                // slot, rather than duplicate class members.
+                ts_any_type()
+            };
+            body.push(ClassMember::ClassProp(ClassProp {
+                span: swc_common::DUMMY_SP,
+                key: property(name),
+                value: None,
+                type_ann: Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(ty),
+                })),
+                is_static: true,
+                decorators: Vec::new(),
+                accessibility: None,
+                is_abstract: false,
+                is_optional: true,
+                is_override: false,
+                readonly: false,
+                declare: false,
+                definite: false,
+            }));
+        }
+    }
+    // `F.prototype = { m() {...}, x: 1 }` -- fold the object literal's
+    // identifier-keyed members into the class as instance methods/fields
+    // (numeric/string keys and a non-literal RHS are left unsupported).
+    if let Some(Expr::Object(object)) = prototype_replacement {
+        for prop in &object.props {
+            let PropOrSpread::Prop(prop) = prop else {
+                continue;
+            };
+            match prop.as_ref() {
+                Prop::Method(method) => {
+                    let PropName::Ident(key) = &method.key else {
+                        continue;
+                    };
+                    let mut method_function = (*method.function).clone();
+                    make_params_default_undefined(&mut method_function.params);
+                    body.push(ClassMember::Method(ClassMethod {
+                        span: swc_common::DUMMY_SP,
+                        key: PropName::Ident(key.clone()),
+                        function: Box::new(method_function),
+                        kind: MethodKind::Method,
+                        is_static: false,
+                        accessibility: None,
+                        is_abstract: false,
+                        is_optional: false,
+                        is_override: false,
+                    }));
+                }
+                Prop::KeyValue(pair) => {
+                    let PropName::Ident(key) = &pair.key else {
+                        continue;
+                    };
+                    // `{ greet: function () {...} }` is a method, not a field.
+                    if let Some(mut method_function) = resolve_function(&pair.value) {
+                        make_params_default_undefined(&mut method_function.params);
+                        body.push(ClassMember::Method(ClassMethod {
+                            span: swc_common::DUMMY_SP,
+                            key: PropName::Ident(key.clone()),
+                            function: Box::new(method_function),
+                            kind: MethodKind::Method,
+                            is_static: false,
+                            accessibility: None,
+                            is_abstract: false,
+                            is_optional: false,
+                            is_override: false,
+                        }));
+                        continue;
+                    }
+                    let ty = inferred_field_type(&pair.value, &param_types)
+                        .unwrap_or_else(ts_any_type);
+                    body.push(ClassMember::ClassProp(ClassProp {
+                        span: swc_common::DUMMY_SP,
+                        key: PropName::Ident(key.clone()),
+                        value: Some(pair.value.clone()),
+                        type_ann: Some(Box::new(TsTypeAnn {
+                            span: swc_common::DUMMY_SP,
+                            type_ann: Box::new(ty),
+                        })),
+                        is_static: false,
+                        decorators: Vec::new(),
+                        accessibility: None,
+                        is_abstract: false,
+                        is_optional: false,
+                        is_override: false,
+                        readonly: false,
+                        declare: false,
+                        definite: false,
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(ClassDecl {
+        ident: function.ident.clone(),
+        declare: false,
+        class: Box::new(Class {
+            span: swc_common::DUMMY_SP,
+            ctxt: Default::default(),
+            decorators: Vec::new(),
+            body,
+            super_class: None,
+            is_abstract: false,
+            type_params: None,
+            super_type_params: None,
+            implements: Vec::new(),
+        }),
+    })
+}
+
+/// A break at the current loop level can reach the statement after a
+/// `while (true)`. Breaks inside nested loops or switches target those
+/// constructs instead; a labeled break may leave the outer loop.
+fn ast_loop_body_may_break(statement: &swc_ecma_ast::Stmt, nested: usize) -> bool {
+    use swc_ecma_ast::Stmt;
+    match statement {
+        Stmt::Break(value) => value.label.is_some() || nested == 0,
+        Stmt::Block(block) => block.stmts.iter().any(|stmt| ast_loop_body_may_break(stmt, nested)),
+        Stmt::If(branch) => ast_loop_body_may_break(&branch.cons, nested)
+            || branch.alt.as_ref().is_some_and(|alt| ast_loop_body_may_break(alt, nested)),
+        Stmt::Switch(switch) => switch.cases.iter().any(|case| case.cons.iter()
+            .any(|stmt| ast_loop_body_may_break(stmt, nested + 1))),
+        Stmt::While(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::DoWhile(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::For(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::ForIn(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::ForOf(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::Try(try_stmt) => try_stmt.block.stmts.iter().any(|stmt| ast_loop_body_may_break(stmt, nested))
+            || try_stmt.handler.as_ref().is_some_and(|handler| handler.body.stmts.iter()
+                .any(|stmt| ast_loop_body_may_break(stmt, nested)))
+            || try_stmt.finalizer.as_ref().is_some_and(|finalizer| finalizer.stmts.iter()
+                .any(|stmt| ast_loop_body_may_break(stmt, nested))),
+        Stmt::Labeled(labeled) => ast_loop_body_may_break(&labeled.body, nested),
+        _ => false,
+    }
+}
+
+/// True if `statement` always transfers control away (a `return`/`throw` on
+/// every path) -- a conservative AST-level approximation, enough to decide
+/// whether a function body can fall off its end.
+fn ast_statement_terminates(statement: &swc_ecma_ast::Stmt) -> bool {
+    use swc_ecma_ast::*;
+    match statement {
+        Stmt::Return(_) | Stmt::Throw(_) => true,
+        Stmt::Block(block) => ast_block_terminates(&block.stmts),
+        Stmt::If(if_statement) => {
+            if_statement.alt.is_some()
+                && ast_statement_terminates(&if_statement.cons)
+                && ast_statement_terminates(if_statement.alt.as_ref().unwrap())
+        }
+        Stmt::Switch(switch) => {
+            switch.cases.iter().any(|case| case.test.is_none())
+                && switch
+                    .cases
+                    .iter()
+                    .all(|case| ast_block_terminates(&case.cons))
+        }
+        Stmt::Try(try_statement) => {
+            try_statement.finalizer.as_ref().is_some_and(|finalizer|
+                ast_block_terminates(&finalizer.stmts))
+                || (ast_block_terminates(&try_statement.block.stmts)
+                    && try_statement.handler.as_ref().is_none_or(|handler|
+                        ast_block_terminates(&handler.body.stmts)))
+        }
+        Stmt::While(while_statement) => {
+            matches!(while_statement.test.as_ref(), Expr::Lit(Lit::Bool(b)) if b.value)
+                && !ast_loop_body_may_break(&while_statement.body, 0)
+        }
+        Stmt::For(for_statement) => {
+            for_statement.test.as_ref().is_none_or(|test|
+                matches!(test.as_ref(), Expr::Lit(Lit::Bool(b)) if b.value))
+                && !ast_loop_body_may_break(&for_statement.body, 0)
+        }
+        Stmt::DoWhile(do_while) => ast_statement_terminates(&do_while.body),
+        _ => false,
+    }
+}
+
+fn ast_block_terminates(statements: &[swc_ecma_ast::Stmt]) -> bool {
+    for statement in statements {
+        // A break before an apparent later return reaches the enclosing
+        // switch/loop instead; that later return cannot prove termination.
+        if ast_loop_body_may_break(statement, 0) {
+            return false;
+        }
+        if ast_statement_terminates(statement) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if a callback written inline (arrow or function expression with a block
+/// body) ends in `throw` on every path and never returns a value, so its result
+/// type may be taken from the surrounding Promise chain instead of `void`.
+fn ast_callback_always_throws(expr: &swc_ecma_ast::Expr) -> bool {
+    use swc_ecma_ast::*;
+    let stmts = match expr {
+        Expr::Arrow(arrow) => match arrow.body.as_ref() {
+            ArrowFunctionBody::FunctionBody(block) => &block.stmts,
+            _ => return false,
+        },
+        Expr::Fn(function) => match &function.function.body {
+            Some(block) => &block.stmts,
+            None => return false,
+        },
+        _ => return false,
+    };
+    ast_block_terminates(stmts) && !ast_block_has_value_return(stmts)
+}
+
+/// True if the block contains a `return <value>` somewhere (so the function
+/// is value-returning, not `void`).
+fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {
+    use swc_ecma_ast::*;
+    statements.iter().any(|statement| match statement {
+        Stmt::Return(ret) => ret.arg.is_some(),
+        Stmt::Block(block) => ast_block_has_value_return(&block.stmts),
+        Stmt::If(if_statement) => {
+            ast_block_has_value_return(std::slice::from_ref(&if_statement.cons))
+                || if_statement
+                    .alt
+                    .as_ref()
+                    .is_some_and(|alt| ast_block_has_value_return(std::slice::from_ref(alt)))
+        }
+        Stmt::Switch(switch) => switch
+            .cases
+            .iter()
+            .any(|case| ast_block_has_value_return(&case.cons)),
+        Stmt::Try(try_statement) => {
+            ast_block_has_value_return(&try_statement.block.stmts)
+                || try_statement
+                    .handler
+                    .as_ref()
+                    .is_some_and(|handler| ast_block_has_value_return(&handler.body.stmts))
+                || try_statement.finalizer.as_ref().is_some_and(|finalizer|
+                    ast_block_has_value_return(&finalizer.stmts))
+        }
+        Stmt::While(while_statement) => ast_block_has_value_return(std::slice::from_ref(&*while_statement.body)),
+        Stmt::DoWhile(do_while) => ast_block_has_value_return(std::slice::from_ref(&*do_while.body)),
+        Stmt::For(for_statement) => ast_block_has_value_return(std::slice::from_ref(&*for_statement.body)),
+        Stmt::ForIn(for_in) => ast_block_has_value_return(std::slice::from_ref(&*for_in.body)),
+        Stmt::ForOf(for_of) => ast_block_has_value_return(std::slice::from_ref(&*for_of.body)),
+        Stmt::Labeled(labeled) => ast_block_has_value_return(std::slice::from_ref(&labeled.body)),
+        _ => false,
+    })
+}
+
+/// Gives a module-level `var x;`/`let x;` (no initializer) an
+/// `: any = undefined` type and value, so it can be declared and assigned
+/// later (real trigger: test262's `testTypedArray.js` `var makeIterable;`).
+/// A `const` without an initializer stays an error.
+pub fn normalize_uninitialized_globals(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    let mut normalized = module.clone();
+    for item in &mut normalized.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) = item else {
+            continue;
+        };
+        if var.kind == VarDeclKind::Const {
+            continue;
+        }
+        for declarator in &mut var.decls {
+            if declarator.init.is_some() {
+                continue;
+            }
+            let Pat::Ident(binding) = &mut declarator.name else {
+                continue;
+            };
+            if binding.type_ann.is_none() {
+                binding.type_ann = Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                        span: swc_common::DUMMY_SP,
+                        kind: TsKeywordTypeKind::TsAnyKeyword,
+                    })),
+                }));
+            }
+            declarator.init = Some(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                "undefined".into(),
+                swc_common::DUMMY_SP,
+            ))));
+        }
+    }
+    normalized
+}
+
+/// True if `function`'s body (including nested arrows, which inherit it, but
+/// not nested non-arrow functions, which have their own) references
+/// `arguments`.
+fn function_references_arguments(function: &swc_ecma_ast::Function) -> bool {
+    struct Finder(bool);
+    impl swc_ecma_visit::Visit for Finder {
+        fn visit_expr(&mut self, expr: &Expr) {
+            if matches!(expr, Expr::Ident(ident) if ident.sym == *"arguments") {
+                self.0 = true;
+            }
+            expr.visit_children_with(self);
+        }
+        fn visit_function(&mut self, _function: &swc_ecma_ast::Function) {}
+    }
+    let mut finder = Finder(false);
+    if let Some(body) = &function.body {
+        body.visit_with(&mut finder);
+    }
+    finder.0
+}
+
+/// `const arguments: any[] = [p1, p2, ...];` for a function whose body uses
+/// `arguments` -- an approximation binding it to the declared parameters (JS
+/// `arguments` also holds extra args, which thaw's fixed-arity functions
+/// cannot receive). `None` when a parameter is itself named `arguments` or
+/// isn't a simple identifier.
+fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
+    use swc_ecma_ast::*;
+    let mut elements = Vec::new();
+    for parameter in &function.params {
+        let Pat::Ident(binding) = &parameter.pat else {
+            return None;
+        };
+        if binding.id.sym == *"arguments" {
+            return None;
+        }
+        elements.push(Some(ExprOrSpread {
+            spread: None,
+            expr: Box::new(Expr::Ident(binding.id.clone())),
+        }));
+    }
+    let any = || TsType::TsKeywordType(TsKeywordType {
+        span: swc_common::DUMMY_SP,
+        kind: TsKeywordTypeKind::TsAnyKeyword,
+    });
+    Some(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+        span: swc_common::DUMMY_SP,
+        ctxt: Default::default(),
+        kind: VarDeclKind::Const,
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: swc_common::DUMMY_SP,
+            name: Pat::Ident(BindingIdent {
+                id: Ident::new_no_ctxt("arguments".into(), swc_common::DUMMY_SP),
+                type_ann: Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(TsType::TsArrayType(TsArrayType {
+                        span: swc_common::DUMMY_SP,
+                        elem_type: Box::new(any()),
+                    })),
+                })),
+            }),
+            init: Some(Box::new(Expr::Array(ArrayLit {
+                span: swc_common::DUMMY_SP,
+                elems: elements,
+            }))),
+            definite: false,
+        }],
+    }))))
+}
+
+/// Normalize inferred value-returning callable bodies before signatures are
+/// inferred. A bare return and a path that reaches the end both yield
+/// `undefined`; generators use a separate completion channel.
+fn normalize_inferred_return_body(statements: &mut Vec<Stmt>) {
+    use swc_ecma_ast::*;
+    if !ast_block_has_value_return(statements) {
+        return;
+    }
+    fn undefined_expr() -> Box<Expr> {
+        // The inserted value must not resolve a user binding named `undefined`.
+        // This synthetic void-zero is recognized as an Undefined value during
+        // lowering; ordinary unary-void expressions keep their existing ABI.
+        Box::new(Expr::Unary(UnaryExpr {
+            span: swc_common::DUMMY_SP,
+            op: UnaryOp::Void,
+            arg: Box::new(Expr::Lit(Lit::Num(Number {
+                span: swc_common::DUMMY_SP,
+                value: 0.0,
+                raw: None,
+            }))),
+        }))
+    }
+    struct BareReturns;
+    impl swc_ecma_visit::VisitMut for BareReturns {
+        fn visit_mut_function(&mut self, _: &mut Function) {}
+        fn visit_mut_arrow_expr(&mut self, _: &mut ArrowExpr) {}
+        fn visit_mut_return_stmt(&mut self, ret: &mut ReturnStmt) {
+            if ret.arg.is_none() {
+                ret.arg = Some(undefined_expr());
+            }
+        }
+    }
+    statements.visit_mut_with(&mut BareReturns);
+    if !ast_block_terminates(statements) {
+        statements.push(Stmt::Return(ReturnStmt {
+            span: swc_common::DUMMY_SP,
+            arg: Some(undefined_expr()),
+        }));
+    }
+}
+
+pub fn normalize_implicit_returns(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    struct Rewriter;
+    impl swc_ecma_visit::VisitMut for Rewriter {
+        fn visit_mut_function(&mut self, function: &mut Function) {
+            function.visit_mut_children_with(self);
+            if function_references_arguments(function) {
+                if let Some(binding) = arguments_binding(function) {
+                    if let Some(body) = &mut function.body {
+                        body.stmts.insert(0, binding);
+                    }
+                }
+            }
+            if function.return_type.is_none() && !function.is_generator {
+                if let Some(body) = &mut function.body {
+                    normalize_inferred_return_body(&mut body.stmts);
+                }
+            }
+        }
+
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {
+            arrow.visit_mut_children_with(self);
+            if arrow.return_type.is_none() && !arrow.is_generator {
+                if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_mut() {
+                    normalize_inferred_return_body(&mut body.stmts);
+                }
+            }
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rewriter);
+    module
+}
+
+/// `(owner, object)` for a whole-prototype assignment `F.prototype = <expr>`.
+fn constructor_prototype_replacement(expr: &Expr) -> Option<(Symbol, &Expr)> {
+    let Expr::Assign(assign) = expr else {
+        return None;
+    };
+    if assign.op != swc_ecma_ast::AssignOp::Assign {
+        return None;
+    }
+    let swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Member(member)) =
+        &assign.left
+    else {
+        return None;
+    };
+    let Expr::Ident(owner) = member.obj.as_ref() else {
+        return None;
+    };
+    if !matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(prop) if prop.sym == *"prototype") {
+        return None;
+    }
+    Some((owner.sym.to_string(), assign.right.as_ref()))
+}
+
+/// `(name, function)` for a single-declarator `var F = function () {...}`
+/// binding, else `None`.
+fn var_decl_function(var: &swc_ecma_ast::VarDecl) -> Option<(Symbol, &swc_ecma_ast::Function)> {
+    let [declarator] = var.decls.as_slice() else {
+        return None;
+    };
+    let swc_ecma_ast::Pat::Ident(binding) = &declarator.name else {
+        return None;
+    };
+    let swc_ecma_ast::Expr::Fn(function) = declarator.init.as_deref()? else {
+        return None;
+    };
+    Some((binding.id.sym.to_string(), &function.function))
+}
+
+/// Rewrites the classic constructor-function pattern into a class, so it
+/// reuses thaw's native class machinery (`this`, `new F()`,
+/// `instanceof F`, static dispatch) instead of failing on `this` in a plain
+/// function. Real trigger: test262's own harness (`Test262Error`).
+///
+/// Only *module-level* function declarations whose body uses `this` are
+/// converted; their `F.prototype.m = ...` / `F.s = ...` assignments (wherever
+/// they appear in the module) become instance methods / static members.
+pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String> {
+    use swc_ecma_ast::*;
+
+    // A function explicitly declared with a `this` parameter, or used via
+    // `.call`/`.apply`/`.bind`, is a call-with-receiver function, not a
+    // constructor -- leave it alone.
+    let rebound: std::collections::HashSet<Symbol> = {
+        struct Finder(std::collections::HashSet<Symbol>);
+        impl swc_ecma_visit::Visit for Finder {
+            fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+                if let (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(property)) =
+                    (member.obj.as_ref(), &member.prop)
+                {
+                    if matches!(property.sym.as_ref(), "call" | "apply" | "bind") {
+                        self.0.insert(object.sym.to_string());
+                    }
+                }
+                member.visit_children_with(self);
+            }
+        }
+        let mut finder = Finder(std::collections::HashSet::new());
+        module.visit_with(&mut finder);
+        finder.0
+    };
+
+    // Collect every top-level `F.prototype.m = ...` / `F.s = ...` first, so a
+    // function can be recognized as a namespace (`assert`) even without
+    // `this`.
+    let mut assignments: HashMap<Symbol, Vec<(usize, bool, Symbol, &Expr)>> = HashMap::new();
+    let mut prototype_replacements: HashMap<Symbol, (usize, &Expr)> = HashMap::new();
+    for (index, item) in module.body.iter().enumerate() {
+        let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item else {
+            continue;
+        };
+        if let Some((owner, on_prototype, name, right)) = constructor_assignment_target(expr) {
+            assignments
+                .entry(owner)
+                .or_default()
+                .push((index, on_prototype, name, right));
+        } else if let Some((owner, object)) = constructor_prototype_replacement(expr) {
+            prototype_replacements.insert(owner, (index, object));
+        }
+    }
+
+    let eligible = |function: &Function, name: &str| {
+        !function.is_async
+            && !function.is_generator
+            && function.body.is_some()
+            && function.this_param.is_none()
+            && !rebound.contains(name)
+    };
+    let mut candidates: HashMap<Symbol, bool> = HashMap::new();
+    for item in &module.body {
+        let (name, function) = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
+                (function.ident.sym.to_string(), &*function.function)
+            }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => match var_decl_function(var) {
+                Some(found) => found,
+                None => continue,
+            },
+            _ => continue,
+        };
+        if !eligible(function, &name) {
+            continue;
+        }
+        let uses_this = constructor_function_uses_this(function);
+        // A whole-prototype assignment (`Con.prototype = {...}`) also marks a
+        // constructor, even without `this`.
+        let is_constructor = uses_this || prototype_replacements.contains_key(&name);
+        if is_constructor || assignments.contains_key(&name) {
+            candidates.insert(name, is_constructor);
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(module.clone());
+    }
+
+    let functions: HashMap<Symbol, &Function> = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
+                Some((function.ident.sym.to_string(), &*function.function))
+            }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => var_decl_function(var),
+            _ => None,
+        })
+        .collect();
+
+    let mut namespaces: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    let mut class_for: HashMap<usize, ClassDecl> = HashMap::new();
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (index, item) in module.body.iter().enumerate() {
+        let (name, ident, function) = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => (
+                function.ident.sym.to_string(),
+                function.ident.clone(),
+                (*function.function).clone(),
+            ),
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => {
+                let Some((name, function)) = var_decl_function(var) else {
+                    continue;
+                };
+                let Pat::Ident(binding) = &var.decls[0].name else {
+                    continue;
+                };
+                (name, binding.id.clone(), function.clone())
+            }
+            _ => continue,
+        };
+        let Some(is_constructor) = candidates.get(&name) else {
+            continue;
+        };
+        let list = assignments.remove(&name).unwrap_or_default();
+        let callable_statics: std::collections::HashSet<Symbol> = list.iter()
+            .filter(|(_, on_prototype, _, right)| !*on_prototype &&
+                (rhs_function(right).is_some() || matches!(right, Expr::Ident(ident)
+                    if functions.contains_key(ident.sym.as_ref()))))
+            .map(|(_, _, member, _)| member.clone())
+            .collect();
+        for (item_index, on_prototype, member, _) in &list {
+            // Callable and prototype members still use the legacy class
+            // method conversion.  Ordinary static writes stay in place.
+            if *on_prototype || callable_statics.contains(member) {
+                consumed.insert(*item_index);
+            }
+        }
+        let replacement_object = match prototype_replacements.remove(&name) {
+            Some((replacement_index, object)) => {
+                consumed.insert(replacement_index);
+                Some(object)
+            }
+            None => None,
+        };
+        let refs: Vec<(bool, Symbol, &Expr)> = list
+            .iter()
+            .map(|(_, on_prototype, member, right)| (*on_prototype, member.clone(), *right))
+            .collect();
+        if !*is_constructor {
+            namespaces.insert(name.clone());
+        }
+        let declaration = FnDecl {
+            ident,
+            declare: false,
+            function: Box::new(function),
+        };
+        class_for.insert(
+            index,
+            constructor_class(
+                &declaration,
+                &refs,
+                *is_constructor,
+                replacement_object,
+                &functions,
+            )?,
+        );
+    }
+
+    let mut body = Vec::new();
+    for (index, item) in module.body.iter().enumerate() {
+        if let Some(class) = class_for.remove(&index) {
+            body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))));
+            continue;
+        }
+        if consumed.contains(&index) {
+            continue;
+        }
+        body.push(item.clone());
+    }
+    let mut normalized = module.clone();
+    normalized.body = body;
+
+    // A namespace function is now a class, so rewrite its plain calls
+    // (`assert(x)`) to the static `assert.__call__(x)`.
+    if !namespaces.is_empty() {
+        struct CallRewriter<'a> {
+            names: &'a std::collections::HashSet<Symbol>,
+        }
+        impl swc_ecma_visit::VisitMut for CallRewriter<'_> {
+            fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+                if let Callee::Expr(callee) = &call.callee {
+                    if let Expr::Ident(ident) = callee.as_ref() {
+                        if self.names.contains(ident.sym.as_ref()) {
+                            call.callee = Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span: swc_common::DUMMY_SP,
+                                obj: Box::new(Expr::Ident(ident.clone())),
+                                prop: MemberProp::Ident(IdentName::new(
+                                    "__call__".into(),
+                                    swc_common::DUMMY_SP,
+                                )),
+                            })));
+                        }
+                    }
+                }
+                call.visit_mut_children_with(self);
+            }
+        }
+        normalized
+            .body
+            .visit_mut_with(&mut CallRewriter { names: &namespaces });
+    }
+    Ok(normalized)
+}
+
+/// A default expression that creates a closure must be evaluated in the callee's
+/// own scope: a closure built by the arity wrappers captures the wrappers' copy
+/// of every parameter, not the cell the body reads and writes. Such defaults
+/// (and the defaults after them) move into the body as
+/// `let p = p__thaw_arg === undefined ? <default> : p__thaw_arg`, the parameter
+/// itself becoming `p__thaw_arg?: T`. Needs an annotation or a literal default
+/// to name `T`; any other shape keeps the wrapper evaluation.
+pub fn normalize_default_parameter_closures(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    struct ClosureFinder(bool);
+    impl swc_ecma_visit::Visit for ClosureFinder {
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) {
+            self.0 = true;
+        }
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {
+            self.0 = true;
+        }
+    }
+    fn creates_closure(expr: &Expr) -> bool {
+        let mut finder = ClosureFinder(false);
+        expr.visit_with(&mut finder);
+        finder.0
+    }
+    fn keyword(kind: TsKeywordTypeKind) -> Box<TsTypeAnn> {
+        Box::new(TsTypeAnn {
+            span: swc_common::DUMMY_SP,
+            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                span: swc_common::DUMMY_SP,
+                kind,
+            })),
+        })
+    }
+    fn parameter_type(binding: &BindingIdent, default: &Expr) -> Option<Box<TsTypeAnn>> {
+        if let Some(annotation) = &binding.type_ann {
+            return Some(annotation.clone());
+        }
+        match default {
+            Expr::Lit(Lit::Num(_)) => Some(keyword(TsKeywordTypeKind::TsNumberKeyword)),
+            Expr::Lit(Lit::Str(_)) => Some(keyword(TsKeywordTypeKind::TsStringKeyword)),
+            Expr::Lit(Lit::Bool(_)) => Some(keyword(TsKeywordTypeKind::TsBooleanKeyword)),
+            _ => None,
+        }
+    }
+    /// The body statements that evaluate the moved defaults, or `None` (patterns untouched).
+    fn move_defaults(patterns: &mut [&mut Pat]) -> Option<Vec<Stmt>> {
+        let start = patterns.iter().position(
+            |pattern| matches!(&**pattern, Pat::Assign(assign) if creates_closure(&assign.right)),
+        )?;
+        let mut moved = Vec::new();
+        for pattern in &patterns[start..] {
+            let Pat::Assign(assign) = &**pattern else {
+                return None;
+            };
+            let Pat::Ident(binding) = assign.left.as_ref() else {
+                return None;
+            };
+            let annotation = parameter_type(binding, &assign.right)?;
+            moved.push((binding.id.clone(), annotation, assign.right.clone()));
+        }
+        let mut statements = Vec::new();
+        for (pattern, (id, annotation, default)) in patterns[start..].iter_mut().zip(moved) {
+            let supplied = Ident::new_no_ctxt(format!("{}__thaw_arg", id.sym).into(), swc_common::DUMMY_SP);
+            **pattern = Pat::Ident(BindingIdent {
+                id: Ident {
+                    optional: true,
+                    ..supplied.clone()
+                },
+                type_ann: Some(annotation.clone()),
+            });
+            let undefined = Box::new(Expr::Ident(Ident::new_no_ctxt(
+                "undefined".into(),
+                swc_common::DUMMY_SP,
+            )));
+            statements.push(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                kind: VarDeclKind::Let,
+                declare: false,
+                decls: vec![VarDeclarator {
+                    span: swc_common::DUMMY_SP,
+                    name: Pat::Ident(BindingIdent {
+                        id: Ident::new_no_ctxt(id.sym.clone(), swc_common::DUMMY_SP),
+                        type_ann: Some(annotation),
+                    }),
+                    init: Some(Box::new(Expr::Cond(CondExpr {
+                        span: swc_common::DUMMY_SP,
+                        test: Box::new(Expr::Bin(BinExpr {
+                            span: swc_common::DUMMY_SP,
+                            op: BinaryOp::EqEqEq,
+                            left: Box::new(Expr::Ident(supplied.clone())),
+                            right: undefined,
+                        })),
+                        cons: default,
+                        alt: Box::new(Expr::Ident(supplied)),
+                    }))),
+                    definite: false,
+                }],
+            }))));
+        }
+        Some(statements)
+    }
+    struct Rewriter;
+    impl swc_ecma_visit::VisitMut for Rewriter {
+        fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
+            function.visit_mut_children_with(self);
+            if function_references_arguments(function) {
+                return;
+            }
+            let Some(body) = &mut function.body else {
+                return;
+            };
+            let mut patterns: Vec<&mut Pat> =
+                function.params.iter_mut().map(|param| &mut param.pat).collect();
+            if let Some(mut statements) = move_defaults(&mut patterns) {
+                statements.append(&mut body.stmts);
+                body.stmts = statements;
+            }
+        }
+
+        fn visit_mut_constructor(&mut self, constructor: &mut Constructor) {
+            constructor.visit_mut_children_with(self);
+            let Some(body) = &mut constructor.body else {
+                return;
+            };
+            let mut patterns = Vec::new();
+            for parameter in &mut constructor.params {
+                let ParamOrTsParamProp::Param(parameter) = parameter else {
+                    return;
+                };
+                patterns.push(&mut parameter.pat);
+            }
+            if let Some(mut statements) = move_defaults(&mut patterns) {
+                statements.append(&mut body.stmts);
+                body.stmts = statements;
+            }
+        }
+
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {
+            arrow.visit_mut_children_with(self);
+            let mut patterns: Vec<&mut Pat> = arrow.params.iter_mut().collect();
+            let Some(mut statements) = move_defaults(&mut patterns) else {
+                return;
+            };
+            match arrow.body.as_mut() {
+                ArrowFunctionBody::FunctionBody(body) => {
+                    statements.append(&mut body.stmts);
+                    body.stmts = statements;
+                }
+                ArrowFunctionBody::Expr(expr) => {
+                    statements.push(Stmt::Return(ReturnStmt {
+                        span: swc_common::DUMMY_SP,
+                        arg: Some(expr.clone()),
+                    }));
+                    *arrow.body = ArrowFunctionBody::FunctionBody(FunctionBody {
+                        span: swc_common::DUMMY_SP,
+                        stmts: statements,
+                    });
+                }
+            }
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rewriter);
+    module
 }

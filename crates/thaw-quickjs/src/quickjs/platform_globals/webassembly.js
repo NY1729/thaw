@@ -1,4 +1,13 @@
 (() => {
+  const wasmApply = Reflect.apply, wasmArrayPush = Array.prototype.push;
+  const wasmTrunc = Math.trunc, wasmIsFinite = Number.isFinite;
+  const wasmUnsigned32 = value => {
+    const number = +value;
+    if (!wasmIsFinite(number)) throw new TypeError('WebAssembly length must be finite');
+    const integer = wasmTrunc(number);
+    if (integer < 0 || integer > 0xffffffff) throw new TypeError('WebAssembly length is outside the unsigned 32-bit range');
+    return integer === 0 ? 0 : integer;
+  };
   const wasmBytes = value => {
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -18,7 +27,25 @@
   const wasmFinalizer = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(resource => {
     if (resource.resources) for (const entry of resource.resources) if (entry.binding) entry.value.__thawUnbind(entry.binding);
     __thaw_wasm_release(resource.kind, resource.handle);
+    if (resource.kind === 'instance') wasmInstances.delete(resource.handle);
   }) : null;
+  const wasmInstances = new Map();
+  const wasmInstance = handle => {
+    const entry = wasmInstances.get(handle);
+    return entry && typeof entry.deref === 'function' ? entry.deref() : entry;
+  };
+  const wasmWithResources = (owner, invoke) => {
+    const resources = owner ? owner.__thawResources : [];
+    for (const resource of resources) resource.value.__thawSync();
+    let result, failed = false, primary;
+    try { result = invoke(); } catch (error) { failed = true; primary = error; }
+    for (const resource of resources) {
+      try { resource.value.__thawRefresh(resource.binding); }
+      catch (error) { if (!failed) { failed = true; primary = error; } }
+    }
+    if (failed) throw primary;
+    return result;
+  };
   const wasmFuncrefs = new Map();
   const wasmCachedFuncref = key => { const entry = wasmFuncrefs.get(key); return entry && typeof entry.deref === 'function' ? entry.deref() : entry; };
   const wasmCacheFuncref = (key, value) => wasmFuncrefs.set(key, typeof WeakRef === 'function' ? new WeakRef(value) : value);
@@ -31,9 +58,14 @@
     const handle = __thaw_wasm_retain_value(value); references.set(value, handle); return handle;
   };
   const wasmPrepareFuncref = value => {
+    if (value.__thawWasmInstance === 0) {
+      return { t: 'funcref', v: value.__thawWasmFuncref, instance: 0,
+        parameters: value.__thawWasmParameters, results: value.__thawWasmResults };
+    }
     if (value.__thawWasmBridge === undefined) {
       const bridge = (...args) => {
-        const called = wasmResult(__thaw_wasm_call_funcref(value.__thawWasmInstance, value.__thawWasmFuncref, JSON.stringify(args.map(wasmEncodeValue))), WebAssembly.RuntimeError);
+        const encoded = JSON.stringify(wasmEncodeArguments(args, value.__thawWasmParameters));
+        const called = wasmWithResources(wasmInstance(value.__thawWasmInstance), () => wasmResult(__thaw_wasm_call_funcref(value.__thawWasmInstance, value.__thawWasmFuncref, encoded), WebAssembly.RuntimeError));
         const values = called.values.map(item => wasmDecodeValue(item, value.__thawWasmInstance));
         return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
       };
@@ -46,19 +78,53 @@
     ? wasmPrepareFuncref(value)
     : typeof value === 'bigint'
     ? { t: 'bigint', v: String(value) }
-    : typeof value === 'number' ? { t: 'number', v: Number.isFinite(value) ? value : null }
+    : typeof value === 'number' ? { t: 'number', v: Number.isFinite(value) && !Object.is(value, -0) ? value : String(value === 0 ? "-0" : value) }
     : { t: 'externref', v: wasmRetainExternref(value) };
+  const wasmEncodeArgument = (value, type) => {
+    if (type === 'externref') return { t: 'externref', v: wasmRetainExternref(value) };
+    if (type === 'i64') return { t: 'bigint', v: String(BigInt.asIntN(64, value)) };
+    if (type === 'i32') return wasmEncodeValue(+value | 0);
+    if (type === 'f32') return wasmEncodeValue(Math.fround(+value));
+    if (type === 'f64') return wasmEncodeValue(+value);
+    if (type === 'funcref') {
+      if (value === null) return { t: 'funcref', v: 0 };
+      if (typeof value === 'function' && value.__thawWasmFuncref !== undefined) return wasmPrepareFuncref(value);
+      throw new TypeError('WebAssembly funcref argument must be null or an exported function');
+    }
+    throw new TypeError('Unsupported WebAssembly argument type: ' + type);
+  };
+  const wasmEncodeArguments = (args, types) => types.map((type, index) => wasmEncodeArgument(args[index], type));
+  const wasmConvertImportResult = (value, type) => {
+    if (type === 'i32' || type === 'i64' || type === 'f32' || type === 'f64') {
+      return wasmDecodeValue(wasmEncodeArgument(value, type));
+    }
+    return value;
+  };
   const wasmDecodeValue = (value, instance) => {
     if (value.t === 'bigint') return BigInt(value.v);
     if (value.t === 'externref') return __thaw_wasm_restore_value(Number(value.v));
     if (value.t === 'jsfuncref') return __thaw_wasm_restore_import(Number(value.v));
-    if (value.t !== 'funcref') return value.v === null ? NaN : value.v;
+    if (value.t === 'number') return typeof value.v === 'string' ? Number(value.v) : value.v === null ? NaN : value.v;
+    if (value.t !== 'funcref') return value.v;
     if (!value.v) return null;
+    if (value.instance !== undefined) instance = value.instance;
     const key = instance + ':' + value.v;
     let cached = wasmCachedFuncref(key);
     if (!cached) {
+      // A retained table function (instance 0) has no single owner instance;
+      // sync every live instance's memories/globals around the call.
+      // ponytail: O(live instances) per call, track owners from Rust if this gets hot.
+      const owner = instance === 0 ? { get __thawResources() {
+        const all = [];
+        for (const entry of wasmInstances.values()) {
+          const live = entry && typeof entry.deref === 'function' ? entry.deref() : entry;
+          if (live && live.__thawResources) all.push(...live.__thawResources);
+        }
+        return all;
+      } } : wasmInstance(instance);
       const callable = (...args) => {
-        const called = wasmResult(__thaw_wasm_call_funcref(instance, value.v, JSON.stringify(args.map(wasmEncodeValue))), WebAssembly.RuntimeError);
+        const encoded = JSON.stringify(wasmEncodeArguments(args, value.parameters || []));
+        const called = wasmWithResources(owner, () => wasmResult(__thaw_wasm_call_funcref(instance, value.v, encoded), WebAssembly.RuntimeError));
         const values = called.values.map(item => wasmDecodeValue(item, instance));
         return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
       };
@@ -66,6 +132,7 @@
       Object.defineProperty(callable, '__thawWasmFuncref', { value: value.v });
       Object.defineProperty(callable, '__thawWasmParameters', { value: value.parameters || [] });
       Object.defineProperty(callable, '__thawWasmResults', { value: value.results || [] });
+      if (instance === 0 && wasmFinalizer) wasmFinalizer.register(callable, { kind: 'table-funcref', handle: value.v });
       wasmCacheFuncref(key, callable); cached = callable;
     }
     return cached;
@@ -85,7 +152,7 @@
     }
     static imports(module) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Module.imports(): argument 0 must be a WebAssembly.Module');
-      return module.__thawImports.map(value => ({ ...value }));
+      return module.__thawImports.map(value => ({ module: value.module, name: value.name, kind: value.kind }));
     }
     static customSections(module, name) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Module.customSections(): argument 0 must be a WebAssembly.Module');
@@ -96,105 +163,136 @@
   class WasmMemory {
     constructor(descriptor, internal) {
       if (internal) {
-        this.__thawInstance = descriptor.instance;
-        this.__thawName = descriptor.name;
+        const retained = wasmResult(__thaw_wasm_memory(descriptor.instance, descriptor.name, 'retain', ''));
+        this.__thawInstance = 0;
+        this.__thawName = String(retained.handle);
       } else {
-        if (!descriptor || descriptor.initial === undefined) throw new TypeError('WebAssembly.Memory(): Property initial is required');
-        const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? -1 : Number(descriptor.maximum);
+        if (!descriptor) throw new TypeError('WebAssembly.Memory(): Property initial is required');
+        const initialValue = descriptor.initial;
+        if (initialValue === undefined) throw new TypeError('WebAssembly.Memory(): Property initial is required');
+        const initial = wasmUnsigned32(initialValue);
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? -1 : wasmUnsigned32(maximumValue);
         const result = wasmResult(__thaw_wasm_memory_create(initial, maximum), RangeError);
         this.__thawInstance = 0;
         this.__thawName = String(result.handle);
-        this.__thawMaximum = descriptor.maximum === undefined ? null : Number(descriptor.maximum);
+        this.__thawMaximum = maximum === -1 ? null : maximum;
       }
       this.__thawBindings = [];
       this.__thawRefresh();
+      if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'memory', handle: Number(this.__thawName) });
     }
     __thawRefresh(binding) {
       const instance = binding ? binding.instance : this.__thawInstance, name = binding ? binding.name : this.__thawName;
       const result = wasmResult(__thaw_wasm_memory(instance, name, 'read', ''));
       const bytes = wasmUnhex(result.value);
-      if (this.__thawBuffer && bytes.byteLength > this.__thawBuffer.byteLength && binding) {
-        const delta = (bytes.byteLength - this.__thawBuffer.byteLength) / 65536;
-        wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(delta)), RangeError);
-        for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_memory(other.instance, other.name, 'grow', String(delta)), RangeError);
-      }
       if (this.__thawBuffer && this.__thawBuffer.byteLength === bytes.byteLength) new Uint8Array(this.__thawBuffer).set(bytes);
       else {
         if (this.__thawBuffer) __thaw_detach_array_buffer(this.__thawBuffer);
         this.__thawBuffer = bytes.buffer;
       }
-      if (binding) { const data = wasmHex(this.__thawBuffer); wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', data)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_memory(other.instance, other.name, 'write', data)); }
     }
     __thawSync() {
       const data = wasmHex(this.__thawBuffer);
       wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', data));
-      for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_memory(binding.instance, binding.name, 'write', data));
     }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
     get buffer() { return this.__thawBuffer; }
     grow(delta) {
+      delta = wasmUnsigned32(delta);
       this.__thawSync();
-      const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(Number(delta))), RangeError);
-      for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_memory(binding.instance, binding.name, 'grow', String(Number(delta))), RangeError);
+      const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(delta)), RangeError);
+      __thaw_detach_array_buffer(this.__thawBuffer);
+      this.__thawBuffer = undefined;
       this.__thawRefresh();
       return result.value;
     }
   }
   class WasmGlobal {
     constructor(descriptor, value, internal) {
-      if (internal) { this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name; return; }
-      if (!descriptor || !['i32','i64','f32','f64','externref'].includes(String(descriptor.value))) throw new TypeError('WebAssembly.Global(): invalid value type');
-      this.__thawType = String(descriptor.value); this.__thawMutable = Boolean(descriptor.mutable);
-      this.__thawLocalValue = this.__thawConvert(value === undefined ? (this.__thawType === 'i64' ? 0n : 0) : value);
-      this.__thawBindings = [];
+      if (internal) {
+        const global = wasmResult(__thaw_wasm_global(descriptor.instance, descriptor.name, undefined));
+        this.__thawType = global.type; this.__thawMutable = global.mutable;
+        // Function-reference carrier lifetime still uses the existing instance path.
+        if (global.type === 'funcref') {
+          this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name;
+          // The global reads through the instance's store: keep that Instance (and
+          // so its finalizer's resources) alive for as long as this export lives.
+          Object.defineProperty(this, '__thawOwner', { value: descriptor.owner });
+          return;
+        }
+        const retained = wasmResult(__thaw_wasm_global_retain(descriptor.instance, descriptor.name));
+        this.__thawInstance = 0; this.__thawName = String(retained.handle);
+      } else {
+        if (!descriptor) throw new TypeError('WebAssembly.Global(): invalid value type');
+        const mutable = !!descriptor.mutable, type = `${descriptor.value}`;
+        if (!['i32','i64','f32','f64','externref'].includes(type)) throw new TypeError('WebAssembly.Global(): invalid value type');
+        this.__thawType = type; this.__thawMutable = mutable;
+        const initial = this.__thawConvert(arguments.length < 2 ? (type === 'i64' ? 0n : type === 'externref' ? undefined : 0) : value);
+        const created = wasmResult(__thaw_wasm_global_create(type, mutable, JSON.stringify(wasmEncodeArgument(initial, type))));
+        this.__thawInstance = 0; this.__thawName = String(created.handle);
+      }
+      if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'global', handle: Number(this.__thawName) });
     }
     __thawConvert(value) {
-      if (this.__thawType === 'i64') return BigInt.asIntN(64, BigInt(value));
+      if (this.__thawType === 'i64') return BigInt.asIntN(64, value);
       if (this.__thawType === 'externref') return value;
-      if (this.__thawType === 'i32') return Number(value) | 0;
-      if (this.__thawType === 'f32') return Math.fround(Number(value));
-      return Number(value);
+      if (this.__thawType === 'i32') return +value | 0;
+      if (this.__thawType === 'f32') return Math.fround(+value);
+      return +value;
     }
-    get value() { return this.__thawInstance === undefined ? this.__thawLocalValue : wasmDecodeValue(wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined)).value); }
+    get value() { return wasmDecodeValue(wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined)).value, this.__thawInstance); }
     set value(value) {
-      if (this.__thawInstance === undefined) {
-        if (!this.__thawMutable) throw new TypeError('set WebAssembly.Global.value: immutable global');
-        this.__thawLocalValue = this.__thawConvert(value); this.__thawSync(); return;
-      }
-      wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeValue(value))));
+      if (!this.__thawMutable) throw new TypeError('set WebAssembly.Global.value: immutable global');
+      const converted = this.__thawConvert(value);
+      wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeArgument(converted, this.__thawType))));
     }
-    __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
-    __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
-    __thawSync() { if (this.__thawInstance !== undefined) return; const encoded = JSON.stringify(wasmEncodeValue(this.__thawLocalValue)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
-    __thawRefresh(binding) { if (!binding) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeValue(this.__thawLocalValue)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
+    __thawBind() { return null; }
+    __thawUnbind() {}
+    __thawSync() {}
+    __thawRefresh() {}
     valueOf() { return this.value; }
   }
   class WasmTable {
-    constructor(descriptor, value = null, internal = false) {
-      if (internal) { this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name; this.__thawBindings = []; return; }
-      if (!descriptor || !['anyfunc','funcref','externref'].includes(String(descriptor.element))) throw new TypeError('WebAssembly.Table(): invalid element type');
-      const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? Infinity : Number(descriptor.maximum);
-      if (!Number.isInteger(initial) || initial < 0 || initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
-      this.__thawElement = descriptor.element === 'externref' ? 'externref' : 'funcref'; this.__thawMaximum = maximum;
-      this.__thawValidate(value); this.__thawValues = Array(initial).fill(value); this.__thawBindings = [];
+    constructor(descriptor, value, internal = false) {
+      let retained;
+      if (internal) {
+        retained = wasmResult(__thaw_wasm_table_retain(descriptor.instance, descriptor.name));
+        this.__thawElement = retained.type;
+      } else {
+        if (!descriptor) throw new TypeError('WebAssembly.Table(): invalid element type');
+        const element = `${descriptor.element}`;
+        if (!['anyfunc','funcref','externref'].includes(element)) throw new TypeError('WebAssembly.Table(): invalid element type');
+        const initial = wasmUnsigned32(descriptor.initial);
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? -1 : wasmUnsigned32(maximumValue);
+        if (maximum !== -1 && initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
+        this.__thawElement = element === 'externref' ? 'externref' : 'funcref';
+        if (arguments.length < 2) value = this.__thawElement === 'externref' ? undefined : null;
+        this.__thawValidate(value);
+        retained = wasmResult(__thaw_wasm_table_create(this.__thawElement, initial, maximum, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError);
+      }
+      this.__thawInstance = 0; this.__thawName = String(retained.handle);
+      if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'table', handle: retained.handle });
     }
     __thawValidate(value) { if (this.__thawElement === 'funcref' && value !== null && (typeof value !== 'function' || value.__thawWasmFuncref === undefined)) throw new TypeError('WebAssembly.Table(): funcref value must be null or an exported WebAssembly function'); }
-    get length() { return this.__thawInstance === undefined ? this.__thawValues.length : wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).value; }
-    get(index) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return this.__thawInstance === undefined ? this.__thawValues[index] : wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value, this.__thawInstance); }
-    set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); this.__thawValidate(value); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeValue(value)))); }
-    grow(delta, value = null) { delta = Number(delta); const previous = this.length; this.__thawValidate(value); if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError); return previous; }
-    __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
-    __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
-    __thawSync() { if (this.__thawInstance !== undefined) return; for (const binding of this.__thawBindings) { let size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value; if (size < this.__thawValues.length) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', this.__thawValues.length - size, JSON.stringify(wasmEncodeValue(null))), RangeError); for (let index = 0; index < this.__thawValues.length; index++) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'set', index, JSON.stringify(wasmEncodeValue(this.__thawValues[index])))); } }
-    __thawRefresh(binding) { if (!binding || this.__thawInstance !== undefined) return; const size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value, values = []; for (let index = 0; index < size; index++) values.push(wasmDecodeValue(wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'get', index, undefined)).value, binding.instance)); this.__thawValues = values; this.__thawSync(); }
+    get length() { return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).value; }
+    get(index) { index = wasmUnsigned32(index); if (index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value, this.__thawInstance); }
+    set(index, value) { index = wasmUnsigned32(index); if (arguments.length < 2) value = this.__thawElement === 'externref' ? undefined : null; this.__thawValidate(value); if (index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeArgument(value, this.__thawElement)))); }
+    grow(delta, value) { delta = wasmUnsigned32(delta); if (arguments.length < 2) value = this.__thawElement === 'externref' ? undefined : null; this.__thawValidate(value); return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError).value; }
+    __thawBind() { return null; }
+    __thawUnbind() {}
+    __thawSync() {}
+    __thawRefresh() {}
   }
   class WasmInstance {
     constructor(module, imports = {}) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Instance(): argument 0 must be a WebAssembly.Module');
       if (imports === null || (typeof imports !== 'object' && typeof imports !== 'function')) throw new TypeError('WebAssembly.Instance(): imports must be an object');
       const wasi = imports && imports.wasi_snapshot_preview1 && imports.wasi_snapshot_preview1.__thawWasiOptions;
-      const linkage = { wasi: wasi, functions: [], memories: [], globals: [], tables: [] }, pendingResources = [];
+      const linkage = { wasi: wasi, functions: [], memories: [], globals: [], tables: [] }, pendingResources = [], linkedMemories = new Map();
+      const importValues = [];
       for (const item of module.__thawImports) {
         if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
         const namespace = imports[item.module];
@@ -202,56 +300,140 @@
         const value = namespace[item.name];
         if (item.kind === 'function' && typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
         if (item.kind === 'memory' && !(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
-        if (item.kind === 'global' && !(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
-        if (item.kind === 'table' && (!(value instanceof WasmTable) || value.__thawInstance !== undefined)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a standalone Table`);
+        if (item.kind === 'global' && !(value instanceof WasmGlobal)) {
+          const numeric = ['i32', 'f32', 'f64'].includes(item.valueType) && typeof value === 'number';
+          const wide = item.valueType === 'i64' && typeof value === 'bigint';
+          if (item.mutable || !(numeric || wide)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a compatible immutable value or Global`);
+        }
+        if (item.kind === 'table' && !(value instanceof WasmTable)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Table`);
+        importValues.push({ item, value });
       }
       try {
-        for (const item of module.__thawImports) {
-          if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
-          const value = imports[item.module][item.name];
-          if (item.kind === 'function') linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
-          else if (item.kind === 'memory') { value.__thawSync(); linkage.memories.push({ module: item.module, name: item.name, value: { data: wasmHex(value.buffer), maximum: value.__thawMaximum } }); pendingResources.push({ value, item }); }
-          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeValue(value.value) }); pendingResources.push({ value, item }); }
-          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(wasmEncodeValue), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
+        for (const { item, value } of importValues) {
+          if (item.kind === 'function') {
+            const bridge = (...args) => {
+              for (const memory of linkedMemories.keys()) memory.__thawRefresh();
+              let result, failed = false, primary;
+              try {
+                result = wasmApply(value, undefined, args);
+                const types = item.resultTypes;
+                if (types.length > 1) {
+                  result = [...result];
+                  if (result.length !== types.length) throw new TypeError('WebAssembly import returned an incorrect number of values');
+                  for (let index = 0; index < types.length; index++) result[index] = wasmConvertImportResult(result[index], types[index]);
+                } else if (types.length === 1) {
+                  result = wasmConvertImportResult(result, types[0]);
+                }
+              }
+              catch (error) { failed = true; primary = error; }
+              for (const memory of linkedMemories.keys()) {
+                try { memory.__thawSync(); }
+                catch (error) { if (!failed) { failed = true; primary = error; } }
+              }
+              if (failed) throw primary;
+              return result;
+            };
+            linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value, bridge) });
+          }
+          else if (item.kind === 'memory') {
+            let descriptor = linkedMemories.get(value);
+            if (!descriptor) {
+              value.__thawSync();
+              descriptor = { instance: value.__thawInstance, name: value.__thawName };
+              linkedMemories.set(value, descriptor);
+              pendingResources.push({ value, item });
+            }
+            linkage.memories.push({ module: item.module, name: item.name, value: descriptor });
+          }
+          else if (item.kind === 'global') {
+            if (value instanceof WasmGlobal) {
+              linkage.globals.push({ module: item.module, name: item.name, value: { instance: value.__thawInstance, name: value.__thawName } });
+              pendingResources.push({ value, item });
+            } else {
+              linkage.globals.push({ module: item.module, name: item.name, value: { primitive: wasmEncodeArgument(value, item.valueType) } });
+            }
+          }
+          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { instance: value.__thawInstance, name: value.__thawName } }); pendingResources.push({ value, item }); }
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
       } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      const rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)));
-      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw new WebAssembly.LinkError(rawResult.error); }
+      const pendingHandles = JSON.stringify(linkage.functions.map(value => value.handle));
+      let rawResult, failed = false, primary;
+      try {
+        rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)));
+        if (!rawResult.ok) wasmResult(JSON.stringify(rawResult), rawResult.runtime ? WebAssembly.RuntimeError : WebAssembly.LinkError);
+      } catch (error) { failed = true; primary = error; }
+      for (const memory of linkedMemories.keys()) {
+        try { memory.__thawRefresh(); }
+        catch (error) { if (!failed) { failed = true; primary = error; } }
+      }
+      if (failed) {
+        if (rawResult && rawResult.ok) __thaw_wasm_release('instance', rawResult.handle);
+        __thaw_wasm_release_pending(pendingHandles);
+        throw primary;
+      }
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
-      const exports = {}, resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
+      const exports = Object.create(null), resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
+      const memories = new Map();
       for (const item of result.exports) {
         if (item.kind === 'function') {
+          const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;
+          if (reference.t === 'jsfuncref') {
+            exports[item.name] = wasmDecodeValue(reference, this.__thawHandle);
+            continue;
+          }
+          if (reference.instance === 0) {
+            exports[item.name] = wasmDecodeValue(reference, this.__thawHandle);
+            continue;
+          }
+          const key = this.__thawHandle + ':' + reference.v;
+          const cached = wasmCachedFuncref(key);
+          if (cached) { exports[item.name] = cached; continue; }
           const callable = (...args) => {
-            for (const resource of resources) resource.value.__thawSync();
-            const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(args.map(wasmEncodeValue))));
-            for (const resource of resources) resource.value.__thawRefresh(resource.binding);
-            if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
-            const called = raw.ok ? raw : (() => { throw new WebAssembly.RuntimeError(raw.error); })();
+            const encoded = JSON.stringify(wasmEncodeArguments(args, item.parameterTypes || []));
+            const called = wasmWithResources(this, () => {
+              const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, encoded));
+              if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
+              return wasmResult(JSON.stringify(raw), WebAssembly.RuntimeError);
+            });
             const values = called.values.map(value => wasmDecodeValue(value, this.__thawHandle));
             return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
           };
           Object.defineProperty(callable, 'length', { value: item.parameters || 0 });
-          const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;
           Object.defineProperty(callable, '__thawWasmInstance', { value: this.__thawHandle });
           Object.defineProperty(callable, '__thawWasmFuncref', { value: reference.v });
           Object.defineProperty(callable, '__thawWasmParameters', { value: item.parameterTypes || [] });
           Object.defineProperty(callable, '__thawWasmResults', { value: item.resultTypes || [] });
-          wasmCacheFuncref(this.__thawHandle + ':' + reference.v, callable);
+          wasmCacheFuncref(key, callable);
           exports[item.name] = callable;
         } else if (item.kind === 'memory') {
-          const memory = new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
-          resources.push({ value: memory }); exports[item.name] = memory;
-        } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name }, undefined, true);
+          let memory = memories.get(item.memoryKey);
+          if (!memory) {
+            const imported = item.memoryImport === null ? undefined : resources.find(resource => resource.binding && resource.binding.name === 'import:' + item.memoryImport);
+            memory = imported ? imported.value : new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
+            memories.set(item.memoryKey, memory);
+            linkedMemories.set(memory, { instance: memory.__thawInstance, name: memory.__thawName });
+            if (!imported) resources.push({ value: memory });
+          }
+          exports[item.name] = memory;
+        } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name, owner: this }, undefined, true);
         else if (item.kind === 'table') { const table = new WasmTable({ instance: this.__thawHandle, name: item.name }, null, true); resources.push({ value: table }); exports[item.name] = table; }
       }
       Object.defineProperty(this, 'exports', { value: Object.freeze(exports), enumerable: true });
       Object.defineProperty(this, '__thawResources', { value: resources });
+      wasmInstances.set(this.__thawHandle, typeof WeakRef === 'function' ? new WeakRef(this) : this);
       if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'instance', handle: this.__thawHandle, resources });
     }
-    dispose() { if (this.__thawDisposed) return; if (!__thaw_wasm_release('instance', this.__thawHandle)) return; this.__thawDisposed = true; for (const resource of this.__thawResources) if (resource.binding) resource.value.__thawUnbind(resource.binding); }
+    dispose() { if (this.__thawDisposed) return; if (!__thaw_wasm_release('instance', this.__thawHandle)) return; this.__thawDisposed = true; wasmInstances.delete(this.__thawHandle); for (const resource of this.__thawResources) if (resource.binding) resource.value.__thawUnbind(resource.binding); }
   }
+  function compileStreaming(source) { return Promise.resolve(source).then(response => {
+      if (!response || typeof response.arrayBuffer !== 'function') throw new TypeError('WebAssembly streaming source must be a Response');
+      if (response.ok === false) throw new TypeError('WebAssembly streaming response was not successful');
+      const contentType = response.headers && typeof response.headers.get === 'function' ? response.headers.get('content-type') : null;
+      if (!contentType || String(contentType).split(';', 1)[0].trim().toLowerCase() !== 'application/wasm') throw new TypeError('WebAssembly streaming response has an unsupported MIME type');
+      return response.arrayBuffer();
+    }).then(bytes => new WasmModule(bytes)); }
   globalThis.WebAssembly = {
     CompileError: class CompileError extends Error { constructor(message) { super(message); this.name = 'CompileError'; } },
     LinkError: class LinkError extends Error { constructor(message) { super(message); this.name = 'LinkError'; } },
@@ -261,20 +443,20 @@
     Memory: WasmMemory,
     Global: WasmGlobal,
     Table: WasmTable,
-    validate(bytes) { try { new WasmModule(bytes); return true; } catch (_) { return false; } },
-    compile(bytes) { return Promise.resolve().then(() => new WasmModule(bytes)); },
+    validate(bytes) { const result = JSON.parse(__thaw_wasm_compile(wasmHex(bytes))); if (result.ok) __thaw_wasm_release('module', result.handle); return result.ok; },
+    compile(bytes) {
+      try { bytes = new Uint8Array(wasmBytes(bytes)); }
+      catch (error) { return Promise.reject(error); }
+      return Promise.resolve().then(() => new WasmModule(bytes));
+    },
     instantiate(source, imports) {
+      try { if (!(source instanceof WasmModule)) source = new Uint8Array(wasmBytes(source)); }
+      catch (error) { return Promise.reject(error); }
       return Promise.resolve().then(() => source instanceof WasmModule
         ? new WasmInstance(source, imports)
         : (() => { const module = new WasmModule(source); return { module, instance: new WasmInstance(module, imports) }; })());
     },
-    compileStreaming(source) { return Promise.resolve(source).then(response => {
-      if (!response || typeof response.arrayBuffer !== 'function') throw new TypeError('WebAssembly streaming source must be a Response');
-      if (response.ok === false) throw new TypeError('WebAssembly streaming response was not successful');
-      const contentType = response.headers && typeof response.headers.get === 'function' ? response.headers.get('content-type') : null;
-      if (!contentType || String(contentType).split(';', 1)[0].trim().toLowerCase() !== 'application/wasm') throw new TypeError('WebAssembly streaming response has an unsupported MIME type');
-      return response.arrayBuffer();
-    }).then(bytes => new WasmModule(bytes)); },
-    instantiateStreaming(source, imports) { return this.compileStreaming(source).then(module => ({ module, instance: new WasmInstance(module, imports) })); }
+    compileStreaming,
+    instantiateStreaming(source, imports) { return compileStreaming(source).then(module => ({ module, instance: new WasmInstance(module, imports) })); }
   };
   let nextTimerId = 1;

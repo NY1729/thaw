@@ -1,41 +1,4 @@
 impl NumericProgram {
-    fn returns_tagged_array(&self) -> bool {
-        matches!(
-            self.0.last(),
-            Some(
-                NumericValue::StringSplit
-                    | NumericValue::StringToArray
-                    | NumericValue::ArraySlice
-                    | NumericValue::ArrayConcat
-                    | NumericValue::NumberArrayAppend
-                    | NumericValue::StringArrayAppend
-                    | NumericValue::BoolArrayAppend
-                    | NumericValue::ArrayToReversed
-                    | NumericValue::ArrayReverse
-                    | NumericValue::NumberArrayToSorted
-                    | NumericValue::StringArrayToSorted
-                    | NumericValue::BoolArrayToSorted
-                    | NumericValue::NumberArraySort
-                    | NumericValue::StringArraySort
-                    | NumericValue::BoolArraySort
-                    | NumericValue::PrimitiveArrayJitMap(_, _, _)
-                    | NumericValue::PrimitiveArrayJitScan(_, 6, _)
-                    | NumericValue::StringArrayToSortedDescending
-                    | NumericValue::StringArraySortDescending
-                    | NumericValue::NumberArrayFill
-                    | NumericValue::StringArrayFill
-                    | NumericValue::BoolArrayFill
-                    | NumericValue::ArrayCopyWithin
-                    | NumericValue::ArraySplice
-                    | NumericValue::ArrayToSpliced
-                    | NumericValue::ArrayValue
-                    | NumericValue::NumberArrayWith
-                    | NumericValue::StringArrayWith
-                    | NumericValue::BoolArrayWith
-            )
-        )
-    }
-
     fn parse(symbol: &str) -> Option<Self> {
         if let Some(encoded) = symbol.strip_prefix("expr:") {
             let encoded = encoded.split_once(':')?.0;
@@ -177,11 +140,15 @@ impl NumericProgram {
                     "dnget" => Some(NumericValue::NumberDictionaryGet),
                     "dbget" => Some(NumericValue::BoolDictionaryGet),
                     "dsget" => Some(NumericValue::StringDictionaryGet),
+                    "dngetoptional" => Some(NumericValue::OptionalNumberDictionaryGet),
+                    "dbgetoptional" => Some(NumericValue::OptionalBoolDictionaryGet),
+                    "dsgetoptional" => Some(NumericValue::OptionalStringDictionaryGet),
                     "dnset" => Some(NumericValue::NumberDictionarySet),
                     "dnpostset" => Some(NumericValue::NumberDictionaryPostSet),
                     "dsset" => Some(NumericValue::StringDictionarySet),
                     "dbset" => Some(NumericValue::BoolDictionarySet),
                     "ddelete" => Some(NumericValue::DictionaryDelete),
+                    "dstrictdelete" => Some(NumericValue::DictionaryStrictDelete),
                     "dhasown" => Some(NumericValue::DictionaryHasOwn),
                     "din" => Some(NumericValue::DictionaryIn),
                     "dkeys" => Some(NumericValue::DictionaryKeys),
@@ -1170,15 +1137,21 @@ impl NumericProgram {
                                 .map(NumericValue::LocalSet)
                         })
                         .or_else(|| {
-                            ["dnput", "dbput", "dsput"].iter().enumerate().find_map(
-                                |(kind, prefix)| {
+                            // `init` is a put into a freshly built literal dictionary: the same
+                            // operation, but one that cannot raise a script-visible error.
+                            ["dnput", "dbput", "dsput", "dninit", "dbinit", "dsinit"]
+                                .iter()
+                                .enumerate()
+                                .find_map(|(kind, prefix)| {
                                     value.strip_prefix(prefix).and_then(|key| {
                                         intern_string(key).map(|key| {
-                                            NumericValue::DictionaryStaticAppend(kind as u8, key)
+                                            NumericValue::DictionaryStaticAppend(
+                                                (kind % 3) as u8,
+                                                key,
+                                            )
                                         })
                                     })
-                                },
-                            )
+                                })
                         })
                         .or_else(|| {
                             let (kind, index) =

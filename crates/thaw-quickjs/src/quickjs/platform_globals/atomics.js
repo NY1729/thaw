@@ -11,11 +11,20 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
     if ((!isInt32 && !isBigInt64) || !(typedArray.buffer instanceof SharedArrayBuffer)) {
       throw new TypeError('Atomics.waitAsync requires a shared Int32Array or BigInt64Array');
     }
-    const element = Number(index);
-    if (!Number.isInteger(element) || element < 0 || element >= typedArray.length) {
+    // ToIndex: truncate (NaN -> 0), reject only negatives and values beyond 2**53-1, then bound by length.
+    const number = Number(index);
+    const element = Number.isNaN(number) ? 0 : Math.trunc(number);
+    if (element < 0 || element > Number.MAX_SAFE_INTEGER || element >= typedArray.length) {
       throw new RangeError('Atomics.waitAsync index is out of range');
     }
     return [typedArray.buffer, typedArray.byteOffset + element * typedArray.BYTES_PER_ELEMENT, element];
+  }
+
+  function toBigInt(value) {
+    if (typeof value === 'bigint') return value;
+    if (typeof value === 'boolean') return BigInt(value);
+    if (typeof value === 'string') return BigInt(value);
+    throw new TypeError('Cannot convert value to a BigInt');
   }
 
   function listFor(buffer, offset, create) {
@@ -34,12 +43,14 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
 
   Atomics.waitAsync = function (typedArray, index, value, timeout) {
     const [buffer, offset, element] = location(typedArray, index);
-    if (Atomics.load(typedArray, element) !== value) {
-      return { async: false, value: 'not-equal' };
-    }
+    // Spec order: convert the expected value, then the timeout, then compare.
+    const expected = typedArray instanceof Int32Array ? value | 0 : BigInt.asIntN(64, toBigInt(value));
     let delay = timeout === undefined ? Infinity : Number(timeout);
     if (Number.isNaN(delay)) delay = Infinity;
     delay = Math.max(0, delay);
+    if (Atomics.load(typedArray, element) !== expected) {
+      return { async: false, value: 'not-equal' };
+    }
     if (delay === 0) return { async: false, value: 'timed-out' };
 
     let settle;
@@ -50,6 +61,11 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
       waiter.timer = setTimeout(() => {
         if (!waiter.active) return;
         waiter.active = false;
+        const remainingWaiters = listFor(buffer, offset, false);
+        if (remainingWaiters) {
+          const index = remainingWaiters.indexOf(waiter);
+          if (index >= 0) remainingWaiters.splice(index, 1);
+        }
         settle('timed-out');
       }, delay);
     }
@@ -57,9 +73,15 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
   };
 
   Atomics.notify = function (typedArray, index, count) {
+    if ((typedArray instanceof Int32Array
+        || (typeof BigInt64Array === 'function' && typedArray instanceof BigInt64Array))
+        && !(typedArray.buffer instanceof SharedArrayBuffer)) {
+      return nativeNotify.call(Atomics, typedArray, index, count);
+    }
     const [buffer, offset, element] = location(typedArray, index);
     let remaining = count === undefined ? Infinity : Math.max(0, Math.trunc(Number(count)));
     if (Number.isNaN(remaining)) remaining = 0;
+    count = remaining;
     const list = listFor(buffer, offset, false);
     let notified = 0;
     if (list && remaining > 0) {

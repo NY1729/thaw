@@ -64,6 +64,10 @@ pub fn set_ffi_error_abi(
                 visit_expr(consequent, symbol, abi, found);
                 visit_expr(alternate, symbol, abi, found);
             }
+            HirExpr::EvalThen(first, second) => {
+                visit_expr(first, symbol, abi, found);
+                visit_expr(second, symbol, abi, found);
+            }
             HirExpr::Call(callee, args) => {
                 visit_expr(callee, symbol, abi, found);
                 for arg in args {
@@ -119,12 +123,23 @@ pub fn set_ffi_error_abi(
             | HirExpr::UnionTag(inner, _)
             | HirExpr::UnionValue(inner, _, _) => visit_expr(inner, symbol, abi, found),
             HirExpr::RecursiveClosure(_, _, closure) => visit_expr(closure, symbol, abi, found),
-            HirExpr::TypedClosure(_, closure) => visit_expr(closure, symbol, abi, found),
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => {
+                visit_expr(closure, symbol, abi, found)
+            }
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
-            HirExpr::PromiseNew(executor, _, _, _) => visit_expr(executor, symbol, abi, found),
+            HirExpr::PromiseNew(executor, _, _, _) | HirExpr::PromiseNewMixed(executor, _, _) => {
+                visit_expr(executor, symbol, abi, found)
+            }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
+            }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+                visit_expr(source, symbol, abi, found);
+                if let Some(fulfilled) = fulfilled {
+                    visit_expr(fulfilled, symbol, abi, found);
+                }
+                visit_expr(rejected, symbol, abi, found);
             }
             HirExpr::PromiseFinally(source, callback, _, _) => {
                 visit_expr(source, symbol, abi, found);
@@ -176,7 +191,9 @@ pub fn set_ffi_error_abi(
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
+            | HirExpr::ClassAlloc(_)
             | HirExpr::FunctionRef(..)
+            | HirExpr::FunctionRefThis(..)
             | HirExpr::MethodRef(..)
             | HirExpr::PostfixUpdate(_, _) => {}
         }
@@ -196,6 +213,9 @@ pub fn set_ffi_error_abi(
                 }
                 HirStmt::While(condition, body) => {
                     visit_expr(condition, symbol, abi, found);
+                    visit_stmts(body, symbol, abi, found);
+                }
+                HirStmt::Finally(body, _) => {
                     visit_stmts(body, symbol, abi, found);
                 }
                 HirStmt::Try(body, _, catch_body, _) => {
@@ -255,6 +275,10 @@ pub fn set_ffi_ownership(
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }
+            }
+            HirExpr::EvalThen(first, second) => {
+                update_expr(first, symbol, returns, errors, found);
+                update_expr(second, symbol, returns, errors, found);
             }
             HirExpr::Call(callee, args) => {
                 update_expr(callee, symbol, returns, errors, found);
@@ -338,16 +362,23 @@ pub fn set_ffi_ownership(
             HirExpr::RecursiveClosure(_, _, closure) => {
                 update_expr(closure, symbol, returns, errors, found)
             }
-            HirExpr::TypedClosure(_, closure) => {
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => {
                 update_expr(closure, symbol, returns, errors, found)
             }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
-            HirExpr::PromiseNew(executor, _, _, _) => {
+            HirExpr::PromiseNew(executor, _, _, _) | HirExpr::PromiseNewMixed(executor, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
             }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
                 update_expr(source, symbol, returns, errors, found);
                 update_expr(callback, symbol, returns, errors, found);
+            }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+                update_expr(source, symbol, returns, errors, found);
+                if let Some(fulfilled) = fulfilled {
+                    update_expr(fulfilled, symbol, returns, errors, found);
+                }
+                update_expr(rejected, symbol, returns, errors, found);
             }
             HirExpr::PromiseFinally(source, callback, _, _) => {
                 update_expr(source, symbol, returns, errors, found);
@@ -388,7 +419,9 @@ pub fn set_ffi_ownership(
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
+            | HirExpr::ClassAlloc(_)
             | HirExpr::FunctionRef(..)
+            | HirExpr::FunctionRefThis(..)
             | HirExpr::MethodRef(..)
             | HirExpr::PostfixUpdate(_, _) => {}
         }
@@ -413,6 +446,9 @@ pub fn set_ffi_ownership(
                 }
                 HirStmt::While(condition, body) => {
                     update_expr(condition, symbol, returns, errors, found);
+                    update_stmts(body, symbol, returns, errors, found);
+                }
+                HirStmt::Finally(body, _) => {
                     update_stmts(body, symbol, returns, errors, found);
                 }
                 HirStmt::Try(body, _, catch_body, _) => {
@@ -499,6 +535,26 @@ pub fn set_ffi_string_abi(
                         found,
                     );
                 }
+            }
+            HirExpr::EvalThen(first, second) => {
+                update_expr(
+                    first,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    second,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
             }
             HirExpr::Call(callee, values) => {
                 update_expr(
@@ -714,7 +770,7 @@ pub fn set_ffi_string_abi(
                 aggregate_return_abi,
                 found,
             ),
-            HirExpr::TypedClosure(_, closure) => update_expr(
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => update_expr(
                 closure,
                 symbol,
                 params,
@@ -732,15 +788,17 @@ pub fn set_ffi_string_abi(
                 aggregate_return_abi,
                 found,
             ),
-            HirExpr::PromiseNew(executor, _, _, _) => update_expr(
-                executor,
-                symbol,
-                params,
-                returns,
-                calling_convention,
-                aggregate_return_abi,
-                found,
-            ),
+            HirExpr::PromiseNew(executor, _, _, _) | HirExpr::PromiseNewMixed(executor, _, _) => {
+                update_expr(
+                    executor,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                )
+            }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
                 update_expr(
                     source,
@@ -753,6 +811,37 @@ pub fn set_ffi_string_abi(
                 );
                 update_expr(
                     callback,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+            }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+                update_expr(
+                    source,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                if let Some(fulfilled) = fulfilled {
+                    update_expr(
+                        fulfilled,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
+                }
+                update_expr(
+                    rejected,
                     symbol,
                     params,
                     returns,
@@ -902,7 +991,9 @@ pub fn set_ffi_string_abi(
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
+            | HirExpr::ClassAlloc(_)
             | HirExpr::FunctionRef(..)
+            | HirExpr::FunctionRefThis(..)
             | HirExpr::MethodRef(..)
             | HirExpr::PostfixUpdate(_, _) => {}
         }
@@ -977,6 +1068,17 @@ pub fn set_ffi_string_abi(
                         aggregate_return_abi,
                         found,
                     );
+                    update_stmts(
+                        body,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
+                }
+                HirStmt::Finally(body, _) => {
                     update_stmts(
                         body,
                         symbol,
@@ -1244,4 +1346,137 @@ pub fn set_ffi_variadic_abi(
     }
     signature.variadic_abi = abi;
     Ok(())
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_program_controls {
+    use super::*;
+
+    fn signature() -> FfiSignature {
+        FfiSignature {
+            symbol: "traversal_target".into(),
+            params: vec![HirType::Str],
+            variadic: None,
+            variadic_abi: FfiVariadicAbi::Native,
+            ret: HirType::Str,
+            error_abi: FfiErrorAbi::Direct,
+            return_ownership: FfiOwnership::Borrowed,
+            error_ownership: FfiOwnership::Borrowed,
+            param_string_abis: vec![FfiStringAbi::NullTerminated],
+            return_string_abi: FfiStringAbi::NullTerminated,
+            calling_convention: FfiCallingConvention::C,
+            aggregate_return_abi: FfiAggregateAbi::Internal,
+            aggregate_return_layout: None,
+        }
+    }
+
+    fn program_with_neighbor_ffi_call() -> HirProgram {
+        let call_signature = signature();
+        HirProgram {
+            extern_functions: vec![call_signature.clone()],
+            functions: vec![HirFunction {
+                name: "traversal_test".into(),
+                params: Vec::new(),
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![HirStmt::Expr(HirExpr::ArrayLit(vec![
+                    HirExpr::FunctionRefThis(
+                        "callable_with_this".into(),
+                        HirType::Bytes,
+                        vec![HirType::Bytes],
+                        HirType::Bytes,
+                    ),
+                    HirExpr::FfiCall(
+                        Box::new(call_signature),
+                        vec![HirExpr::Lit(HirLit::Str("argument".into()))],
+                    ),
+                ]))],
+            }],
+            ..HirProgram::default()
+        }
+    }
+
+    fn nested_call(program: &HirProgram) -> &FfiSignature {
+        let HirStmt::Expr(HirExpr::ArrayLit(values)) = &program.functions[0].body[0] else {
+            panic!("expected adjacent callable reference and FFI call");
+        };
+        let HirExpr::FfiCall(signature, _) = &values[1] else {
+            panic!("expected FFI call after callable reference");
+        };
+        signature
+    }
+
+    #[test]
+    fn thaw_remaining_program_error_abi_mutator_reaches_neighboring_ffi_call() {
+        let mut program = program_with_neighbor_ffi_call();
+        set_ffi_error_abi(&mut program, "traversal_target", FfiErrorAbi::ThawResult).unwrap();
+
+        assert_eq!(
+            program.extern_functions[0].error_abi,
+            FfiErrorAbi::ThawResult
+        );
+        assert_eq!(nested_call(&program).error_abi, FfiErrorAbi::ThawResult);
+    }
+
+    #[test]
+    fn thaw_remaining_program_ownership_mutator_reaches_neighboring_ffi_call() {
+        let mut program = program_with_neighbor_ffi_call();
+        let returns = FfiOwnership::Owned {
+            destroy: "destroy_result".into(),
+        };
+        let errors = FfiOwnership::ArenaCopy {
+            destroy: Some("destroy_error".into()),
+        };
+        set_ffi_ownership(
+            &mut program,
+            "traversal_target",
+            returns.clone(),
+            errors.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(program.extern_functions[0].return_ownership, returns);
+        assert_eq!(program.extern_functions[0].error_ownership, errors);
+        assert_eq!(nested_call(&program).return_ownership, returns);
+        assert_eq!(nested_call(&program).error_ownership, errors);
+    }
+
+    #[test]
+    fn thaw_remaining_program_string_abi_mutator_reaches_neighboring_ffi_call() {
+        let mut program = program_with_neighbor_ffi_call();
+        set_ffi_string_abi(
+            &mut program,
+            "traversal_target",
+            vec![FfiStringAbi::PointerLength],
+            FfiStringAbi::PointerLength,
+            FfiCallingConvention::Fast,
+            FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+
+        assert_eq!(
+            program.extern_functions[0].param_string_abis,
+            vec![FfiStringAbi::PointerLength]
+        );
+        assert_eq!(
+            program.extern_functions[0].return_string_abi,
+            FfiStringAbi::PointerLength
+        );
+        assert_eq!(
+            nested_call(&program).param_string_abis,
+            vec![FfiStringAbi::PointerLength]
+        );
+        assert_eq!(
+            nested_call(&program).return_string_abi,
+            FfiStringAbi::PointerLength
+        );
+        assert_eq!(
+            nested_call(&program).calling_convention,
+            FfiCallingConvention::Fast
+        );
+        assert_eq!(
+            nested_call(&program).aggregate_return_abi,
+            FfiAggregateAbi::Portable
+        );
+    }
 }

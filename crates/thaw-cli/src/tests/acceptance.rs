@@ -329,7 +329,9 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     let artifact_manifest =
         artifact_manifest_from_bytes(&std::fs::read(&executable).unwrap()).unwrap();
     assert!(package
-        .join("board.native/_prisma_client/native.node")
+        .join("board.native")
+        .join(native_addon_path_component("@prisma/client"))
+        .join("native.node")
         .is_file());
     let moved = dir.join("moved");
     std::fs::rename(package, &moved).unwrap();

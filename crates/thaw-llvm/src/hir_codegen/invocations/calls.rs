@@ -4,10 +4,24 @@ impl<'ctx> HirCompiler<'ctx> {
         callee: &HirExpr,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let HirExpr::Var(name) = callee else {
-            return self.compile_expression_call(callee, args);
-        };
+        // Keep this dispatcher small: chains of immediately-invoked lambdas (one per
+        // argument binding) recurse through here, and `compile_named_call` has a
+        // frame of ~100 KiB in debug builds.
+        match callee {
+            HirExpr::Var(_) => self.compile_named_call(callee, args),
+            _ => self.compile_expression_call(callee, args),
+        }
+    }
 
+    #[inline(never)]
+    fn compile_named_call(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let HirExpr::Var(name) = callee else {
+            unreachable!("compile_named_call is only reached for a variable callee");
+        };
         if let Some(result) = self.compile_dynamic_named_call(name, args) {
             return result;
         }
@@ -22,6 +36,234 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match name.as_str() {
+            "@@thaw_async_caught_carrier" => {
+                let [text, owner, native, tag, number, bigint, boolean] = args else {
+                    return Err("async caught carrier expects text, owner, native, tag, number, bigint and bool".into());
+                };
+                let text = self.compile_expr(text)?.into_pointer_value();
+                let owner = self.compile_expr(owner)?.into_pointer_value();
+                let native = self.compile_expr(native)?.into_pointer_value();
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let number = self.compile_expr(number)?.into_float_value();
+                let bigint = self.compile_expr(bigint)?.into_int_value();
+                let boolean = self.compile_expr(boolean)?.into_int_value();
+                return self.build_caught_exception_carrier(text, owner, native, tag, number, bigint, boolean, false)
+                    .map(Into::into);
+            }
+            "@@thaw_capture_throw_text" => {
+                let [value] = args else {
+                    return Err("caught throw conversion expects one operand".into());
+                };
+                return self.compile_throw_text(value).map(Into::into);
+            }
+            "__thaw_date_assert_native_identity" => {
+                let [value] = args else { return Err("Date identity assertion expects one operand".into()); };
+                let value = self.compile_expr(value)?;
+                let date = self.builder.build_global_string_ptr("Date", "date_assert_name")
+                    .map_err(|error| error.to_string())?;
+                let trusted = self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[value.into(), date.as_pointer_value().into()],
+                    "date_assert_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Date identity assertion returned no value")?.into_int_value();
+                let function = self.current_function();
+                let accepted = self.context.append_basic_block(function, "date_identity_accepted");
+                let rejected = self.context.append_basic_block(function, "date_identity_rejected");
+                self.builder.build_conditional_branch(trusted, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Date method called on a non-Date value")?;
+                self.builder.position_at_end(accepted);
+                return Ok(value);
+            }
+            "__thaw_date_has_native_identity" => {
+                let [value] = args else { return Err("Date identity check expects one operand".into()); };
+                let value = self.compile_expr(value)?;
+                let date = self.builder.build_global_string_ptr("Date", "date_identity_name")
+                    .map_err(|error| error.to_string())?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[value.into(), date.as_pointer_value().into()],
+                    "date_has_native_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Date identity check returned no value".into());
+            }
+
+            "__thaw_assert_class_identity" => {
+                let (object_expr, HirExpr::Lit(HirLit::Str(class_name)), layout_checked) = (match args {
+                    [object, name] => (object, name, false),
+                    [object, name, HirExpr::Lit(HirLit::Str(_))] => (object, name, true),
+                    _ => return Err("class identity assertion expects an object and a literal class name".into()),
+                }) else {
+                    return Err("class identity assertion expects an object and a literal class name".into());
+                };
+                let object = self.compile_expr(object_expr)?.into_pointer_value();
+                // The three-operand form is a typed `as` of a caught value: an
+                // empty class name (interface target) skips the nominal check,
+                // and the target's field layout must fit the registered one.
+                let trusted = if class_name.is_empty() && layout_checked {
+                    self.context.bool_type().const_int(1, false)
+                } else {
+                    let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                        &[object.into(), expected.as_pointer_value().into()],
+                        "class_assert_identity",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("class identity assertion returned no value")?.into_int_value()
+                };
+                let function = self.current_function();
+                let accepted = self.context.append_basic_block(function, "class_identity_accepted");
+                let rejected = self.context.append_basic_block(function, "class_identity_rejected");
+                self.builder.build_conditional_branch(trusted, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Incompatible class accessor receiver")?;
+                self.builder.position_at_end(accepted);
+                if layout_checked {
+                    let fits = self.compile_register_native_object_layout(&[
+                        object_expr.clone(), HirExpr::Lit(HirLit::Bool(false)),
+                    ])?.into_int_value();
+                    let incompatible = self.context.append_basic_block(function, "class_layout_incompatible");
+                    let compatible = self.context.append_basic_block(function, "class_layout_compatible");
+                    self.builder.build_conditional_branch(fits, compatible, incompatible)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(incompatible);
+                    self.compile_throw_type_error("Incompatible native object field layout")?;
+                    self.builder.position_at_end(compatible);
+                }
+                return Ok(object.into());
+            }
+            "__thaw_object_has_class_identity" => {
+                let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {
+                    return Err("class identity query expects an object and a literal class name".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let expected = self.builder.build_global_string_ptr(class_name, "class_identity_name")
+                    .map_err(|error| error.to_string())?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[object.into(), expected.as_pointer_value().into()],
+                    "has_class_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("class identity query returned no value".into());
+            }
+            "__thaw_object_marker_hidden" => {
+                let [object, marker] = args else {
+                    return Err("object marker query expects two operands".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let marker = self.compile_expr(marker)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_marker_hidden").unwrap(),
+                    &[object.into(), marker.into()],
+                    "object_marker_hidden",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("object marker query returned no value".into());
+            }
+            "__thaw_object_has_full_layout" => {
+                let [object] = args else {
+                    return Err("full object layout query expects one object".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_has_full_layout").unwrap(),
+                    &[object.into()],
+                    "has_full_object_layout",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("full object layout query returned no value".into());
+            }
+            "__thaw_object_full_has_own" => {
+                let [object, key] = args else {
+                    return Err("full object own-property query expects object and key".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_full_has_own").unwrap(),
+                    &[object.into(), key.into()],
+                    "full_object_has_own",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("full object own-property query returned no value".into());
+            }
+            "__thaw_object_full_own_keys" => {
+                let [object, include_non_enumerable] = args else {
+                    return Err("full object keys query expects object and mode".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let mode = self.compile_expr(include_non_enumerable)?.into_int_value();
+                let raw_keys = self.builder.build_call(
+                    self.module.get_function("thaw_object_full_own_keys").unwrap(),
+                    &[object.into(), mode.into()],
+                    "full_object_own_keys",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("full object keys query returned no value")?.into_pointer_value();
+                return Ok(self.compile_array_wrap(raw_keys)?.into());
+            }
+            "__thaw_object_set_class_identity" => {
+                let [object, marker] = args else {
+                    return Err("object class identity registration expects two operands".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let marker = self.compile_expr(marker)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_set_class_identity").unwrap(),
+                    &[object.into(), marker.into()],
+                    "register_error_record_identity",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
+            "__thaw_object_hide_marker" => {
+                let [object, marker] = args else {
+                    return Err("object marker registration expects two operands".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let marker = self.compile_expr(marker)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_hide_marker").unwrap(),
+                    &[object.into(), marker.into()],
+                    "register_hidden_object_marker",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
+            "__thaw_object_order_begin" => {
+                let [object] = args else {
+                    return Err("object order initialization expects one object".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_order_begin").unwrap(),
+                    &[object.into()], "object_order_begin",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
+            "__thaw_object_order_seed" => {
+                let [object, key] = args else {
+                    return Err("object order insertion expects object and key".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_order_seed").unwrap(),
+                    &[object.into(), key.into()], "object_order_seed",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
+            "__thaw_object_order_rank" => {
+                let [object, key, rank] = args else {
+                    return Err("object order rank expects object, key, and fallback".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let rank = self.compile_expr(rank)?.into_int_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_order_rank").unwrap(),
+                    &[object.into(), key.into(), rank.into()], "object_order_rank",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("object order rank returned no value".into());
+            }
             "__thaw_object_has_accessor" => {
                 let [object, property, setter] = args else {
                     return Err(
@@ -55,10 +297,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [object, operation] = args else {
                     return Err(format!("{name} expects an object and an operation"));
                 };
+                // A `Record` is a JSON container too: it must use the same state key the JSON runtime consults.
+                let json_state = matches!(self.expr_hir_type(object), Some(HirType::Json | HirType::Dictionary(_)));
                 let object = self.compile_expr(object)?;
                 if !object.is_pointer_value() {
                     return Err("object integrity methods require a native object".into());
                 }
+                let state_object = if json_state {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_json_state_key").unwrap(),
+                            &[object.into()],
+                            "json_state_key",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("JSON state key returned no value")?
+                } else {
+                    object
+                };
                 let operation = self.compile_expr(operation)?.into_float_value();
                 let operation = self
                     .builder
@@ -77,7 +335,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_call(
                         self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
-                        &[object.into(), operation.into()],
+                        &[state_object.into(), operation.into()],
                         "object_state",
                     )
                     .map_err(|error| error.to_string())?
@@ -89,6 +347,142 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Ok(object);
                 }
                 return result;
+            }
+            "__thaw_object_property_flags" => {
+                let [object, key] = args else {
+                    return Err("native descriptor query expects object and key".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let flags = self.builder.build_call(
+                    self.module.get_function("thaw_object_property_flags").unwrap(),
+                    &[object.into(), key.into()], "native_property_flags",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor query returned no value")?.into_int_value();
+                return self.builder.build_unsigned_int_to_float(
+                    flags, self.context.f64_type(), "native_property_flags_number",
+                ).map(Into::into).map_err(|error| error.to_string());
+            }
+            "__thaw_object_define_data_value" => {
+                let [object, HirExpr::Lit(HirLit::Str(field)), value, requested] = args else {
+                    return Err("native data definition expects object, static field, value, flags".into());
+                };
+                let Some(HirType::Object(fields)) = self.expr_hir_type(object) else {
+                    return Err("native data definition requires a typed object".into());
+                };
+                let index = fields.iter().position(|(name, _)| name == field)
+                    .ok_or_else(|| format!("native object has no field `{field}`"))?;
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let field_ptr = self.compile_field_ptr_from_pointer(object, &fields, index)?;
+                // Graph decoding the RHS can invoke a host getter that
+                // freezes or redefines this same owner. Recheck its current
+                // flags after decoding, immediately before the store.
+                let value = self.compile_expr(value)?;
+                let requested = self.compile_expr(requested)?.into_float_value();
+                let requested = self.builder.build_float_to_unsigned_int(
+                    requested, self.context.i8_type(), "define_requested_flags",
+                ).map_err(|error| error.to_string())?;
+                let property = self.compile_expr(&HirExpr::Lit(HirLit::Str(field.clone())))?
+                    .into_pointer_value();
+                let valid = self.builder.build_call(
+                    self.module.get_function("thaw_object_can_set_property_flags").unwrap(),
+                    &[object.into(), property.into(), requested.into()],
+                    "define_native_flags_still_valid",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor preflight returned no value")?.into_int_value();
+                let current = self.builder.build_call(
+                    self.module.get_function("thaw_object_property_flags").unwrap(),
+                    &[object.into(), property.into()], "define_native_current_flags",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor flags returned no value")?.into_int_value();
+                let can_write = self.builder.build_and(
+                    current, self.context.i8_type().const_int(5, false),
+                    "define_native_writable_or_configurable",
+                ).map_err(|error| error.to_string())?;
+                let can_write = self.builder.build_int_compare(
+                    IntPredicate::NE, can_write, self.context.i8_type().const_zero(),
+                    "define_native_value_allowed",
+                ).map_err(|error| error.to_string())?;
+                let allowed = self.builder.build_and(valid, can_write, "define_native_allowed")
+                    .map_err(|error| error.to_string())?;
+                let checked = self.builder.get_insert_block()
+                    .ok_or("native data definition has no insertion block")?;
+                let function = self.current_function();
+                let store = self.context.append_basic_block(function, "define_native_store");
+                let done = self.context.append_basic_block(function, "define_native_done");
+                self.builder.build_conditional_branch(allowed, store, done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(store);
+                self.builder.build_store(field_ptr, value)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                let result = self.builder.build_phi(self.context.bool_type(), "define_native_result")
+                    .map_err(|error| error.to_string())?;
+                let rejected = self.context.bool_type().const_zero();
+                let accepted = self.context.bool_type().const_all_ones();
+                result.add_incoming(&[(&rejected, checked), (&accepted, store)]);
+                return Ok(result.as_basic_value());
+            }
+            "__thaw_object_set_property_flags"
+            | "__thaw_object_can_set_property_flags" => {
+                let [object, key, flags] = args else {
+                    return Err("native descriptor update expects object, key, flags".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let flags = self.compile_expr(flags)?.into_float_value();
+                let flags = self.builder.build_float_to_unsigned_int(
+                    flags, self.context.i8_type(), "native_property_flags_byte",
+                ).map_err(|error| error.to_string())?;
+                return self.builder.build_call(
+                    self.module.get_function(if name == "__thaw_object_set_property_flags" {
+                        "thaw_object_set_property_flags"
+                    } else {
+                        "thaw_object_can_set_property_flags"
+                    }).unwrap(),
+                    &[object.into(), key.into(), flags.into()], "set_native_property_flags",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor update returned no value".into());
+            }
+            "__thaw_array_delete_strict" | "__thaw_array_delete_reflect" => {
+                let [array, key] = args else {
+                    return Err("array delete expects a receiver and key".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let status = self.builder.build_call(
+                    self.module.get_function("thaw_array_delete_property").unwrap(),
+                    &[handle.into(), key.into()], "array_delete_status",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array delete returned no status")?.into_int_value();
+                let function = self.current_function();
+                let allocation_failed = self.context.append_basic_block(function, "array_delete_allocation_failed");
+                let checked = self.context.append_basic_block(function, "array_delete_checked");
+                let failed = self.builder.build_int_compare(
+                    IntPredicate::EQ, status, self.context.i8_type().const_int(2, false),
+                    "array_delete_failed_allocation",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(failed, allocation_failed, checked)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(allocation_failed);
+                self.compile_throw_builtin_error("Error", "Array delete allocation failed")?;
+                self.builder.position_at_end(checked);
+                let deleted = self.builder.build_int_compare(
+                    IntPredicate::EQ, status, self.context.i8_type().const_int(1, false),
+                    "array_delete_success",
+                ).map_err(|error| error.to_string())?;
+                if name == "__thaw_array_delete_strict" {
+                    let denied = self.context.append_basic_block(function, "array_delete_denied");
+                    let allowed = self.context.append_basic_block(function, "array_delete_allowed");
+                    self.builder.build_conditional_branch(deleted, allowed, denied)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(denied);
+                    self.compile_throw_type_error("Cannot delete property")?;
+                    self.builder.position_at_end(allowed);
+                }
+                return Ok(deleted.into());
             }
             "__thaw_array_has_index" => {
                 let [array, index] = args else {
@@ -207,7 +601,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let i64_type = self.context.i64_type();
                 let slot = self.builder.build_call(
                     self.module.get_function("thaw_array_ensure_index").unwrap(),
-                    &[target.into(), i64_type.const_int(array_element_storage_bytes(&element), false).into(), index.into()],
+                    &[target.into(), i64_type.const_int(array_element_storage_bytes(&element)?, false).into(), index.into()],
                     "undefined_write_slot",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("array undefined write returned no slot")?.into_pointer_value();
@@ -270,12 +664,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array resize requires a homogeneous array".into());
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
+                if self.tracks_object_integrity {
+                    self.compile_guard_array_handle(
+                        handle,
+                        2,
+                        "Cannot assign to read only property 'length' of object '[object Array]'",
+                    )?;
+                }
                 let length = self.compile_expr(length)?.into_float_value();
                 self.builder.build_call(
                     self.module.get_function("thaw_array_resize").unwrap(),
                     &[
                         handle.into(),
-                        self.context.i64_type().const_int(array_element_storage_bytes(&element), false).into(),
+                        self.context.i64_type().const_int(array_element_storage_bytes(&element)?, false).into(),
                         length.into(),
                     ],
                     "array_resize",
@@ -426,7 +827,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[
                             buffer.into(),
                             presence.into(),
-                            self.context.i64_type().const_int(array_element_storage_bytes(&element), false).into(),
+                            self.context.i64_type().const_int(array_element_storage_bytes(&element)?, false).into(),
                         ],
                         "array_sort_present_length",
                     )
@@ -621,7 +1022,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let right = self.compile_expr(right)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
@@ -631,7 +1032,21 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("bigint arithmetic returned no value".into());
+                    .ok_or("bigint arithmetic returned no value".to_string())?;
+                if matches!(name.as_str(), "__thaw_bigint_decimal_div" | "__thaw_bigint_decimal_mod") {
+                    let invalid = self.builder
+                        .build_is_null(result.into_pointer_value(), "bigint_zero_divisor")
+                        .map_err(|error| error.to_string())?;
+                    let function = self.current_function();
+                    let error_bb = self.context.append_basic_block(function, "bigint_division_error");
+                    let continue_bb = self.context.append_basic_block(function, "bigint_division_ok");
+                    self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(error_bb);
+                    self.compile_throw_builtin_error("RangeError", "Division by zero")?;
+                    self.builder.position_at_end(continue_bb);
+                }
+                return Ok(result);
             }
             "__thaw_temporal_now" | "__thaw_temporal_now_nanos" => {
                 if !args.is_empty() {
@@ -667,6 +1082,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "__thaw_temporal_instant_from_string"
             | "__thaw_temporal_instant_nanos_from_string"
+            | "__thaw_temporal_plain_date_time_from_string"
+            | "__thaw_temporal_plain_date_time_nanos_from_string"
             | "__thaw_temporal_plain_time_from_string"
             | "__thaw_temporal_plain_time_nanos_from_string"
             | "__thaw_temporal_plain_month_day_from_string"
@@ -879,14 +1296,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("Temporal time zone transition returned no value".into());
             }
             "__thaw_temporal_with_fields" => {
-                if args.len() != 12 {
-                    return Err(format!("{name} expects twelve operands"));
+                if args.len() != 14 {
+                    return Err(format!("{name} expects fourteen operands"));
                 }
                 let values = args
                     .iter()
                     .map(|value| self.compile_expr(value).map(Into::into))
                     .collect::<Result<Vec<_>, _>>()?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_temporal_with_fields").unwrap(),
@@ -896,7 +1313,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("Temporal field replacement returned no value".into());
+                    .ok_or("Temporal field replacement returned no value")?;
+                let value = result.into_float_value();
+                let invalid = self.builder
+                    .build_float_compare(inkwell::FloatPredicate::UNO, value, value, "temporal_invalid_fields")
+                    .map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "temporal_fields_error");
+                let continue_bb = self.context.append_basic_block(function, "temporal_fields_ok");
+                self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                let error = self.builder
+                    .build_global_string_ptr("\u{1}RangeError\u{1}Invalid Temporal field", "temporal_fields_range_error")
+                    .map_err(|error| error.to_string())?
+                    .as_pointer_value();
+                self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+                    .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                self.mark_pending_native_text(error)?;
+                self.builder.build_unconditional_branch(continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(continue_bb);
+                self.branch_on_pending_exception()?;
+                return Ok(value.into());
             }
             "__thaw_temporal_zoned_to_string" | "__thaw_temporal_zoned_offset" => {
                 let [milliseconds, nanoseconds, zone] = args else {
@@ -1113,6 +1553,7 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_error_suppressed_error"
             | "__thaw_error_suppressed"
             | "__thaw_error_is_error"
+            | "__thaw_native_wrapper_is_live"
             | "__thaw_error_to_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -1131,6 +1572,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("error property access returned no value".into());
+            }
+            "__thaw_error_frame" => {
+                let [name, message] = args else {
+                    return Err("error frame expects a name and message".into());
+                };
+                let name = self.compile_expr(name)?;
+                let message = self.compile_expr(message)?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_error_frame").unwrap(),
+                    &[name.into(), message.into()], "error_frame",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("error frame returned no value".into());
             }
             "__thaw_error_suppress" => {
                 let [error, suppressed, message] = args else {
@@ -1157,7 +1610,46 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [receiver, key] = args else {
                     return Err("__thaw_error_property expects a receiver and a property name".into());
                 };
-                let receiver = self.compile_expr(receiver)?;
+                let receiver_type = self.expr_hir_type(receiver);
+                let mut receiver = self.compile_expr(receiver)?;
+                // A union-typed catch value carries its text as the `Str` member's
+                // payload; read it only when that member is the active one.
+                if let (BasicValueEnum::StructValue(union), Some(HirType::Union(members))) =
+                    (receiver, receiver_type)
+                {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    receiver = match members.iter().position(|member| *member == HirType::Str) {
+                        Some(index) => {
+                            let tag = self
+                                .builder
+                                .build_extract_value(union, 0, "catch_tag")
+                                .map_err(|error| error.to_string())?
+                                .into_int_value();
+                            let payload = self
+                                .builder
+                                .build_extract_value(union, 1, "catch_payload")
+                                .map_err(|error| error.to_string())?
+                                .into_int_value();
+                            let text = self
+                                .builder
+                                .build_int_to_ptr(payload, ptr_type, "catch_text")
+                                .map_err(|error| error.to_string())?;
+                            let is_text = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    tag,
+                                    tag.get_type().const_int(index as u64, false),
+                                    "catch_is_text",
+                                )
+                                .map_err(|error| error.to_string())?;
+                            self.builder
+                                .build_select(is_text, text, ptr_type.const_null(), "catch_text_or_null")
+                                .map_err(|error| error.to_string())?
+                        }
+                        None => ptr_type.const_null().into(),
+                    };
+                }
                 let key = self.compile_expr(key)?;
                 return self
                     .builder
@@ -1170,6 +1662,65 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("error custom property access returned no value".into());
+            }
+            "__thaw_error_property_json" => {
+                let [receiver, key] = args else {
+                    return Err("__thaw_error_property_json expects a receiver and a property name".into());
+                };
+                let receiver = self.compile_expr(receiver)?;
+                let key = self.compile_expr(key)?;
+                let text = self.builder.build_call(
+                    self.module.get_function("thaw_error_property_json").unwrap(),
+                    &[receiver.into(), key.into()],
+                    "error_custom_property_json_text",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("error custom property JSON lookup returned no value")?.into_pointer_value();
+                let missing_block = self.context.append_basic_block(self.current_function(), "error_property_missing");
+                let present_block = self.context.append_basic_block(self.current_function(), "error_property_present");
+                let done_block = self.context.append_basic_block(self.current_function(), "error_property_done");
+                let missing = self.builder.build_is_null(text, "error_property_is_missing")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(missing, missing_block, present_block)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(missing_block);
+                let undefined = self.builder.build_call(
+                    self.module.get_function("thaw_json_undefined").unwrap(),
+                    &[],
+                    "missing_error_property_undefined",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("undefined error property returned no value")?;
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+                let missing_end = self.builder.get_insert_block().unwrap();
+                self.builder.position_at_end(present_block);
+                let value = self.builder.build_call(
+                    self.module.get_function("thaw_json_parse_error_property").unwrap(),
+                    &[text.into()],
+                    "parsed_error_property_json",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("parsed error property returned no value")?;
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+                let present_end = self.builder.get_insert_block().unwrap();
+                self.builder.position_at_end(done_block);
+                let result = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "error_property_json")
+                    .map_err(|error| error.to_string())?;
+                result.add_incoming(&[(&undefined, missing_end), (&value, present_end)]);
+                self.tracks_owned_json_roots = true;
+                // Both parse and undefined allocate a fresh Box<Value>. Check
+                // any QuickJS getter/coercion failure before registering the
+                // successful merged value as an invocation-owned root.
+                let checked = self.compile_check_json_host_error(
+                    result.as_basic_value(), Some("thaw_json_destroy"),
+                )?;
+                let rooted = self.builder.build_call(
+                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                    &[checked.into()],
+                    "error_property_json_root",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("error property JSON root returned no value")?;
+                // Root registration can itself fail and consume the Box;
+                // observe that host error without destroying the result twice.
+                let rooted = self.compile_check_json_host_error(rooted, None)?;
+                return Ok(rooted);
             }
             "__thaw_i64_to_string" => {
                 let [value] = args else {
@@ -1213,13 +1764,71 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err(format!("{name} expects two operands"));
                 };
                 let value = self.compile_expr(value)?;
-                let bits = self.compile_expr(bits)?;
+                let bits = self.compile_expr(bits)?.into_float_value();
+                let zero = self.context.f64_type().const_zero();
+                let truncated = self.builder.build_call(
+                    self.module.get_function("llvm.trunc.f64").unwrap(),
+                    &[bits.into()], "bigint_integer_argument",
+                ).map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic()
+                    .ok_or("BigInt integer argument truncation returned no value")?
+                    .into_float_value();
+                let invalid_or_normalized = if name == "__thaw_i64_to_radix_string" {
+                    let not_number = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::UNO, bits, bits, "bigint_radix_nan",
+                    ).map_err(|error| error.to_string())?;
+                    let too_small = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OLT, truncated,
+                        self.context.f64_type().const_float(2.0), "bigint_radix_small",
+                    ).map_err(|error| error.to_string())?;
+                    let too_large = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OGT, truncated,
+                        self.context.f64_type().const_float(36.0), "bigint_radix_large",
+                    ).map_err(|error| error.to_string())?;
+                    let outside = self.builder.build_or(not_number, too_small, "bigint_radix_invalid")
+                        .map_err(|error| error.to_string())?;
+                    (self.builder.build_or(outside, too_large, "bigint_radix_invalid")
+                        .map_err(|error| error.to_string())?, truncated)
+                } else {
+                    // ToIndex maps NaN and negative fractions to zero after
+                    // truncation, but rejects negative integers, infinities,
+                    // and values beyond MAX_SAFE_INTEGER.
+                    let not_number = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::UNO, bits, bits, "bigint_bits_nan",
+                    ).map_err(|error| error.to_string())?;
+                    let normalized = self.builder.build_select(
+                        not_number, zero, truncated, "bigint_bits_integer",
+                    ).map_err(|error| error.to_string())?.into_float_value();
+                    let negative = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OLT, normalized, zero, "bigint_bits_negative",
+                    ).map_err(|error| error.to_string())?;
+                    let too_large = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OGT, normalized,
+                        self.context.f64_type().const_float(9_007_199_254_740_991.0),
+                        "bigint_bits_large",
+                    ).map_err(|error| error.to_string())?;
+                    (self.builder.build_or(negative, too_large, "bigint_bits_invalid")
+                        .map_err(|error| error.to_string())?, normalized)
+                };
+                let (invalid, normalized) = invalid_or_normalized;
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "bigint_index_error");
+                let continue_bb = self.context.append_basic_block(function, "bigint_index_valid");
+                self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                self.compile_throw_builtin_error("RangeError", if name == "__thaw_i64_to_radix_string" {
+                    "BigInt radix must be between 2 and 36"
+                } else {
+                    "BigInt bits must be a valid index"
+                })?;
+                self.builder.position_at_end(continue_bb);
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 return self
                     .builder
                     .build_call(
                         self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
-                        &[value.into(), bits.into()],
+                        &[value.into(), normalized.into()],
                         "bigint_radix",
                     )
                     .map_err(|error| error.to_string())?
@@ -1227,8 +1836,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint radix conversion returned no value".into());
             }
-            "__thaw_symbol_new"
-            | "__thaw_symbol_to_string"
+            "__thaw_symbol_new" => {
+                let [description] = args else { return Err("Symbol expects one description".into()); };
+                let value = self.compile_expr(description)?;
+                let pointer = if value.is_struct_value() {
+                    let optional = value.into_struct_value();
+                    let present = self.builder.build_extract_value(optional, 0, "symbol_description_present")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                    let text = self.builder.build_extract_value(optional, 1, "symbol_description_text")
+                        .map_err(|error| error.to_string())?.into_pointer_value();
+                    self.builder.build_select(present, text, text.get_type().const_null(), "symbol_description_pointer")
+                        .map_err(|error| error.to_string())?.into_pointer_value()
+                } else { value.into_pointer_value() };
+                return self.builder.build_call(self.module.get_function("thaw_symbol_new").unwrap(),
+                    &[pointer.into()], "symbol_new")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("symbol creation returned no value".into());
+            }
+            "__thaw_symbol_to_string"
             | "__thaw_symbol_key"
             | "__thaw_symbol_for"
             | "__thaw_symbol_key_for"
@@ -1292,8 +1917,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err(format!("{name} expects one operand"));
                 };
                 let value = self.compile_expr(value)?;
+                self.clear_pending_native_text()?;
                 self.builder
                     .build_store(self.pending_exception_object().as_pointer_value(), value)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
                     .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
@@ -1303,6 +1932,136 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_set_pending_exception_native" => {
+                let [value, tag, layout] = args else {
+                    return Err(format!("{name} expects value, category, and layout"));
+                };
+                let value = self.compile_expr(value)?.into_pointer_value();
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let layout = self.compile_expr(layout)?.into_pointer_value();
+                let descriptor = self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_provenance_new").unwrap(),
+                    &[tag.into(), value.into(), layout.into()],
+                    "pending_native_exception_descriptor",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception descriptor returned no value")?.into_pointer_value();
+                self.clear_pending_native_text()?;
+                self.builder.build_store(self.pending_exception_native().as_pointer_value(), descriptor)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), value)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_set_pending_exception_native_value" => {
+                let [descriptor] = args else {
+                    return Err(format!("{name} expects one descriptor"));
+                };
+                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
+                let tag = self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_tag").unwrap(),
+                    &[descriptor.into()], "pending_native_exception_tag",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception tag returned no value")?.into_int_value();
+                self.clear_pending_native_text()?;
+                self.builder.build_store(self.pending_exception_native().as_pointer_value(), descriptor)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_capture_exception_js_value" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let handle = self.compile_expr(value)?;
+                return self.compile_original_quickjs_exception_handle(handle, false);
+            }
+            "__thaw_set_pending_exception_json" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                self.tracks_owned_json_roots = true;
+                let value = self.compile_expr(value)?.into_pointer_value();
+                let shared = self.builder.build_call(
+                    self.module.get_function("thaw_json_share").unwrap(),
+                    &[value.into()], "pending_exception_json_share",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON exception share returned no value")?;
+                let rooted = self.builder.build_call(
+                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                    &[shared.into()], "pending_exception_json_root",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON exception root returned no value")?;
+                let rooted = self.compile_check_json_host_error(rooted, None)?.into_pointer_value();
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), rooted)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+                    self.context.f64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+                    self.context.bool_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_int(7, false),
+                ).map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_clear_pending_exception_provenance" => {
+                let null = self.context.ptr_type(AddressSpace::default()).const_null();
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), null)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_native().as_pointer_value(), null)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), null)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+                    self.context.f64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+                    self.context.bool_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_pending_exception_aggregate" => {
+                return self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception_aggregate_errors().as_pointer_value(),
+                    "pending_exception_aggregate_errors",
+                ).map_err(|error| error.to_string());
             }
             "__thaw_pending_exception_object" => {
                 return self
@@ -1314,6 +2073,38 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string());
             }
+            "__thaw_pending_exception_native" => {
+                return self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception_native().as_pointer_value(),
+                    "pending_exception_native_descriptor")
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_native_exception_tag" => {
+                let [descriptor] = args else { return Err(format!("{name} expects one descriptor")); };
+                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_tag").unwrap(),
+                    &[descriptor.into()], "native_exception_tag",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception tag returned no value".into());
+            }
+            "__thaw_native_exception_owner" => {
+                let [descriptor, tag, layout] = args else { return Err(format!("{name} expects descriptor, category, and layout")); };
+                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let layout = self.compile_expr(layout)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_owner").unwrap(),
+                    &[descriptor.into(), tag.into(), layout.into()], "native_exception_owner",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception owner returned no value".into());
+            }
+            "__thaw_native_exception_owner_present" => {
+                let [owner] = args else { return Err(format!("{name} expects one owner")); };
+                let owner = self.compile_expr(owner)?.into_pointer_value();
+                return self.builder.build_is_not_null(owner, "native_exception_owner_present")
+                    .map(Into::into).map_err(|error| error.to_string());
+            }
             "__thaw_exception_object_present" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -1324,6 +2115,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_is_not_null(value, "exception_object_present")
                     .map(Into::into)
                     .map_err(|error| error.to_string());
+            }
+            "__thaw_pending_exception_native_text" => {
+                return self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception_native_text().as_pointer_value(),
+                    "pending_exception_native_text",
+                ).map_err(|error| error.to_string());
             }
             "__thaw_pending_exception_tag"
             | "__thaw_pending_exception_f64"
@@ -1363,6 +2161,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     _ => (PENDING_EXCEPTION_BOOL_SYMBOL, 3),
                 };
                 let value = self.compile_expr(value)?;
+                self.clear_pending_native_text()?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(symbol).as_pointer_value(),
@@ -1389,6 +2191,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     (3, "boolean"),
                     (4, "string"),
                     (5, "undefined"),
+                    (20, "symbol"),
+                    (28, "function"),
                 ];
                 let mut result = self.compile_expr(&HirExpr::Lit(HirLit::Str("object".into())))?;
                 for (expected, label) in choices.into_iter().rev() {
@@ -1414,6 +2218,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("exception tag setter expects one tag".into());
                 };
                 let tag = self.compile_expr(tag)?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
@@ -1422,6 +2229,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_closure_alias" => {
+                let [adapter, original] = args else {
+                    return Err("closure alias expects an adapter and the original closure".into());
+                };
+                let adapter = self.compile_expr(adapter)?;
+                let original = self.compile_expr(original)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_closure_alias_register").unwrap(),
+                        &[adapter.into(), original.into()],
+                        "closure_alias",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("closure alias returned no value".into());
             }
             "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                 let [promise] = args else {
@@ -1436,7 +2261,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_promise_detach").unwrap(),
+                        self.module.get_function(if name == "__thaw_detach_rejection" {
+                            "thaw_promise_detach_for_report"
+                        } else {
+                            "thaw_promise_detach"
+                        }).unwrap(),
                         &[
                             promise.into(),
                             pending.as_pointer_value().into(),
@@ -1790,17 +2619,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
-                return self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_math_sum_precise").unwrap(),
-                        &[buffer.into()],
-                        "math_sum_precise",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("Math.sumPrecise returned no value".into());
+                let presence = self.compile_array_presence(handle)?;
+                let result = self.allocate_arena_cell(self.context.f64_type().into(), "math_sum_precise_result")?;
+                let status = self.builder.build_call(
+                    self.module.get_function("thaw_math_sum_precise").unwrap(),
+                    &[buffer.into(), presence.into(), result.into()],
+                    "math_sum_precise_status",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Math.sumPrecise returned no status")?.into_int_value();
+                let valid = self.builder.build_int_compare(
+                    IntPredicate::NE, status, self.context.i8_type().const_zero(),
+                    "math_sum_precise_valid",
+                ).map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let accepted = self.context.append_basic_block(function, "math_sum_precise_accepted");
+                let rejected = self.context.append_basic_block(function, "math_sum_precise_rejected");
+                self.builder.build_conditional_branch(valid, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Math.sumPrecise requires Number values")?;
+                self.builder.position_at_end(accepted);
+                return self.builder.build_load(self.context.f64_type(), result, "math_sum_precise")
+                    .map_err(|error| error.to_string());
             }
             "__thaw_math_random" => {
                 if !args.is_empty() {
@@ -1824,17 +2664,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let left = self.compile_expr(left)?;
                 let right = self.compile_expr(right)?;
-                return self
-                    .builder
-                    .build_call(
-                        self.module.get_function("pow").unwrap(),
-                        &[left.into(), right.into()],
-                        "math_pow",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("pow returned no value".to_string());
+                return self.compile_js_pow(left.into_float_value(), right.into_float_value());
             }
             "__thaw_math_atan2" => {
                 let [left, right] = args else {
@@ -1899,7 +2729,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_function(&symbol)
             .ok_or_else(|| format!("call to undeclared function `{name}`"))?;
 
-        self.build_call_with(function, args, name)
+        if self.is_proven_typed_quickjs_wrapper(name) {
+            self.with_typed_wrapper_argument_scope(
+                TypedJsonArgumentOwner::ProvenWrapper(name.to_string()),
+                |compiler| compiler.build_call_with(function, args, name),
+            )
+        } else {
+            self.build_call_with(function, args, name)
+        }
     }
 
 }

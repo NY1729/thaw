@@ -188,6 +188,68 @@ fn compiles_object_and_typed_array_string_conversion() {
 }
 
 #[test]
+fn tuple_join_uses_empty_text_for_only_absent_slots() {
+    let source = r#"
+        let calls = 0;
+        function make(): [number | null | undefined, string, string, number | undefined] {
+            calls++;
+            return [null, "null", "undefined", undefined];
+        }
+        function main(): void {
+            const staticSlots: [null, undefined, string, string] =
+                [null, undefined, "null", "undefined"];
+            console.log(String(staticSlots));
+            console.log(staticSlots.join("|"));
+            console.log(staticSlots.join());
+            const optional: [number | undefined, number | undefined] = [undefined, 4];
+            const nullable: [number | null, number | null] = [null, 5];
+            const nullish: [number | null | undefined, number | null | undefined, number | null | undefined] =
+                [null, undefined, 6];
+            console.log(String(optional), optional.join("|"));
+            console.log(String(nullable), nullable.join("|"));
+            console.log(String(nullish), nullish.join("|"));
+            const union: [number | string | null | undefined, number | string | null | undefined,
+                          number | string | null | undefined, number | string | null | undefined] =
+                [null, undefined, "null", 7];
+            console.log(String(union), union.join("|"));
+            console.log(String(make()), calls);
+            console.log(make().join("|"), calls);
+            console.log(String(null), String(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tuple_join_absent_static_tagged_union"),
+        ",,null,undefined\n||null|undefined\n,,null,undefined\n,4 |4\n,5 |5\n,,6 ||6\n,,null,7 ||null|7\n,null,undefined, 1\n|null|undefined| 2\nnull undefined\n"
+    );
+}
+
+#[test]
+fn tuple_join_checks_json_and_live_jsvalue_slots_without_stringifying_absence() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.joinNull = null; globalThis.joinMissing = undefined; globalThis.joinText = 'null'; globalThis.joinObject = { toString() { return 'object'; }, toJSON() { throw new Error('snapshot'); } }; globalThis.joinObject.self = globalThis.joinObject;");
+            const jsonNull: any = JSON.parse("null");
+            const jsonMissing: any = undefined;
+            const jsonText: any = JSON.parse("\"undefined\"");
+            const jsonSlots: [any, any, any] = [jsonNull, jsonMissing, jsonText];
+            console.log(String(jsonSlots), jsonSlots.join("|"));
+            const liveNull: JsValue = getDynamicValue("joinNull");
+            const liveMissing: JsValue = getDynamicValue("joinMissing");
+            const liveText: JsValue = getDynamicValue("joinText");
+            const liveObject: JsValue = getDynamicValue("joinObject");
+            const liveSlots: [JsValue, JsValue, JsValue, JsValue] =
+                [liveNull, liveMissing, liveText, liveObject];
+            console.log(String(liveSlots), liveSlots.join("|"));
+            console.log(String(jsonNull), String(jsonMissing));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tuple_join_absent_json_live"),
+        ",,undefined ||undefined\n,,null,object ||null|object\nnull undefined\n"
+    );
+}
+
+#[test]
 fn compiles_heterogeneous_tuple_string_conversion_once() {
     let source = r#"
         function tupleValue(): [number, string, boolean, { value: number }, number[], [string, boolean]] {
@@ -206,6 +268,39 @@ fn compiles_heterogeneous_tuple_string_conversion_once() {
     assert_eq!(
         compile_and_run(source, "tuple_string_conversion"),
         "tuple-evaluated\n1.5,word,true,[object Object],3,4,inner,false\ntuple=7,x,false\nprefix:7,x,false\nempty-tuple=\n"
+    );
+}
+
+/// A tuple-valued index must be captured before its elements are stringified.
+/// The empty tuple still evaluates its source once despite using no elements.
+#[test]
+fn tuple_index_string_conversion_evaluates_source_once() {
+    let source = r#"
+        let makes = 0;
+        let indexes = 0;
+        let empties = 0;
+        function make(): [number, string][] {
+            makes++;
+            return [[1, "x"]];
+        }
+        function index(): number {
+            indexes++;
+            return 0;
+        }
+        function empty(): [[]] {
+            empties++;
+            return [[]];
+        }
+        function main(): void {
+            const text = String(make()[index()]);
+            console.log(text === "1,x" && makes === 1 && indexes === 1);
+            const blank = String(empty()[0]);
+            console.log(blank === "" && empties === 1);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tuple_index_string_conversion_once"),
+        "true\ntrue\n"
     );
 }
 
@@ -542,4 +637,341 @@ fn destructures_union_arrays_with_defaults_rest_and_single_evaluation() {
         compile_and_run(source, "union_array_destructuring"),
         "1 2 3|4\na b c|d\n1 2 3|4\na b c|d\n4\n"
     );
+}
+
+#[test]
+fn nested_destructuring_reads_each_getter_result_once() {
+    let source = r#"
+        function main(): void {
+            let reads = 0;
+            const source = {
+                get nested(): { x: number; y: number } {
+                    reads++;
+                    return { x: reads, y: reads };
+                },
+                get pair(): [number, number] {
+                    reads++;
+                    return [reads, reads];
+                },
+                get optional(): { x: number | undefined; y: number } {
+                    reads++;
+                    return { x: undefined, y: reads };
+                },
+            };
+            const { nested: { x, y } } = source;
+            console.log(x, y, reads);
+            let assignedX = 0;
+            let assignedY = 0;
+            ({ nested: { x: assignedX, y: assignedY } } = source);
+            console.log(assignedX, assignedY, reads);
+            const { pair: [first, second] } = source;
+            console.log(first, second, reads);
+            let assignedFirst = 0;
+            let assignedSecond = 0;
+            ({ pair: [assignedFirst, assignedSecond] } = source);
+            console.log(assignedFirst, assignedSecond, reads);
+            const { optional: { x: defaulted = 42, y: sibling } } = source;
+            console.log(defaulted, sibling, reads);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_destructuring_getter_once"),
+        "1 1 1\n2 2 2\n3 3 3\n4 4 4\n42 5 5\n"
+    );
+}
+
+#[test]
+fn nested_destructuring_preserves_array_and_function_union_metadata() {
+    let source = r#"
+        type Result =
+            { kind: "number"; value: number } |
+            { kind: "text"; value: string };
+        type Source = { nested: { items: Result[]; make: () => Result } };
+        function main(): void {
+            const source: Source = {
+                nested: {
+                    items: [{ kind: "number", value: 32 } as Result],
+                    make: (): Result => ({ kind: "text", value: "returned" }),
+                },
+            };
+            const { nested: { items, make } } = source;
+            for (const item of items) {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            const made = make();
+            if (made.kind === "number") console.log(made.value + 10);
+            else console.log(made.value + "!");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_destructuring_union_metadata"),
+        "42\nreturned!\n"
+    );
+}
+
+#[test]
+fn array_map_keeps_presence_at_each_visit() {
+    let source = r#"
+        function main(): void {
+            const source = [1, 2, 3];
+            const mapped = source.map((value: number, index: number) => {
+                if (index === 1) { delete source[0]; }
+                return value * 10;
+            });
+            console.log(0 in mapped, mapped[0]);
+            const sparse = [1, 2, 3];
+            delete sparse[1];
+            const result = sparse.map((value: number, index: number) => {
+                if (index === 2) { sparse[1] = 99; }
+                return value * 10;
+            });
+            console.log(1 in result, 2 in result, result[2]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_map_visit_presence"), "true 10\nfalse true 30\n");
+}
+
+#[test]
+fn array_filter_keeps_the_pre_predicate_value_and_presence() {
+    let source = r#"
+        function main(): void {
+            const source = [1, 2];
+            const filtered = source.filter((value: number, index: number) => {
+                source[index] = 99;
+                return value === 1;
+            });
+            console.log(filtered.length, filtered[0]);
+            const values = [3, 4];
+            const result = values.filter((value: number, index: number) => {
+                delete values[index];
+                return true;
+            });
+            console.log(result.length, 0 in result, result[0], 1 in result, result[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_filter_snapshot"), "1 1\n2 true 3 true 4\n");
+}
+
+#[test]
+fn comparator_sort_uses_snapshot_and_writes_back_only_on_success() {
+    let source = r#"
+        function main(): void {
+            const values = [2, 1];
+            const result = values.sort((left: number, right: number): number => {
+                values[0] = 99;
+                return 0;
+            });
+            console.log(result === values, values.join(","));
+            const failed = [2, 1];
+            try {
+                failed.sort((left: number, right: number): number => {
+                    failed[0] = 99;
+                    throw "stop";
+                });
+            } catch (error) {
+                console.log(failed.join(","));
+            }
+            const extended = [2, 1];
+            extended.sort((left: number, right: number): number => {
+                extended.push(3);
+                return 0;
+            });
+            console.log(extended.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "sort_snapshot_mutation"),
+        "true 2,1\n99,1\n2,1,3\n");
+}
+
+#[test]
+fn computed_dictionary_assignment_default_evaluates_key_once() {
+    let source = r#"
+        let calls = 0;
+        let defaults = 0;
+        function key(): string { calls++; return calls === 1 ? "a" : "b"; }
+        function fallback(): number { defaults++; return 99; }
+        function main(): void {
+            const present: Record<string, number> = { a: 7, b: 9 };
+            let result = 0;
+            ({ [key()]: result = fallback() } = present);
+            console.log(result, calls, defaults);
+            calls = 0;
+            const missing: Record<string, number> = { b: 9 };
+            ({ [key()]: result = fallback() } = missing);
+            console.log(result, calls, defaults);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "computed_dictionary_assignment_key_once"),
+        "7 1 0\n99 1 1\n");
+}
+
+#[test]
+fn dynamic_destructuring_defaults_check_read_value_and_preserve_null() {
+    let source = r#"
+        let defaults = 0;
+        function fallback(): number { defaults++; return 42; }
+        let keys = 0;
+        function key(): string { keys++; return "present"; }
+        function main(): void {
+            const source: any = { present: undefined, nil: null, value: 7 };
+            const { present = fallback(), missing = fallback(), nil = fallback(), value = fallback() } = source;
+            console.log(present, missing, nil, value, defaults);
+            let assigned: any = 0;
+            ({ present: assigned = fallback() } = source);
+            console.log(assigned, defaults);
+            const { [key()]: computed = fallback() } = source;
+            console.log(computed, keys, defaults);
+            const array: any = [undefined, null, 7];
+            const [first = fallback(), second = fallback(), third = fallback()] = array;
+            console.log(first, second, third, defaults);
+            let reads = 0;
+            const access: any = { get value(): any { reads++; return undefined; } };
+            const { value: accessed = fallback() } = access;
+            console.log(accessed, reads, defaults);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_destructuring_value_defaults"),
+        "42 42 null 7 2\n42 3\n42 1 4\n42 null 7 5\n42 1 6\n");
+}
+
+#[test]
+fn missing_fixed_object_assignment_properties_use_defaults() {
+    let source = r#"
+        let defaults = 0;
+        function fallback(): number { defaults++; return 99; }
+        function main(): void {
+            let assigned = 0;
+            ({ assigned = fallback() } = {});
+            console.log(assigned, defaults);
+            const source = { present: 7 };
+            const returned = ({ missing: assigned = fallback() } = source);
+            console.log(assigned, defaults, returned.present);
+            ({ present: assigned = fallback() } = source);
+            console.log(assigned, defaults);
+            let rest = { present: 0 };
+            ({ missing: assigned = fallback(), ...rest } = source);
+            console.log(assigned, defaults, rest.present);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "missing_fixed_assignment_defaults"),
+        "99 1\n99 2 7\n7 2\n99 3 7\n");
+}
+
+#[test]
+fn dynamic_destructuring_validates_empty_patterns_and_snapshots_named_sources() {
+    let source = r#"
+        let reads = 0;
+        let defaults = 0;
+        function absent(): any { reads++; return null; }
+        function fallback(): number { defaults++; return 42; }
+        function main(): void {
+            try { const {} = absent(); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            try { const [] = absent(); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            try { const { value = fallback() } = absent(); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            try { ({} = absent()); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            let original: any = { first: undefined, later: 7 };
+            function replace(): number { original = { later: 99 }; return 42; }
+            const { first = replace(), later } = original;
+            console.log(first, later, original.later);
+            let assigned: any = { first: undefined, later: 8 };
+            let a = 0;
+            let b = 0;
+            function replaceAssigned(): number { assigned = { later: 100 }; return 43; }
+            ({ first: a = replaceAssigned(), later: b } = assigned);
+            console.log(a, b, assigned.later);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "destructure_dynamic_source"),
+        "true 1 0\ntrue 2 0\ntrue 3 0\ntrue 4 0\n42 7 99\n43 8 100\n");
+}
+
+#[test]
+fn any_array_search_distinguishes_holes_and_explicit_undefined() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const holes: any[] = [,];
+            console.log(holes.includes(undefined));
+            console.log(holes.includes(undefined, 1));
+            console.log(holes.indexOf(undefined));
+            console.log(holes.lastIndexOf(undefined));
+            console.log(holes.includes(null));
+            const mixed: any[] = [, undefined];
+            console.log(mixed.indexOf(undefined));
+            console.log(mixed.lastIndexOf(undefined));
+            console.log(mixed.includes(undefined));
+            console.log(mixed.includes(null));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "any_array_search_absence"),
+        "true\nfalse\n-1\n-1\nfalse\n1\n1\ntrue\nfalse\n");
+}
+
+#[test]
+fn any_array_search_checks_host_query_failure_before_returning() {
+    // A Host-backed needle can make thaw_json_is_undefined set HOST_ERROR
+    // while the runtime search returns its ordinary not-found value. Every
+    // search variant must branch on that error before exposing the result.
+    let source = r#"
+        function main(): void {
+            const values: any[] = [, undefined];
+            console.log(values.includes(undefined));
+            console.log(values.indexOf(undefined));
+            console.log(values.lastIndexOf(undefined));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "any_array_search_host_error");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let lines: Vec<_> = ir.lines().collect();
+    for variant in ["includes", "index_of", "last_index_of"] {
+        let call = format!("@thaw_any_array_{variant}(");
+        let index = lines.iter().position(|line| line.contains(" = call ") && line.contains(&call))
+            .unwrap_or_else(|| panic!("missing {call} in generated IR"));
+        let continuation = &lines[index + 1..];
+        let query = continuation.iter().position(|line| line.contains("@thaw_json_take_host_error("))
+            .unwrap_or_else(|| panic!("{call} did not check HostError"));
+        assert!(query < 4, "{call} must check HostError immediately after the search");
+        let failure_branch = continuation.iter().skip(query).take(8)
+            .any(|line| line.contains("br i1") && line.contains("json_host_failed"));
+        assert!(failure_branch, "{call} must route HostError to the exception branch");
+        if variant == "includes" {
+            let converted = continuation.iter().position(|line| line.contains("array_includes_bool"))
+                .expect("includes result was not converted to bool");
+            assert!(converted > query, "includes converted its normal result before HostError");
+        }
+    }
+}
+
+#[test]
+fn union_array_sort_evaluates_undefined_comparator_after_receiver_once() {
+    let source = r#"
+        function values(text: boolean): number[] | string[] {
+            console.log("receiver");
+            if (text) return ["b", "a"];
+            return [2, 1];
+        }
+        function argument(fail: boolean): undefined {
+            console.log("argument");
+            if (fail) throw "argument failed";
+            return undefined;
+        }
+        function main(): void {
+            values(false).sort(argument(false));
+            values(true).toSorted(argument(false));
+            try { values(false).sort(argument(true)); }
+            catch (error) { console.log("caught"); }
+            try { values(true).toSorted(argument(true)); }
+            catch (error) { console.log("caught"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "union_sort_undefined_argument"),
+        "receiver\nargument\nreceiver\nargument\nreceiver\nargument\ncaught\nreceiver\nargument\ncaught\n");
 }
