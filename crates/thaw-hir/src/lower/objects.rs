@@ -1864,7 +1864,7 @@ impl<'a> FnLowerer<'a> {
     fn lower_unbound_this_error(&self, property: &str, ty: &HirType) -> Result<HirExpr, String> {
         Ok(HirExpr::ThrowValue(
             Box::new(HirExpr::Lit(HirLit::Str(format!(
-                "Cannot read properties of undefined (reading '{property}')"
+                "\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{property}')"
             )))),
             Box::new(Self::unreachable_value(ty)?),
         ))
@@ -3943,7 +3943,9 @@ impl<'a> FnLowerer<'a> {
                 || fields.iter().any(|(name, field)| !is_hidden_accessor_field(name)
                     && matches!(field, HirType::Object(_))
                     && self.class_instance_supports_live_methods(field)));
-        !decorated
+        // A decorated instance's `constructor` must stay the registered class token, which the
+        // live view's prototype provides; only values handed to ambient/npm code keep the snapshot.
+        (!decorated || self.alias_native_arrays)
             && carries_methods
             && fields.iter()
                 .filter(|(name, _)| !name.starts_with("__thaw_class_identity_\u{1e}")
@@ -4627,10 +4629,9 @@ impl<'a> FnLowerer<'a> {
         match element {
             HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue
             | HirType::Array(_) | HirType::Tuple(_) => true,
-            // A class instance written from JS would decode to a plain copy that no longer
-            // carries the class identity, so those views stay read-only.
-            HirType::Object(fields) => !fields.iter()
-                .any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")),
+            // A class instance written from JS is stored through its native owner (see the
+            // owner lookup in `lower_native_array_as_dynamic_view`); a plain copy would lose the class.
+            HirType::Object(_) => true,
             _ => false,
         }
     }
@@ -4685,10 +4686,27 @@ impl<'a> FnLowerer<'a> {
                 )),
                 Box::new(HirExpr::Lit(HirLit::F64(2.0))),
             );
+            let json_undefined = || HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+            let mut converted = converted?;
+            if *element == HirType::Str {
+                // A null `Str` slot is a tagged template's invalid-escape cooked entry.
+                converted = HirExpr::Conditional(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                        vec![HirExpr::TypedIndex(
+                            Box::new(source_var()), Box::new(HirExpr::Var(index.clone())), HirType::Str,
+                        )],
+                    )),
+                    Box::new(json_undefined()),
+                    Box::new(converted),
+                    HirType::Json,
+                );
+            }
             let body = HirExpr::Conditional(
                 Box::new(explicit_undefined),
-                Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
-                Box::new(converted?),
+                Box::new(json_undefined()),
+                Box::new(converted),
                 HirType::Json,
             );
             register(HirExpr::Lambda(
@@ -4700,7 +4718,69 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
         );
-        let (assign, push) = if writable {
+        // Objects and arrays written back are first resolved to the native owner behind a live
+        // view (so `v[1] = c` stores `c` itself); anything else is decoded as a copy, which a
+        // class instance cannot be.
+        let owner_layout = match element {
+            HirType::Object(fields) => Some(crate::native_object_layout_token(fields)),
+            HirType::Array(inner) => Some(format!("array:{inner:?}")),
+            _ => None,
+        };
+        let (assign, push) = if let (true, Some(owner_layout)) = (writable, owner_layout) {
+            let is_class = matches!(element, HirType::Object(fields) if fields.iter()
+                .any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")));
+            let item_js = format!("__thaw_array_view_value_{id}");
+            let target = format!("__thaw_array_view_target_{id}");
+            self.scope.insert(item_js.clone(), HirType::JsValue);
+            self.scope.insert(target.clone(), HirType::Optional(Box::new(element.clone())));
+            // Bind the fallback first: it may fail to lower for exotic element types.
+            let fallback = if is_class { Some(HirExpr::Lit(HirLit::Bool(false))) } else { None };
+            let decoded = if is_class { None } else {
+                self.coerce_to_declared(element, HirExpr::Var(item_js.clone())).ok()
+            };
+            let resolve = |store: &dyn Fn(HirExpr) -> HirExpr| HirExpr::Block(vec![
+                HirStmt::Let(target.clone(), HirType::Optional(Box::new(element.clone())),
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_native_view_target".into())), vec![
+                        HirExpr::Var(item_js.clone()),
+                        HirExpr::Lit(HirLit::Str(owner_layout.clone())),
+                        HirExpr::TypedIndex(Box::new(source_var()),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))), element.clone()),
+                    ])),
+                HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(HirExpr::Var(target.clone())), element.clone()),
+                    match (&fallback, &decoded) {
+                        (_, Some(copy)) => vec![
+                            HirStmt::Expr(store(copy.clone())),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                        ],
+                        _ => vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                    },
+                    vec![
+                        HirStmt::Expr(store(HirExpr::OptionalValue(
+                            Box::new(HirExpr::Var(target.clone())), element.clone()))),
+                        HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                    ],
+                ),
+            ]);
+            let value_param = || HirParam { name: item_js.clone(), ty: HirType::JsValue };
+            (
+                register(HirExpr::Lambda(
+                    capture(),
+                    vec![HirParam { name: index.clone(), ty: HirType::F64 }, value_param()],
+                    HirType::Bool,
+                    Box::new(resolve(&|value| HirExpr::IndexAssign(
+                        Box::new(source_var()), Box::new(HirExpr::Var(index.clone())), Box::new(value),
+                    ))),
+                )),
+                register(HirExpr::Lambda(
+                    capture(), vec![value_param()], HirType::Bool,
+                    Box::new(resolve(&|value| HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![source_var(), value],
+                    ))),
+                )),
+            )
+        } else if writable {
             let value_param = || HirParam { name: item.clone(), ty: element.clone() };
             (
                 register(HirExpr::Lambda(
@@ -4744,6 +4824,19 @@ impl<'a> FnLowerer<'a> {
                 vec![source_var(), HirExpr::Var(index.clone())],
             ))),
         ));
+        // A tagged template's cooked strings keep their registered `.raw` sibling: the view
+        // asks the runtime for it (an unregistered `string[]` yields an empty array, i.e. none).
+        let raw = if *element == HirType::Str {
+            let nested = std::mem::replace(&mut self.alias_native_arrays, false);
+            let converted = self.coerce_to_declared(&HirType::Json, HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_template_strings_raw".into())), vec![source_var()],
+            ));
+            self.alias_native_arrays = nested;
+            let converted = converted?;
+            register(HirExpr::Lambda(capture(), Vec::new(), HirType::Json, Box::new(converted)))
+        } else {
+            undefined()
+        };
         let cached_type = HirType::Optional(Box::new(HirType::JsValue));
         self.scope.insert(cached.clone(), cached_type.clone());
         self.scope.insert(args.clone(), HirType::Json);
@@ -4781,7 +4874,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
                     vec![HirExpr::Lit(HirLit::Str("__thaw_array_with_native_view".into()))])),
             HirStmt::Try(
-                [length, read, assign, push, resize, hole, present].into_iter().map(push_callback).collect(),
+                [length, read, assign, push, resize, hole, present, raw].into_iter().map(push_callback).collect(),
                 failure.clone(),
                 vec![
                     HirStmt::Expr(HirExpr::Call(
@@ -5246,10 +5339,11 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
-    /// A receiver-aware method read as a value (`const f = o.method`) is a
-    /// function that still wants its receiver view as argument 1, so a later
-    /// `f()` could not even compile. Bind it to the owner it was read from.
-    /// ponytail: Node leaves `this` undefined here; binding accepts a superset.
+    /// A receiver-aware method (its body reads `this`) read as a value (`const f = o.method`)
+    /// has no receiver once extracted, so calling it throws a `TypeError`, as in Node; the
+    /// extraction itself succeeds. A method that never uses `this` is an ordinary function
+    /// value and stays as read.
+    /// ponytail: the message names the method, not the property the body would have read.
     fn bind_extracted_method(&mut self, read: HirExpr) -> Result<HirExpr, String> {
         let HirExpr::PropAccess(owner, owner_type, name) = &read else {
             return Ok(read);
@@ -5257,23 +5351,34 @@ impl<'a> FnLowerer<'a> {
         let HirType::Object(fields) = owner_type else {
             return Ok(read);
         };
-        let Ok(read_type) = Self::fixed_object_property_read_type(fields, name) else {
-            return Ok(read);
-        };
-        let this = HirExpr::Var("__thaw_this".into());
-        let method = HirExpr::PropAccess(Box::new(this), owner_type.clone(), name.clone());
-        let Some((bound, bound_type)) =
-            self.bind_projected_method_receiver(&method, &read_type, owner_type)?
+        let Ok(HirType::Function(params, ret)) = Self::fixed_object_property_read_type(fields, name)
         else {
             return Ok(read);
         };
-        let wrapper = HirExpr::Lambda(
-            Vec::new(),
-            vec![HirParam { name: "__thaw_this".into(), ty: owner_type.clone() }],
-            bound_type,
-            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(bound))])),
+        let Some(HirType::Object(receiver_fields)) = params.first() else {
+            return Ok(read);
+        };
+        if !receiver_fields.iter().any(|(field, _)| field == "__thaw_object_method_receiver") {
+            return Ok(read);
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let rest = params[1..].iter().enumerate()
+            .map(|(index, ty)| HirParam { name: format!("__thaw_extracted_arg_{id}_{index}"), ty: ty.clone() })
+            .collect::<Vec<_>>();
+        let throwing = HirExpr::Lambda(
+            Vec::new(), rest, ret.as_ref().clone(),
+            Box::new(self.lower_unbound_this_error(name, &ret)?),
         );
-        Ok(HirExpr::Call(Box::new(wrapper), vec![owner.as_ref().clone()]))
+        let closure_type = HirType::Function(params[1..].to_vec(), ret.clone());
+        // Evaluate the owner expression once, as the read itself would.
+        let holder = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam { name: format!("__thaw_extracted_owner_{id}"), ty: owner_type.clone() }],
+            closure_type,
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(throwing))])),
+        );
+        Ok(HirExpr::Call(Box::new(holder), vec![owner.as_ref().clone()]))
     }
 
     /// For a method field whose first parameter is the receiver-view object,

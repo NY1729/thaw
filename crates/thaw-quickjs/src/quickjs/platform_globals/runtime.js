@@ -291,6 +291,7 @@
   const thawGraphReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
   const thawGraphObjectIsSealed = Object.isSealed;
   const thawGraphObjectIsFrozen = Object.isFrozen;
+  const thawGraphObjectFreeze = Object.freeze;
   const thawHostObjectSeal = Object.seal;
   const thawHostObjectFreeze = Object.freeze;
   const thawHostNativeSymbolFor = Symbol.for;
@@ -2220,7 +2221,7 @@
   // these traps; `[]` is only the Proxy target (it makes Array.isArray true and
   // supplies the prototype).
   thawGraphDefineProperty(globalThis, '__thaw_array_with_native_view', {
-    value: (canWrite, lenCb, getCb, setCb, pushCb, resizeCb, holeCb, presentCb) => {
+    value: (canWrite, lenCb, getCb, setCb, pushCb, resizeCb, holeCb, presentCb, rawCb) => {
       const target = [];
       const receiver = thawGraphObjectCreate(null);
       const len = () => thawGraphApply(lenCb, receiver, []);
@@ -2235,11 +2236,11 @@
       const write = (index, value) => {
         if (!canWrite) return false;
         const length = len();
-        if (index < length) { thawGraphApply(setCb, receiver, [index, value]); return true; }
-        if (index === length) { thawGraphApply(pushCb, receiver, [value]); return true; }
+        // An owner-backed element callback answers `false` for a value that is not storable.
+        if (index < length) return thawGraphApply(setCb, receiver, [index, value]) !== false;
+        if (index === length) return thawGraphApply(pushCb, receiver, [value]) !== false;
         thawGraphApply(resizeCb, receiver, [index + 1]);
-        thawGraphApply(setCb, receiver, [index, value]);
-        return true;
+        return thawGraphApply(setCb, receiver, [index, value]) !== false;
       };
       const resize = value => {
         const length = thawGraphNumber(value);
@@ -2247,11 +2248,24 @@
         thawGraphApply(resizeCb, receiver, [length]);
         return true;
       };
+      // A tagged template's strings array: `.raw` is the registered sibling, frozen like the array.
+      let raw;
+      const rawArray = () => {
+        if (raw === undefined) {
+          const found = typeof rawCb === 'function' ? thawGraphApply(rawCb, receiver, []) : null;
+          raw = found && found.length > 0 ? thawGraphObjectFreeze(found) : null;
+        }
+        return raw;
+      };
       return new thawGraphProxy(target, {
         get(_target, key, self) {
           if (key === 'length') return len();
           const index = indexOf(key);
           if (index >= 0) return has(index) ? at(index) : undefined;
+          if (key === 'raw' && !thawGraphReflectHas(target, key)) {
+            const found = rawArray();
+            if (found) return found;
+          }
           return thawGraphReflectGet(target, key, self);
         },
         set(_target, key, value) {

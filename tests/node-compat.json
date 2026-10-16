@@ -1201,6 +1201,31 @@
       "name": "cooked undefined through an any tag parameter",
       "expect": "matched",
       "source": "function tag(s: any, ...v: any[]): string {\n  return typeof s[0] + \"|\" + String(s[0] === undefined) + \"|\" + String(s[1]) + \"|\" + s.length + \"|\" + Array.isArray(s) + \"|\" + JSON.stringify(s);\n}\nasync function main(): Promise<void> {\n  console.log(tag`\\unicode ${1} ok`);\n}\n"
+    },
+    {
+      "name": "raw through an any tag parameter",
+      "expect": "matched",
+      "source": "const seen: any[] = [];\nfunction tag(s: any, ...v: any[]): string { seen.push(s); return s.raw.length + \":\" + s.raw[1] + \":\" + s.length; }\nfunction site(): string { return tag`a${1}\\n${2}b`; }\nasync function main(): Promise<void> {\n  console.log(site());\n  console.log(site());\n  console.log(seen[0] === seen[1], seen[0].raw === seen[1].raw);\n}\n"
+    },
+    {
+      "name": "extracted object method throws TypeError when called",
+      "expect": "matched",
+      "source": "const o = { n: 1, inc() { this.n++; return this.n; }, pure() { return 7; } };\nasync function main(): Promise<void> {\n  const g = o.pure;\n  console.log(g());\n  const f = o.inc;\n  console.log(\"extracted\", typeof f);\n  try { f(); console.log(\"called\"); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(o.n, o.inc());\n}\n"
+    },
+    {
+      "name": "top-level class method values",
+      "expect": "matched",
+      "source": "class C { n = 1; bump() { this.n++; return this.n; } id() { return 5; } }\nconst c = new C();\nconst i = c.id;\nconst h = c.bump;\nasync function main(): Promise<void> {\n  console.log(i());\n  try { console.log(h()); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(c.n, c.bump());\n}\n"
+    },
+    {
+      "name": "class and array elements write through an any view to the native owner",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const nat: C[] = [new C()];\n  const v: any = nat;\n  const e = new C();\n  v[1] = e;\n  e.bump();\n  console.log(v.length, nat.length, nat[1] === e, nat[1].n, v[1] === e, v[1].n);\n  v.push(new C());\n  console.log(nat.length, nat[2].n);\n  const d = new C();\n  const x: any = d;\n  const y: any = [d];\n  console.log(x === d, d === x, y[0] === d, y[0] === x, x !== d);\n  const grid: number[][] = [[1]];\n  const gv: any = grid;\n  const inner = [5, 6];\n  gv[0] = inner;\n  inner.push(7);\n  console.log(grid[0].length, inner.length, grid[0] === inner, gv[0] === inner);\n  gv.push([9]);\n  console.log(grid.length, grid[1][0]);\n  const ref: any = nat;\n  console.log(ref === nat, nat === ref);\n}\n"
+    },
+    {
+      "name": "top-level any slots alias native arrays",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nconst nums: number[] = [1];\nconst alias: any = nums;\nnums.push(2);\nconst nat: C[] = [new C()];\nconst view: any = nat;\nview[1] = new C();\nconsole.log(alias.length, view.length, nat.length, nat[1].n);\nasync function main(): Promise<void> {}\n"
     }
   ]
 }

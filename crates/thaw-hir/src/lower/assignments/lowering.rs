@@ -1376,7 +1376,7 @@ impl<'a> FnLowerer<'a> {
             Target::Dictionary(_, _, element) => self.coerce_to_declared(element, value)?,
             Target::JsonIndex(_, index) => {
                 self.expect_type(&HirType::F64, index, "JSON array index")?;
-                self.coerce_to_declared(&HirType::Json, value)?
+                self.coerce_to_declared_aliasing(&HirType::Json, value)?
             }
             Target::DynamicProperty(_, _) => unreachable!(),
             Target::Prop(_, other, field) => {
