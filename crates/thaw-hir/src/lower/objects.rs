@@ -998,6 +998,10 @@ impl<'a> FnLowerer<'a> {
         value: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        // `{ inc: o.inc }` borrows a receiver-aware method: the new object becomes its `this`.
+        if let (None, Expr::Member(member)) = (expected, value) {
+            return self.lower_member_read(member);
+        }
         if let Some(expected) = expected {
             let supplied = match value {
                 Expr::Arrow(arrow) => arrow.params.len(),
@@ -4735,8 +4739,29 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(target.clone(), HirType::Optional(Box::new(element.clone())));
             // Bind the fallback first: it may fail to lower for exotic element types.
             let fallback = if is_class { Some(HirExpr::Lit(HirLit::Bool(false))) } else { None };
-            let decoded = if is_class { None } else {
-                self.coerce_to_declared(element, HirExpr::Var(item_js.clone())).ok()
+            let decoded = self.coerce_to_declared(element, HirExpr::Var(item_js.clone())).ok();
+            // A JS value with no native owner is adopted as a fresh instance of the class: its
+            // own fields are copied into a record that carries the class identity.
+            let decoded = match (is_class, decoded, element) {
+                (true, Some(copy), HirType::Object(fields)) => {
+                    let marker = fields[0].0.clone();
+                    let copy_name = format!("__thaw_array_view_adopt_{id}");
+                    self.scope.insert(copy_name.clone(), element.clone());
+                    let record = HirExpr::ObjectLit(fields.iter().map(|(name, _)| {
+                        if *name == marker {
+                            (name.clone(), HirExpr::Lit(HirLit::Bool(true)))
+                        } else {
+                            (name.clone(), HirExpr::PropAccess(
+                                Box::new(HirExpr::Var(copy_name.clone())), element.clone(), name.clone()))
+                        }
+                    }).collect());
+                    let adopted = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_object_set_class_identity".into())),
+                        vec![record, HirExpr::Lit(HirLit::Str(marker))],
+                    );
+                    self.wrap_call_argument_bindings(adopted, &[(copy_name, element.clone(), copy)]).ok()
+                }
+                (_, decoded, _) => decoded,
             };
             let resolve = |store: &dyn Fn(HirExpr) -> HirExpr| HirExpr::Block(vec![
                 HirStmt::Let(target.clone(), HirType::Optional(Box::new(element.clone())),
@@ -5363,20 +5388,48 @@ impl<'a> FnLowerer<'a> {
         }
         let id = self.next_binding;
         self.next_binding += 1;
+        // The extracted value is a `this`-taking function (the same value a `function () { this }`
+        // expression makes): a plain call has no receiver and throws, while `.call/.apply/.bind`
+        // hand it one, which becomes the method's receiver view.
+        let marker = "__thaw_object_method_receiver";
+        let prefix = receiver_fields.iter().take_while(|(field, _)| field != marker).cloned().collect::<Vec<_>>();
+        let this_type = HirType::Object(prefix);
         let rest = params[1..].iter().enumerate()
             .map(|(index, ty)| HirParam { name: format!("__thaw_extracted_arg_{id}_{index}"), ty: ty.clone() })
             .collect::<Vec<_>>();
-        let throwing = HirExpr::Lambda(
-            Vec::new(), rest, ret.as_ref().clone(),
-            Box::new(self.lower_unbound_this_error(name, &ret)?),
+        let owner_name = format!("__thaw_extracted_owner_{id}");
+        self.scope.insert(owner_name.clone(), owner_type.clone());
+        let (this_arg, view_binding) = self.native_object_method_receiver(
+            HirExpr::Var("__thaw_this".into()), &this_type, receiver_fields);
+        let mut statements = Vec::new();
+        if let Some((view, view_type, source)) = view_binding {
+            statements.push(HirStmt::Let(view, view_type, source));
+        }
+        let mut arguments = vec![this_arg];
+        arguments.extend(rest.iter().map(|param| HirExpr::Var(param.name.clone())));
+        let call = HirExpr::Call(
+            Box::new(HirExpr::PropAccess(Box::new(HirExpr::Var(owner_name.clone())), owner_type.clone(), name.clone())),
+            arguments,
         );
-        let closure_type = HirType::Function(params[1..].to_vec(), ret.clone());
+        statements.push(HirStmt::Return(Some(call)));
+        let mut lambda_params = vec![HirParam { name: "__thaw_this".into(), ty: this_type.clone() }];
+        lambda_params.extend(rest);
+        let inner = HirExpr::NonArrowFunction(Box::new(HirExpr::Lambda(
+            vec![HirParam { name: owner_name.clone(), ty: owner_type.clone() }],
+            lambda_params,
+            ret.as_ref().clone(),
+            Box::new(HirExpr::Block(statements)),
+        )));
+        let closure_type = HirType::FunctionWithThis(
+            Box::new(this_type),
+            Box::new(HirType::Function(params[1..].to_vec(), ret.clone())),
+        );
         // Evaluate the owner expression once, as the read itself would.
         let holder = HirExpr::Lambda(
             Vec::new(),
-            vec![HirParam { name: format!("__thaw_extracted_owner_{id}"), ty: owner_type.clone() }],
+            vec![HirParam { name: owner_name, ty: owner_type.clone() }],
             closure_type,
-            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(throwing))])),
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(inner))])),
         );
         Ok(HirExpr::Call(Box::new(holder), vec![owner.as_ref().clone()]))
     }

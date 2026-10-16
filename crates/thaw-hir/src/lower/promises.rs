@@ -306,6 +306,12 @@ impl<'a> FnLowerer<'a> {
         supplied: &[HirType],
     ) -> Result<HirExpr, String> {
         let original = self.infer_expr_type(&callback)?;
+        // A receiver-taking callback keeps its own `this` ABI; the caller supplies the receiver.
+        if let HirType::FunctionWithThis(_, visible) = &original {
+            if matches!(visible.as_ref(), HirType::Function(fixed, _) if fixed == supplied) {
+                return Ok(callback);
+            }
+        }
         let (fixed, rest, ret) = match &original {
             HirType::Function(fixed, ret) => {
                 let rest = if let HirExpr::FunctionRef(symbol, _, _) = &callback {

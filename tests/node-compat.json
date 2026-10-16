@@ -1226,6 +1226,21 @@
       "name": "top-level any slots alias native arrays",
       "expect": "matched",
       "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nconst nums: number[] = [1];\nconst alias: any = nums;\nnums.push(2);\nconst nat: C[] = [new C()];\nconst view: any = nat;\nview[1] = new C();\nconsole.log(alias.length, view.length, nat.length, nat[1].n);\nasync function main(): Promise<void> {}\n"
+    },
+    {
+      "name": "extracted method with call, apply and bind",
+      "expect": "matched",
+      "source": "const o = { base: 10, inc(n: number): number { return this.base + n; } };\nasync function main(): Promise<void> {\n  const f = o.inc;\n  try { f(1); console.log(\"no throw\"); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(f.call({ base: 5 }, 1));\n  console.log(f.apply({ base: 6 }, [1]));\n  const g = f.bind({ base: 7 });\n  console.log(g(1));\n  console.log(o.inc.call({ base: 100 }, 1));\n  const o2 = { base: 100, inc: o.inc };\n  console.log(o2.inc(1), o.inc(1));\n}\n"
+    },
+    {
+      "name": "object method as an array callback",
+      "expect": "matched",
+      "source": "const o = {\n  k: 3,\n  scale(n: number): number { return n * this.k; },\n  pure(n: number): number { return n + 1; },\n};\nasync function main(): Promise<void> {\n  console.log([1, 2].map(o.pure).join(\",\"));\n  try { console.log([1, 2].map(o.scale).join(\",\")); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log([1, 2].map(o.scale, { k: 4 }).join(\",\"));\n  console.log([1, 2].map(o.scale.bind(o)).join(\",\"));\n  console.log([1, 2, 3].filter(o.pure).length);\n}\n"
+    },
+    {
+      "name": "JS value adopted into a native class array through an any view",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const nat: C[] = [new C()];\n  const v: any = nat;\n  const j: any = JSON.parse('{\"n\": 41}');\n  v.push(j);\n  console.log(nat.length, nat[1].n);\n  v[0] = { n: 7 };\n  console.log(nat[0].n);\n}\n"
     }
   ]
 }
