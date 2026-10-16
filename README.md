@@ -189,6 +189,17 @@ Known gaps against Node semantics:
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
 - Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
   functions are still snapshots.
+- A method or arrow function inside an object literal that sits in an array literal typed `any`
+  (`const m: any = [{ inc() { ... } }]`) has no `this`/receiver; put it in an object literal
+  directly, or build the objects first. A native `Map`/`Set` cannot be a field of an `any`
+  literal.
+- A plain `any` value's array result of a dynamic method call (`v.inner.get().push(x)` where
+  `get()` returns `this.arr`) is a snapshot; keep the array in a variable and mutate that.
+- A named function value that mutates an `any` parameter (`const f = (x: any) => x.n = 1`)
+  cannot be passed to an array method as a callback; write the arrow inline.
+- A tagged template whose tag is a member of an `any` value (``o.t`..` ``) is not supported.
+- A JavaScript-owned array's `map` with an identity callback (`(x: any) => x`) over an array
+  that lives in a JavaScript-side object literal fails at run time.
 
 ## Examples
 

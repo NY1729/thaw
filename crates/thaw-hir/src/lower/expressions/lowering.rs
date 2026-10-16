@@ -3230,10 +3230,15 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Call(call) => self.lower_call(call),
 
-            Expr::OptChain(chain) => match chain.base.as_ref() {
-                OptChainBase::Member(member) => self.lower_optional_member_read(member),
-                OptChainBase::Call(call) => self.lower_optional_call(call),
-            },
+            Expr::OptChain(chain) => {
+                if let Some(guarded) = self.lower_json_optional_chain(expr)? {
+                    return Ok(guarded);
+                }
+                match chain.base.as_ref() {
+                    OptChainBase::Member(member) => self.lower_optional_member_read(member),
+                    OptChainBase::Call(call) => self.lower_optional_call(call),
+                }
+            }
 
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
             Expr::Fn(function) => self.lower_function_expression(function, None),
@@ -5077,13 +5082,7 @@ impl<'a> FnLowerer<'a> {
             // the dynamic object builder's actual JS `this` representation.
             // A `Symbol.iterator`-style key must also stay a real symbol there:
             // the typed object form would store it under a string sentinel.
-            if object.props.iter().any(|property| matches!(property,
-                swc_ecma_ast::PropOrSpread::Prop(property) if match property.as_ref() {
-                    swc_ecma_ast::Prop::Method(_) | swc_ecma_ast::Prop::Getter(_) | swc_ecma_ast::Prop::Setter(_) => true,
-                    swc_ecma_ast::Prop::KeyValue(swc_ecma_ast::KeyValueProp { key, .. }) =>
-                        self.is_compiler_symbol_property(key),
-                    _ => false,
-                })) {
+            if self.object_literal_needs_live_object(object) {
                 return self.lower_dynamic_accessor_object_lit(object, true);
             }
         }

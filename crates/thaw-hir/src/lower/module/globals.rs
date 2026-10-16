@@ -75,12 +75,17 @@ fn lower_top_level_initializers(
                     };
                     let name = binding.id.sym.to_string();
                     let expected = global_types[&name].clone();
-                    let init = lowerer.lower_expr(
-                        declarator
-                            .init
-                            .as_deref()
-                            .expect("top-level initializers were validated above"),
-                    )?;
+                    let init_expr = declarator
+                        .init
+                        .as_deref()
+                        .expect("top-level initializers were validated above");
+                    // An `any` global's literal initializer gets the same dynamic-element
+                    // treatment as a local `any` declaration.
+                    let init = if expected == HirType::Json {
+                        lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))?
+                    } else {
+                        lowerer.lower_expr(init_expr)?
+                    };
                     let ty = if expected == HirType::Dynamic {
                         lowerer.infer_expr_type(&init)?
                     } else {
@@ -321,13 +326,16 @@ fn lower_global_decls(
                 unreachable!("top-level patterns were validated above")
             };
             let name = binding.id.sym.to_string();
-            let init = lowerer.lower_expr(
-                declarator
-                    .init
-                    .as_deref()
-                    .expect("top-level initializers were validated above"),
-            )?;
             let expected = global_types[&name].clone();
+            let init_expr = declarator
+                .init
+                .as_deref()
+                .expect("top-level initializers were validated above");
+            let init = if expected == HirType::Json {
+                lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))?
+            } else {
+                lowerer.lower_expr(init_expr)?
+            };
             let inferred = lowerer.infer_expr_type(&init)?;
             // A function global whose return type was still the `Dynamic` placeholder when it was
             // first inferred (an unannotated method read) takes the now-resolved type.

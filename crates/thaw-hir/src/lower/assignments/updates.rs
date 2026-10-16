@@ -1,4 +1,62 @@
 impl<'a> FnLowerer<'a> {
+    /// `o.n++` / `--o.n` on an `any` (Json) member, as `o.n = Number(o.n) + 1` (the postfix value
+    /// is the numeric old value, `(o.n = Number(o.n) + 1) - 1`). Only for a receiver that is cheap and
+    /// pure to evaluate twice.
+    fn lower_json_member_update(
+        &mut self,
+        update: &swc_ecma_ast::UpdateExpr,
+        member: &MemberExpr,
+    ) -> Result<HirExpr, String> {
+        fn pure_receiver(expr: &Expr) -> bool {
+            match expr {
+                Expr::Ident(_) | Expr::This(_) => true,
+                Expr::Member(member) => {
+                    pure_receiver(&member.obj)
+                        && matches!(&member.prop, MemberProp::Ident(_))
+                }
+                Expr::Paren(paren) => pure_receiver(&paren.expr),
+                _ => false,
+            }
+        }
+        if !pure_receiver(&member.obj) {
+            return Err("cannot apply ++/-- to a member of a computed `any` receiver".into());
+        }
+        let span = update.span;
+        let number = |value: f64| {
+            Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number { span, value, raw: None })))
+        };
+        let (add, undo) = match update.op {
+            swc_ecma_ast::UpdateOp::PlusPlus => (swc_ecma_ast::BinaryOp::Add, swc_ecma_ast::BinaryOp::Sub),
+            swc_ecma_ast::UpdateOp::MinusMinus => (swc_ecma_ast::BinaryOp::Sub, swc_ecma_ast::BinaryOp::Add),
+        };
+        let current = Box::new(Expr::Call(swc_ecma_ast::CallExpr {
+            span,
+            ctxt: Default::default(),
+            callee: Callee::Expr(Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("Number".into(), span)))),
+            args: vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(Expr::Member(member.clone())) }],
+            type_args: None,
+        }));
+        let assignment = Box::new(Expr::Assign(swc_ecma_ast::AssignExpr {
+            span,
+            op: swc_ecma_ast::AssignOp::Assign,
+            left: AssignTarget::Simple(SimpleAssignTarget::Member(member.clone())),
+            right: Box::new(Expr::Bin(swc_ecma_ast::BinExpr { span, op: add, left: current, right: number(1.0) })),
+        }));
+        let rewritten = if update.prefix {
+            *assignment
+        } else {
+            Expr::Bin(swc_ecma_ast::BinExpr {
+                span,
+                op: undo,
+                left: Box::new(Expr::Paren(swc_ecma_ast::ParenExpr { span, expr: assignment })),
+                right: number(1.0),
+            })
+        };
+        self.lower_expr(&rewritten)
+    }
+}
+
+impl<'a> FnLowerer<'a> {
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
         if self.unbound_this_context {
             if let Expr::Member(member) = update.arg.as_ref() {
@@ -338,6 +396,7 @@ impl<'a> FnLowerer<'a> {
                                             ))),
                                         )
                                     }
+                                    HirType::Json => return self.lower_json_member_update(update, member),
                                     _ => {
                                         return Err(format!(
                                             "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -378,6 +437,7 @@ impl<'a> FnLowerer<'a> {
                                     object,
                                     Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                                 ),
+                                HirType::Json => return self.lower_json_member_update(update, member),
                                 _ => {
                                     return Err(format!(
                                 "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",

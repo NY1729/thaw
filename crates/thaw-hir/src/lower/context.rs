@@ -116,6 +116,10 @@ struct FnLowerer<'a> {
     /// values (recursively through nested object literals) are `Array<Json>`: an `any` array takes any
     /// element type later (`h.list.push("x")`), which a typed native array cannot hold.
     any_object_literal: bool,
+    /// One-shot: the next lowered arrow is a callback that native array/Map/Set iteration
+    /// calls with `Json` elements, so an `any` parameter it mutates stays a (shared) `Json`
+    /// instead of becoming a live `JsValue` handle.
+    native_iteration_callback: bool,
     sparse_mapping_result: bool,
     generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,

@@ -5480,6 +5480,17 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     // resolve to `Null` (-> `0`)/`undefined` instead of its real byte
     // count (found via a real `fs.createReadStream(...).on('data', ...)`
     // callback with an untyped/`any` chunk parameter).
+    // `.length` of a string value (a plain decoded `any` string) counts UTF-16 code units.
+    if key.as_slice() == b"length" {
+        if let Value::String(text) = value {
+            let units = wtf8_decode_utf16(text.as_bytes()).len() as u64;
+            return track_typed_decode_child(leak(Value::Number(units.into())));
+        }
+        if let Value::Wtf8(bytes) = value {
+            let units = wtf8_decode_utf16(bytes).len() as u64;
+            return track_typed_decode_child(leak(Value::Number(units.into())));
+        }
+    }
     let result = match json_array_or_buffer_data(value) {
         Some(items) if key.as_slice() == b"length" => Value::Number((items.len() as u64).into()),
         Some(_)
