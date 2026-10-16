@@ -7719,15 +7719,16 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
         (Value::Wtf8(_), Value::Wtf8(_))
         | (Value::String(_), Value::Wtf8(_))
         | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
-        (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
-        (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
-        (Value::Host(x), Value::Host(y)) => x.handle == y.handle,
+        (
+            Value::Array(_) | Value::Object(_) | Value::Host(_),
+            Value::Array(_) | Value::Object(_) | Value::Host(_),
+        ) => collection_key_identity(a_val) == collection_key_identity(b_val),
         _ => false,
     })
 }
 
-/// The stable identity key for `value`'s own shared container (see
-/// `object_identity_key`), or `0` for a scalar/null pointer. Used by
+/// The stable identity shared by a native container and its JS shadow,
+/// with reference identity for other objects and `0` for scalars. Used by
 /// thaw-runtime's `AnyKey` (`maps.rs`) as the hash for a `Map<any, V>`/
 /// `Set<any>` key that's itself an Array/Object -- it has to track
 /// `thaw_json_same_value_zero`'s own real-reference-identity notion, not
@@ -7740,10 +7741,26 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
 /// `value` must be null or point to a valid JSON `Value`.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_identity_key(value: *const Value) -> u64 {
-    (unsafe { value.as_ref() })
-        .and_then(object_identity_key)
-        .map(|key| key as u64)
+    unsafe { value.as_ref() }
+        .map(collection_key_identity)
         .unwrap_or(0)
+}
+
+fn collection_key_identity(value: &Value) -> u64 {
+    let serial = match value {
+        Value::Host(lease) => host_query(lease, 25)
+            .and_then(|serial| serial.parse::<u64>().ok())
+            .unwrap_or(0),
+        _ => graph_origin_serial(value),
+    };
+    if serial != 0 {
+        // Assign before first insertion so projecting a key never changes its hash.
+        serial << 1
+    } else {
+        object_identity_key(value)
+            .map(|key| ((key as u64) << 1) | 1)
+            .unwrap_or(0)
+    }
 }
 
 #[no_mangle]

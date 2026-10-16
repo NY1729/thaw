@@ -192,3 +192,22 @@ async function main():Promise<void> {
  for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(x.get("x"));
 }"##,"native_class_methods_preserve_returned_collection_aliases"),"1 true true true 2\n3 true\n5\nfalse false\n7\n");
 }
+
+#[test]
+fn native_any_collection_keys_preserve_identity_through_host_aliases() {
+ assert_eq!(compile_and_run(r##"async function main():Promise<void> {
+ const key:any={n:1}; const distinct:any={n:1}; const arr:any=[1];
+ const m=new Map<any,number>();m.set(key,1);m.set(distinct,2);m.set(arr,3);
+ const a:any=m;const it:any=a.keys();const got:any=it.next().value;
+ console.log(got===key,a.get(key),a.get(got),a.get(distinct),a.get(arr));
+ a.set(got,4);console.log(m.get(key),m.get(distinct),m.size);
+ for(let i=0;i<40;i++){m.set("k"+i,i);}
+ console.log(a.get(got),m.get(key),a.has(key),a.has(arr));
+ console.log(a.delete(got),m.has(key),m.has(distinct));a.set(key,5);console.log(m.get(key));
+ const si=new Set<any>();si.add(key);si.add(arr);const s:any=si;console.log(s.has(got),s.has(arr));s.delete(got);console.log(si.has(key));s.add(got);console.log(si.has(key));
+ for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(a.get(got),a.get(arr));
+ const box:any={key:{n:2}};a.set(box.key,8);console.log(m.get(box.key),a.get(box.key));
+ const p=new Map<any,number>();p.set(NaN,1);p.set(-0,2);p.set("x",3);p.set(true,4);p.set(null,5);p.set(undefined,6);p.set(1n,7);const q:any=p;
+ console.log(q.get(NaN),q.get(0),q.get("x"),q.get(true),q.get(null),q.get(undefined),q.get(1n));
+}"##,"native_any_collection_keys_preserve_identity_through_host_aliases"),"true 1 1 2 3\n4 2 3\n4 4 true true\ntrue false true\n5\ntrue true\nfalse\ntrue\n5 3\n8 8\n1 2 3 4 5 6 7\n");
+}
