@@ -1,4 +1,73 @@
 impl<'a> FnLowerer<'a> {
+    /// `o.k op= r` / `o[k] ??= r` on a dynamic (`any`) target: the receiver and key are evaluated
+    /// once into temporaries, then the assignment is rewritten as `t[k] = t[k] op r`
+    /// (`t[k] || (t[k] = r)` for the short-circuiting forms) and lowered like any other.
+    fn lower_dynamic_compound_assign(
+        &mut self,
+        assign: &swc_ecma_ast::AssignExpr,
+        object: HirExpr,
+        key: HirExpr,
+    ) -> Result<HirExpr, String> {
+        use swc_ecma_ast::{AssignExpr, BinExpr, BinaryOp, ComputedPropName, Ident, MemberExpr, MemberProp};
+        let span = swc_common::DUMMY_SP;
+        let object_name = format!("__thaw_dynamic_compound_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_name = format!("__thaw_dynamic_compound_key_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_type = self.infer_expr_type(&key)?;
+        self.scope.insert(object_name.clone(), HirType::JsValue);
+        self.scope.insert(key_name.clone(), key_type.clone());
+        let member = MemberExpr {
+            span,
+            obj: Box::new(Expr::Ident(Ident::new_no_ctxt(object_name.clone().into(), span))),
+            prop: MemberProp::Computed(ComputedPropName {
+                span,
+                expr: Box::new(Expr::Ident(Ident::new_no_ctxt(key_name.clone().into(), span))),
+            }),
+        };
+        let read = Expr::Member(member.clone());
+        let write = |value: Expr| {
+            Expr::Assign(AssignExpr {
+                span,
+                op: AssignOp::Assign,
+                left: AssignTarget::Simple(SimpleAssignTarget::Member(member.clone())),
+                right: Box::new(value),
+            })
+        };
+        let binary = |op: BinaryOp, left: Expr, right: Expr| {
+            Expr::Bin(BinExpr { span, op, left: Box::new(left), right: Box::new(right) })
+        };
+        let right = assign.right.as_ref().clone();
+        let rewritten = match assign.op {
+            AssignOp::NullishAssign => binary(BinaryOp::NullishCoalescing, read, write(right)),
+            AssignOp::OrAssign => binary(BinaryOp::LogicalOr, read, write(right)),
+            AssignOp::AndAssign => binary(BinaryOp::LogicalAnd, read, write(right)),
+            op => {
+                let bin = match op {
+                    AssignOp::AddAssign => BinaryOp::Add,
+                    AssignOp::SubAssign => BinaryOp::Sub,
+                    AssignOp::MulAssign => BinaryOp::Mul,
+                    AssignOp::DivAssign => BinaryOp::Div,
+                    AssignOp::ModAssign => BinaryOp::Mod,
+                    AssignOp::ExpAssign => BinaryOp::Exp,
+                    AssignOp::BitOrAssign => BinaryOp::BitOr,
+                    AssignOp::BitXorAssign => BinaryOp::BitXor,
+                    AssignOp::BitAndAssign => BinaryOp::BitAnd,
+                    AssignOp::LShiftAssign => BinaryOp::LShift,
+                    AssignOp::RShiftAssign => BinaryOp::RShift,
+                    AssignOp::ZeroFillRShiftAssign => BinaryOp::ZeroFillRShift,
+                    other => return Err(format!("unsupported dynamic property assignment operator {other:?}")),
+                };
+                write(binary(bin, read, right))
+            }
+        };
+        let result = self.lower_expr(&rewritten)?;
+        self.wrap_call_argument_bindings(
+            result,
+            &[(object_name, HirType::JsValue, object), (key_name, key_type, key)],
+        )
+    }
+
     fn lower_assignment_target_write(
         &mut self,
         target: Target,
@@ -846,7 +915,7 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         if let Target::DynamicProperty(object, key) = &target {
             if assign.op != AssignOp::Assign {
-                return Err("dynamic properties currently support simple `=` assignment only".into());
+                return self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone());
             }
             let object_name = format!("__thaw_dynamic_assign_object_{}", self.next_binding);
             self.next_binding += 1;

@@ -51,6 +51,25 @@ fn absent_after(value: HirExpr, absent: HirExpr) -> HirExpr {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// A named function whose last parameter is a rest parameter registers as a rest callable,
+    /// so JS callers' trailing arguments are collected into that array.
+    fn rest_callable_type(&self, callback: &HirExpr, callback_type: HirType) -> HirType {
+        match (callback, &callback_type) {
+            (HirExpr::FunctionRef(name, ..), HirType::Function(params, ret)) if !params.is_empty() => {
+                match self.signatures.get(name).and_then(|signature| signature.native_rest.clone()) {
+                    Some(element) => HirType::CallableFunction(
+                        params[..params.len() - 1].to_vec(),
+                        HirOptionalMask::default(),
+                        Some(Box::new(element)),
+                        ret.clone(),
+                    ),
+                    None => callback_type,
+                }
+            }
+            _ => callback_type,
+        }
+    }
+
     /// Preserve the active member with the same HIR adapter used by compiler-
     /// generated Promise reason materializers. The adapter returns an
     /// arena-managed Json cell; callers must share before consuming it.
@@ -531,6 +550,7 @@ impl<'a> FnLowerer<'a> {
                 (value, inferred.clone())
             };
             let graph_callback = callback_type != inferred;
+            let callback_type = self.rest_callable_type(&callback, callback_type);
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var(if graph_callback {
                     "registerNativeCallbackGraph".to_string()
@@ -925,6 +945,7 @@ impl<'a> FnLowerer<'a> {
                     (bound.clone(), actual.clone())
                 };
                 let graph_callback = callback_type != actual;
+                let callback_type = self.rest_callable_type(&value, callback_type);
                 let registered = HirExpr::Call(
                     Box::new(HirExpr::Var(if graph_callback {
                         "registerNativeCallbackGraph".to_string()

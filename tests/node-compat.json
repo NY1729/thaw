@@ -1311,6 +1311,26 @@
       "name": "linked json values survive arena resets",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const words: string[][] = [[\"a\"]];\n  const wv: any = words;\n  const w: any = [\"x\"];\n  wv[0] = w;\n  const objs: { n: number; s: string }[] = [{ n: 0, s: \"z\" }];\n  const ov: any = objs;\n  const o: any = { n: 1, s: \"q\" };\n  ov[0] = o;\n  let sum = 0;\n  for (let i = 0; i < 200; i++) {\n    w.push(\"item\" + i);\n    o.n = i;\n    o.s = \"s\" + i;\n    await new Promise<void>((resolve) => setTimeout(resolve, 0));\n    const junk: string[] = [];\n    for (let k = 0; k < 200; k++) junk.push(\"junk\" + k + i);\n    sum += junk.length + words[0].length + objs[0].n;\n    if (words[0][words[0].length - 1] !== \"item\" + i || objs[0].s !== \"s\" + i) {\n      console.log(\"MISMATCH\", i, words[0][words[0].length - 1], objs[0].s);\n      return;\n    }\n  }\n  console.log(words[0].length, objs[0].n, sum, w.length, o.s);\n}\n"
+    },
+    {
+      "name": "methods in objects inside any array literals keep their receiver",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const m: any = [{ v: 1, inc() { this.v++; return this.v; } }];\n  console.log(m[0].inc(), m[0].v);\n  const n: any = [{ k: 2, dbl: function () { this.k *= 2; return this.k; } }, { k: 3, tri() { return this.k * 3; } }];\n  console.log(n[0].dbl(), n[0].k, n[1].tri());\n  const p: any = { rows: [{ c: 0, bump() { this.c += 5; return this.c; } }] };\n  console.log(p.rows[0].bump(), p.rows[0].c);\n  const q: any = [[{ z: 1, up() { this.z++; return this.z; } }]];\n  console.log(q[0][0].up(), q[0][0].z);\n}\n"
+    },
+    {
+      "name": "named callbacks mutate any parameters",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const rows: any = [{ n: 0, list: [1] }, { n: 0, list: [2] }];\n  const f = (x: any) => { x.n = 1; };\n  rows.forEach(f);\n  const g = (x: any) => x.list.push(7);\n  rows.map(g);\n  function h(x: any) { x.n += 10; return x.n; }\n  const ns = rows.map(h);\n  const ok = rows.filter((x: any) => x.n > 5).length;\n  console.log(JSON.stringify(rows), JSON.stringify(ns), ok);\n}\n"
+    },
+    {
+      "name": "tagged template whose tag is a member of an any value",
+      "expect": "matched",
+      "source": "function tag(s: any, ...v: any[]): string { return s.raw.join(\"|\") + v.length; }\nfunction mk(): any { return { t: tag }; }\nasync function main(): Promise<void> {\n  console.log(tag`a${1}b${2}c`);\n  console.log(mk().t`x${1}y`);\n  const o: any = { t: tag, deep: { t: tag } };\n  console.log(o.t`p${1}q`, o.deep.t`r${2}s${3}t`);\n}\n"
+    },
+    {
+      "name": "callback returning its own any parameter over a JS array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const g: any = (globalThis as any);\n  g.__lit = { list: [1, 2, 3], names: [\"a\", \"b\"] };\n  const o: any = g.__lit;\n  const a = o.list.map((x: any) => x);\n  console.log(JSON.stringify(a), a.length);\n  const b = o.names.map((s: any) => s);\n  console.log(JSON.stringify(b));\n  const c = JSON.parse('{\"xs\":[4,5,6]}').xs.map((x: any) => x);\n  console.log(JSON.stringify(c));\n  const d: any = [{ xs: [1, 2] }];\n  console.log(JSON.stringify(d[0].xs.map((x: any) => x)));\n}\n"
     }
   ]
 }

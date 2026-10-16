@@ -397,15 +397,19 @@ impl<'a> FnLowerer<'a> {
                     // borrowed-handle wrapper and erase that provenance.
                     Expr::Object(_) => self.lower_expr(&argument.expr)?,
                     Expr::Arrow(arrow) => {
-                        let expected_return = if arrow.is_async {
-                            HirType::Promise(Box::new(HirType::JsValue))
+                        // Only a call result in return position has to stay a live handle; a
+                        // returned parameter or literal keeps the value's own (`any`) type.
+                        let expected_return = if !arrow_returns_call_result(arrow) {
+                            None
+                        } else if arrow.is_async {
+                            Some(HirType::Promise(Box::new(HirType::JsValue)))
                         } else {
-                            HirType::JsValue
+                            Some(HirType::JsValue)
                         };
                         self.lower_contextual_arrow(
                             arrow,
                             &vec![HirType::JsValue; arrow.params.len()],
-                            Some(&expected_return),
+                            expected_return.as_ref(),
                         )?
                     }
                     _ => self.lower_expr_with_expected_type(
@@ -674,4 +678,24 @@ impl<'a> FnLowerer<'a> {
             })
     }
 
+}
+
+/// Whether an arrow function's body contains a call, `new` or `await`: the only forms whose
+/// result needs the `JsValue` return hint to stay a live handle.
+fn arrow_returns_call_result(arrow: &swc_ecma_ast::ArrowExpr) -> bool {
+    struct Finder(bool);
+    impl Visit for Finder {
+        fn visit_call_expr(&mut self, _: &CallExpr) {
+            self.0 = true;
+        }
+        fn visit_new_expr(&mut self, _: &swc_ecma_ast::NewExpr) {
+            self.0 = true;
+        }
+        fn visit_await_expr(&mut self, _: &AwaitExpr) {
+            self.0 = true;
+        }
+    }
+    let mut finder = Finder(false);
+    arrow.body.visit_with(&mut finder);
+    finder.0
 }

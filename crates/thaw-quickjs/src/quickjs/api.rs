@@ -2991,9 +2991,18 @@ fn register_native_callback(
              var args = {has_rest} \
              ? Array.prototype.slice.call(arguments, 0, {visible_param_count} - 1).concat([Array.prototype.slice.call(arguments, {visible_param_count} - 1)]) \
              : Array.prototype.slice.call(arguments, 0, {visible_param_count}); \
+             var held = []; \
+             var releaseHeld = function() {{ \
+             while (held.length) globalThis.__thaw_release_dynamic_value(held.pop()); \
+             }}; \
+             var deferred = false; \
+             try {{ \
              for (var i = 0; i < args.length; i++) {{ \
              if (!{graph_mode} && (mask & (1 << i)) !== 0) {{ \
-             args[i] = {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(args[i]) }}; \
+             var id = globalThis.__thaw_retain_dynamic_value(args[i]); \
+             globalThis.__thaw_retain_dynamic_value(args[i]); \
+             held.push(id); \
+             args[i] = {{ __thaw_js_handle_id__: id }}; \
              }} \
              }} \
              var result = raw({graph_mode} ? globalThis.__thaw_json_graph_encode_js([this].concat(args), {method_mode} ? mask : mask << 1, true) : JSON.stringify(args, function(key, value) {{ \
@@ -3006,18 +3015,23 @@ fn register_native_callback(
              }} \
              if ({void_result} && result.slice(0, 8) !== 'promise:') return undefined; \
              if (result.slice(0, 8) !== 'promise:') return {graph_mode} ? globalThis.__thaw_json_graph_decode_owned(result) : globalThis.__thaw_json_parse_legacy(result); \
+             deferred = true; \
              return new Promise(function(resolve, reject) {{ \
              function check() {{ \
              var settled; \
              try {{ settled = ({method_mode} ? poll : globalThis['{poll_name}'])(result); }} \
-             catch (nativeError) {{ return reject(nativeError); }} \
+             catch (nativeError) {{ releaseHeld(); return reject(nativeError); }} \
              if (!settled) return setTimeout(check, 0); \
-             if (settled.slice(0, 6) === 'error:') return reject(globalThis.__thaw_error_from_tagged(settled.slice(6))); \
-             if ({void_result}) return resolve(undefined); \
+             if (settled.slice(0, 6) === 'error:') {{ releaseHeld(); return reject(globalThis.__thaw_error_from_tagged(settled.slice(6))); }} \
+             if ({void_result}) {{ releaseHeld(); return resolve(undefined); }} \
              try {{ resolve({graph_mode} ? globalThis.__thaw_json_graph_decode_owned(settled) : globalThis.__thaw_json_parse_legacy(settled)); }} catch (error) {{ reject(error); }} \
+             releaseHeld(); \
              }} \
              check(); \
              }}); \
+             }} finally {{ \
+             if (!deferred) releaseHeld(); \
+             }} \
              }}; \
              return callback; \
              }})()"
