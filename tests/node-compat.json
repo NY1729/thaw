@@ -1371,6 +1371,21 @@
       "name": "method result of an any object literal aliases its owner and chains",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const o: any = { arr: [1, 2], get() { return this.arr; } };\n  const r = o.get();\n  console.log(typeof r, Array.isArray(r), r.length);\n  r.push(4);\n  console.log(o.arr.length, r.length, r === o.arr);\n  const q = o.get().length;\n  console.log(q);\n  o.get().push(9);\n  console.log(o.arr.length);\n}\n"
+    },
+    {
+      "name": "native Map and Set alias through an any slot",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const m = new Map<string, number>();\n  m.set(\"a\", 1);\n  const a: any = m;\n  console.log(a === m, m === a, a.size, a.get(\"a\"), a.has(\"a\"), a.has(\"z\"));\n  a.set(\"b\", 2);\n  console.log(m.size, m.get(\"b\"));\n  m.set(\"c\", 3);\n  console.log(a.size, a.get(\"c\"));\n  console.log(a.delete(\"a\"), m.has(\"a\"), a.delete(\"zz\"));\n  console.log([...a].length, [...a.keys()].join(\",\"), [...a.values()].join(\",\"));\n  const seen: string[] = [];\n  a.forEach((v: any, k: any) => { seen.push(k + \"=\" + v); });\n  console.log(seen.join(\",\"));\n  for (const e of a) { console.log(e[0], e[1]); }\n  console.log(a instanceof Map, String(a), JSON.stringify(a));\n  console.log(a);\n  a.clear();\n  console.log(m.size, a.size);\n  const s = new Set<number>();\n  s.add(1);\n  const b: any = s;\n  b.add(2);\n  s.add(3);\n  console.log(b === s, b.size, s.size, b.has(3), s.has(2), [...b].join(\",\"));\n  console.log(b.delete(1), s.has(1));\n  console.log(b);\n}\n"
+    },
+    {
+      "name": "native Map and Set views cross literals, functions and value types",
+      "expect": "matched",
+      "source": "class P { n = 1; bump(): number { this.n += 1; return this.n; } }\nfunction touch(x: any): void {\n  x.set(\"viaFn\", 9);\n}\nfunction give(m: Map<string, number>): any {\n  return m;\n}\nasync function main(): Promise<void> {\n  const m = new Map<string, number>();\n  m.set(\"a\", 1);\n  const o: any = { m, tag: \"t\" };\n  o.m.set(\"b\", 2);\n  console.log(m.size, o.m.size, o.m === m, o.m.get(\"b\"));\n  m.set(\"c\", 3);\n  console.log(o.m.has(\"c\"), o.tag);\n  touch(m);\n  console.log(m.get(\"viaFn\"));\n  const g = give(m);\n  g.set(\"fromReturn\", 4);\n  console.log(m.get(\"fromReturn\"), g === m);\n  const s = new Set<string>([\"x\"]);\n  const list: any = [s, m];\n  list[0].add(\"y\");\n  list[1].delete(\"a\");\n  console.log(s.size, s.has(\"y\"), m.has(\"a\"), list.length, list[0] === s);\n  const nums = new Map<number, string>();\n  nums.set(1, \"one\");\n  const n: any = nums;\n  n.set(2, \"two\");\n  console.log(nums.get(2), n.get(1), n.get(3), n.has(2), n.size);\n  const arrs = new Map<string, number[]>();\n  arrs.set(\"k\", [1, 2]);\n  const ar: any = arrs;\n  ar.get(\"k\").push(3);\n  console.log(arrs.get(\"k\")!.length, ar.get(\"k\")[2], ar.size);\n  const bools = new Map<string, boolean>();\n  const bo: any = bools;\n  bo.set(\"t\", true);\n  bo.set(\"f\", false);\n  console.log(bools.get(\"t\"), bools.get(\"f\"), bo.get(\"f\"), bo.has(\"f\"));\n  const objs = new Map<string, P>();\n  objs.set(\"p\", new P());\n  const ob: any = objs;\n  console.log(ob.get(\"p\").bump(), objs.get(\"p\")!.n);\n  console.log(o);\n  console.log(JSON.stringify(o.m), [...n.entries()].map((e: any) => e.join(\":\")).join(\",\"));\n}\n"
+    },
+    {
+      "name": "native collection replacer keeps requested custom properties",
+      "expect": "matched",
+      "source": "function main(): void { const native = new Map<string, number>(); native.set(\"a\", 1); const m: any = native; m.extra = 7; m.missing = undefined; m.inf = Infinity; console.log(JSON.stringify(m, [\"size\", \"extra\", \"missing\", \"inf\"])); const set = new Set<number>([1, 2]); const s: any = set; s.extra = \"kept\"; console.log(JSON.stringify(s, [\"extra\", \"size\"])); }"
     }
   ]
 }

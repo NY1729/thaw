@@ -2385,6 +2385,26 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
         // Map/Set). A key that resolves to nothing (no such accessor,
         // e.g. `["a"]` against a Map) is omitted, matching a real
         // `undefined` `[[Get]]` result being skipped by `JSON.stringify`.
+        // A replacer list uses [[Get]], including collection accessors and added properties.
+        Value::Host(lease) if host_query(lease, 24).is_some_and(|kind| !kind.is_empty()) => {
+            let mut fields = indexmap::IndexMap::new();
+            for key in keys {
+                if HOST_ERROR.with(|error| error.borrow().is_some()) {
+                    break;
+                }
+                let resolved = host_get_property(lease, key);
+                if HOST_ERROR.with(|error| error.borrow().is_some()) {
+                    break;
+                }
+                if !is_napi_undefined(&resolved) {
+                    fields.insert(
+                        key.clone(),
+                        filtered_json_omitting_undefined(&resolved, keys),
+                    );
+                }
+            }
+            Value::shared_object(fields)
+        }
         Value::Object(_) if is_thaw_internal_wrapper(value) => Value::shared_object(
             keys.iter()
                 .filter_map(|key| {
@@ -6242,8 +6262,15 @@ pub extern "C" fn thaw_json_has_wrapper_key(value: *const Value, key: *const c_c
         return 0;
     };
     // A live Host lease is the handle marker's native form.
-    if matches!(value, Value::Host(_)) {
-        return u8::from(to_key(key).as_slice() == b"__thaw_js_handle_id__");
+    if let Value::Host(lease) = value {
+        let key = to_key(key);
+        // `instanceof Map` / `instanceof Set` of a host collection (a JS Map or a native view).
+        let collection = match key.as_slice() {
+            b"__thaw_map_entries__" => "map",
+            b"__thaw_set_values__" => "set",
+            _ => return u8::from(key.as_slice() == b"__thaw_js_handle_id__"),
+        };
+        return u8::from(host_query(lease, 24).as_deref() == Some(collection));
     }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return 0;
@@ -8337,7 +8364,26 @@ pub extern "C" fn thaw_json_map_or_set_clear(value: *const Value) -> *mut Value 
 /// of typed native fields. This is enough for the overwhelmingly
 /// common `for (const k of m.keys())`/`[...m.values()]` usage, which
 /// only needs *something* iterable, and an eager array is one.
+/// The keys and values of a host `Map`/`Set` (a JS collection, or a native collection viewed
+/// from `any`): `(keys, Some(values))` for a Map, `(values, None)` for a Set.
+fn host_map_or_set_items(value: &Value) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+    let Value::Host(lease) = value else {
+        return None;
+    };
+    match host_query(lease, 24).as_deref() {
+        Some("map") => Some((
+            host_enumerate_values(lease, 4),
+            Some(host_enumerate_values(lease, 6)),
+        )),
+        Some("set") => Some((host_enumerate_values(lease, 5), None)),
+        _ => None,
+    }
+}
+
 fn map_or_set_keys(value: &Value) -> Vec<Value> {
+    if let Some((keys, _)) = host_map_or_set_items(value) {
+        return keys;
+    }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return Vec::new();
     };
@@ -8358,6 +8404,9 @@ fn map_or_set_keys(value: &Value) -> Vec<Value> {
 }
 
 fn map_or_set_values(value: &Value) -> Vec<Value> {
+    if let Some((keys, values)) = host_map_or_set_items(value) {
+        return values.unwrap_or(keys);
+    }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return Vec::new();
     };
@@ -8378,6 +8427,19 @@ fn map_or_set_values(value: &Value) -> Vec<Value> {
 }
 
 fn map_or_set_entries_view(value: &Value) -> Vec<Value> {
+    if let Some((keys, values)) = host_map_or_set_items(value) {
+        return match values {
+            Some(values) => keys
+                .into_iter()
+                .zip(values)
+                .map(|(key, value)| Value::shared_array(vec![key, value]))
+                .collect(),
+            None => keys
+                .into_iter()
+                .map(|key| Value::shared_array(vec![key.clone(), key]))
+                .collect(),
+        };
+    }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return Vec::new();
     };
@@ -9423,6 +9485,44 @@ mod tests {
             handle,
             release: host_array_test_release,
         })))
+    }
+
+    #[test]
+    fn collection_replacer_stops_after_a_host_getter_error() {
+        std::thread::spawn(|| {
+            extern "C" fn collection_query(handle: u64, operation: u8) -> HostTextResult {
+                if operation == 24 {
+                    HostTextResult {
+                        value: thaw_arena::owned_string(b"map"),
+                        error: std::ptr::null(),
+                    }
+                } else {
+                    host_array_test_query(handle, operation)
+                }
+            }
+            install_host_array_test_operations();
+            HOST_OPERATIONS.with(|slot| {
+                let mut operations = slot.get().unwrap();
+                operations.query = collection_query;
+                slot.set(Some(operations));
+            });
+            HOST_ARRAY_TEST_GETS.with(|count| count.set(0));
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(true));
+            let value = host_array_test_value(8);
+            begin_stringify();
+            let _ = filtered_json_omitting_undefined(
+                unsafe { &*value },
+                &[b"first".to_vec(), b"second".to_vec()],
+            );
+            HOST_ARRAY_TEST_GETS.with(|count| assert_eq!(count.get(), 1));
+            assert_eq!(
+                read_c_string(thaw_json_take_host_error()),
+                "length getter failed"
+            );
+            unsafe { thaw_json_destroy(value) };
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

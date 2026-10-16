@@ -197,9 +197,13 @@ Known gaps against Node semantics:
   functions are still snapshots.
 - A `new Map()`/`new Set()` written in an `any` literal (a field, a nested field or an array
   element) is a real collection that `get`/`set`/`add`/`has`/`delete`/`forEach`, spread and
-  `console.log` handle. A native `Map`/`Set` held in a variable is a snapshot whenever it becomes `any`
-  (`const a: any = existing`, `{ m: existing }`), so later changes on either side are not shared;
-  aliasing it would need a live view with native callbacks per key/value type, as arrays have.
+  `console.log` handle. A native `Map`/`Set` variable that becomes `any` (`const a: any = existing`,
+  `{ m: existing }`, `[existing]`, an argument or return of a user function) is a live view: both sides
+  see every change and `a === existing` holds. A view serves keys of type `number`, `string` or `any`
+  and values of type `number`, `string`, `boolean` or `any` (arrays, objects and dictionaries read back
+  live but are read-only through the view); storing another type through it throws a `TypeError`.
+  Iterators (`keys`, `values`, `entries`, `for..of`) walk a snapshot taken when they start. Maps and
+  sets with object keys, or whose values are themselves Maps or Sets, stay snapshots.
 - An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
   self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
   element becomes `NaN`, and nesting deeper than 32 levels is stored as a plain copy.
