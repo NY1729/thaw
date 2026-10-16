@@ -129,6 +129,7 @@ impl<'a> FnLowerer<'a> {
             expected_arrow_return_hint: None,
             any_object_literal: false,
             native_iteration_callback: false,
+            stored_arrow_initializer: false,
             sparse_mapping_result: false,
             generator_yields: None,
             generator_finalizers: HashMap::new(),
