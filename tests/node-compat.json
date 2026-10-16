@@ -1373,6 +1373,16 @@
       "source": "async function main(): Promise<void> {\n  const o: any = { arr: [1, 2], get() { return this.arr; } };\n  const r = o.get();\n  console.log(typeof r, Array.isArray(r), r.length);\n  r.push(4);\n  console.log(o.arr.length, r.length, r === o.arr);\n  const q = o.get().length;\n  console.log(q);\n  o.get().push(9);\n  console.log(o.arr.length);\n}\n"
     },
     {
+      "name": "bare call of a this-using function expression reports the first property read or set",
+      "expect": "matched",
+      "source": "const lam = function (this: { n: number }, k: number): number { return k + this.n; };\nconst setter = function (this: { n: number }): void { this.n = 3; };\nasync function main(): Promise<void> {\n  try { console.log(lam(1)); } catch (e: any) { console.log(\"E1 \" + e.message); }\n  try { setter(); } catch (e: any) { console.log(\"E2 \" + e.message); }\n  console.log(lam.call({ n: 5 }, 1));\n  try { console.log(lam.call(null as any, 1)); } catch (e: any) { console.log(\"E3 \" + e.message); }\n}\n"
+    },
+    {
+      "name": "function receiver error names the assignment RHS property",
+      "expect": "matched",
+      "source": "function main(): void { const assign = function(this: {a:number,b:number}):void { this.a = this.b; }; try { assign(); } catch(e:any) { console.log(e.message); } try { assign.call(null as any); } catch(e:any) { console.log(e.message); } }"
+    },
+    {
       "name": "native Map and Set alias through an any slot",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const m = new Map<string, number>();\n  m.set(\"a\", 1);\n  const a: any = m;\n  console.log(a === m, m === a, a.size, a.get(\"a\"), a.has(\"a\"), a.has(\"z\"));\n  a.set(\"b\", 2);\n  console.log(m.size, m.get(\"b\"));\n  m.set(\"c\", 3);\n  console.log(a.size, a.get(\"c\"));\n  console.log(a.delete(\"a\"), m.has(\"a\"), a.delete(\"zz\"));\n  console.log([...a].length, [...a.keys()].join(\",\"), [...a.values()].join(\",\"));\n  const seen: string[] = [];\n  a.forEach((v: any, k: any) => { seen.push(k + \"=\" + v); });\n  console.log(seen.join(\",\"));\n  for (const e of a) { console.log(e[0], e[1]); }\n  console.log(a instanceof Map, String(a), JSON.stringify(a));\n  console.log(a);\n  a.clear();\n  console.log(m.size, a.size);\n  const s = new Set<number>();\n  s.add(1);\n  const b: any = s;\n  b.add(2);\n  s.add(3);\n  console.log(b === s, b.size, s.size, b.has(3), s.has(2), [...b].join(\",\"));\n  console.log(b.delete(1), s.has(1));\n  console.log(b);\n}\n"
