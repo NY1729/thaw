@@ -1351,6 +1351,16 @@
       "name": "records with array fields written through an any view stay linked",
       "expect": "matched",
       "source": "interface Row { n: number; tags: string[] }\nasync function main(): Promise<void> {\n  const rows: Row[] = [{ n: 1, tags: [\"a\"] }];\n  const v: any = rows;\n  const row: any = JSON.parse('{\"n\":2,\"tags\":[\"x\",\"y\"]}');\n  v[0] = row;\n  row.tags.push(\"z\");\n  console.log(rows[0].tags.join(\",\"), rows[0].n);\n  rows[0].tags.push(\"w\");\n  console.log(row.tags.join(\",\"));\n  row.n = 5;\n  console.log(rows[0].n);\n  rows[0].tags[0] = \"q\";\n  console.log(row.tags[0], v[0] === row);\n  const extra: any = JSON.parse('{\"n\":3,\"tags\":[]}');\n  v.push(extra);\n  extra.tags.push(\"t\");\n  console.log(rows.length, rows[1].tags.join(\",\"));\n  rows[1].tags.push(\"u\");\n  console.log(extra.tags.join(\",\"));\n}\n"
+    },
+    {
+      "name": "cyclic json array joins to an empty string at the cycle and can be written into a typed slot",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const j: any = JSON.parse(\"[1,2]\");\n  j.push(j);\n  console.log(String(j));\n  console.log(j.join(\"-\"));\n  console.log(Number(j), \"\" + j);\n  const nat: number[][] = [[1]];\n  const v: any = nat;\n  v[0] = j;\n  console.log(nat.length, nat[0].length, v[0] === j);\n}\n"
+    },
+    {
+      "name": "annotated forEach callbacks on an any Map, Set and array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { m: new Map<string, number>(), s: new Set<number>([5, 6]) };\n  o.m.set(\"a\", 1);\n  o.m.set(\"b\", 2);\n  o.m.forEach((v: number, k: string) => console.log(k, v));\n  o.s.forEach((v: number) => console.log(v));\n  const list: any = [3, 4];\n  list.forEach((x: number, i: number) => console.log(i, x));\n}\n"
     }
   ]
 }
