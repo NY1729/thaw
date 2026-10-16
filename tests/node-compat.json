@@ -1361,6 +1361,16 @@
       "name": "annotated forEach callbacks on an any Map, Set and array",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const o: any = { m: new Map<string, number>(), s: new Set<number>([5, 6]) };\n  o.m.set(\"a\", 1);\n  o.m.set(\"b\", 2);\n  o.m.forEach((v: number, k: string) => console.log(k, v));\n  o.s.forEach((v: number) => console.log(v));\n  const list: any = [3, 4];\n  list.forEach((x: number, i: number) => console.log(i, x));\n}\n"
+    },
+    {
+      "name": "method result array of an any class instance aliases its owner",
+      "expect": "matched",
+      "source": "class Inner { arr: number[] = [1, 2]; get(): number[] { return this.arr; } }\nclass Holder { inner: Inner = new Inner(); }\nasync function main(): Promise<void> {\n  const v: any = new Holder();\n  v.inner.get().push(3);\n  console.log(v.inner.arr.length, v.inner.get() === v.inner.arr);\n  const r = v.inner.get();\n  r.push(4);\n  console.log(v.inner.arr.length, r.length, v.inner.arr[3]);\n}\n"
+    },
+    {
+      "name": "method result of an any object literal aliases its owner and chains",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { arr: [1, 2], get() { return this.arr; } };\n  const r = o.get();\n  console.log(typeof r, Array.isArray(r), r.length);\n  r.push(4);\n  console.log(o.arr.length, r.length, r === o.arr);\n  const q = o.get().length;\n  console.log(q);\n  o.get().push(9);\n  console.log(o.arr.length);\n}\n"
     }
   ]
 }

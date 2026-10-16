@@ -203,12 +203,13 @@ Known gaps against Node semantics:
 - An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
   self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
   element becomes `NaN`, and nesting deeper than 32 levels is stored as a plain copy.
-- The array returned by a method of an `any` class instance (`v.inner.get().push(x)` where
-  `get()` returns `this.arr`) is a copy: a compiled call result crosses the call boundary as JSON
-  data, so mutating it does not reach the owner. Keep the array in a variable on the object and
-  mutate it there. A method of an `any` object literal returns the object's own array, but
-  mutating that result in the same expression (`o.get().push(x)`) fails with "Invalid JavaScript
-  method receiver"; bind the result to a variable first (`const r = o.get(); r.push(x)`).
+- A method result that belongs to its receiver is returned by reference
+  (`v.inner.get().push(x)`, `o.cfg().x = 1`): a native array or class instance a class method
+  hands back (declared as `T[]` or a class type), and a JavaScript object stored in the receiver
+  within two levels (a scan of at most 256 own data properties). Other results are data
+  snapshots: a fresh array or object, a result declared `T[] | undefined`, a tuple, a `Map`/`Set`
+  or a `Promise` of an array (`async get()`), and an owned value stored deeper or further down than
+  the scan reaches. Mutating a snapshot does not reach the owner.
 
 ## Examples
 
