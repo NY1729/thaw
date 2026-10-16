@@ -4680,6 +4680,10 @@ impl<'a> FnLowerer<'a> {
                     result = HirType::JsValue;
                 }
             }
+            if self.alias_native_arrays && Self::native_collection_view_supported(&result) {
+                method_body = self.lower_native_collection_as_dynamic_view(method_body, &result)?;
+                result = HirType::JsValue;
+            }
             let bound = HirExpr::Lambda(
                 vec![HirParam { name: this_name.into(), ty: source_type.clone() }],
                 method_params, result.clone(),
