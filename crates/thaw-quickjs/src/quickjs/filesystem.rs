@@ -480,14 +480,19 @@ fn fs_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
 
 fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> io::Result<serde_json::Value> {
     fn visit(directory: &std::path::Path, prefix: &[u8], typed: bool, recursive: bool, output: &mut Vec<serde_json::Value>) -> io::Result<()> {
+        // An entry removed between the listing and its lstat is skipped (Node lists from d_type and
+        // never fails on a concurrent unlink); only the requested directory itself may be missing.
+        let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
         for entry in std::fs::read_dir(directory)? {
-            let entry = entry?;
+            let entry = match entry { Ok(entry) => entry, Err(error) if gone(&error) => continue, Err(error) => return Err(error) };
             let name_bytes = fs_name_bytes(&entry.file_name());
             let mut relative_bytes = prefix.to_vec();
             if !relative_bytes.is_empty() { relative_bytes.push(b'/'); }
             relative_bytes.extend_from_slice(&name_bytes);
             let entry_path = entry.path();
-            let metadata = if typed || recursive { Some(std::fs::symlink_metadata(&entry_path)?) } else { None };
+            let metadata = if typed || recursive {
+                match std::fs::symlink_metadata(&entry_path) { Ok(value) => Some(value), Err(error) if gone(&error) => continue, Err(error) => return Err(error) }
+            } else { None };
             let descend = recursive && metadata.as_ref().is_some_and(|value| value.is_dir() && !value.file_type().is_symlink());
             output.push(serde_json::json!({
                 "nameHex": hex_encode(&name_bytes),
@@ -496,7 +501,9 @@ fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> i
                 "parentPath": directory.to_string_lossy(),
                 "stat": metadata.map(fs_metadata_record),
             }));
-            if descend { visit(&entry_path, &relative_bytes, typed, recursive, output)?; }
+            if descend {
+                match visit(&entry_path, &relative_bytes, typed, recursive, output) { Err(error) if gone(&error) => {}, other => other? }
+            }
         }
         Ok(())
     }
@@ -1221,4 +1228,38 @@ fn fs_copy_relation_resolves_alias_parents_before_descendant_mutation() {
     assert!(!root.join("missing").exists());
     assert!(!source.join("new").exists());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A directory entry that vanishes between the listing and its `lstat` (a busy `/tmp`) must not
+/// fail the whole listing: `glob` walks absolute patterns from `/` and treats ENOENT as "empty".
+#[test]
+fn readdir_entries_survive_entries_removed_while_listing() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = std::env::temp_dir().join(format!("thaw-readdir-churn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let churn = {
+        let (root, stop) = (root.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut index = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let path = root.join(format!("e{}", index % 64));
+                if index.is_multiple_of(3) { let _ = std::fs::create_dir_all(path.join("inner")); let _ = std::fs::remove_dir_all(&path); }
+                else { let _ = std::fs::write(&path, b"x"); let _ = std::fs::remove_file(&path); }
+                index += 1;
+            }
+        })
+    };
+    let mut failure = None;
+    for round in 0..4000 {
+        for recursive in [false, true] {
+            if let Err(error) = fs_readdir_entries(&root, true, recursive) { failure = Some((round, recursive, error.to_string())); }
+        }
+        if failure.is_some() { break; }
+    }
+    stop.store(true, Ordering::Relaxed);
+    churn.join().unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(failure.is_none(), "typed readdir failed on a vanishing entry: {failure:?}");
 }
