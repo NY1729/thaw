@@ -165,7 +165,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
             "__thaw_native_view_target" => self.compile_native_view_target(args),
-            "__thaw_json_link_native" | "__thaw_json_link_native_object" =>
+            "__thaw_json_link_native" | "__thaw_json_link_native_object" | "__thaw_json_link_native_tree" =>
                 self.compile_json_link_native(name, args),
             "__thaw_json_note_view_copy" => (|| {
                 self.builder.build_call(
@@ -758,8 +758,12 @@ impl<'ctx> HirCompiler<'ctx> {
             ("__thaw_json_link_native", HirExpr::Lit(HirLit::F64(kind))) =>
                 ("thaw_json_link_native_by_serial",
                  self.context.i8_type().const_int(*kind as u64, false).into()),
-            ("__thaw_json_link_native_object", HirExpr::Lit(HirLit::Str(layout))) => (
-                "thaw_json_link_native_object_by_serial",
+            ("__thaw_json_link_native_object" | "__thaw_json_link_native_tree", HirExpr::Lit(HirLit::Str(layout))) => (
+                if name == "__thaw_json_link_native_tree" {
+                    "thaw_json_link_native_tree_by_serial"
+                } else {
+                    "thaw_json_link_native_object_by_serial"
+                },
                 self.builder.build_global_string_ptr(layout, "native_link_layout")
                     .map_err(|error| error.to_string())?.as_pointer_value().into(),
             ),
