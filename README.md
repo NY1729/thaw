@@ -197,8 +197,12 @@ Known gaps against Node semantics:
   functions are still snapshots.
 - A `new Map()`/`new Set()` written in an `any` literal (a field, a nested field or an array
   element) is a real collection that `get`/`set`/`add`/`has`/`delete`/`forEach`, spread and
-  `console.log` handle. A native `Map`/`Set` held in a variable is copied when it is stored into
-  such a literal (`{ m: existing }`), so later changes on either side are not shared.
+  `console.log` handle. A native `Map`/`Set` held in a variable is a snapshot whenever it becomes `any`
+  (`const a: any = existing`, `{ m: existing }`), so later changes on either side are not shared;
+  aliasing it would need a live view with native callbacks per key/value type, as arrays have.
+- An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
+  self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
+  element becomes `NaN`, and nesting deeper than 32 levels is stored as a plain copy.
 - The array returned by a method of an `any` class instance (`v.inner.get().push(x)` where
   `get()` returns `this.arr`) is a copy: a compiled call result crosses the call boundary as JSON
   data, so mutating it does not reach the owner. Keep the array in a variable on the object and
