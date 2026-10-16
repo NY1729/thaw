@@ -1256,6 +1256,11 @@
       "name": "a Record aliased to any stays valid and shares writes",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const d: Record<string, number> = { a: 1 };\n  const dv: any = d;\n  console.log(d.a, dv.a);\n  dv.a = 7;\n  dv.c = 5;\n  console.log(d.a, JSON.stringify(d), JSON.stringify(dv));\n  const e: Record<string, any> = { a: 1 };\n  const ev: any = e;\n  ev.a = { x: 1 };\n  ev.b = [2];\n  console.log(JSON.stringify(e), e.a === ev.a);\n}\n"
+    },
+    {
+      "name": "an any assertion on an array literal gives it dynamic elements",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const h: any = { items: [1, 2] as any[] };\n  h.items.push(\"x\");\n  h.items.push({ a: 1 });\n  h.items[0] = \"z\";\n  console.log(h.items.length, JSON.stringify(h.items));\n  const a = [1, 2] as any;\n  a.push(\"s\");\n  const b = [1, 2] as any[];\n  b.unshift(null);\n  console.log(JSON.stringify(a), JSON.stringify(b));\n  const o = { list: [1] } as any;\n  (o as any).list.push(\"w\");\n  console.log(JSON.stringify(o));\n  const m = [[1, 2], [3]] as any[];\n  m[0].push(\"q\");\n  m.push(\"w\");\n  console.log(JSON.stringify(m));\n}\n"
     }
   ]
 }
