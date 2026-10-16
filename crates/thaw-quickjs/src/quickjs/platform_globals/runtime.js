@@ -538,6 +538,7 @@
       case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
       case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
       case 23: return thawGraphApply(thawClassProjectionGet, thawClassProjectionNames, [value]) ?? '';
+      case 24: return thawGraphKind(thawGraphMapSize, value) ? 'map' : thawGraphKind(thawGraphSetSize, value) ? 'set' : '';
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
@@ -548,6 +549,9 @@
       : operation === 1 ? thawGraphReflectOwnKeys(value)
       : operation === 2 ? thawGraphObjectKeys(value)
       : operation === 3 ? thawGraphObjectValues(value)
+      : operation === 4 ? thawGraphArrayFrom(thawGraphApply(thawGraphMapKeys, value, []))
+      : operation === 5 ? thawGraphArrayFrom(thawGraphApply(thawGraphSetValues, value, []))
+      : operation === 6 ? thawGraphArrayFrom(thawGraphApply(thawGraphMapValues, value, []))
       : null;
     if (entries === null) throw new thawGraphTypeError('Invalid native host enumeration');
     return thawGraphEncode(entries, 0, true);
@@ -1155,6 +1159,8 @@
     writable: false, configurable: false,
   });
   const thawGraphMapEntries = thawGraphMapConstructor.prototype.entries;
+  const thawGraphMapKeys = thawGraphMapConstructor.prototype.keys;
+  const thawGraphMapValues = thawGraphMapConstructor.prototype.values;
   const thawGraphSetValues = thawGraphSetConstructor.prototype.values;
   const thawGraphKind = (getter, value) => {
     if (value === null || typeof value !== 'object') return false;

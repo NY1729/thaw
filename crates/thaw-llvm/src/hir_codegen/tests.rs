@@ -428,6 +428,7 @@ include!("tests/ga_contracts.rs");
 include!("tests/gc_contracts.rs");
 include!("tests/gb_contracts.rs");
 include!("tests/ha_contracts.rs");
+include!("tests/ia_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {

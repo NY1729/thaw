@@ -143,6 +143,9 @@ impl<'a> FnLowerer<'a> {
         if let Some(result) = self.lower_json_array_method(member, property, call)? {
             return Ok(result);
         }
+        if let Some(result) = self.lower_json_collection_method(member, property, call)? {
+            return Ok(result);
+        }
         // The private Date field layout is not proof of a native Date.
         // Capture arguments before the internal-slot check, then pass only
         // a verified allocation to every Date getter/setter/converter.
@@ -450,14 +453,29 @@ impl<'a> FnLowerer<'a> {
         } else {
             None
         };
+        let native_non_array = non_array.is_some();
         let non_array = match non_array {
             Some(expr) => expr,
             None => self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?,
         };
         let non_array = if self.infer_expr_type(&non_array)? == HirType::Void {
-            HirExpr::EvalThen(Box::new(non_array), Box::new(undefined))
+            HirExpr::EvalThen(Box::new(non_array), Box::new(undefined.clone()))
         } else {
             self.coerce_to_declared(&HirType::Json, non_array)?
+        };
+        // The native non-array lowering reads Json wrappers and strings; a host-owned value
+        // (a JS array or collection) is called live.
+        let non_array = if native_non_array {
+            let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
+            let live = if self.infer_expr_type(&live)? == HirType::Void {
+                HirExpr::EvalThen(Box::new(live), Box::new(undefined))
+            } else {
+                self.coerce_to_declared(&HirType::Json, live)?
+            };
+            let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
+            HirExpr::Conditional(Box::new(has_handle), Box::new(live), Box::new(non_array), HirType::Json)
+        } else {
+            non_array
         };
         let (array_branch, dynamic, ty) = (array_branch, non_array, HirType::Json);
         // A host-owned array (a live view of a native array, or a JS array) is mutated in place
@@ -473,6 +491,50 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Lit(HirLit::Bool(false)),
         );
         let result = HirExpr::Conditional(Box::new(condition), Box::new(array_branch), Box::new(dynamic), ty);
+        Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?))
+    }
+
+    /// `get`/`set`/`add`/`has`/`delete` on an `any` receiver: a branded Json `Map`/`Set` wrapper
+    /// takes the native wrapper lowering, but a host-owned collection (a real JS `Map`/`Set` from
+    /// an `any` literal field or an npm package) must be called live or the mutation is lost.
+    fn lower_json_collection_method(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let name = property.sym.as_ref();
+        let arity = match name {
+            "get" | "add" | "has" | "delete" => 1,
+            "set" => 2,
+            _ => return Ok(None),
+        };
+        if call.args.len() != arity
+            || call.args.iter().any(|argument| argument.spread.is_some())
+            || !self.json_receiver_candidate(&member.obj)
+        {
+            return Ok(None);
+        }
+        let Ok(receiver) = self.lower_required_member_receiver(&member.obj, name) else {
+            return Ok(None);
+        };
+        if self.infer_expr_type(&receiver)? != HirType::Json {
+            return Ok(None);
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let receiver_name = format!("__thaw_json_collection_receiver_{id}");
+        self.scope.insert(receiver_name.clone(), HirType::Json);
+        let mut copy_member = member.clone();
+        *copy_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(receiver_name.as_str().into(), member.span));
+        let mut copy_call = call.clone();
+        copy_call.callee = Callee::Expr(Box::new(Expr::Member(copy_member.clone())));
+        let native = self.lower_native_instance_builtin_unchecked(&copy_member, property, &copy_call)?;
+        let native_type = self.infer_expr_type(&native)?;
+        let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
+        let live = if self.infer_expr_type(&live)? == native_type { live } else { self.coerce_to_declared(&native_type, live)? };
+        let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
+        let result = HirExpr::Conditional(Box::new(has_handle), Box::new(live), Box::new(native), native_type);
         Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?))
     }
 
