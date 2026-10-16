@@ -177,8 +177,46 @@ impl<'a> FnLowerer<'a> {
                         let mut ordered = vec![HirExpr::Var(receiver_name)];
                         for (position, value) in arguments.into_iter().enumerate() {
                             let actual = self.infer_expr_type(&value)?;
+                            let spreads_json = element == HirType::Json
+                                && (actual == HirType::Json || matches!(actual, HirType::Array(_)))
+                                && actual != HirType::Array(Box::new(element.clone()));
                             let part = if actual == HirType::Array(Box::new(element.clone())) {
                                 value
+                            } else if element == HirType::Json && matches!(actual, HirType::Array(_)) {
+                                // An array argument is spread into an `any[]` receiver.
+                                let as_json = self.coerce_to_declared(&HirType::Json, value)?;
+                                let typed_name = format!("__thaw_concat_typed_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(typed_name.clone(), HirType::Json);
+                                let decoded = self.coerce_to_declared(
+                                    &array_type_for_json_spread(),
+                                    HirExpr::Var(typed_name.clone()),
+                                )?;
+                                self.wrap_call_argument_bindings(decoded, &[(typed_name, HirType::Json, as_json)])?
+                            } else if element == HirType::Json && actual == HirType::Json {
+                                // A dynamic argument is spread when it is an array at run time.
+                                let dynamic_name = format!("__thaw_concat_dynamic_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(dynamic_name.clone(), HirType::Json);
+                                let spread = self.coerce_to_declared(
+                                    &array_type_for_json_spread(),
+                                    HirExpr::Var(dynamic_name.clone()),
+                                )?;
+                                let single = self.lower_native_array_literal(
+                                    vec![HirExpr::Var(dynamic_name.clone())],
+                                    HirType::Json,
+                                )?;
+                                let is_array = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_is_array".into())),
+                                    vec![HirExpr::Var(dynamic_name.clone())],
+                                );
+                                let chosen = HirExpr::Conditional(
+                                    Box::new(is_array),
+                                    Box::new(spread),
+                                    Box::new(single),
+                                    array_type_for_json_spread(),
+                                );
+                                self.wrap_call_argument_bindings(chosen, &[(dynamic_name, HirType::Json, value)])?
                             } else {
                                 let value = self.coerce_array_insert_value(value, &element)
                                     .map_err(|_| format!(
@@ -186,7 +224,11 @@ impl<'a> FnLowerer<'a> {
                                     ))?;
                                 self.lower_native_array_literal(vec![value], element.clone())?
                             };
-                            let ty = self.infer_expr_type(&part)?;
+                            let ty = if spreads_json {
+                                array_type_for_json_spread()
+                            } else {
+                                self.infer_expr_type(&part)?
+                            };
                             let name = format!(
                                 "__thaw_concat_part_{}_{}",
                                 position + 1,
@@ -733,4 +775,8 @@ impl<'a> FnLowerer<'a> {
                 }
         unreachable!("instance builtin category was checked before lowering")
     }
+}
+
+fn array_type_for_json_spread() -> HirType {
+    HirType::Array(Box::new(HirType::Json))
 }

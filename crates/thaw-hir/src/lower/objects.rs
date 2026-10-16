@@ -1,3 +1,21 @@
+impl<'a> FnLowerer<'a> {
+    /// Whether an `any` object literal must be built as one live object: it has a method,
+    /// accessor or well-known-symbol key, or a nested object literal that does.
+    fn object_literal_needs_live_object(&self, object: &SwcObjectLit) -> bool {
+        object.props.iter().any(|property| match property {
+            PropOrSpread::Prop(property) => match property.as_ref() {
+                Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_) => true,
+                Prop::KeyValue(KeyValueProp { key, value }) => {
+                    self.is_compiler_symbol_property(key)
+                        || matches!(value.as_ref(), Expr::Object(inner) if self.object_literal_needs_live_object(inner))
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+}
+
 fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, HirType)> {
     match ty {
         HirType::Function(params, ret) if supplied == usize::MAX || supplied <= params.len() => {
@@ -742,6 +760,15 @@ impl<'a> FnLowerer<'a> {
                             true,
                         )?;
                         ("method", key, None, Some(callback))
+                    } else if let Expr::Object(inner) = value.as_ref() {
+                        // A nested literal that itself has methods is a live object too.
+                        let nested = if self.object_literal_needs_live_object(inner) {
+                            self.lower_dynamic_accessor_object_lit(inner, true)?
+                        } else {
+                            self.lower_object_lit_field_value(value, None)?
+                        };
+                        let nested = self.coerce_to_declared(&HirType::Json, nested)?;
+                        ("data", key, Some(nested), None)
                     } else {
                         let value = self.lower_object_lit_field_value(value, None)?;
                         let value = self.coerce_to_declared(&HirType::Json, value)?;

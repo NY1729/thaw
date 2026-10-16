@@ -159,7 +159,7 @@ impl<'a> FnLowerer<'a> {
                                 };
                                 let comparator = call.args.first().map(|argument| {
                                     if matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
-                                        self.lower_promise_callback(
+                                        self.lower_native_iteration_callback(
                                             &argument.expr,
                                             &[callback_element.clone(), callback_element.clone()],
                                             Some(&HirType::F64),
@@ -295,7 +295,7 @@ impl<'a> FnLowerer<'a> {
                                 ]);
                             }
                         }
-                        let comparator = self.lower_promise_callback(
+                        let comparator = self.lower_native_iteration_callback(
                             &argument.expr,
                             &[element_type.clone(), element_type.clone()],
                             Some(&HirType::F64),
