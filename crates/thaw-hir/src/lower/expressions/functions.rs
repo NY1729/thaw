@@ -275,7 +275,8 @@ impl<'a> FnLowerer<'a> {
                 params.push(HirParam { name, ty: receiver.clone() });
             }
             let mut destructuring = Vec::new();
-            let json_iteration_callback = std::mem::take(&mut lowerer.native_iteration_callback);
+            let json_iteration_callback = std::mem::take(&mut lowerer.native_iteration_callback)
+                | std::mem::take(&mut lowerer.stored_arrow_initializer);
             for (pattern, param) in arrow.params.iter().zip(source_params) {
                 // A callback parameter annotated `any`/`unknown` that the
                 // body *mutates* receives a live JavaScript value, not a
@@ -1058,7 +1059,8 @@ impl<'a> FnLowerer<'a> {
         // whether a mutated parameter really is handed over as a live JS
         // value (a dynamic/`any` slot) or as a native object.
         let expected_parameter_types = parameter_types.to_vec();
-        let json_iteration_callback = std::mem::take(&mut self.native_iteration_callback);
+        let json_iteration_callback = std::mem::take(&mut self.native_iteration_callback)
+            | std::mem::take(&mut self.stored_arrow_initializer);
         let parameter_types = declared_parameter_types.as_slice();
         let sparse_mapping_result = self.sparse_mapping_result;
         self.sparse_mapping_result = false;

@@ -1596,7 +1596,11 @@ impl<'a> FnLowerer<'a> {
                 {
                     return Ok(vec![HirStmt::Let(hir_name, ty, value)]);
                 }
-                let value = self.lower_expr(&Expr::Fn(expression))?;
+                // A declared function is a stored value like `const f = (x: any) => ..`.
+                self.stored_arrow_initializer = true;
+                let value = self.lower_expr(&Expr::Fn(expression));
+                self.stored_arrow_initializer = false;
+                let value = value?;
                 let ty = self.infer_expr_type(&value)?;
                 let hir_name = self.bind_local(&name, ty.clone());
                 Ok(vec![HirStmt::Let(hir_name, ty, value)])

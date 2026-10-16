@@ -795,10 +795,15 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::FunctionRef(source, signature.params.clone(), ret)
                         }
                     }
-                    _ => self.lower_expr_with_expected_type(
-                        init,
-                        annotated.as_ref().or(inferred_expected.as_ref()),
-                    )?,
+                    _ => {
+                        self.stored_arrow_initializer = matches!(init, Expr::Arrow(_));
+                        let lowered = self.lower_expr_with_expected_type(
+                            init,
+                            annotated.as_ref().or(inferred_expected.as_ref()),
+                        );
+                        self.stored_arrow_initializer = false;
+                        lowered?
+                    }
                 };
 
                 let actual_type = self.infer_expr_type_inner(&value).map_err(|error| {

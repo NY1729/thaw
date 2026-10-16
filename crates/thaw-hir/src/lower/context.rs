@@ -120,6 +120,9 @@ struct FnLowerer<'a> {
     /// calls with `Json` elements, so an `any` parameter it mutates stays a (shared) `Json`
     /// instead of becoming a live `JsValue` handle.
     native_iteration_callback: bool,
+    /// The next arrow lowered is the initializer of a `const f = (x: any) => ..`: a stored function
+    /// value keeps `Json` parameters (it may be handed to native iteration), not live `JsValue` ones.
+    stored_arrow_initializer: bool,
     sparse_mapping_result: bool,
     generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,

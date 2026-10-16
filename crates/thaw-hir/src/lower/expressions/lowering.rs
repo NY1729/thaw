@@ -1469,6 +1469,43 @@ impl<'a> FnLowerer<'a> {
                     args.push(self.lower_expr(expression)?);
                 }
                 let tag = self.lower_expr(&tagged.tag)?;
+                // A tag that is a dynamic (`any`) value, e.g. a member of one (`o.t`..``), is
+                // called like any dynamic method: `tag(strings, ...values)` with the template
+                // object handed over as a live view (so `.raw` and identity survive).
+                if matches!(self.infer_expr_type(&tag)?, HirType::Json | HirType::JsValue | HirType::Dynamic) {
+                    let strings_name = format!("__thaw_template_strings_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(strings_name.clone(), HirType::Json);
+                    let site_array = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_template_site".to_string())),
+                        vec![
+                            HirExpr::Lit(HirLit::F64(site)),
+                            HirExpr::ArrayLit(cooked_strings),
+                            HirExpr::ArrayLit(raw_strings),
+                        ],
+                    );
+                    let strings = self.coerce_to_declared_aliasing(&HirType::Json, site_array)?;
+                    let mut call_args = vec![swc_ecma_ast::ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            strings_name.clone().into(),
+                            tagged.span,
+                        ))),
+                    }];
+                    call_args.extend(template.exprs.iter().map(|expression| swc_ecma_ast::ExprOrSpread {
+                        spread: None,
+                        expr: expression.clone(),
+                    }));
+                    let call = Expr::Call(swc_ecma_ast::CallExpr {
+                        span: tagged.span,
+                        ctxt: Default::default(),
+                        callee: swc_ecma_ast::Callee::Expr(tagged.tag.clone()),
+                        args: call_args,
+                        type_args: None,
+                    });
+                    let lowered = self.lower_expr(&call)?;
+                    return self.wrap_call_argument_bindings(lowered, &[(strings_name, HirType::Json, strings)]);
+                }
                 // A tagged-template call is built directly here rather than
                 // through `lower_call` (`invocations/calls.rs`, which a
                 // tagged template has no `CallExpr` AST node to feed), so
@@ -5084,6 +5121,13 @@ impl<'a> FnLowerer<'a> {
             // the typed object form would store it under a string sentinel.
             if self.object_literal_needs_live_object(object) {
                 return self.lower_dynamic_accessor_object_lit(object, true);
+            }
+        }
+        if let (Expr::Array(array), Some(HirType::Json)) = (expr, expected) {
+            if self.literal_holds_live_object(expr) {
+                if let Some(lowered) = self.lower_any_live_array(array)? {
+                    return self.coerce_to_declared(&HirType::Json, lowered);
+                }
             }
         }
         if let (Expr::Object(_), Some(HirType::Json)) = (expr, expected) {

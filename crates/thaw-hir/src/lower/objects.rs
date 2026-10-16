@@ -7,12 +7,68 @@ impl<'a> FnLowerer<'a> {
                 Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_) => true,
                 Prop::KeyValue(KeyValueProp { key, value }) => {
                     self.is_compiler_symbol_property(key)
-                        || matches!(value.as_ref(), Expr::Object(inner) if self.object_literal_needs_live_object(inner))
+                        || matches!(value.as_ref(), Expr::Fn(_))
+                        || matches!(value.as_ref(), Expr::Ident(name) if {
+                            let name = self.resolve_binding(name.sym.as_ref());
+                            self.scope.get(&name).is_some_and(|ty| matches!(
+                                ty, HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)))
+                                || self.signatures.contains_key(&name)
+                        })
+                        || self.literal_holds_live_object(value)
                 }
                 _ => false,
             },
             _ => false,
         })
+    }
+
+    /// Whether an `any` literal (an object, or an array of them, at any depth) holds an object
+    /// literal that must be built as a live object.
+    pub(in crate::lower) fn literal_holds_live_object(&self, expr: &Expr) -> bool {
+        match peel_parens(expr) {
+            Expr::Object(object) => self.object_literal_needs_live_object(object),
+            Expr::Array(array) => array
+                .elems
+                .iter()
+                .flatten()
+                .any(|element| element.spread.is_none() && self.literal_holds_live_object(&element.expr)),
+            _ => false,
+        }
+    }
+
+    /// An `any` array literal that holds live objects: every element is an `any` value (a live
+    /// object, a nested array of them, or a plain value coerced to `Json`), so the elements keep
+    /// their `this` and identity. `None` when an element spreads or awaits (the typed path stays).
+    pub(in crate::lower) fn lower_any_live_array(
+        &mut self,
+        array: &swc_ecma_ast::ArrayLit,
+    ) -> Result<Option<HirExpr>, String> {
+        let mut elements = Vec::with_capacity(array.elems.len());
+        for element in &array.elems {
+            let Some(element) = element else { return Ok(None) };
+            if element.spread.is_some() {
+                return Ok(None);
+            }
+            let value = match peel_parens(&element.expr) {
+                Expr::Object(object) if self.object_literal_needs_live_object(object) => {
+                    self.lower_dynamic_accessor_object_lit(object, true)?
+                }
+                Expr::Array(inner) if self.literal_holds_live_object(&element.expr) => {
+                    match self.lower_any_live_array(inner)? {
+                        Some(inner) => inner,
+                        None => return Ok(None),
+                    }
+                }
+                _ => self.lower_expr(&element.expr)?,
+            };
+            if contains_await(&value) {
+                return Ok(None);
+            }
+            elements.push(self.coerce_to_declared(&HirType::Json, value)?);
+        }
+        let array = HirExpr::ArrayLit(elements);
+        self.infer_expr_type(&array)?;
+        Ok(Some(array))
     }
 }
 
@@ -769,6 +825,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         let nested = self.coerce_to_declared(&HirType::Json, nested)?;
                         ("data", key, Some(nested), None)
+                    } else if let (Expr::Array(inner), true) = (peel_parens(value), self.literal_holds_live_object(value)) {
+                        let array = match self.lower_any_live_array(inner)? {
+                            Some(array) => array,
+                            None => self.lower_object_lit_field_value(value, None)?,
+                        };
+                        let array = self.coerce_to_declared(&HirType::Json, array)?;
+                        ("data", key, Some(array), None)
                     } else {
                         let value = self.lower_object_lit_field_value(value, None)?;
                         let value = self.coerce_to_declared(&HirType::Json, value)?;
