@@ -1153,40 +1153,7 @@ fn run_host_child(
         }
     };
     let _ = events.send(HostChildEvent::Spawn(process.id()));
-    let stdout_events = events.clone();
-    let stdout = process.stdout.take();
-    let stdout_thread = std::thread::spawn(move || {
-        if let Some(mut stdout) = stdout {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match stdout.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(length) => {
-                        let _ =
-                            stdout_events.send(HostChildEvent::Stdout(buffer[..length].to_vec()));
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    });
-    let stderr_events = events.clone();
-    let stderr = process.stderr.take();
-    let stderr_thread = std::thread::spawn(move || {
-        if let Some(mut stderr) = stderr {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match stderr.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(length) => {
-                        let _ =
-                            stderr_events.send(HostChildEvent::Stderr(buffer[..length].to_vec()));
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    });
+    let output_thread = pump_child_output(process.stdout.take(), process.stderr.take(), events.clone());
     // Writes go through their own thread: a child that stops reading stdin
     // must never keep this control loop from handling kill/exit.
     let mut stdin = process.stdin.take().map(|mut pipe| {
@@ -1242,9 +1209,117 @@ fn run_host_child(
     // `exit` is the process ending; `close` (the final Exit event) waits for the output pipes to reach EOF, which a
     // detached grandchild holding them open can delay.
     let _ = events.send(HostChildEvent::Exited { code, signal });
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
+    let _ = output_thread.join();
     let _ = events.send(HostChildEvent::Exit { code, signal });
+}
+
+/// Read one chunk from a child pipe and forward it; false once the pipe is finished.
+fn forward_child_output(pipe: &mut dyn Read, is_stderr: bool, events: &Sender<HostChildEvent>, buffer: &mut [u8]) -> bool {
+    match pipe.read(buffer) {
+        Ok(0) => false,
+        Ok(length) => {
+            let bytes = buffer[..length].to_vec();
+            let _ = events.send(if is_stderr { HostChildEvent::Stderr(bytes) } else { HostChildEvent::Stdout(bytes) });
+            true
+        }
+        Err(error) => error.kind() == io::ErrorKind::Interrupted,
+    }
+}
+
+/// A child output pipe: its descriptor, reader and whether it is stderr.
+#[cfg(unix)]
+type OutputPipe = (i32, Box<dyn Read + Send>, bool);
+
+/// Forward a child's stdout and stderr as events, in the order the pipes became readable.
+///
+/// One reader thread per pipe races on wake-up: a child that wrote stdout and then stderr could have the
+/// stderr event overtake stdout, and execFile's per-pipe `maxBuffer` then overflows on the wrong pipe.
+/// epoll reports descriptors in the order they became ready, which is what libuv's poll phase gives Node.
+#[cfg(unix)]
+fn pump_child_output(
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    events: Sender<HostChildEvent>,
+) -> std::thread::JoinHandle<()> {
+    use std::os::fd::AsRawFd;
+    let mut pipes: Vec<OutputPipe> = Vec::new();
+    if let Some(pipe) = stdout {
+        pipes.push((pipe.as_raw_fd(), Box::new(pipe), false));
+    }
+    if let Some(pipe) = stderr {
+        pipes.push((pipe.as_raw_fd(), Box::new(pipe), true));
+    }
+    std::thread::spawn(move || {
+        let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        std::thread::scope(|scope| {
+            let mut live: Vec<Option<OutputPipe>> = Vec::new();
+            let mut registered = 0;
+            for (fd, mut reader, is_stderr) in pipes {
+                let mut event = libc::epoll_event { events: libc::EPOLLIN as u32, u64: live.len() as u64 };
+                if epoll >= 0 && unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_ADD, fd, &mut event) } == 0 {
+                    live.push(Some((fd, reader, is_stderr)));
+                    registered += 1;
+                } else {
+                    // Not pollable: give this pipe a blocking reader of its own rather than losing its output.
+                    live.push(None);
+                    let events = events.clone();
+                    scope.spawn(move || {
+                        let mut buffer = [0u8; 8192];
+                        while forward_child_output(&mut *reader, is_stderr, &events, &mut buffer) {}
+                    });
+                }
+            }
+            let mut buffer = [0u8; 8192];
+            let mut ready = [libc::epoll_event { events: 0, u64: 0 }; 2];
+            while registered > 0 {
+                let count = unsafe { libc::epoll_wait(epoll, ready.as_mut_ptr(), ready.len() as i32, -1) };
+                if count < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                for event in &ready[..count as usize] {
+                    let index = event.u64 as usize;
+                    let Some((fd, reader, is_stderr)) = live[index].as_mut() else { continue };
+                    if !forward_child_output(&mut **reader, *is_stderr, &events, &mut buffer) {
+                        unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_DEL, *fd, std::ptr::null_mut()) };
+                        live[index] = None;
+                        registered -= 1;
+                    }
+                }
+            }
+        });
+        if epoll >= 0 {
+            unsafe { libc::close(epoll) };
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn pump_child_output(
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    events: Sender<HostChildEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::scope(|scope| {
+            if let Some(mut pipe) = stdout {
+                let events = events.clone();
+                scope.spawn(move || {
+                    let mut buffer = [0u8; 8192];
+                    while forward_child_output(&mut pipe, false, &events, &mut buffer) {}
+                });
+            }
+            if let Some(mut pipe) = stderr {
+                let events = events.clone();
+                scope.spawn(move || {
+                    let mut buffer = [0u8; 8192];
+                    while forward_child_output(&mut pipe, true, &events, &mut buffer) {}
+                });
+            }
+        });
+    })
 }
 
 /// `Command::spawn`, retried while the kernel answers ETXTBSY.
@@ -2369,6 +2444,24 @@ mod m_wave_tests {
         assert!(kill_host_child(handle, libc::SIGKILL));
         drain(host_children_active, std::time::Instant::now() + Duration::from_secs(5));
         assert!(!host_children_active());
+    }
+
+    /// A child that writes stdout and then stderr must have the two reach the event loop in that order,
+    /// however the reader threads happen to be scheduled (execFile's per-pipe `maxBuffer` depends on it).
+    #[cfg(unix)]
+    #[test]
+    fn stdout_then_stderr_output_keeps_write_order_across_pipes() {
+        for round in 0..300 {
+            spawn_host_child(
+                "sh".to_string(),
+                serde_json::json!(["-c", "printf abcd; printf x >&2"]).to_string(),
+                serde_json::json!({}).to_string(),
+            );
+            let events = drain(host_children_active, std::time::Instant::now() + Duration::from_secs(10));
+            let first = |kind: &str| events.iter().position(|event| event["type"] == kind);
+            let (out, err) = (first("stdout").expect("stdout event"), first("stderr").expect("stderr event"));
+            assert!(out < err, "round {round}: stderr overtook stdout: {events:?}");
+        }
     }
 
     #[test]
