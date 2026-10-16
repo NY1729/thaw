@@ -1456,6 +1456,7 @@ impl<'a> FnLowerer<'a> {
     fn has_live_view_identity_inner(&self, ty: &HirType) -> bool {
         match ty {
             HirType::Array(_) => true,
+            HirType::Map(..) | HirType::Set(_) => Self::native_collection_view_supported(ty),
             // Plain fixed objects already compare through the owner projection below.
             HirType::Object(_) => self.class_instance_supports_live_methods(ty),
             _ => false,

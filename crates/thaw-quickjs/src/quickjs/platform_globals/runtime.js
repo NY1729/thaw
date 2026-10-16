@@ -65,6 +65,19 @@
   const thawOriginSerialSet = WeakMap.prototype.set;
   const thawProjectedReceivers = new WeakSet();
   const thawNativeViews = new WeakSet();
+  // Native Map/Set live views (`__thaw_collection_with_native_view`): view -> { isMap, keys, get }.
+  const thawNativeCollections = new WeakMap();
+  const thawNativeCollectionState = value => value !== null && typeof value === 'object'
+    ? thawDateApply(thawOriginSerialGet, thawNativeCollections, [value]) : undefined;
+  // `[[k, v], ...]` for a Map view, `[v, ...]` for a Set view, read live from the native collection.
+  const thawNativeCollectionSnapshot = state => {
+    const keys = state.keys();
+    if (!state.isMap) return keys;
+    const entries = [];
+    for (let index = 0; index < keys.length; index++)
+      thawDateApply(Array.prototype.push, entries, [[keys[index], state.get(keys[index])]]);
+    return entries;
+  };
   const thawProjectedReceiverHas = WeakSet.prototype.has;
   const thawProjectedReceiverAdd = WeakSet.prototype.add;
   const thawSameOrigin = (left, right) => {
@@ -539,13 +552,28 @@
       case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
       case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
       case 23: return thawGraphApply(thawClassProjectionGet, thawClassProjectionNames, [value]) ?? '';
-      case 24: return thawGraphKind(thawGraphMapSize, value) ? 'map' : thawGraphKind(thawGraphSetSize, value) ? 'set' : '';
+      case 24: {
+        const native = thawNativeCollectionState(value);
+        if (native) return native.isMap ? 'map' : 'set';
+        return thawGraphKind(thawGraphMapSize, value) ? 'map' : thawGraphKind(thawGraphSetSize, value) ? 'set' : '';
+      }
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
     }
   };
   globalThis.__thaw_json_host_enumerate = (value, operation) => {
+    const nativeCollection = operation >= 4 && operation <= 6 ? thawNativeCollectionState(value) : undefined;
+    if (nativeCollection) {
+      const keys = nativeCollection.keys();
+      let items = keys;
+      if (operation === 6) {
+        items = [];
+        for (let index = 0; index < keys.length; index++)
+          thawDateApply(Array.prototype.push, items, [nativeCollection.get(keys[index])]);
+      }
+      return thawGraphEncode(items, 0, true);
+    }
     const entries = operation === 0 ? thawGraphObjectEntries(value)
       : operation === 1 ? thawGraphReflectOwnKeys(value)
       : operation === 2 ? thawGraphObjectKeys(value)
@@ -1333,6 +1361,10 @@
       } else if (thawGraphDate(value)) {
         const time = thawGraphDate(value).time;
         thawGraphApply(thawGraphArrayPush, nodes, [{ d: thawGraphNumberIsFinite(time) ? time : null }]);
+      } else if (thawNativeCollectionState(value)) {
+        const native = thawNativeCollectionState(value);
+        thawGraphApply(thawGraphArrayPush, nodes,
+          [{ [native.isMap ? 'm' : 's']: token(thawNativeCollectionSnapshot(native)) }]);
       } else if (thawGraphKind(thawGraphMapSize, value)) {
         thawGraphApply(thawGraphArrayPush, nodes, [{ m: token(thawGraphArrayFrom(thawGraphApply(thawGraphMapEntries, value, []))) }]);
       } else if (thawGraphKind(thawGraphSetSize, value)) {
@@ -2324,6 +2356,80 @@
           return 'value' in descriptor ? write(index, descriptor.value) : has(index);
         },
       });
+      thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [view]);
+      return view;
+    },
+    writable: false, configurable: false,
+  });
+  // A native Map/Set held in `any` is a live view: every operation goes through callbacks over the
+  // native collection, so both sides observe each change. The object inherits from Map.prototype /
+  // Set.prototype (so `instanceof` and the toStringTag say Map/Set) but never touches their internal
+  // slots: its own closures serve the whole API. Iterators walk a snapshot of the keys.
+  thawGraphDefineProperty(globalThis, '__thaw_collection_with_native_view', {
+    value: (isMap, keyKind, valueKind, sizeCb, hasCb, getCb, setCb, deleteCb, clearCb, keysCb) => {
+      const receiver = thawGraphObjectCreate(null);
+      const keyOk = key => keyKind === 'any' || typeof key === keyKind;
+      const valueOk = value => valueKind === 'any' || typeof value === valueKind;
+      const keys = () => thawGraphApply(keysCb, receiver, []);
+      const has = key => keyOk(key) && thawGraphApply(hasCb, receiver, [key]) === true;
+      const get = key => keyOk(key) ? thawGraphApply(getCb, receiver, [key]) : undefined;
+      const proto = thawGraphObjectCreate(isMap ? thawGraphMapConstructor.prototype : thawGraphSetConstructor.prototype);
+      const view = thawGraphObjectCreate(proto);
+      const define = (name, fn) => thawGraphDefineProperty(proto, name,
+        { value: fn, writable: true, configurable: true, enumerable: false });
+      const iterate = items => thawDateApply(Array.prototype[thawBootstrapIteratorKey], items, []);
+      const reject = () => new thawGraphTypeError(
+        'Cannot store this value in a native ' + (isMap ? 'Map' : 'Set') + ' view');
+      const entries = () => {
+        const out = [];
+        const all = keys();
+        for (let index = 0; index < all.length; index++)
+          thawGraphApply(thawGraphArrayPush, out, [isMap ? [all[index], get(all[index])] : [all[index], all[index]]]);
+        return out;
+      };
+      thawGraphDefineProperty(proto, 'size', {
+        get: () => thawGraphApply(sizeCb, receiver, []), configurable: true, enumerable: false,
+      });
+      define('has', has);
+      define('delete', key => keyOk(key) && thawGraphApply(deleteCb, receiver, [key]) === true);
+      define('clear', () => { thawGraphApply(clearCb, receiver, []); });
+      define('forEach', (callback, thisArg) => {
+        if (typeof callback !== 'function') throw new thawGraphTypeError(String(callback) + ' is not a function');
+        const all = keys();
+        for (let index = 0; index < all.length; index++) {
+          const key = all[index];
+          if (!has(key)) continue;
+          thawDateApply(callback, thisArg, [isMap ? get(key) : key, key, view]);
+        }
+      });
+      if (isMap) {
+        define('get', get);
+        define('set', (key, value) => {
+          if (!keyOk(key) || !valueOk(value)) throw reject();
+          thawGraphApply(setCb, receiver, [key, value]);
+          return view;
+        });
+        define('keys', () => iterate(keys()));
+        define('values', () => {
+          const all = keys();
+          const out = [];
+          for (let index = 0; index < all.length; index++) thawGraphApply(thawGraphArrayPush, out, [get(all[index])]);
+          return iterate(out);
+        });
+        define('entries', () => iterate(entries()));
+        define(thawBootstrapIteratorKey, () => iterate(entries()));
+      } else {
+        define('add', value => {
+          if (!keyOk(value)) throw reject();
+          thawGraphApply(setCb, receiver, [value]);
+          return view;
+        });
+        define('values', () => iterate(keys()));
+        define('keys', () => iterate(keys()));
+        define('entries', () => iterate(entries()));
+        define(thawBootstrapIteratorKey, () => iterate(keys()));
+      }
+      thawGraphApply(thawOriginSerialSet, thawNativeCollections, [view, { isMap, keys, get }]);
       thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [view]);
       return view;
     },

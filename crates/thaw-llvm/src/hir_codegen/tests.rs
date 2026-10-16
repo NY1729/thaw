@@ -571,3 +571,5 @@ fn typed_quickjs_wrapper_lease_requires_all_paths_to_return_native_jsvalue() {
     assert!(!is_proven_typed_quickjs_wrapper(&side_effecting_body));
 }
 include!("tests/fb_contracts.rs");
+
+include!("tests/ka_contracts.rs");
