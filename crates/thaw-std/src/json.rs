@@ -48,6 +48,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thaw_arena::NativeStr as CStr;
 
+mod native_links;
+
 /// A live-shared native array -- `Rc` gives every read of the same
 /// logical array (via `Value::clone`) a handle to the *same* underlying
 /// `Vec`, so a mutation through one alias (`thaw_json_index_set`, or a
@@ -871,6 +873,7 @@ impl<T> SharedValue<T> {
 impl<T> Drop for SharedValue<T> {
     fn drop(&mut self) {
         let key = self as *const Self as usize;
+        native_links::forget(key);
         let _ = PROTOTYPES.try_with(|table| {
             let previous = { table.borrow_mut().remove(&key) };
             drop(previous);
@@ -955,30 +958,30 @@ impl Value {
 
     fn as_array(&self) -> Option<&Vec<Value>> {
         match self {
-            Value::Array(items) => Some(unsafe { &*items.get() }),
+            Value::Array(items) => Some(shared_array_ref(items)),
             _ => None,
         }
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn as_array_mut(&self) -> Option<&mut Vec<Value>> {
+    fn as_array_mut(&self) -> Option<native_links::ArrayMut<'_>> {
         match self {
-            Value::Array(items) => Some(unsafe { &mut *items.get() }),
+            Value::Array(items) => Some(shared_array_ref_mut(items)),
             _ => None,
         }
     }
 
     fn as_object(&self) -> Option<&indexmap::IndexMap<Vec<u8>, Value>> {
         match self {
-            Value::Object(fields) => Some(unsafe { &*fields.get() }),
+            Value::Object(fields) => Some(shared_object_ref(fields)),
             _ => None,
         }
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn as_object_mut(&self) -> Option<&mut indexmap::IndexMap<Vec<u8>, Value>> {
+    fn as_object_mut(&self) -> Option<native_links::ObjectMut<'_>> {
         match self {
-            Value::Object(fields) => Some(unsafe { &mut *fields.get() }),
+            Value::Object(fields) => Some(shared_object_ref_mut(fields)),
             _ => None,
         }
     }
@@ -1032,7 +1035,7 @@ impl Value {
             Value::Wtf8(bytes) => Value::Wtf8(bytes.clone()),
             Value::Array(items) => {
                 let copy = Value::shared_array(
-                    unsafe { &*items.get() }
+                    shared_array_ref(items)
                         .iter()
                         .map(|item| item.deep_clone_mode(live))
                         .collect(),
@@ -1290,21 +1293,33 @@ pub unsafe extern "C" fn thaw_json_state_key(value: *const Value) -> *const u8 {
 /// apply). See `SharedArray`'s own doc comment for why this is a raw
 /// `UnsafeCell` read (not a `RefCell` borrow) in the first place.
 fn shared_array_ref(items: &SharedArray) -> &Vec<Value> {
+    native_links::pull(Rc::as_ptr(items) as usize);
     unsafe { &*items.get() }
 }
 
 #[allow(clippy::mut_from_ref)]
-fn shared_array_ref_mut(items: &SharedArray) -> &mut Vec<Value> {
-    unsafe { &mut *items.get() }
+fn shared_array_ref_mut(items: &SharedArray) -> native_links::ArrayMut<'_> {
+    let address = Rc::as_ptr(items) as usize;
+    native_links::pull(address);
+    native_links::ArrayMut {
+        vec: unsafe { &mut *items.get() },
+        address,
+    }
 }
 
 fn shared_object_ref(fields: &SharedObject) -> &indexmap::IndexMap<Vec<u8>, Value> {
+    native_links::pull(Rc::as_ptr(fields) as usize);
     unsafe { &*fields.get() }
 }
 
 #[allow(clippy::mut_from_ref)]
-fn shared_object_ref_mut(fields: &SharedObject) -> &mut indexmap::IndexMap<Vec<u8>, Value> {
-    unsafe { &mut *fields.get() }
+fn shared_object_ref_mut(fields: &SharedObject) -> native_links::ObjectMut<'_> {
+    let address = Rc::as_ptr(fields) as usize;
+    native_links::pull(address);
+    native_links::ObjectMut {
+        map: unsafe { &mut *fields.get() },
+        address,
+    }
 }
 
 fn object_identity_key(object: &Value) -> Option<usize> {
@@ -2262,7 +2277,7 @@ fn ordered_json(value: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(items) => {
-            Value::shared_array(unsafe { &*items.get() }.iter().map(ordered_json).collect())
+            Value::shared_array(shared_array_ref(items).iter().map(ordered_json).collect())
         }
         other => other.clone(),
     }
@@ -2798,8 +2813,8 @@ impl DestroyNode {
 
     fn take_values(&self) -> Vec<Value> {
         match self {
-            Self::Array(items) => std::mem::take(shared_array_ref_mut(items)),
-            Self::Object(fields) => std::mem::take(shared_object_ref_mut(fields))
+            Self::Array(items) => std::mem::take(&mut *shared_array_ref_mut(items)),
+            Self::Object(fields) => std::mem::take(&mut *shared_object_ref_mut(fields))
                 .into_iter()
                 .map(|(_, value)| value)
                 .collect(),
@@ -5273,7 +5288,7 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
         Value::String(text) => write_json_string(text.as_bytes(), out),
         Value::Wtf8(bytes) => write_json_string(bytes, out),
         Value::Array(items) => {
-            let items = unsafe { &*items.get() };
+            let items = shared_array_ref(items);
             if items.is_empty() {
                 out.extend_from_slice(b"[]");
                 return;
@@ -5609,7 +5624,7 @@ pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -
     let value = unsafe { consume_owned_json_value(value) };
     let result = value
         .as_object_mut()
-        .and_then(|fields| fields.shift_remove(to_key(key).as_slice()))
+        .and_then(|mut fields| fields.shift_remove(to_key(key).as_slice()))
         .unwrap_or_else(napi_undefined_value);
     leak(result)
 }
@@ -5690,7 +5705,7 @@ pub unsafe extern "C" fn thaw_json_index_set(
                     mark_array_holes(items, old_len..index);
                 }
                 mark_array_present(items, index);
-                let items = shared_array_ref_mut(items);
+                let mut items = shared_array_ref_mut(items);
                 if items.len() <= index {
                     // A write past the end leaves the intermediate slots as
                     // real JS array *holes*, which read back as `undefined`
@@ -5776,7 +5791,7 @@ pub unsafe extern "C" fn thaw_json_index_get_mut(value: *mut Value, index: f64) 
         mark_array_holes(items, old_len..index);
     }
     mark_array_present(items, index);
-    let items = shared_array_ref_mut(items);
+    let mut items = shared_array_ref_mut(items);
     if items.len() <= index {
         // Intermediate slots are real JS array holes reading as
         // `undefined` (see `thaw_json_index_set`'s own comment).
@@ -6360,7 +6375,7 @@ pub extern "C" fn thaw_json_date_set_timestamp(value: *mut Value, timestamp: f64
         unsafe { thaw_arena::destroy_string(result.value.cast_mut()) };
         return actual;
     }
-    if let Some(fields) = value.as_object_mut() {
+    if let Some(mut fields) = value.as_object_mut() {
         fields.insert(b"timestamp".to_vec(), number_value(timestamp));
         return timestamp;
     }
@@ -7705,14 +7720,14 @@ pub unsafe extern "C" fn thaw_json_object_is_bool(value: *const Value, other: bo
 
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
-    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
         items.push(number_value(value));
     }
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_string(array: *mut Value, value: *const c_char) {
-    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
         // A null `Str` slot is an `undefined` element (a tagged template's invalid-escape cooked entry).
         items.push(if value.is_null() {
             napi_undefined_value()
@@ -7725,7 +7740,7 @@ pub extern "C" fn thaw_json_array_push_string(array: *mut Value, value: *const c
 /// Pushes the complete registered native WTF-8 string, including embedded NUL bytes.
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_native_wtf8_string(array: *mut Value, value: *const c_char) {
-    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
         items.push(if value.is_null() {
             Value::Null
         } else {
@@ -7739,7 +7754,7 @@ pub extern "C" fn thaw_json_array_push_native_wtf8_string(array: *mut Value, val
 
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_bool(array: *mut Value, value: u8) {
-    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
         items.push(Value::Bool(value != 0));
     }
 }
@@ -7758,7 +7773,7 @@ pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value
     let Some(value) = (unsafe { value.as_ref() }).cloned() else {
         return;
     };
-    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
         items.push(value);
     }
 }
@@ -7886,7 +7901,7 @@ fn revive_framed_errors(value: Value) -> Value {
             }
         }
         Value::Array(_) => {
-            if let Some(items) = value.as_array_mut() {
+            if let Some(mut items) = value.as_array_mut() {
                 for item in items.iter_mut() {
                     *item = revive_framed_errors(std::mem::replace(item, Value::Null));
                 }
@@ -8153,14 +8168,14 @@ pub extern "C" fn thaw_json_map_or_set_set(
     let Value::Object(fields_rc) = value else {
         return leak(value.clone());
     };
-    let fields = shared_object_ref_mut(fields_rc);
+    let mut fields = shared_object_ref_mut(fields_rc);
     let entries_rc = fields
         .entry(b"__thaw_map_entries__".to_vec())
         .or_insert_with(|| Value::shared_array(Vec::new()));
     let Value::Array(entries_rc) = entries_rc else {
         unreachable!()
     };
-    let entries = shared_array_ref_mut(entries_rc);
+    let mut entries = shared_array_ref_mut(entries_rc);
     let existing = entries.iter_mut().find(|entry| {
         entry
             .as_array()
@@ -8187,14 +8202,14 @@ pub extern "C" fn thaw_json_map_or_set_add(
     let Value::Object(fields_rc) = value else {
         return leak(value.clone());
     };
-    let fields = shared_object_ref_mut(fields_rc);
+    let mut fields = shared_object_ref_mut(fields_rc);
     let values_rc = fields
         .entry(b"__thaw_set_values__".to_vec())
         .or_insert_with(|| Value::shared_array(Vec::new()));
     let Value::Array(values_rc) = values_rc else {
         unreachable!()
     };
-    let values = shared_array_ref_mut(values_rc);
+    let mut values = shared_array_ref_mut(values_rc);
     let already_present = values
         .iter()
         .any(|candidate| unsafe { thaw_json_same_value_zero(candidate, element) } != 0);
@@ -8219,7 +8234,7 @@ pub extern "C" fn thaw_json_map_or_set_delete(
     };
     let fields = shared_object_ref(fields_rc);
     if let Some(Value::Array(entries_rc)) = fields.get(b"__thaw_map_entries__".as_slice()) {
-        let entries = shared_array_ref_mut(entries_rc);
+        let mut entries = shared_array_ref_mut(entries_rc);
         entries.retain(|entry| {
             let entry_key = entry.as_array().and_then(|pair| pair.first());
             entry_key
@@ -8228,7 +8243,7 @@ pub extern "C" fn thaw_json_map_or_set_delete(
         return leak(value.clone());
     }
     if let Some(Value::Array(values_rc)) = fields.get(b"__thaw_set_values__".as_slice()) {
-        let values = shared_array_ref_mut(values_rc);
+        let mut values = shared_array_ref_mut(values_rc);
         values.retain(|candidate| unsafe { thaw_json_same_value_zero(candidate, key) } == 0);
         return leak(value.clone());
     }
@@ -8468,7 +8483,7 @@ pub extern "C" fn thaw_json_array_extend(array: *mut Value, other: *mut Value) {
     else {
         return;
     };
-    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
         items.extend(extra);
     }
 }
@@ -8484,7 +8499,7 @@ pub extern "C" fn thaw_json_array_assign(target: *mut Value, source: *mut Value)
     else {
         return target;
     };
-    if let Some(slot) = (unsafe { target.as_ref() }).and_then(Value::as_array_mut) {
+    if let Some(mut slot) = (unsafe { target.as_ref() }).and_then(Value::as_array_mut) {
         *slot = items;
     }
     target
@@ -8565,7 +8580,22 @@ fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
     if !object_writable(object, &key) {
         return;
     }
-    if let Some(fields) = (unsafe { object.as_ref() }).and_then(Value::as_object_mut) {
+    if let (Some(Value::Array(items)), b"length") = (unsafe { object.as_ref() }, key.as_slice()) {
+        // `array.length = n` truncates, or extends with holes.
+        if let Some(length) = value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= u32::MAX as f64)
+        {
+            let length = length as usize;
+            let old = shared_array_ref(items).len();
+            if length > old {
+                mark_array_holes(items, old..length);
+            }
+            shared_array_ref_mut(items).resize(length, napi_undefined_value());
+        }
+        return;
+    }
+    if let Some(mut fields) = (unsafe { object.as_ref() }).and_then(Value::as_object_mut) {
         fields.insert(key, value);
     }
 }
@@ -8650,7 +8680,7 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
         }
         return 1;
     }
-    if let Some(fields) = (unsafe { object.as_ref() }).and_then(Value::as_object_mut) {
+    if let Some(mut fields) = (unsafe { object.as_ref() }).and_then(Value::as_object_mut) {
         // `serde_json::Map::remove` (with the `preserve_order` feature
         // this crate builds with) is `swap_remove` -- it moves the map's
         // last entry into the removed slot instead of shifting the
@@ -8711,7 +8741,7 @@ pub unsafe extern "C" fn thaw_json_object_assign(
             ASSIGN_ERROR.with(|error| error.set(true));
             break;
         }
-        if let Some(fields) = (unsafe { target.as_ref() }).and_then(Value::as_object_mut) {
+        if let Some(mut fields) = (unsafe { target.as_ref() }).and_then(Value::as_object_mut) {
             fields.insert(key, value);
         }
     }

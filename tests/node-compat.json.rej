@@ -1,0 +1,24 @@
+--- tests/node-compat.json
++++ tests/node-compat.json
+@@ -1261,6 +1261,21 @@
+       "name": "an any assertion on an array literal gives it dynamic elements",
+       "expect": "matched",
+       "source": "async function main(): Promise<void> {\n  const h: any = { items: [1, 2] as any[] };\n  h.items.push(\"x\");\n  h.items.push({ a: 1 });\n  h.items[0] = \"z\";\n  console.log(h.items.length, JSON.stringify(h.items));\n  const a = [1, 2] as any;\n  a.push(\"s\");\n  const b = [1, 2] as any[];\n  b.unshift(null);\n  console.log(JSON.stringify(a), JSON.stringify(b));\n  const o = { list: [1] } as any;\n  (o as any).list.push(\"w\");\n  console.log(JSON.stringify(o));\n  const m = [[1, 2], [3]] as any[];\n  m[0].push(\"q\");\n  m.push(\"w\");\n  console.log(JSON.stringify(m));\n}\n"
++    },
++    {
++      "name": "json arrays of primitives written through an any view stay linked both ways",
++      "expect": "matched",
++      "source": "async function main(): Promise<void> {\n  const nat: number[][] = [[1]];\n  const v: any = nat;\n  const inner: any = [5, 6];\n  v[0] = inner;\n  inner.splice(0, 1);\n  console.log(nat[0].length, nat[0][0]);\n  inner.unshift(1, 2);\n  console.log(nat[0].join(\",\"));\n  nat[0][1] = 99;\n  console.log(inner[1], inner.length);\n  nat[0].push(4);\n  console.log(inner.join(\",\"), v[0].length);\n  inner.splice(2);\n  console.log(nat[0].length);\n  inner.fill(7);\n  console.log(nat[0].join(\",\"));\n\n  const words: string[][] = [[\"a\"]];\n  const wv: any = words;\n  const w: any = [\"x\", \"y\"];\n  wv[0] = w;\n  w.push(\"z\");\n  console.log(words[0].join(\"-\"), words[0].length);\n  words[0][0] = \"q\";\n  console.log(w.join(\"-\"));\n  w[1] = \"yy\";\n  console.log(words[0][1]);\n\n  const flags: boolean[][] = [[true]];\n  const fv: any = flags;\n  const f: any = [false, true];\n  fv[0] = f;\n  f.push(false);\n  console.log(flags[0].length, flags[0][0], flags[0][2]);\n  flags[0][0] = true;\n  console.log(f[0]);\n\n  const parsed: number[][] = [];\n  const pv: any = parsed;\n  const j = JSON.parse(\"[1,2]\");\n  pv.push(j);\n  j.push(3);\n  console.log(parsed.length, parsed[0].length);\n\n  const two: number[][] = [[0], [0]];\n  const tv: any = two;\n  const shared: any = [1];\n  tv[0] = shared;\n  tv[1] = shared;\n  shared.push(2);\n  console.log(two[0].length, two[1].length);\n\n  await new Promise<void>((resolve) => setTimeout(resolve, 5));\n  inner.push(8);\n  console.log(nat[0].length, nat[0][nat[0].length - 1]);\n  console.log(v[0] === inner, v[0] === v[0]);\n}\n"
++    },
++    {
++      "name": "json object written through an any view stays shared with the typed record",
++      "expect": "matched",
++      "source": "interface P { n: number; s: string; ok: boolean }\nasync function main(): Promise<void> {\n  const objs: P[] = [{ n: 1, s: \"a\", ok: false }];\n  const v: any = objs;\n  const j: any = { n: 2, s: \"b\", ok: true };\n  v[0] = j;\n  j.n = 9;\n  j.s = \"bb\";\n  j.ok = false;\n  console.log(objs[0].n, objs[0].s, objs[0].ok);\n  objs[0].n = 10;\n  objs[0].s = \"typed\";\n  console.log(j.n, j.s, JSON.stringify(j));\n  v.push(j);\n  j.n = 11;\n  console.log(objs[1].n, objs[0].n, v[0] === j, v[1] === j);\n  const parsed = JSON.parse('{\"n\":5,\"s\":\"p\",\"ok\":true}');\n  v[0] = parsed;\n  parsed.n = 6;\n  console.log(objs[0].n);\n  await new Promise<void>((resolve) => setTimeout(resolve, 5));\n  j.n = 12;\n  console.log(objs[1].n);\n}\n"
++    },
++    {
++      "name": "linked json values survive arena resets",
++      "expect": "matched",
++      "source": "async function main(): Promise<void> {\n  const words: string[][] = [[\"a\"]];\n  const wv: any = words;\n  const w: any = [\"x\"];\n  wv[0] = w;\n  const objs: { n: number; s: string }[] = [{ n: 0, s: \"z\" }];\n  const ov: any = objs;\n  const o: any = { n: 1, s: \"q\" };\n  ov[0] = o;\n  let sum = 0;\n  for (let i = 0; i < 200; i++) {\n    w.push(\"item\" + i);\n    o.n = i;\n    o.s = \"s\" + i;\n    await new Promise<void>((resolve) => setTimeout(resolve, 0));\n    const junk: string[] = [];\n    for (let k = 0; k < 200; k++) junk.push(\"junk\" + k + i);\n    sum += junk.length + words[0].length + objs[0].n;\n    if (words[0][words[0].length - 1] !== \"item\" + i || objs[0].s !== \"s\" + i) {\n      console.log(\"MISMATCH\", i, words[0][words[0].length - 1], objs[0].s);\n      return;\n    }\n  }\n  console.log(words[0].length, objs[0].n, sum, w.length, o.s);\n}\n"
+     }
+   ]
+ }

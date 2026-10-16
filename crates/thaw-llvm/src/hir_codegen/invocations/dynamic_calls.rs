@@ -165,6 +165,37 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
             "__thaw_native_view_target" => self.compile_native_view_target(args),
+            "__thaw_json_link_native" | "__thaw_json_link_native_object" =>
+                self.compile_json_link_native(name, args),
+            "__thaw_json_note_view_copy" => (|| {
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_note_view_copy").unwrap(), &[], "note_view_copy",
+                ).map_err(|error| error.to_string())?;
+                Ok(self.context.i8_type().const_zero().into())
+            })(),
+            "__thaw_json_has_native_link" | "__thaw_json_linked_array" => {
+                let [array] = args else {
+                    return Some(Err("native link query expects one array".into()));
+                };
+                let function = if name == "__thaw_json_has_native_link" {
+                    "thaw_json_has_native_link"
+                } else {
+                    "thaw_json_linked_array"
+                };
+                (|| {
+                    let array = self.compile_expr(array)?.into_pointer_value();
+                    let result = self.builder.build_call(
+                        self.module.get_function(function).unwrap(), &[array.into()], function,
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or_else(|| "native link query returned no value".to_string())?;
+                    if name != "__thaw_json_has_native_link" {
+                        return Ok(result);
+                    }
+                    let zero = self.context.i8_type().const_zero();
+                    self.builder.build_int_compare(IntPredicate::NE, result.into_int_value(), zero, "has_native_link")
+                        .map(Into::into).map_err(|error| error.to_string())
+                })()
+            }
             "__thaw_register_native_exception_describer" =>
                 self.compile_register_native_exception_describer(args),
             "__thaw_lookup_native_exception_describer" =>
@@ -709,6 +740,38 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
     }
 
+    /// Links the Json array behind a JS shadow (`item`) to the typed native array `array` just
+    /// stored from it, so both sides keep sharing one array (`kind`: 0 number, 1 boolean, 2 string).
+    fn compile_json_link_native(&mut self, name: &str, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [item, native, detail] = args else {
+            return Err("json link expects a handle, a native value and a kind".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let handle = self.compile_expr(item)?.into_int_value();
+        let native = self.compile_expr(native)?.into_pointer_value();
+        let serial = self.builder.build_call(
+            self.module.get_function("thaw_js_origin_serial").unwrap(), &[handle.into()], "origin_serial",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("origin serial returned no value")?;
+        let (function, detail): (&str, BasicMetadataValueEnum<'ctx>) = match (name, detail) {
+            ("__thaw_json_link_native", HirExpr::Lit(HirLit::F64(kind))) =>
+                ("thaw_json_link_native_by_serial",
+                 self.context.i8_type().const_int(*kind as u64, false).into()),
+            ("__thaw_json_link_native_object", HirExpr::Lit(HirLit::Str(layout))) => (
+                "thaw_json_link_native_object_by_serial",
+                self.builder.build_global_string_ptr(layout, "native_link_layout")
+                    .map_err(|error| error.to_string())?.as_pointer_value().into(),
+            ),
+            _ => return Err("json link detail must be a literal".into()),
+        };
+        self.builder.build_call(
+            self.module.get_function(function).unwrap(),
+            &[serial.into(), native.into(), detail], "link_native",
+        ).map_err(|error| error.to_string())?;
+        Ok(self.context.i8_type().const_zero().into())
+    }
+
     /// Recovers the native owner behind a live-view wrapper (`item`) if it was interned with
     /// `layout`; the third argument only supplies the owner's static type.
     fn compile_native_view_target(
@@ -742,17 +805,6 @@ impl<'ctx> HirCompiler<'ctx> {
         let present = self.builder.build_int_compare(IntPredicate::NE, pointer,
             self.context.i64_type().const_zero(), "native_view_target_present")
             .map_err(|error| error.to_string())?;
-        // No native owner: the caller stores a copy of the JS-owned value (see README
-        // Limitations); `THAW_WARN_COPY=1` makes the runtime say so once.
-        let function = self.current_function();
-        let note = self.context.append_basic_block(function, "native_view_copy_note");
-        let after = self.context.append_basic_block(function, "native_view_copy_noted");
-        self.builder.build_conditional_branch(present, after, note).map_err(|error| error.to_string())?;
-        self.builder.position_at_end(note);
-        self.builder.build_call(self.module.get_function("thaw_js_note_view_copy").unwrap(), &[], "note_view_copy")
-            .map_err(|error| error.to_string())?;
-        self.builder.build_unconditional_branch(after).map_err(|error| error.to_string())?;
-        self.builder.position_at_end(after);
         let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
         let owner = self.builder.build_int_to_ptr(pointer, ptr_type, "native_view_target_owner")
             .map_err(|error| error.to_string())?;
