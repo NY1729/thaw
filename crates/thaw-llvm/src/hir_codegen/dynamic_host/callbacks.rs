@@ -1132,13 +1132,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     ).map_err(|error| error.to_string())?;
                 }
             }
-            for value in argument_json.iter().copied().chain(std::iter::once(args_json.into_pointer_value())) {
-                self.builder.build_call(
-                    self.module.get_function("thaw_json_destroy").unwrap(),
-                    &[value.into()],
-                    "destroy_deferred_callback_argument",
-                ).map_err(|error| error.to_string())?;
+            for (position, value) in argument_json.iter().copied().enumerate() {
+                let param = position.checked_sub(holder_offset).and_then(|index| params.get(index));
+                self.compile_release_callback_json_argument(value, param, "deferred_callback_argument")?;
             }
+            self.builder.build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[args_json.into()],
+                "destroy_deferred_callback_args",
+            ).map_err(|error| error.to_string())?;
             self.builder
                 .build_return(Some(&promise))
                 .map_err(|error| error.to_string())?;
@@ -1349,15 +1351,17 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?;
                 }
             }
-            for value in argument_json.into_iter().chain(std::iter::once(args_json.into_pointer_value())) {
-                self.builder
-                    .build_call(
-                        self.module.get_function("thaw_json_destroy").unwrap(),
-                        &[value.into()],
-                        "destroy_native_callback_json",
-                    )
-                    .map_err(|error| error.to_string())?;
+            for (position, value) in argument_json.into_iter().enumerate() {
+                let param = position.checked_sub(holder_offset).and_then(|index| params.get(index));
+                self.compile_release_callback_json_argument(value, param, "native_callback_json")?;
             }
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[args_json.into()],
+                    "destroy_native_callback_json",
+                )
+                .map_err(|error| error.to_string())?;
         }
         let result = self
             .builder
@@ -1401,6 +1405,25 @@ impl<'ctx> HirCompiler<'ctx> {
         });
         self.builder.position_at_end(return_block);
         adapter_result
+    }
+
+    /// Retires a decoded callback argument box once the callback returned. A `Json`/`Dictionary`
+    /// parameter reaches the callback as this very box (no copy), so the callback may have stored
+    /// the pointer in a native array, object field or closure: those boxes move to the arena
+    /// reachability graph (freed once unreferenced and the invocation arena resets) instead of
+    /// being destroyed under the stored reference. Every other box is a pure decoding temporary.
+    fn compile_release_callback_json_argument(
+        &mut self,
+        value: PointerValue<'ctx>,
+        param: Option<&HirType>,
+        label: &str,
+    ) -> Result<(), String> {
+        let escapes = matches!(param, Some(HirType::Json | HirType::Dictionary(_)));
+        let function = if escapes { "thaw_json_track_arena_owned_root" } else { "thaw_json_destroy" };
+        self.builder
+            .build_call(self.module.get_function(function).unwrap(), &[value.into()], label)
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// A host may invoke this adapter while an outer generated frame has an
