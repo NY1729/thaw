@@ -170,3 +170,25 @@ async function main():Promise<void> { const it:any=make(); for(let i=0;i<40;i++)
 fn native_collection_iterator_spread() {
     assert_eq!(compile_and_run(r##"function main():void { const m = new Map<string,number>(); m.set("a",1); m.set("b",2); const a:any=m; console.log([...a.keys()].join(","), [...a.values()].join(","), [...a].length); }"##, "native_collection_iterator_spread"), "a,b 1,2 2\n");
 }
+
+#[test]
+fn native_class_methods_preserve_returned_collection_aliases() {
+ assert_eq!(compile_and_run(r##"const sharedMap = new Map<string,number>();
+const sharedSet = new Set<number>();
+class Store {
+  calls = 0;
+  getMap(): Map<string,number> { this.calls += 1; return sharedMap; }
+  getSet(): Set<number> { return sharedSet; }
+  fresh(): Map<string,number> { return new Map<string,number>(); }
+}
+async function main():Promise<void> {
+ const s=new Store(); const a:any=s;
+ const m:any=a.getMap(); const t:any=a.getSet();
+ m.set("a",1); t.add(2);
+ console.log(sharedMap.get("a"),sharedSet.has(2),m===a.getMap(),t===a.getSet(),s.calls);
+ sharedMap.set("b",3);sharedSet.add(4); console.log(m.get("b"),t.has(4));
+ await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set("c",5);console.log(sharedMap.get("c"));
+ const x:any=a.fresh(); const y:any=a.fresh();x.set("x",7);console.log(x===y,y.has("x"));
+ for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(x.get("x"));
+}"##,"native_class_methods_preserve_returned_collection_aliases"),"1 true true true 2\n3 true\n5\nfalse false\n7\n");
+}
