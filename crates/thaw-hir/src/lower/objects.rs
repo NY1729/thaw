@@ -4864,11 +4864,8 @@ impl<'a> FnLowerer<'a> {
             }
             // A nested flat array that still mirrors a Json array reads back as that Json array
             // (so `v[0] === inner` holds; see thaw-std `json/native_links.rs`).
-            let readable_link = matches!(element, HirType::Array(inner)
-                if matches!(inner.as_ref(), HirType::F64 | HirType::Bool | HirType::Str))
-                || matches!(element, HirType::Object(fields) if !fields.is_empty()
-                    && fields.iter().all(|(name, ty)| !name.starts_with("__thaw_")
-                        && matches!(ty, HirType::F64 | HirType::Bool | HirType::Str)));
+            let readable_link = matches!(element, HirType::Array(_) | HirType::Object(_))
+                && native_link_layout(element).is_some();
             if readable_link {
                 let slot = || HirExpr::TypedIndex(
                     Box::new(source_var()), Box::new(HirExpr::Var(index.clone())), element.clone());
@@ -4966,6 +4963,8 @@ impl<'a> FnLowerer<'a> {
                 },
                 _ => None,
             };
+            // Nested shapes (arrays of arrays, records with array/record fields) link recursively.
+            let tree_layout = native_link_layout(element);
             let linked_copy = format!("__thaw_array_view_linked_{id}");
             self.scope.insert(linked_copy.clone(), element.clone());
             let resolve = |store: &dyn Fn(HirExpr) -> HirExpr| HirExpr::Block(vec![
@@ -5001,6 +5000,19 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Var(item_js.clone()),
                                     HirExpr::Var(linked_copy.clone()),
                                     HirExpr::Lit(HirLit::F64(link_kind.unwrap_or(0.0))),
+                                ],
+                            )),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                        ],
+                        (_, Some(copy)) if tree_layout.is_some() => vec![
+                            HirStmt::Let(linked_copy.clone(), element.clone(), copy.clone()),
+                            HirStmt::Expr(store(HirExpr::Var(linked_copy.clone()))),
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_link_native_tree".into())),
+                                vec![
+                                    HirExpr::Var(item_js.clone()),
+                                    HirExpr::Var(linked_copy.clone()),
+                                    HirExpr::Lit(HirLit::Str(tree_layout.clone().unwrap_or_default())),
                                 ],
                             )),
                             HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
@@ -5436,6 +5448,29 @@ impl<'a> FnLowerer<'a> {
 }
 
 /// Hidden marker fields and accessor slots have no descriptor flags of their own.
+/// Layout token of a tree of arrays/records of primitives that a Json container can stay linked
+/// to (thaw-std `json/native_links.rs` `parse_kind`): `n`/`b`/`s`, `A<elem>`, and
+/// `R<count>;` followed by `<keylen>:<key><offset>:<layout>` per field (8-byte slots).
+fn native_link_layout(ty: &HirType) -> Option<String> {
+    match ty {
+        HirType::F64 => Some("n".into()),
+        HirType::Bool => Some("b".into()),
+        HirType::Str => Some("s".into()),
+        HirType::Array(inner) => Some(format!("A{}", native_link_layout(inner)?)),
+        HirType::Object(fields) if !fields.is_empty() => {
+            let mut token = format!("R{};", fields.len());
+            for (slot, (name, field)) in fields.iter().enumerate() {
+                if name.starts_with("__thaw_") || name.contains('\0') {
+                    return None;
+                }
+                token.push_str(&format!("{}:{}{}:{}", name.len(), name, slot * 8, native_link_layout(field)?));
+            }
+            Some(token)
+        }
+        _ => None,
+    }
+}
+
 fn key_is_plain_field(key: &str) -> bool {
     !key.starts_with("__thaw_") && !key.starts_with('\u{1f}')
 }
