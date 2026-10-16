@@ -1948,16 +1948,16 @@ pub extern "C" fn thaw_js_native_object_pointer(
     }
 }
 
-/// One-time note (only when `THAW_WARN_COPY=1`) that a JS-owned object written through an `any`
-/// view into a typed native slot was stored as a copy: later changes on either side are not shared.
+/// The origin serial of a graph-decoded JS shadow (the native container it stands for), or zero.
 #[no_mangle]
-pub extern "C" fn thaw_js_note_view_copy() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    if std::env::var_os("THAW_WARN_COPY").is_some_and(|value| value == "1") {
-        ONCE.call_once(|| eprintln!(
-            "thaw: a JavaScript-owned object was copied into a typed native slot through an `any` view; \
-             the two sides no longer share it (declare the array as any[] to keep one object)"));
-    }
+pub extern "C" fn thaw_js_origin_serial(handle: u64) -> u64 {
+    with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
+        let value = value_for_handle(&ctx, handle)?;
+        let serial: Function = ctx.globals().get("__thaw_origin_serial")
+            .map_err(|error| error.to_string())?;
+        let serial: f64 = serial.call((value,)).map_err(|error| error.to_string())?;
+        Ok(if serial.is_finite() && serial > 0.0 { serial as u64 } else { 0 })
+    }).unwrap_or(0)
 }
 
 /// Calls a live, retained function *value* (as opposed to a call by global

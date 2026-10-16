@@ -181,10 +181,14 @@ requirements.
 Known gaps against Node semantics:
 
 - A value typed `any` that aliases a statically typed native array (`T[]`) is a live view.
-  Writing a JavaScript-owned object or array into such an array stores a native copy, because a
-  native element slot cannot hold a JavaScript reference: the original object and the stored
-  element do not alias afterwards, and a plain object written into a class array (`C[]`) becomes
-  a `C` with the object's fields. Declare the array `any[]` to keep references; run with
+  A native array or record written into it is stored as that same object. A native `any`/JSON
+  array of numbers, strings or booleans, or an `any`/JSON object whose fields are such values,
+  stays linked to the typed slot it was written into (`v[0] = j; j.push(1)` is visible as
+  `nat[0]`, and typed writes are visible through `j`). Other JavaScript-owned values (objects
+  returned by npm packages or the JS realm, nested containers) are stored as a native copy,
+  because a native element slot cannot hold a JavaScript reference: the original object and the
+  stored element do not alias afterwards, and a plain object written into a class array (`C[]`)
+  becomes a `C` with the object's fields. Declare the array `any[]` to keep references; run with
   `THAW_WARN_COPY=1` to get a one-time note on stderr the first time such a copy happens.
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
 - Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
