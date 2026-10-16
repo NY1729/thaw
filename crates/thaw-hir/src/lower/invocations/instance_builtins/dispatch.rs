@@ -396,7 +396,22 @@ impl<'a> FnLowerer<'a> {
         copy_member.obj = ident(&copy_name);
         let mut copy_call = call.clone();
         copy_call.callee = Callee::Expr(Box::new(Expr::Member(copy_member.clone())));
-        let native = self.lower_native_instance_builtin_unchecked(&copy_member, property, &copy_call)?;
+        let native = match self.lower_native_instance_builtin_unchecked(&copy_member, property, &copy_call) {
+            Ok(native) => native,
+            // An annotated `forEach` callback that does not fit `Array<Json>` elements (a Map's
+            // `(v: number, k: string)`) has no array branch: call the method live.
+            Err(_) if name == "forEach" => {
+                let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
+                let live = if self.infer_expr_type(&live)? == HirType::Void {
+                    let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+                    HirExpr::EvalThen(Box::new(live), Box::new(undefined))
+                } else {
+                    self.coerce_to_declared(&HirType::Json, live)?
+                };
+                return Ok(Some(self.wrap_call_argument_bindings(live, &[(receiver_name, HirType::Json, receiver)])?));
+            }
+            Err(error) => return Err(error),
+        };
         let native_type = self.infer_expr_type(&native)?;
         let mut bindings = vec![(
             copy_name.clone(),
