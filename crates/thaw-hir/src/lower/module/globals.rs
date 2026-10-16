@@ -89,7 +89,7 @@ fn lower_top_level_initializers(
                     let init = if ty == HirType::Dynamic {
                         init
                     } else {
-                        lowerer.coerce_to_declared(&ty, init)?
+                        lowerer.coerce_to_declared_aliasing(&ty, init)?
                     };
                     steps.push(HirInitStep::StoreGlobal(name.clone(), init));
                     lowerer.scope.insert(name.clone(), ty);
@@ -145,7 +145,7 @@ fn lower_top_level_initializers(
                     let init = match property.value.as_deref() {
                         Some(value) => {
                             let init = lowerer.lower_expr(value)?;
-                            lowerer.coerce_to_declared(&expected, init)?
+                            lowerer.coerce_to_declared_aliasing(&expected, init)?
                         }
                         None => match &expected {
                             HirType::Optional(payload) => {
@@ -329,7 +329,12 @@ fn lower_global_decls(
             )?;
             let expected = global_types[&name].clone();
             let inferred = lowerer.infer_expr_type(&init)?;
-            let ty = if expected == HirType::Dynamic {
+            // A function global whose return type was still the `Dynamic` placeholder when it was
+            // first inferred (an unannotated method read) takes the now-resolved type.
+            let resolved_function = matches!((&expected, &inferred),
+                (HirType::Function(params, ret), HirType::Function(inferred_params, _))
+                    if **ret == HirType::Dynamic && params == inferred_params);
+            let ty = if expected == HirType::Dynamic || resolved_function {
                 inferred
             } else {
                 expected
@@ -337,7 +342,7 @@ fn lower_global_decls(
             let init = if ty == HirType::Dynamic {
                 init
             } else {
-                lowerer.coerce_to_declared(&ty, init)?
+                lowerer.coerce_to_declared_aliasing(&ty, init)?
             };
             let scope_type = ty.clone();
             globals.push(crate::HirGlobal {
@@ -415,7 +420,7 @@ fn lower_static_class_globals(
             let init = match property.value.as_deref() {
                 Some(value) => {
                     let init = lowerer.lower_expr(value)?;
-                    lowerer.coerce_to_declared(&ty, init)?
+                    lowerer.coerce_to_declared_aliasing(&ty, init)?
                 }
                 None => match &ty {
                     HirType::Optional(payload) => HirExpr::OptionalNone(payload.as_ref().clone()),

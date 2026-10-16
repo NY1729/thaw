@@ -421,6 +421,7 @@ include!("tests/ci_contracts.rs");
 include!("tests/uc_contracts.rs");
 include!("tests/lv_contracts.rs");
 include!("tests/rm_contracts.rs");
+include!("tests/fa_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {
@@ -558,3 +559,4 @@ fn typed_quickjs_wrapper_lease_requires_all_paths_to_return_native_jsvalue() {
     };
     assert!(!is_proven_typed_quickjs_wrapper(&side_effecting_body));
 }
+include!("tests/fb_contracts.rs");

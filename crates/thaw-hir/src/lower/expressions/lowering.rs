@@ -1495,7 +1495,11 @@ impl<'a> FnLowerer<'a> {
                     args.into_iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            if index < positional && index < declared.len() {
+                            if index == 0 && index < positional && index < declared.len() {
+                                // `strings: any` is a live view of the template object, so
+                                // `.raw` and its identity survive the conversion.
+                                self.coerce_to_declared_aliasing(&declared[index], value)
+                            } else if index < positional && index < declared.len() {
                                 self.coerce_to_declared(&declared[index], value)
                             } else {
                                 Ok(value)
