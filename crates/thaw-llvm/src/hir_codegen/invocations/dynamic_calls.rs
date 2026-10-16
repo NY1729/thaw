@@ -164,6 +164,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_host_json_from_borrowed_dynamic(args),
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
+            "__thaw_native_view_target" => self.compile_native_view_target(args),
             "__thaw_register_native_exception_describer" =>
                 self.compile_register_native_exception_describer(args),
             "__thaw_lookup_native_exception_describer" =>
@@ -705,6 +706,49 @@ impl<'ctx> HirCompiler<'ctx> {
             "cached_native_object_tag")
             .map_err(|error| error.to_string())?.into_struct_value();
         self.builder.build_insert_value(tagged, handle, 1, "cached_native_object_value")
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
+    }
+
+    /// Recovers the native owner behind a live-view wrapper (`item`) if it was interned with
+    /// `layout`; the third argument only supplies the owner's static type.
+    fn compile_native_view_target(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [item, HirExpr::Lit(HirLit::Str(layout)), witness] = args else {
+            return Err("native view target expects handle, static layout, and type witness".into());
+        };
+        let owner_type = self.expr_hir_type(witness)
+            .ok_or("native view target requires a typed witness")?;
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let handle = self.compile_expr(item)?.into_int_value();
+        let layout = self.builder.build_global_string_ptr(layout, "native_view_target_layout")
+            .map_err(|error| error.to_string())?;
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_native_object_pointer").unwrap(),
+            &[handle.into(), layout.as_pointer_value().into()], "native_view_target_pointer",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native view target returned no result")?.into_struct_value();
+        let pointer = self.builder.build_extract_value(result, 0, "native_view_target_word")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let error = self.builder.build_extract_value(result, 1, "native_view_target_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        let present = self.builder.build_int_compare(IntPredicate::NE, pointer,
+            self.context.i64_type().const_zero(), "native_view_target_present")
+            .map_err(|error| error.to_string())?;
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let owner = self.builder.build_int_to_ptr(pointer, ptr_type, "native_view_target_owner")
+            .map_err(|error| error.to_string())?;
+        let ty = self.basic_type(&HirType::Optional(Box::new(owner_type)))?.into_struct_type();
+        let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
+            "native_view_target_tag").map_err(|error| error.to_string())?.into_struct_value();
+        self.builder.build_insert_value(tagged, owner, 1, "native_view_target_value")
             .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
     }
 

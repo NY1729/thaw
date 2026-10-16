@@ -659,7 +659,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .ok_or_else(|| format!("unknown array predicate `{name}`"))?
             }
-            _ => return Err("array predicate must be an arrow or function value".into()),
+            _ => self.callback_value_arity(expr, "array predicate")?,
         };
         if arity > 3 {
             return Err(format!(
@@ -707,6 +707,20 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// Arity of a callback that is neither a literal nor a plain name (`o.method`, `f.bind(x)`):
+    /// the type of the lowered value decides it.
+    fn callback_value_arity(&mut self, expr: &Expr, label: &str) -> Result<usize, String> {
+        let value = self.lower_expr(expr)?;
+        let ty = match self.infer_expr_type(&value)? {
+            HirType::FunctionWithThis(_, visible) => *visible,
+            other => other,
+        };
+        match ty {
+            HirType::Function(params, _) | HirType::CallableFunction(params, ..) => Ok(params.len()),
+            _ => Err(format!("{label} must be an arrow or function value")),
+        }
+    }
+
     fn lower_array_reducer_callback(
         &mut self,
         expr: &Expr,
@@ -743,7 +757,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .ok_or_else(|| format!("unknown array reducer `{name}`"))?
             }
-            _ => return Err("array reducer must be an arrow or function value".into()),
+            _ => self.callback_value_arity(expr, "array reducer")?,
         };
         if arity > 4 {
             return Err(format!(
@@ -794,7 +808,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .ok_or_else(|| format!("unknown array mapper `{name}`"))?
             }
-            _ => return Err("array mapper must be an arrow or function value".into()),
+            _ => self.callback_value_arity(expr, "array mapper")?,
         };
         if arity > 3 {
             return Err(format!(
@@ -880,7 +894,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .ok_or_else(|| format!("unknown Array.from mapper `{name}`"))?
             }
-            _ => return Err("Array.from mapper must be an arrow or function value".into()),
+            _ => self.callback_value_arity(expr, "Array.from mapper")?,
         };
         if arity > 2 {
             return Err(format!(

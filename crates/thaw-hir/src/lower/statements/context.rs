@@ -127,6 +127,7 @@ impl<'a> FnLowerer<'a> {
             non_arrow_receiver: None,
             expected_return_hint: None,
             expected_arrow_return_hint: None,
+            any_object_literal: false,
             sparse_mapping_result: false,
             generator_yields: None,
             generator_finalizers: HashMap::new(),

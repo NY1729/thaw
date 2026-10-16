@@ -2479,6 +2479,12 @@ async function main(): Promise<void> {
     console.log(bad.length);
     const good = await validate(new ValidUser());
     console.log(good.length);
+    // A decorated instance held in a local `any` slot is a live view; it must still validate.
+    const looseBad: any = new User();
+    const looseGood: any = new ValidUser();
+    console.log((await validate(looseBad)).length, (await validate(looseGood)).length);
+    looseBad.email = "someone@example.com";
+    console.log((await validate(looseBad)).length);
 }"#,
     )
     .unwrap();
@@ -2499,7 +2505,7 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n0\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n0\n1 0\n0\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1495,7 +1495,11 @@ impl<'a> FnLowerer<'a> {
                     args.into_iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            if index < positional && index < declared.len() {
+                            if index == 0 && index < positional && index < declared.len() {
+                                // `strings: any` is a live view of the template object, so
+                                // `.raw` and its identity survive the conversion.
+                                self.coerce_to_declared_aliasing(&declared[index], value)
+                            } else if index < positional && index < declared.len() {
                                 self.coerce_to_declared(&declared[index], value)
                             } else {
                                 Ok(value)
@@ -5074,6 +5078,12 @@ impl<'a> FnLowerer<'a> {
                 })) {
                 return self.lower_dynamic_accessor_object_lit(object, true);
             }
+        }
+        if let (Expr::Object(_), Some(HirType::Json)) = (expr, expected) {
+            self.any_object_literal = true;
+            let lowered = self.lower_expr(expr);
+            self.any_object_literal = false;
+            return lowered;
         }
         if let (Expr::Object(object), Some(expected)) = (expr, expected) {
             let fields = match expected {

@@ -112,6 +112,10 @@ struct FnLowerer<'a> {
     /// place a callback's *unannotated* return is still known to need to
     /// stay a live `JsValue`.
     expected_arrow_return_hint: Option<HirType>,
+    /// One-shot: the next object literal lowered is an `any` literal, so its array-literal property
+    /// values (recursively through nested object literals) are `Array<Json>`: an `any` array takes any
+    /// element type later (`h.list.push("x")`), which a typed native array cannot hold.
+    any_object_literal: bool,
     sparse_mapping_result: bool,
     generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,

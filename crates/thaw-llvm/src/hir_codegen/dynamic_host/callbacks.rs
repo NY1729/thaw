@@ -1558,7 +1558,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_runtime_run_until_resolved")
+                    .get_function("thaw_runtime_await_blocking")
                     .unwrap(),
                 &[promise.into()],
                 "native_promise_error",
