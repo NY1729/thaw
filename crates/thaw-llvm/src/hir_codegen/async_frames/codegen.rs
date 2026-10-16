@@ -99,9 +99,19 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(completion_ready);
         let completion_slot =
             self.async_frame_field(frame, ASYNC_COMPLETION_OFFSET, "completion_slot")?;
+        // The frame owns an internal token on its completion Promise: a caller
+        // may drop the Promise of an unawaited call before the suspended frame
+        // resumes and settles it, which must not free the Promise underneath.
+        // The token is released when the arena reclaims the frame.
         self.builder
-            .build_store(completion_slot, completion)
+            .build_store(completion_slot, ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
+        self.store_arena_promise_slot(
+            frame,
+            completion_slot,
+            &HirType::Promise(Box::new(HirType::Void)),
+            completion.into(),
+        )?;
         let waiting_slot = self.async_frame_field(frame, ASYNC_WAITING_OFFSET, "waiting_slot")?;
         self.builder
             .build_store(waiting_slot, ptr_ty.const_null())

@@ -690,20 +690,30 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .map(|parameter| HirExpr::Var(parameter.name.clone())),
         );
+        let call = HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments);
         let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
             HirType::Promise(Box::new(signature.ret.clone()))
         } else {
             signature.ret.clone()
         };
-        let closure = HirExpr::Lambda(
+        let mut closure = HirExpr::Lambda(
             vec![HirParam {
                 name: receiver_name.clone(),
                 ty: receiver_type.clone(),
             }],
             parameters,
             result,
-            Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
+            Box::new(call),
         );
+        // An unannotated method's signature still defers its return type (`Dynamic`); the
+        // closure's inferred type resolves it from the lowered body.
+        if signature.ret == HirType::Dynamic {
+            if let HirType::Function(_, resolved) = self.infer_expr_type(&closure)? {
+                if let HirExpr::Lambda(_, _, result, _) = &mut closure {
+                    *result = *resolved;
+                }
+            }
+        }
         self.wrap_call_argument_bindings(closure, &[(receiver_name, receiver_type, receiver)])
             .map(Some)
     }

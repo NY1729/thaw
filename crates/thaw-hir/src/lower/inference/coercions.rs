@@ -334,10 +334,12 @@ impl<'a> FnLowerer<'a> {
 
     /// `coerce_to_declared` for a user-visible `any` slot (declaration or assignment): a native
     /// array stored there stays a live view of the array instead of becoming a copy.
-    fn coerce_to_declared_aliasing(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
-        self.alias_native_arrays = Self::type_holds_any(declared);
+    pub(in crate::lower) fn coerce_to_declared_aliasing(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        // Restore (not clear): an assignment nested inside another aliasing coercion must not
+        // switch off the outer one.
+        let outer = std::mem::replace(&mut self.alias_native_arrays, Self::type_holds_any(declared));
         let result = self.coerce_to_declared(declared, value);
-        self.alias_native_arrays = false;
+        self.alias_native_arrays = outer;
         result
     }
 

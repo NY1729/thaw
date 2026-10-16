@@ -180,15 +180,14 @@ requirements.
 
 Known gaps against Node semantics:
 
-- A method extracted from an object (`const f = o.m; f()`) stays bound to its
-  owner, where Node would give `this` as `undefined`.
-- Values typed `any` that hold arrays, class instances or objects are live
-  views (Proxy-backed); class instances written into an `any` array through
-  such a view are not supported, and writes store copies of JavaScript-owned
-  objects.
-- `s.raw` is not available on a tagged-template parameter typed `any`.
+- A value typed `any` that aliases a statically typed native array (`T[]`) is a live view.
+  Writing a JavaScript-owned object or array into such an array stores a native copy, because a
+  native element slot cannot hold a JavaScript reference: the original object and the stored
+  element do not alias afterwards, and a plain object written into a class array (`C[]`) becomes
+  a `C` with the object's fields. Declare the array `any[]` to keep references.
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
-- Decorated classes use snapshot semantics when passed as `any`.
+- Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
+  functions are still snapshots.
 
 ## Examples
 

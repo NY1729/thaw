@@ -289,6 +289,12 @@ impl<'a> FnLowerer<'a> {
             || actual == *expected
             || bytes_array_compatible(expected, &actual)
             || callable_compatible
+            // A function whose return type is still the unresolved `Dynamic` placeholder (an
+            // unannotated method read at top level before its body converged) accepts the
+            // resolved return; the global's type is refined afterwards.
+            || matches!((expected, &actual), (HirType::Function(expected_params, expected_ret),
+                    HirType::Function(actual_params, _))
+                if **expected_ret == HirType::Dynamic && expected_params == actual_params)
             || (*expected == HirType::Str && matches!(actual, HirType::StrLiteral(_)))
             || match (expected, value) {
                 (HirType::Tuple(types), HirExpr::ArrayLit(values)) => {
@@ -2794,6 +2800,11 @@ impl<'a> FnLowerer<'a> {
                     "callDynamicValueMixedNativeJson" => return Ok(HirType::Json),
                     "__thaw_lookup_native_object" =>
                         return Ok(HirType::Optional(Box::new(HirType::JsValue))),
+                    // Owner behind a live view: the witness argument only carries the element type.
+                    "__thaw_native_view_target" => {
+                        let witness = args.get(2).ok_or("native view target expects a type witness")?;
+                        return Ok(HirType::Optional(Box::new(self.infer_expr_type(witness)?)));
+                    }
                     "__thaw_lookup_native_projector" =>
                         return Ok(HirType::Optional(Box::new(HirType::Function(
                             Vec::new(), Box::new(HirType::JsValue))))),

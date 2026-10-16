@@ -1444,6 +1444,31 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// Native values that cross into `any` as an interned live view, which therefore have an identity.
+    fn has_live_view_identity(&mut self, ty: &HirType) -> bool {
+        // The comparison coerces under an `any` slot, which is what makes a decorated class live.
+        let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+        let live = self.has_live_view_identity_inner(ty);
+        self.alias_native_arrays = nested;
+        live
+    }
+
+    fn has_live_view_identity_inner(&self, ty: &HirType) -> bool {
+        match ty {
+            HirType::Array(_) => true,
+            // Plain fixed objects already compare through the owner projection below.
+            HirType::Object(_) => self.class_instance_supports_live_methods(ty),
+            _ => false,
+        }
+    }
+
+    fn coerce_live_view_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+        let view = self.coerce_to_declared(&HirType::Json, value);
+        self.alias_native_arrays = nested;
+        view
+    }
+
     /// Shared by ordinary strict operators and switch case tests. Both source
     /// operands are bound before any kind dispatch, including a static false.
     fn lower_strict_equality(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
@@ -1451,6 +1476,16 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
+        // An `any` operand against a native object/array it may alias: compare the live views
+        // (interned per native pointer), so `view === owner` holds like in Node.
+        if lhs_type == HirType::Json && self.has_live_view_identity(&rhs_type) {
+            let rhs = self.coerce_live_view_operand(rhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
+        if rhs_type == HirType::Json && self.has_live_view_identity(&lhs_type) {
+            let lhs = self.coerce_live_view_operand(lhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
         // The sparse-array index check needs the original TypedIndex shape.
         // Its helper binds the index expression first and then the undefined
         // operand, so it remains a separate source-order-preserving path.
