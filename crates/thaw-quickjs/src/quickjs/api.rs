@@ -1067,7 +1067,19 @@ fn resolve_method_result_graph<'js>(
         }
         _ => false,
     };
+    // An object the receiver owns (a native view, or a value stored in it) is returned by
+    // reference too, so a mutation of the result reaches the owner.
+    let live_member = match &receiver {
+        Some(receiver) if !returns_receiver && result.is_object() => {
+            let live: Function = ctx.globals().get("__thaw_json_result_is_live")
+                .map_err(|error| error.to_string())?;
+            live.call::<_, bool>((receiver.clone(), result.clone()))
+                .map_err(|error| error.to_string())?
+        }
+        _ => false,
+    };
     let encoded = match receiver {
+        Some(_) if live_member => encode.call((result.clone(), 0, true, false, result)),
         Some(receiver) if returns_receiver => encode.call((result, 0, true, false, receiver)),
         _ => encode.call((result, 0, false, true)),
     };

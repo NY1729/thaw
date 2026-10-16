@@ -4646,10 +4646,31 @@ impl<'a> FnLowerer<'a> {
                 method_params.push(HirParam { name, ty: ty.clone() });
             }
             self.next_binding += 1;
+            let mut method_body = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), arguments);
+            let mut result = result;
+            // Under an `any` slot a native array a method hands back stays a live view of its
+            // owner (`v.inner.get().push(x)` mutates `inner`'s array), as a field read does.
+            if let (true, HirType::Array(element)) = (self.alias_native_arrays, &result) {
+                if let Ok(view) = self.lower_native_array_as_dynamic_view(method_body.clone(), element) {
+                    method_body = view;
+                    result = HirType::JsValue;
+                }
+            }
+            // ... and so does a native class instance / object a method hands back.
+            if let (true, HirType::Object(nested)) = (self.alias_native_arrays, &result) {
+                if self.live_projection_supported_with_classes(&result) {
+                    let nested_class = nested.iter().any(|(name, _)|
+                        name.starts_with("__thaw_class_identity_\u{1e}"));
+                    let nested = nested.clone();
+                    method_body = self.lower_fixed_object_as_dynamic_accessor_object(
+                        method_body, &nested, false, true, nested_class)?;
+                    result = HirType::JsValue;
+                }
+            }
             let bound = HirExpr::Lambda(
                 vec![HirParam { name: this_name.into(), ty: source_type.clone() }],
                 method_params, result.clone(),
-                Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), arguments)),
+                Box::new(method_body),
             );
             let bound_type = match (&signature.native_rest, rest.last()) {
                 (Some(element), Some(HirType::Array(last))) if last.as_ref() == element =>

@@ -64,6 +64,7 @@
   const thawOriginSerialGet = WeakMap.prototype.get;
   const thawOriginSerialSet = WeakMap.prototype.set;
   const thawProjectedReceivers = new WeakSet();
+  const thawNativeViews = new WeakSet();
   const thawProjectedReceiverHas = WeakSet.prototype.has;
   const thawProjectedReceiverAdd = WeakSet.prototype.add;
   const thawSameOrigin = (left, right) => {
@@ -2268,7 +2269,7 @@
         }
         return raw;
       };
-      return new thawGraphProxy(target, {
+      const view = new thawGraphProxy(target, {
         get(_target, key, self) {
           if (key === 'length') return len();
           const index = indexOf(key);
@@ -2323,6 +2324,41 @@
           return 'value' in descriptor ? write(index, descriptor.value) : has(index);
         },
       });
+      thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [view]);
+      return view;
+    },
+    writable: false, configurable: false,
+  });
+  // Whether a method's object result is a live part of its receiver: a native view or projected
+  // owner wrapper, or an object stored (depth <= 2, bounded scan, data properties only) in the
+  // receiver. Such a result is handed back by reference, not as a data snapshot, so mutating it
+  // reaches the owner (`o.items().push(x)`).
+  thawGraphDefineProperty(globalThis, '__thaw_json_result_is_live', {
+    value: (receiver, result) => {
+      if (result === null || typeof result !== 'object') return false;
+      if (thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [result])
+        || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [result])) return true;
+      if (receiver === null || typeof receiver !== 'object'
+        || thawGraphArrayIsArray(receiver)
+        || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [receiver])
+        || thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [receiver])) return false;
+      let budget = 256;
+      const scan = (holder, depth) => {
+        const keys = thawGraphReflectOwnKeys(holder);
+        for (let i = 0; i < keys.length && budget > 0; i++, budget--) {
+          const descriptor = thawGraphObjectGetOwnPropertyDescriptor(holder, keys[i]);
+          if (!descriptor || !thawGraphOwn(descriptor, 'value')) continue;
+          const value = descriptor.value;
+          if (value === result) return true;
+          if (depth > 1 && value !== null && typeof value === 'object'
+            && !thawGraphArrayIsArray(value)
+            && !thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [value])
+            && !thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [value])
+            && scan(value, depth - 1)) return true;
+        }
+        return false;
+      };
+      return scan(receiver, 2);
     },
     writable: false, configurable: false,
   });
