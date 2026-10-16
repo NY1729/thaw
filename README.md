@@ -193,12 +193,16 @@ Known gaps against Node semantics:
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
 - Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
   functions are still snapshots.
-- A native `Map`/`Set` cannot be a field of an `any` literal (`const o: any = { m: new Map() }`
-  fails to compile): the collection would be serialized as a copy, so `o.m.set(..)` would be lost.
-  Keep the collection in its own variable.
-- The array returned by a method of an `any` object (`v.inner.get().push(x)` where `get()`
-  returns `this.arr`) is a snapshot, not the object's own array: the compiled method hands its
-  result back as a copy. Keep the array in a variable on the object and mutate it there.
+- A `new Map()`/`new Set()` written in an `any` literal (a field, a nested field or an array
+  element) is a real collection that `get`/`set`/`add`/`has`/`delete`/`forEach`, spread and
+  `console.log` handle. A native `Map`/`Set` held in a variable is copied when it is stored into
+  such a literal (`{ m: existing }`), so later changes on either side are not shared.
+- The array returned by a method of an `any` class instance (`v.inner.get().push(x)` where
+  `get()` returns `this.arr`) is a copy: a compiled call result crosses the call boundary as JSON
+  data, so mutating it does not reach the owner. Keep the array in a variable on the object and
+  mutate it there. A method of an `any` object literal returns the object's own array, but
+  mutating that result in the same expression (`o.get().push(x)`) fails with "Invalid JavaScript
+  method receiver"; bind the result to a variable first (`const r = o.get(); r.push(x)`).
 
 ## Examples
 
