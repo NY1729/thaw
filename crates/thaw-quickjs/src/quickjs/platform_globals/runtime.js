@@ -70,6 +70,11 @@
     const serial = thawDateApply(thawOriginSerialGet, thawOriginSerials, [left]);
     return serial !== undefined && serial === thawDateApply(thawOriginSerialGet, thawOriginSerials, [right]);
   };
+  // Serial of the native container a graph-decoded shadow stands for (0 if none).
+  globalThis.__thaw_origin_serial = (value) => {
+    const serial = thawDateApply(thawOriginSerialGet, thawOriginSerials, [value]);
+    return serial === undefined ? 0 : serial;
+  };
   globalThis.__thaw_strict_equal_dynamic = (left, right, leftKind, rightKind) =>
     ((leftKind === 3 || rightKind === 3) &&
       globalThis.__thaw_same_native_callback(left, right)) || left === right

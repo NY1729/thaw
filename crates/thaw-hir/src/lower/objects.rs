@@ -4758,6 +4758,25 @@ impl<'a> FnLowerer<'a> {
                     HirType::Json,
                 );
             }
+            // A nested flat array that still mirrors a Json array reads back as that Json array
+            // (so `v[0] === inner` holds; see thaw-std `json/native_links.rs`).
+            let readable_link = matches!(element, HirType::Array(inner)
+                if matches!(inner.as_ref(), HirType::F64 | HirType::Bool | HirType::Str))
+                || matches!(element, HirType::Object(fields) if !fields.is_empty()
+                    && fields.iter().all(|(name, ty)| !name.starts_with("__thaw_")
+                        && matches!(ty, HirType::F64 | HirType::Bool | HirType::Str)));
+            if readable_link {
+                let slot = || HirExpr::TypedIndex(
+                    Box::new(source_var()), Box::new(HirExpr::Var(index.clone())), element.clone());
+                converted = HirExpr::Conditional(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_has_native_link".into())), vec![slot()])),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_linked_array".into())), vec![slot()])),
+                    Box::new(converted),
+                    HirType::Json,
+                );
+            }
             let body = HirExpr::Conditional(
                 Box::new(explicit_undefined),
                 Box::new(json_undefined()),
@@ -4814,6 +4833,37 @@ impl<'a> FnLowerer<'a> {
                 }
                 (_, decoded, _) => decoded,
             };
+            // A flat array of primitives written from a Json array stays linked to it, so
+            // both sides keep sharing one array (see thaw-std `json/native_links.rs`).
+            // `key\u{1f}offset\u{1f}kind` per field, `\u{1e}`-separated, for a record of primitive
+            // 8-byte slots (any other shape keeps the plain copy).
+            let object_link = match element {
+                HirType::Object(fields) if !fields.is_empty() => fields.iter().enumerate()
+                    .map(|(slot, (name, ty))| {
+                        let kind = match ty {
+                            HirType::F64 => 0,
+                            HirType::Bool => 1,
+                            HirType::Str => 2,
+                            _ => return None,
+                        };
+                        (!name.starts_with("__thaw_") && !name.contains(['\u{1e}', '\u{1f}']))
+                            .then(|| format!("{name}\u{1f}{}\u{1f}{kind}", slot * 8))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(|entries| entries.join("\u{1e}")),
+                _ => None,
+            };
+            let link_kind = match element {
+                HirType::Array(inner) => match inner.as_ref() {
+                    HirType::F64 => Some(0.0),
+                    HirType::Bool => Some(1.0),
+                    HirType::Str => Some(2.0),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let linked_copy = format!("__thaw_array_view_linked_{id}");
+            self.scope.insert(linked_copy.clone(), element.clone());
             let resolve = |store: &dyn Fn(HirExpr) -> HirExpr| HirExpr::Block(vec![
                 HirStmt::Let(target.clone(), HirType::Optional(Box::new(element.clone())),
                     HirExpr::Call(Box::new(HirExpr::Var("__thaw_native_view_target".into())), vec![
@@ -4825,8 +4875,38 @@ impl<'a> FnLowerer<'a> {
                 HirStmt::If(
                     HirExpr::OptionalIsNone(Box::new(HirExpr::Var(target.clone())), element.clone()),
                     match (&fallback, &decoded) {
+                        (_, Some(copy)) if object_link.is_some() => vec![
+                            HirStmt::Let(linked_copy.clone(), element.clone(), copy.clone()),
+                            HirStmt::Expr(store(HirExpr::Var(linked_copy.clone()))),
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_link_native_object".into())),
+                                vec![
+                                    HirExpr::Var(item_js.clone()),
+                                    HirExpr::Var(linked_copy.clone()),
+                                    HirExpr::Lit(HirLit::Str(object_link.clone().unwrap_or_default())),
+                                ],
+                            )),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                        ],
+                        (_, Some(copy)) if link_kind.is_some() => vec![
+                            HirStmt::Let(linked_copy.clone(), element.clone(), copy.clone()),
+                            HirStmt::Expr(store(HirExpr::Var(linked_copy.clone()))),
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_link_native".into())),
+                                vec![
+                                    HirExpr::Var(item_js.clone()),
+                                    HirExpr::Var(linked_copy.clone()),
+                                    HirExpr::Lit(HirLit::F64(link_kind.unwrap_or(0.0))),
+                                ],
+                            )),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                        ],
                         (_, Some(copy)) => vec![
                             HirStmt::Expr(store(copy.clone())),
+                            // No link applies: the copy stays a copy (and says so once under
+                            // `THAW_WARN_COPY=1`).
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_note_view_copy".into())), Vec::new())),
                             HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
                         ],
                         _ => vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],

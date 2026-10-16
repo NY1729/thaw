@@ -2805,6 +2805,10 @@ impl<'a> FnLowerer<'a> {
                         let witness = args.get(2).ok_or("native view target expects a type witness")?;
                         return Ok(HirType::Optional(Box::new(self.infer_expr_type(witness)?)));
                     }
+                    "__thaw_json_link_native" | "__thaw_json_link_native_object" | "__thaw_json_note_view_copy" =>
+                        return Ok(HirType::Void),
+                    "__thaw_json_has_native_link" => return Ok(HirType::Bool),
+                    "__thaw_json_linked_array" => return Ok(HirType::Json),
                     "__thaw_lookup_native_projector" =>
                         return Ok(HirType::Optional(Box::new(HirType::Function(
                             Vec::new(), Box::new(HirType::JsValue))))),
