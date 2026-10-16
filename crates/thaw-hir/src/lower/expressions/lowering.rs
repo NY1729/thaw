@@ -1302,9 +1302,17 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                if let Some(literal) = self.lower_any_asserted_literal(&assertion.expr, &assertion.type_ann, false)? {
+                    return Ok(literal);
+                }
                 self.lower_expr(&assertion.expr)
             }
-            Expr::TsTypeAssertion(assertion) => self.lower_expr(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => {
+                if let Some(literal) = self.lower_any_asserted_literal(&assertion.expr, &assertion.type_ann, false)? {
+                    return Ok(literal);
+                }
+                self.lower_expr(&assertion.expr)
+            }
             Expr::TsSatisfies(satisfies) => self.lower_satisfies(satisfies),
             Expr::TsNonNull(assertion) => self.lower_non_null_assertion(assertion),
             Expr::TsConstAssertion(assertion) => self.lower_expr(&assertion.expr),
@@ -5149,6 +5157,105 @@ impl<'a> FnLowerer<'a> {
         self.expected_return_hint = None;
         self.expected_arrow_return_hint = None;
         result
+    }
+
+    /// `[..] as any[]` / `[..] as any` / `<any[]>[..]` / `{..} as any`: the assertion hands the
+    /// fresh literal to an `any` slot, so it gets the same dynamic element semantics as
+    /// `const x: any[] | any = <literal>` (each element is an `any` value, `push` takes any
+    /// type). `as_field` leaves the literal a native `any[]` for the caller to turn into a real JS
+    /// array (a field of an `any` object literal). `None` when this is not such an assertion.
+    pub(in crate::lower) fn lower_any_asserted_literal(
+        &mut self,
+        inner: &Expr,
+        type_ann: &TsType,
+        as_field: bool,
+    ) -> Result<Option<HirExpr>, String> {
+        let Some(array_target) = any_like_assertion_target(type_ann) else {
+            return Ok(None);
+        };
+        let inner = peel_parens(inner);
+        match inner {
+            // Only an object that holds an array literal changes meaning under the assertion
+            // (its element type); any other `{..} as any` keeps its typed lowering.
+            Expr::Object(object) if !array_target && object_literal_holds_array(object) => {
+                let lowered = self.lower_expr_with_expected_type(inner, Some(&HirType::Json))?;
+                self.coerce_to_declared_aliasing(&HirType::Json, lowered).map(Some)
+            }
+            Expr::Array(array) if array.elems.iter().all(|element| {
+                element.as_ref().is_some_and(|element| element.spread.is_none())
+            }) => {
+                let mut elements = Vec::with_capacity(array.elems.len());
+                for element in array.elems.iter().flatten() {
+                    let value = self.lower_expr(&element.expr)?;
+                    if contains_await(&value) {
+                        return Ok(None);
+                    }
+                    elements.push(self.coerce_to_declared(&HirType::Json, value)?);
+                }
+                let array = HirExpr::ArrayLit(elements);
+                self.infer_expr_type(&array)?;
+                if array_target || as_field {
+                    Ok(Some(array))
+                } else {
+                    self.coerce_to_declared(&HirType::Json, array).map(Some)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+/// `Some(false)` for an `any`/`unknown` assertion target, `Some(true)` for `any[]`/`unknown[]`/
+/// `Array<any>`; `None` for every other type.
+fn any_like_assertion_target(ty: &TsType) -> Option<bool> {
+    fn any_keyword(ty: &TsType) -> bool {
+        matches!(ty, TsType::TsKeywordType(keyword) if matches!(keyword.kind,
+            TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword))
+    }
+    match ty {
+        _ if any_keyword(ty) => Some(false),
+        TsType::TsArrayType(array) if any_keyword(&array.elem_type) => Some(true),
+        TsType::TsTypeRef(reference) if matches!(&reference.type_name,
+                swc_ecma_ast::TsEntityName::Ident(name) if name.sym.as_ref() == "Array")
+            && reference.type_params.as_ref().is_some_and(|params|
+                params.params.len() == 1 && any_keyword(&params.params[0])) => Some(true),
+        TsType::TsParenthesizedType(paren) => any_like_assertion_target(&paren.type_ann),
+        _ => None,
+    }
+}
+
+/// Whether an object literal has an array literal among its property values, at any depth.
+fn object_literal_holds_array(object: &swc_ecma_ast::ObjectLit) -> bool {
+    object.props.iter().any(|property| match property {
+        swc_ecma_ast::PropOrSpread::Prop(property) => match property.as_ref() {
+            swc_ecma_ast::Prop::KeyValue(swc_ecma_ast::KeyValueProp { value, .. }) => {
+                let value = split_type_assertion(value).map_or(value.as_ref(), |(inner, _)| inner);
+                match peel_parens(value) {
+                    Expr::Array(_) => true,
+                    Expr::Object(nested) => object_literal_holds_array(nested),
+                    _ => false,
+                }
+            }
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
+pub(in crate::lower) fn peel_parens(mut expr: &Expr) -> &Expr {
+    while let Expr::Paren(paren) = expr {
+        expr = &paren.expr;
+    }
+    expr
+}
+
+/// The operand and asserted type of `x as T` / `<T>x`, looking through parentheses.
+pub(in crate::lower) fn split_type_assertion(expr: &Expr) -> Option<(&Expr, &TsType)> {
+    match expr {
+        Expr::Paren(paren) => split_type_assertion(&paren.expr),
+        Expr::TsAs(assertion) => Some((&assertion.expr, &assertion.type_ann)),
+        Expr::TsTypeAssertion(assertion) => Some((&assertion.expr, &assertion.type_ann)),
+        _ => None,
     }
 }
 
