@@ -5992,6 +5992,12 @@ pub unsafe extern "C" fn thaw_json_array_join(
         }
         _ => return CString::new("").unwrap_or_default().into_raw(),
     };
+    // A cyclic array contributes "" where it meets itself again, as in `Array.prototype.join`.
+    let key = items.as_ptr() as usize;
+    if JOINING.with(|joining| joining.borrow().contains(&key)) {
+        return CString::new("").unwrap_or_default().into_raw();
+    }
+    JOINING.with(|joining| joining.borrow_mut().push(key));
     let mut joined = String::new();
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
@@ -6007,7 +6013,13 @@ pub unsafe extern "C" fn thaw_json_array_join(
             }
         }
     }
+    JOINING.with(|joining| joining.borrow_mut().pop());
     thaw_arena::owned_string(joined)
+}
+
+thread_local! {
+    /// Arrays currently being joined (cycle guard for `thaw_json_array_join`).
+    static JOINING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The string-valued `key` of a caught (live) Json value, if it has one.
