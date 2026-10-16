@@ -3371,6 +3371,11 @@ impl<'a> FnLowerer<'a> {
                         } else if spread_source_type == HirType::Json {
                             // An `any` array (plain, JS-owned or a live view of a native array)
                             // decodes element by element, like the `Array<Json>` copy methods use.
+                            // A `Map`/`Set` (wrapper or host collection) yields its entries.
+                            value = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_map_or_set_entries".to_string())),
+                                vec![value],
+                            );
                             value = self.coerce_to_declared(&HirType::Array(Box::new(HirType::Json)), value)?;
                         } else if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
@@ -5128,6 +5133,11 @@ impl<'a> FnLowerer<'a> {
                 if let Some(lowered) = self.lower_any_live_array(array)? {
                     return self.coerce_to_declared(&HirType::Json, lowered);
                 }
+            }
+        }
+        if let (Expr::Array(array), Some(HirType::Json)) = (expr, expected) {
+            if let Some(literal) = self.lower_any_array_with_collections(array)? {
+                return Ok(literal);
             }
         }
         if let (Expr::Object(_), Some(HirType::Json)) = (expr, expected) {

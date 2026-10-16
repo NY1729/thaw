@@ -4669,6 +4669,31 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             .map(|time| unsafe { thaw_date_to_iso_string(time) });
         return Node::Date(text.filter(|text| !text.is_null()).map(to_str));
     }
+    // A host `Map`/`Set` prints like Node's (`Map(1) { 'a' => 1 }`).
+    let collection = host_query(lease, 24);
+    if matches!(collection.as_deref(), Some("map" | "set"))
+        && HOST_INSPECT_DEPTH.with(Cell::get) < 4
+    {
+        HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        let node = if collection.as_deref() == Some("map") {
+            let keys = host_enumerate_values(lease, 4);
+            let values = host_enumerate_values(lease, 6);
+            let entries = keys
+                .iter()
+                .zip(values.iter())
+                .map(|(key, value)| (inspect_node(key, stack), inspect_node(value, stack)))
+                .collect();
+            Node::Map { id: 0, entries }
+        } else {
+            let items = host_enumerate_values(lease, 5)
+                .iter()
+                .map(|item| inspect_node(item, stack))
+                .collect();
+            Node::Set { id: 0, items }
+        };
+        HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        return node;
+    }
     let array = host_query(lease, 4).as_deref() == Some("1");
     // Materialization precedes the formatter's own depth cut-off, so cap it (also ends cycles).
     if HOST_INSPECT_DEPTH.with(Cell::get) >= 4 {
@@ -8062,6 +8087,23 @@ fn is_map_wrapper(value: &Value) -> bool {
 #[no_mangle]
 pub extern "C" fn thaw_json_map_or_set_entries(value: *mut Value) -> *mut Value {
     let value = unsafe { &*value };
+    // A host `Map`/`Set` (a JS collection, e.g. an `any` literal field) is read through the realm.
+    if let Value::Host(lease) = value {
+        match host_query(lease, 24).as_deref() {
+            Some("map") => {
+                let keys = host_enumerate_values(lease, 4);
+                let values = host_enumerate_values(lease, 6);
+                return leak(Value::shared_array(
+                    keys.into_iter()
+                        .zip(values)
+                        .map(|(key, value)| Value::shared_array(vec![key, value]))
+                        .collect(),
+                ));
+            }
+            Some("set") => return leak(Value::shared_array(host_enumerate_values(lease, 5))),
+            _ => {}
+        }
+    }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return leak(value.clone());
     };
