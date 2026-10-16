@@ -13,12 +13,14 @@
 //! machine later in this crate; the blocking client here remains specific to
 //! the Lambda Runtime API.
 //!
-//! Known limitations, acceptable for what this talks to: no TLS, no
-//! chunked transfer-encoding, one request per TCP connection.
+//! Known limitations, acceptable for what this talks to: no TLS and one
+//! request per TCP connection.
+#![allow(clippy::missing_safety_doc)]
+#![cfg_attr(test, allow(unused_unsafe))]
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::raw::c_char;
@@ -26,6 +28,7 @@ use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use thaw_arena::NativeStr as CStr;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
@@ -45,6 +48,7 @@ use thaw_std as _;
 include!("runtime/native_values/numbers.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
+include!("runtime/native_values/array_provenance.rs");
 include!("runtime/native_values/regex.rs");
 include!("runtime/native_values/template_strings.rs");
 include!("runtime/native_values/date.rs");
@@ -93,14 +97,56 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Copies a terminal exception into owned report text before a listener can
+/// reenter generated code. The public Promise rejection ABI permits opaque
+/// pointers, so only an exact producer-supplied native-text pointer is read.
+/// Typed primitive payloads remain printable even when that text is absent.
+/// The caller must destroy the returned string exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_exception_report_text(
+    error: *const c_char,
+    native_text: *const c_char,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: bool,
+) -> *mut c_char {
+    if error.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text: Vec<u8> = if error == native_text || is_detached_report_text(error) {
+        unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
+    } else {
+        match tag {
+            1 => javascript_number_string(f64_value).into_bytes(),
+            2 => i64_value.to_string().into_bytes(),
+            3 => bool_value.to_string().into_bytes(),
+            5 => b"undefined".to_vec(),
+            6 => b"null".to_vec(),
+            4 => b"Uncaught opaque string exception".to_vec(),
+            _ => b"Uncaught opaque exception".to_vec(),
+        }
+    };
+    thaw_arena::owned_string(text)
+}
+
 struct PromiseSubscription {
     resume: PromiseResumeFn,
     frame: *mut u8,
+    // Rust subscriber and ready queues are invisible to the arena scanner.
+    // Pin a suspended arena frame and callback payloads until resume returns.
+    _frame_root: thaw_arena::ArenaRoot,
+    _payload_roots: Vec<thaw_arena::ArenaRoot>,
+}
+
+struct ReadyContinuation {
+    subscription: PromiseSubscription,
+    result: *const u8,
+    _result_root: thaw_arena::ArenaRoot,
 }
 
 thread_local! {
-    static READY_CONTINUATIONS: RefCell<VecDeque<(PromiseSubscription, *const u8)>> =
+    static READY_CONTINUATIONS: RefCell<VecDeque<ReadyContinuation>> =
         const { RefCell::new(VecDeque::new()) };
     static TIMERS: RefCell<Vec<PromiseTimer>> = const { RefCell::new(Vec::new()) };
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
@@ -108,9 +154,13 @@ thread_local! {
     static ACTIVE_PROMISE_JOINS: Cell<usize> = const { Cell::new(0) };
     static ACTIVE_PROMISES: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
     static UNHANDLED_REPORTER: Cell<Option<PromiseUnhandledFn>> = const { Cell::new(None) };
+    static UNHANDLED_REPORTER_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };
+    static UNHANDLED_REPORTER_TEXT_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };
     static REJECTION_HANDLED_REPORTER: Cell<Option<PromiseRejectionHandledFn>> = const { Cell::new(None) };
+    static REJECTION_HANDLED_REPORTER_RESULT: Cell<Option<PromiseRejectionHandledResultFn>> = const { Cell::new(None) };
     static PENDING_REJECTION_HANDLED: Cell<usize> = const { Cell::new(0) };
     static UNHANDLED_FAILURE: Cell<bool> = const { Cell::new(false) };
+    static PROMISE_REPORT_ACTIVITY: Cell<usize> = const { Cell::new(0) };
     // The current Lambda invocation's wall-clock deadline, derived from the
     // Runtime API's `Lambda-Runtime-Deadline-Ms` header, paired with the
     // countdown it started from (kept only to phrase the timeout message).
@@ -151,7 +201,7 @@ fn reject_for_invocation_deadline(promise: *mut ThawPromise) {
         .map_or(0.0, |(_, budget)| budget.as_secs_f64());
     let message = format!("Task timed out after {seconds:.2} seconds");
     let error = arena_c_string(&message).unwrap_or(INVOCATION_TIMEOUT_ERROR.as_ptr());
-    thaw_promise_reject(promise, error);
+    reject_native_text(promise, error);
 }
 
 /// Clears every thread-local queue that could still hold a pointer into the
@@ -163,10 +213,15 @@ fn reject_for_invocation_deadline(promise: *mut ThawPromise) {
 /// subscriptions (such as N-API filesystem watchers) that outlive one
 /// invocation by design.
 fn purge_pending_async_state() {
+    // Abandoned aggregate callback Boxes may outlive cleared queues. Release
+    // their temporary pins and make any later callback ignore arena payloads.
+    cancel_pending_aggregate_states();
+    uncount_pending_promise_all_states_for_invocation();
     READY_CONTINUATIONS.with(|queue| queue.borrow_mut().clear());
     TIMERS.with(|timers| timers.borrow_mut().clear());
     FD_WAITS.with(|waits| waits.borrow_mut().clear());
     ACTIVE_PROMISE_JOINS.with(|count| count.set(0));
+    PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(0));
     set_invocation_deadline(None);
 }
 
@@ -182,13 +237,14 @@ struct PromiseFdWait {
     deadline: Option<Instant>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FdWatcher {
     id: u64,
     fd: libc::c_int,
     interests: u8,
     callback: FdWatcherFn,
     context: *mut u8,
+    _root: thaw_arena::ArenaRoot,
 }
 
 static NEXT_FD_WATCHER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -198,10 +254,20 @@ static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
 static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
 static PROMISE_CYCLE_ERROR: &[u8] = b"Chaining cycle detected for promise\0";
-static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"All promises were rejected\0";
+static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"\x01AggregateError\x01All promises were rejected\0";
 static PROMISE_SETTLED_FULFILLED: &[u8] = b"fulfilled\0";
 static PROMISE_SETTLED_REJECTED: &[u8] = b"rejected\0";
 static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
+
+fn fd_poll_timeout_ms(timeout: Option<Duration>) -> i32 {
+    match timeout {
+        Some(duration) => duration
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32,
+        None => -1,
+    }
+}
 
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
@@ -248,10 +314,7 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
         (Some(delay), None) | (None, Some(delay)) => Some(delay),
         (None, None) => None,
     };
-    let timeout_ms = match timeout {
-        Some(duration) => duration.as_millis().saturating_add(1).min(i32::MAX as u128) as i32,
-        None => -1,
-    };
+    let timeout_ms = fd_poll_timeout_ms(timeout);
     let ready = unsafe {
         libc::poll(
             pollfds.as_mut_ptr(),
@@ -284,9 +347,9 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let count = completed.len();
     for (promise, events, timed_out) in completed {
         if timed_out && events == 0 {
-            thaw_promise_reject(promise, FD_TIMEOUT_ERROR.as_ptr());
+            reject_native_text(promise, FD_TIMEOUT_ERROR.as_ptr());
         } else if events & libc::POLLNVAL != 0 {
-            thaw_promise_reject(promise, INVALID_FD_ERROR.as_ptr());
+            reject_native_text(promise, INVALID_FD_ERROR.as_ptr());
         } else {
             thaw_promise_resolve(promise, std::ptr::dangling::<u8>());
         }
@@ -297,12 +360,21 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
             .iter()
             .zip(&pollfds[wait_count..])
             .filter(|(_, pollfd)| pollfd.revents != 0)
-            .map(|(watcher, pollfd)| (*watcher, pollfd.revents))
+            .map(|(watcher, pollfd)| (watcher.clone(), pollfd.revents))
             .collect::<Vec<_>>()
     });
-    let watcher_count = ready_watchers.len();
+    let mut watcher_count = 0;
     for (watcher, events) in ready_watchers {
-        (watcher.callback)(watcher.context, events);
+        let registered = FD_WATCHERS.with(|watchers| {
+            watchers
+                .borrow()
+                .iter()
+                .any(|current| current.id == watcher.id)
+        });
+        if registered {
+            (watcher.callback)(watcher.context, events);
+            watcher_count += 1;
+        }
     }
     count + watcher_count
 }
@@ -342,6 +414,7 @@ pub extern "C" fn thaw_runtime_watch_fd(
             interests,
             callback,
             context,
+            _root: thaw_arena::ArenaRoot::new(context as usize),
         });
     });
     id
@@ -385,7 +458,13 @@ pub extern "C" fn thaw_runtime_run_one_event() -> bool {
 }
 
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
-    READY_CONTINUATIONS.with(|ready| ready.borrow_mut().push_back((subscription, result)));
+    READY_CONTINUATIONS.with(|ready| {
+        ready.borrow_mut().push_back(ReadyContinuation {
+            subscription,
+            result,
+            _result_root: thaw_arena::ArenaRoot::new(result as usize),
+        });
+    });
 }
 
 fn promote_due_timers() {
@@ -431,11 +510,25 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     promote_due_timers();
     let io_events = poll_fd_waits(Some(Duration::ZERO));
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
-    let Some((subscription, result)) = next else {
+    let Some(continuation) = next else {
         report_registered_unhandled_rejections();
-        return u8::from(io_events != 0);
+        // A rejection listener can enqueue a continuation or another rejection.
+        // Recheck after dispatch so an idle drain does not stop before that work.
+        let reporting_work = PENDING_REJECTION_HANDLED.with(|pending| pending.get() != 0)
+            || ACTIVE_PROMISES.with(|active| {
+                active.borrow().iter().any(|promise| {
+                    let promise = unsafe { &**promise };
+                    promise.rejected && !promise.handled && !promise.reported_unhandled
+                })
+            });
+        return u8::from(
+            io_events != 0
+                || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+                || reporting_work,
+        );
     };
-    (subscription.resume)(subscription.frame, result);
+    (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
+    drop(continuation);
     1
 }
 
@@ -470,7 +563,7 @@ fn thaw_runtime_wait_fd_until(
 ) -> *mut ThawPromise {
     let promise = thaw_promise_new();
     if fd < 0 || interests == 0 || interests & !(THAW_FD_READABLE | THAW_FD_WRITABLE) != 0 {
-        thaw_promise_reject(promise, INVALID_FD_ERROR.as_ptr());
+        reject_native_text(promise, INVALID_FD_ERROR.as_ptr());
         return promise;
     }
     FD_WAITS.with(|waits| {
@@ -497,6 +590,30 @@ pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
     count
 }
 
+/// Timers and fd waits can become ready after an idle drain returns zero.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
+    u8::from(
+        READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+            || TIMERS.with(|timers| !timers.borrow().is_empty())
+            || has_fd_waits(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_runtime_shutdown_wait() {
+    std::thread::sleep(Duration::from_millis(1));
+}
+
+/// Reports rejections nobody handled yet. The generated entry point calls it
+/// before it destroys the async `main` completion promise: a `main` that
+/// throws before its first suspension is already rejected when it returns, so
+/// no poll ever saw it and destroying it would hide the failure (exit 0).
+#[no_mangle]
+pub extern "C" fn thaw_runtime_report_unhandled() {
+    report_registered_unhandled_rejections();
+}
+
 /// Drives detached Promise combinator children to completion. A rejected
 /// parent may already have resumed user code, but its child async frames still
 /// borrow the current request arena and must finish before that arena resets.
@@ -504,6 +621,13 @@ pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
 pub extern "C" fn thaw_runtime_drain_detached() -> usize {
     let mut count = 0;
     while ACTIVE_PROMISE_JOINS.with(Cell::get) != 0 {
+        // Past its deadline the invocation is abandoned: the awaiting handler
+        // and its completion promise are already released, so resuming the
+        // remaining children would settle freed outputs. The caller's purge
+        // discards them instead.
+        if invocation_deadline_remaining() == Some(Duration::ZERO) {
+            break;
+        }
         if thaw_runtime_poll_one() != 0 {
             count += 1;
             continue;
@@ -623,15 +747,22 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
 #[repr(C)]
 pub struct ThawPromise {
     result: Option<*const u8>,
+    fulfilled_provenance: *const ExceptionProvenance,
+    rejection_text: Option<Vec<u8>>,
     rejected: bool,
     exception_tag: u64,
     exception_f64: f64,
     exception_i64: i64,
     exception_bool: bool,
     exception_object: *const u8,
+    exception_native: *const ExceptionProvenance,
+    aggregate_errors: *const u8,
     handled: bool,
     reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,
+    internal_references: usize,
+    references: usize,
+    external_root: Option<thaw_arena::ArenaRoot>,
 }
 
 include!("runtime/promises.rs");

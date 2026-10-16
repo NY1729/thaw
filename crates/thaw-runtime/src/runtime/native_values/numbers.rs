@@ -1,3 +1,5 @@
+use num_bigint::BigUint;
+
 fn javascript_number_string(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -66,6 +68,16 @@ fn javascript_number_string(value: f64) -> String {
 }
 
 #[no_mangle]
+/// `console.log`'s number rendering: like `Number.prototype.toString`, but
+/// shows `-0` (Node's `util.inspect` does), whereas `String(-0)` is `"0"`.
+pub extern "C" fn thaw_number_to_console_string(value: f64) -> *const c_char {
+    if value == 0.0 && value.is_sign_negative() {
+        return arena_c_string("-0").map_or(std::ptr::null(), |value| value.cast());
+    }
+    thaw_number_to_string(value)
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     let text = javascript_number_string(value);
     let destination = thaw_arena::thaw_arena_alloc(text.len() + 1, 1);
@@ -79,18 +91,67 @@ pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     destination.cast()
 }
 
-const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+/// The exact positive binary64 magnitude in units of 2^-1074. The same
+/// scale covers subnormals, normal values, and the theoretical successor of
+/// MAX_VALUE used only for its upper rounding midpoint.
+fn radix_binary_magnitude(bits: u64) -> BigUint {
+    let exponent = ((bits >> 52) & 0x7ff) as usize;
+    let fraction = bits & ((1u64 << 52) - 1);
+    if exponent == 0 {
+        BigUint::from(fraction)
+    } else {
+        BigUint::from((1u64 << 52) | fraction) << (exponent - 1)
+    }
+}
 
-/// Formats `value` in `radix` (already normalized to an integer in
-/// `[2, 36]`), matching `Number.prototype.toString`'s non-decimal case
-/// (`radix` `10` should go through the ordinary decimal path instead --
-/// this doesn't special-case it). Uses plain `f64` arithmetic throughout
-/// rather than converting to a fixed-width integer, so it never overflows
-/// regardless of `value`'s magnitude, at the cost of the same precision
-/// `f64` itself already has past 2^53 -- a faithful reflection of what the
-/// JavaScript number actually represents, not a shortcut. The fractional
-/// part is capped at 100 digits (ordinary engines make a similar practical
-/// cutoff instead of chasing exact bit-for-bit fidelity).
+struct RadixGrid {
+    first: BigUint,
+    last: BigUint,
+    center: BigUint,
+    denominator: BigUint,
+}
+
+/// Integers k for which k * radix^exponent rounds back to the same binary64.
+/// Midpoints use denominator 2^1075; ties belong to this cell exactly when
+/// its significand is even. A positive k is required even near +0.
+fn radix_roundtrip_grid(
+    magnitude: &BigUint,
+    lower_midpoint: &BigUint,
+    upper_midpoint: &BigUint,
+    even: bool,
+    radix: u32,
+    exponent: i32,
+) -> Option<RadixGrid> {
+    let power = BigUint::from(radix).pow(exponent.unsigned_abs());
+    let midpoint_denominator = BigUint::from(1u8) << 1075;
+    let (lower, upper, center, denominator) = if exponent >= 0 {
+        (lower_midpoint.clone(), upper_midpoint.clone(), magnitude << 1,
+            midpoint_denominator * power)
+    } else {
+        (lower_midpoint * &power, upper_midpoint * &power,
+            (magnitude << 1) * &power, midpoint_denominator)
+    };
+    let zero = BigUint::from(0u8);
+    let mut first = &lower / &denominator;
+    if &lower % &denominator != zero || !even {
+        first += 1u8;
+    }
+    if first == zero {
+        first = BigUint::from(1u8);
+    }
+    let mut last = &upper / &denominator;
+    if &upper % &denominator == zero && !even {
+        if last == zero {
+            return None;
+        }
+        last -= 1u8;
+    }
+    (first <= last).then_some(RadixGrid { first, last, center, denominator })
+}
+
+/// Shortest non-decimal positional spelling that rounds to `value` in radix
+/// 2..=36. Searching lattice exponents, rather than emitting f64 fraction
+/// digits, terminates for odd radices and keeps MIN_VALUE's distant last bit.
 fn number_to_radix_string(value: f64, radix: u32) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -101,42 +162,67 @@ fn number_to_radix_string(value: f64, radix: u32) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
-    let negative = value < 0.0;
-    let value = value.abs();
-    let radix_f = radix as f64;
+    debug_assert!((2..=36).contains(&radix));
+    let negative = value.is_sign_negative();
+    let bits = value.abs().to_bits();
+    let magnitude = radix_binary_magnitude(bits);
+    let predecessor = radix_binary_magnitude(bits - 1);
+    let successor = if bits == f64::MAX.to_bits() {
+        BigUint::from(1u8) << 2098
+    } else {
+        radix_binary_magnitude(bits + 1)
+    };
+    let lower_midpoint = &predecessor + &magnitude;
+    let upper_midpoint = &magnitude + &successor;
+    let even = bits & 1 == 0;
 
-    let mut integer_digits = Vec::new();
-    let mut whole = value.trunc();
-    if whole == 0.0 {
-        integer_digits.push(b'0');
-    }
-    while whole > 0.0 {
-        let digit = (whole % radix_f) as usize;
-        integer_digits.push(RADIX_DIGITS[digit]);
-        whole = (whole / radix_f).trunc();
-    }
-    integer_digits.reverse();
-
-    let mut text = String::with_capacity(integer_digits.len() + 8);
-    if negative {
-        text.push('-');
-    }
-    text.push_str(&String::from_utf8(integer_digits).expect("radix digits are ASCII"));
-
-    let mut fraction = value.fract();
-    if fraction > 0.0 {
-        text.push('.');
-        for _ in 0..100 {
-            fraction *= radix_f;
-            let digit = fraction.trunc() as usize;
-            text.push(RADIX_DIGITS[digit] as char);
-            fraction -= digit as f64;
-            if fraction <= 0.0 {
-                break;
-            }
+    // The finest grid is guaranteed feasible; the coarsest is infeasible for
+    // any positive finite binary64. Feasibility stays true on finer grids.
+    let mut finest = -1074;
+    let mut coarsest = 1024;
+    debug_assert!(radix_roundtrip_grid(&magnitude, &lower_midpoint,
+        &upper_midpoint, even, radix, finest).is_some());
+    while coarsest - finest > 1 {
+        let middle = finest + (coarsest - finest) / 2;
+        if radix_roundtrip_grid(&magnitude, &lower_midpoint,
+            &upper_midpoint, even, radix, middle).is_some() {
+            finest = middle;
+        } else {
+            coarsest = middle;
         }
     }
-    text
+    let grid = radix_roundtrip_grid(&magnitude, &lower_midpoint,
+        &upper_midpoint, even, radix, finest).expect("binary64 radix grid exists");
+    // Pick the closest shortest candidate; an exact candidate tie chooses an
+    // even final digit. Clamp to the half-ulp interval at its open endpoints.
+    let mut coefficient = &grid.center / &grid.denominator;
+    let remainder = &grid.center % &grid.denominator;
+    let doubled_remainder = &remainder << 1;
+    if doubled_remainder > grid.denominator
+        || (doubled_remainder == grid.denominator && coefficient.bit(0)) {
+        coefficient += 1u8;
+    }
+    if coefficient < grid.first {
+        coefficient = grid.first;
+    } else if coefficient > grid.last {
+        coefficient = grid.last;
+    }
+    let digits = coefficient.to_str_radix(radix);
+    let mut result = if finest >= 0 {
+        format!("{digits}{}", "0".repeat(finest as usize))
+    } else {
+        let fraction_digits = (-finest) as usize;
+        if digits.len() > fraction_digits {
+            let split = digits.len() - fraction_digits;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        } else {
+            format!("0.{}{digits}", "0".repeat(fraction_digits - digits.len()))
+        }
+    };
+    if negative {
+        result.insert(0, '-');
+    }
+    result
 }
 
 #[no_mangle]
@@ -158,12 +244,29 @@ pub extern "C" fn thaw_number_to_fixed(value: f64, digits: f64) -> *const c_char
         return thaw_number_to_string(value);
     }
     let negative = value < 0.0;
-    let magnitude = if negative { -value } else { value };
+    let magnitude = value.abs();
     if magnitude >= 1e21 {
         return thaw_number_to_string(value);
     }
     let digits = digits as usize;
-    let formatted = format!("{magnitude:.digits$}");
+    // `toFixed` rounds half *away from zero* (spec: pick the larger `n` on
+    // a tie), whereas Rust's `{:.digits$}` rounds half to even (so
+    // `(2.5).toFixed(0)` would be `"2"` instead of `"3"`). Only a *genuine*
+    // exact tie (a `...5000` tail in the value's exact decimal expansion)
+    // needs bumping -- `4.35` is really `4.3499...` and must stay `"4.3"`.
+    let high = format!("{magnitude:.110}");
+    let fractional = high.split('.').nth(1).unwrap_or("");
+    let fractional = fractional.as_bytes();
+    let scale = 10f64.powi(digits as i32);
+    let scaled = magnitude * scale;
+    let is_tie = fractional.len() > digits
+        && fractional[digits] == b'5'
+        && fractional[digits + 1..].iter().all(|digit| *digit == b'0');
+    let formatted = if is_tie && scaled < 9e15 {
+        insert_decimal_point(&format!("{:.0}", scaled.floor() + 1.0), digits)
+    } else {
+        format!("{magnitude:.digits$}")
+    };
     let text = if negative {
         format!("-{formatted}")
     } else {
@@ -172,14 +275,25 @@ pub extern "C" fn thaw_number_to_fixed(value: f64, digits: f64) -> *const c_char
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// Inserts a decimal point `digits` from the right of an integer string
+/// (`"100"`, 2 -> `"1.00"`; `"5"`, 2 -> `"0.05"`).
+fn insert_decimal_point(integer: &str, digits: usize) -> String {
+    if digits == 0 {
+        return integer.to_string();
+    }
+    if integer.len() > digits {
+        let split = integer.len() - digits;
+        format!("{}.{}", &integer[..split], &integer[split..])
+    } else {
+        format!("0.{}{integer}", "0".repeat(digits - integer.len()))
+    }
+}
+
 /// Formats a non-negative, finite `magnitude` with exactly `precision`
 /// significant digits, matching the digit-placement rules of
 /// `Number.prototype.toPrecision` once its sign has been stripped.
 fn format_precision_digits(magnitude: f64, precision: usize) -> String {
-    let formatted = format!("{:.*e}", precision - 1, magnitude);
-    let (mantissa, exponent) = formatted.split_once('e').expect("exponential format");
-    let exponent: i32 = exponent.parse().expect("integer exponent");
-    let digits: String = mantissa.chars().filter(|character| *character != '.').collect();
+    let (digits, exponent) = rounded_significant_digits(magnitude, precision);
     let precision = precision as i32;
     if exponent < -6 || exponent >= precision {
         let mut result = String::new();
@@ -202,6 +316,38 @@ fn format_precision_digits(magnitude: f64, precision: usize) -> String {
     } else {
         format!("0.{}{digits}", "0".repeat((-(exponent + 1)) as usize))
     }
+}
+
+/// Exact decimal digits of a binary64, rounded only once to the requested
+/// significant width. The existing decimal BigInt helpers avoid floating
+/// scaling (which could itself round before an exact decimal tie is tested).
+fn rounded_significant_digits(magnitude: f64, precision: usize) -> (String, i32) {
+    if magnitude == 0.0 {
+        return ("0".repeat(precision), 0);
+    }
+    let bits = magnitude.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = (bits & ((1u64 << 52) - 1))
+        | if exponent_bits == 0 { 0 } else { 1u64 << 52 };
+    let binary_exponent = if exponent_bits == 0 { -1074 } else { exponent_bits - 1075 };
+    let (_, mut coefficient) = decimal_digits(&mantissa.to_string());
+    let factor = if binary_exponent < 0 { 5 } else { 2 };
+    for _ in 0..binary_exponent.unsigned_abs() {
+        coefficient = decimal_mul_magnitude(&coefficient, &[factor]);
+    }
+    let exact = decimal_to_string(false, &coefficient);
+    let mut exponent = exact.len() as i32 - 1 + binary_exponent.min(0);
+    let mut digits = exact.chars().take(precision).collect::<String>();
+    digits.extend(std::iter::repeat_n('0', precision - digits.len()));
+    if exact.len() > precision && exact.as_bytes()[precision] >= b'5' {
+        let (_, retained) = decimal_digits(&digits);
+        digits = decimal_to_string(false, &decimal_add_magnitude(&retained, &[1]));
+        if digits.len() > precision {
+            digits.truncate(precision);
+            exponent += 1;
+        }
+    }
+    (digits, exponent)
 }
 
 #[no_mangle]
@@ -247,7 +393,16 @@ pub extern "C" fn thaw_number_to_exponential(value: f64, digits: f64) -> *const 
         let rendered = format!("{parsed:e}");
         normalize_exponential(rendered)
     } else {
-        normalize_exponential(format!("{magnitude:.digits$e}", digits = digits as usize))
+        let (rounded, exponent) = rounded_significant_digits(magnitude, digits as usize + 1);
+        let mut text = rounded[..1].to_string();
+        if rounded.len() > 1 {
+            text.push('.');
+            text.push_str(&rounded[1..]);
+        }
+        text.push('e');
+        if exponent >= 0 { text.push('+'); }
+        text.push_str(&exponent.to_string());
+        text
     };
     let text = if negative { format!("-{body}") } else { body };
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
@@ -270,7 +425,7 @@ pub extern "C" fn thaw_jit_format_number(
 
 fn javascript_string_number(text: &str) -> f64 {
     let text =
-        text.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+        text.trim_matches(is_javascript_whitespace);
     if text.is_empty() {
         return 0.0;
     }
@@ -385,7 +540,7 @@ pub unsafe extern "C" fn thaw_string_to_number(value: *const c_char) -> f64 {
 
 fn javascript_parse_float(text: &str) -> f64 {
     let text = text
-        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+        .trim_start_matches(is_javascript_whitespace);
     let bytes = text.as_bytes();
     let mut index = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
     if text
@@ -432,7 +587,7 @@ fn javascript_parse_float(text: &str) -> f64 {
 
 fn javascript_parse_int(text: &str, radix: f64) -> f64 {
     let mut text = text
-        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+        .trim_start_matches(is_javascript_whitespace);
     let negative = text.starts_with('-');
     if matches!(text.as_bytes().first(), Some(b'+') | Some(b'-')) {
         text = &text[1..];
@@ -453,6 +608,14 @@ fn javascript_parse_int(text: &str, radix: f64) -> f64 {
     }
     if radix == 16 && has_hex_prefix {
         text = &text[2..];
+    }
+    if matches!(radix, 2 | 4 | 8 | 16 | 32) {
+        let end = text.char_indices()
+            .take_while(|(_, character)| character.is_digit(radix))
+            .map(|(index, character)| index + character.len_utf8())
+            .last().unwrap_or(0);
+        let value = power_of_two_radix_number(&text[..end], radix.trailing_zeros() as usize);
+        return if negative { -value } else { value };
     }
     let mut value = 0.0;
     let mut digits = 0;
@@ -578,6 +741,101 @@ mod radix_string_tests {
         assert_eq!(number_to_radix_string(-0.5, 2), "-0.1");
     }
 
+    // Decode the printed numeral independently of the formatter's grid
+    // search, then compare its exact rational value with the binary64 cell.
+    fn decode_radix(text: &str, radix: u32) -> (BigUint, BigUint, i32) {
+        let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let mut coefficient = BigUint::from(0u8);
+        let base = BigUint::from(radix);
+        for digit in integer.chars().chain(fraction.chars()) {
+            coefficient = coefficient * &base + digit.to_digit(radix).unwrap();
+        }
+        let mut exponent = -(fraction.len() as i32);
+        let numerator = coefficient.clone();
+        let denominator = base.pow(fraction.len() as u32);
+        assert_ne!(coefficient, BigUint::from(0u8));
+        while &coefficient % &base == BigUint::from(0u8) {
+            coefficient /= &base;
+            exponent += 1;
+        }
+        (numerator, denominator, exponent)
+    }
+
+    fn exact_cell_contains(value: f64, numerator: &BigUint, denominator: &BigUint) -> bool {
+        let bits = value.to_bits();
+        let integer = |bits: u64| {
+            let biased = ((bits >> 52) & 0x7ff) as usize;
+            let fraction = bits & ((1u64 << 52) - 1);
+            if biased == 0 { BigUint::from(fraction) }
+            else { BigUint::from(fraction + (1u64 << 52)) << (biased - 1) }
+        };
+        let lower = integer(bits - 1) + integer(bits);
+        let upper_neighbor = if value == f64::MAX {
+            BigUint::from(1u8) << 2098
+        } else {
+            integer(bits + 1)
+        };
+        let upper = integer(bits) + upper_neighbor;
+        let scaled = numerator << 1075;
+        let lower = lower * denominator;
+        let upper = upper * denominator;
+        if bits & 1 == 0 {
+            lower <= scaled && scaled <= upper
+        } else {
+            lower < scaled && scaled < upper
+        }
+    }
+
+    #[test]
+    fn shortest_radix_spelling_roundtrips_across_every_base() {
+        let values = [f64::from_bits(1), f64::from_bits(2),
+            f64::MIN_POSITIVE, f64::from_bits(f64::MIN_POSITIVE.to_bits() - 1),
+            0.1, 0.5, 1.0, 2.0, 9_007_199_254_740_994.0, f64::MAX];
+        for radix in 2..=36 {
+            let base = BigUint::from(radix);
+            for value in values {
+                let text = number_to_radix_string(value, radix);
+                let (numerator, denominator, exponent) = decode_radix(&text, radix);
+                assert!(exact_cell_contains(value, &numerator, &denominator),
+                    "{value:?} base {radix}: {text} does not roundtrip");
+                // A coarser lattice has no point in this rounding cell.
+                let coarser = exponent + 1;
+                let power = base.pow(coarser.unsigned_abs());
+                let binary_scale = BigUint::from(1u8) << 1074usize;
+                let exact_value = {
+                    let bits = value.to_bits();
+                    let biased = ((bits >> 52) & 0x7ff) as usize;
+                    let fraction = bits & ((1u64 << 52) - 1);
+                    if biased == 0 { BigUint::from(fraction) }
+                    else { BigUint::from(fraction + (1u64 << 52)) << (biased - 1) }
+                };
+                let (scaled, divisor) = if coarser >= 0 {
+                    (exact_value, binary_scale * &power)
+                } else {
+                    (exact_value * &power, binary_scale)
+                };
+                let below = &scaled / &divisor;
+                for candidate in [below.clone(), below + 1u8] {
+                    let (numerator, denominator) = if coarser >= 0 {
+                        (candidate * &power, BigUint::from(1u8))
+                    } else {
+                        (candidate, power.clone())
+                    };
+                    assert!(!exact_cell_contains(value, &numerator, &denominator),
+                        "{value:?} base {radix}: {text} has a shorter spelling");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn min_subnormal_keeps_its_last_binary_digit() {
+        assert_eq!(number_to_radix_string(f64::from_bits(1), 2),
+            format!("0.{}1", "0".repeat(1073)));
+        assert_eq!(number_to_radix_string(f64::from_bits(1), 16),
+            format!("0.{}4", "0".repeat(268)));
+    }
+
     #[test]
     fn handles_non_finite_values() {
         assert_eq!(number_to_radix_string(f64::NAN, 16), "NaN");
@@ -608,6 +866,37 @@ mod radix_string_tests {
         ] {
             let text = thaw_number_to_exponential(value, digits);
             assert_eq!(unsafe { std::ffi::CStr::from_ptr(text) }.to_str().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn significant_digits_choose_larger_decimal_integer_on_exact_ties() {
+        let text = |pointer: *const c_char| unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_str().expect("number text").to_string();
+        for (value, precision, expected) in [
+            (2.5, 1.0, "3"),
+            (-2.5, 1.0, "-3"),
+            (1.25, 2.0, "1.3"),
+            (4.35, 2.0, "4.3"),
+            (9.5, 1.0, "1e+1"),
+            (0.0, 3.0, "0.00"),
+            (f64::from_bits(1), 1.0, "5e-324"),
+            (f64::MAX, 1.0, "2e+308"),
+        ] {
+            assert_eq!(text(thaw_number_to_precision(value, precision)), expected);
+        }
+        for (value, digits, expected) in [
+            (2.5, 0.0, "3e+0"),
+            (-2.5, 0.0, "-3e+0"),
+            (1.25, 1.0, "1.3e+0"),
+            (4.35, 1.0, "4.3e+0"),
+            (9.5, 0.0, "1e+1"),
+            (0.0, 2.0, "0.00e+0"),
+            (f64::from_bits(1), 0.0, "5e-324"),
+            (f64::MAX, 0.0, "2e+308"),
+            (12.5, -1.0, "1.25e+1"),
+        ] {
+            assert_eq!(text(thaw_number_to_exponential(value, digits)), expected);
         }
     }
 }
@@ -854,8 +1143,9 @@ fn decimal_to_string(negative: bool, digits: &[u8]) -> String {
 }
 
 /// Applies a signed operation to two decimal strings and returns the
-/// decimal result. `operation` is `0`=add, `1`=subtract, `2`=multiply,
-/// `3`=divide (truncating), `4`=remainder (sign of the dividend).
+/// decimal result, or `None` for division or remainder by zero.
+/// `operation` is `0`=add, `1`=subtract, `2`=multiply, `3`=divide
+/// (truncating), `4`=remainder (sign of the dividend).
 ///
 /// # Safety
 /// Both pointers must be null or valid NUL-terminated UTF-8 strings.
@@ -863,7 +1153,7 @@ unsafe fn bigint_decimal_operation(
     left: *const c_char,
     right: *const c_char,
     operation: u8,
-) -> String {
+) -> Option<String> {
     let read = |pointer: *const c_char| -> (bool, Vec<u8>) {
         if pointer.is_null() {
             return (false, vec![0]);
@@ -872,7 +1162,7 @@ unsafe fn bigint_decimal_operation(
     };
     let (left_negative, left_digits) = read(left);
     let (right_negative, right_digits) = read(right);
-    match operation {
+    Some(match operation {
         0 | 1 => {
             let right_negative = if operation == 1 { !right_negative } else { right_negative };
             if left_negative == right_negative {
@@ -900,7 +1190,7 @@ unsafe fn bigint_decimal_operation(
         ),
         _ => {
             if decimal_is_zero(&right_digits) {
-                return "0".to_string();
+                return None;
             }
             let (quotient, remainder) = decimal_divmod_magnitude(&left_digits, &right_digits);
             if operation == 3 {
@@ -909,7 +1199,7 @@ unsafe fn bigint_decimal_operation(
                 decimal_to_string(left_negative, &remainder)
             }
         }
-    }
+    })
 }
 
 macro_rules! bigint_decimal_operation_fn {
@@ -923,7 +1213,11 @@ macro_rules! bigint_decimal_operation_fn {
             left: *const c_char,
             right: *const c_char,
         ) -> *const c_char {
-            let text = unsafe { bigint_decimal_operation(left, right, $operation) };
+            let Some(text) = (unsafe { bigint_decimal_operation(left, right, $operation) }) else {
+                // A null result signals division or remainder by zero to the
+                // code generator, which raises a catchable RangeError.
+                return std::ptr::null();
+            };
             arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
         }
     };
@@ -1078,7 +1372,14 @@ unsafe fn bigint_decimal_shift(
         };
     }
     let base_bits = decimal_to_bits(&digits);
-    let width = base_bits.len() + amount + 2;
+    if !left_shift && amount >= base_bits.len() {
+        return if negative { "-1" } else { "0" }.to_string();
+    }
+    let width = if left_shift {
+        base_bits.len() + amount + 2
+    } else {
+        base_bits.len() + 1
+    };
     let twos = signed_to_twos(negative, &digits, width);
     let result = if left_shift {
         let mut out = vec![0u8; amount];
@@ -1147,6 +1448,7 @@ mod bigint_decimal_tests {
         let left = std::ffi::CString::new(left).unwrap();
         let right = std::ffi::CString::new(right).unwrap();
         unsafe { bigint_decimal_operation(left.as_ptr(), right.as_ptr(), operation) }
+            .expect("nonzero BigInt divisor")
     }
 
     #[test]
@@ -1165,7 +1467,14 @@ mod bigint_decimal_tests {
         assert_eq!(operate("-7", "3", 4), "-1");
         assert_eq!(operate("7", "-3", 4), "1");
         assert_eq!(operate("0", "5", 3), "0");
-        assert_eq!(operate("5", "0", 3), "0");
+        for operation in [3, 4] {
+            let left = std::ffi::CString::new("5").unwrap();
+            let zero = std::ffi::CString::new("0").unwrap();
+            assert!(
+                unsafe { bigint_decimal_operation(left.as_ptr(), zero.as_ptr(), operation) }
+                    .is_none()
+            );
+        }
         assert_eq!(operate("007", "3", 0), "10");
     }
 
@@ -1198,6 +1507,12 @@ mod bigint_decimal_tests {
             shift("-123456789012345678901234567890", "8", false),
             "-482253082079475308207947531"
         );
+        assert_eq!(shift("123456789012345678901234567890", "1000000", false), "0");
+        assert_eq!(
+            shift("-123456789012345678901234567890", "1000000", false),
+            "-1"
+        );
+        assert_eq!(shift("123456789012345678901234567890", "-1000000", true), "0");
     }
 }
 
@@ -1264,30 +1579,245 @@ pub extern "C" fn thaw_i64_to_radix_string(value: i64, radix: f64) -> *const c_c
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
+// A binary64 is an integer multiple of 2^-1074. Even u64::MAX copies of
+// Number.MAX_VALUE fit in 2162 bits, so 34 limbs hold either signed part.
+const PRECISE_SUM_LIMBS: usize = 34;
+
+struct PreciseSum([u64; PRECISE_SUM_LIMBS]);
+
+impl Default for PreciseSum {
+    fn default() -> Self {
+        Self([0; PRECISE_SUM_LIMBS])
+    }
+}
+
+impl PreciseSum {
+    fn add(&mut self, value: f64) {
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as usize;
+        let mantissa = (bits & ((1u64 << 52) - 1)) | if exponent == 0 { 0 } else { 1u64 << 52 };
+        let shift = exponent.saturating_sub(1);
+        let mut index = shift / 64;
+        let mut carry = (mantissa as u128) << (shift % 64);
+        while carry != 0 {
+            debug_assert!(index < PRECISE_SUM_LIMBS);
+            let total = self.0[index] as u128 + (carry & u64::MAX as u128);
+            self.0[index] = total as u64;
+            carry = (carry >> 64) + (total >> 64);
+            index += 1;
+        }
+    }
+
+    fn bit(&self, index: usize) -> bool {
+        (self.0[index / 64] >> (index % 64)) & 1 != 0
+    }
+
+    fn any_below(&self, bit: usize) -> bool {
+        self.0[..bit / 64].iter().any(|limb| *limb != 0)
+            || (!bit.is_multiple_of(64) && self.0[bit / 64] & ((1u64 << (bit % 64)) - 1) != 0)
+    }
+
+    fn magnitude_difference(positive: &Self, negative: &Self) -> (Self, bool) {
+        let is_negative = positive.0.iter().rev().cmp(negative.0.iter().rev()).is_lt();
+        let (larger, smaller) = if is_negative { (negative, positive) } else { (positive, negative) };
+        let mut result = Self::default();
+        let mut borrow = false;
+        for index in 0..PRECISE_SUM_LIMBS {
+            let (difference, first_borrow) = larger.0[index].overflowing_sub(smaller.0[index]);
+            let (difference, second_borrow) = difference.overflowing_sub(borrow as u64);
+            result.0[index] = difference;
+            borrow = first_borrow || second_borrow;
+        }
+        debug_assert!(!borrow);
+        (result, is_negative)
+    }
+
+    fn rounded_binary64(&self, negative: bool) -> f64 {
+        let Some(highest) = self.0.iter().rposition(|limb| *limb != 0)
+            .map(|index| index * 64 + 63 - self.0[index].leading_zeros() as usize)
+        else {
+            return 0.0;
+        };
+        let sign = (negative as u64) << 63;
+        if highest < 52 {
+            return f64::from_bits(sign | self.0[0]);
+        }
+        if highest > 2097 {
+            return f64::from_bits(sign | (0x7ffu64 << 52));
+        }
+        let shift = highest - 52;
+        let mut mantissa = 0u64;
+        for bit in (shift..=highest).rev() {
+            mantissa = (mantissa << 1) | self.bit(bit) as u64;
+        }
+        if shift != 0 && self.bit(shift - 1)
+            && (self.any_below(shift - 1) || mantissa & 1 != 0)
+        {
+            mantissa += 1;
+        }
+        let exponent = highest - 51 + usize::from(mantissa == 1u64 << 53);
+        if exponent >= 0x7ff {
+            return f64::from_bits(sign | (0x7ffu64 << 52));
+        }
+        f64::from_bits(sign | ((exponent as u64) << 52) | (mantissa & ((1u64 << 52) - 1)))
+    }
+}
+
 #[no_mangle]
-/// `Math.sumPrecise(numbers)`: a Neumaier-compensated sum over the native
-/// `number[]` layout (`[len: u64][value: f64]...`). A null pointer yields
-/// `0`.
+/// `Math.sumPrecise(numbers)` for the native `number[]` buffer and its
+/// presence sidecar. Returns 1 after writing `out`, or 0 for a hole or an
+/// explicit `undefined` element. A null sidecar means every slot is present.
 ///
 /// # Safety
-/// `array` must be null or point to a valid native `number[]` block.
-pub unsafe extern "C" fn thaw_math_sum_precise(array: *const u8) -> f64 {
-    if array.is_null() {
-        return 0.0;
+/// `array` must point to a valid native `number[]` block, `presence` must be
+/// null or its matching readable sidecar, and `out` must be writable.
+pub unsafe extern "C" fn thaw_math_sum_precise(
+    array: *const u8,
+    presence: *const u8,
+    out: *mut f64,
+) -> u8 {
+    if array.is_null() || out.is_null() {
+        return 0;
     }
     let length = unsafe { array.cast::<u64>().read_unaligned() } as usize;
     let values = unsafe { array.add(8) }.cast::<f64>();
-    let mut sum = 0.0f64;
-    let mut compensation = 0.0f64;
+    // Special values must not enter Neumaier's finite compensation: an
+    // Infinity - Infinity intermediate would otherwise turn one infinity
+    // into NaN. Continue scanning after NaN/Infinity to reject later holes.
+    #[derive(Clone, Copy)]
+    enum State { MinusZero, Finite, PlusInfinity, MinusInfinity, NaN }
+    let mut state = State::MinusZero;
+    let mut positive = PreciseSum::default();
+    let mut negative = PreciseSum::default();
     for index in 0..length {
-        let value = unsafe { values.add(index).read_unaligned() };
-        let total = sum + value;
-        if sum.abs() >= value.abs() {
-            compensation += (sum - total) + value;
-        } else {
-            compensation += (value - total) + sum;
+        if !unsafe { array_index_present(presence, index) } {
+            return 0;
         }
-        sum = total;
+        let value = unsafe { values.add(index).read_unaligned() };
+        if value.is_nan() {
+            state = State::NaN;
+        } else if value == f64::INFINITY {
+            state = match state {
+                State::MinusInfinity | State::NaN => State::NaN,
+                _ => State::PlusInfinity,
+            };
+        } else if value == f64::NEG_INFINITY {
+            state = match state {
+                State::PlusInfinity | State::NaN => State::NaN,
+                _ => State::MinusInfinity,
+            };
+        } else if !(matches!(state, State::NaN | State::PlusInfinity | State::MinusInfinity)
+            || value == 0.0 && value.is_sign_negative())
+        {
+            state = State::Finite;
+            if value.is_sign_negative() {
+                negative.add(value);
+            } else {
+                positive.add(value);
+            }
+        }
     }
-    sum + compensation
+    unsafe {
+        out.write(match state {
+            State::MinusZero => -0.0,
+            State::Finite => {
+                let (magnitude, negative) = PreciseSum::magnitude_difference(&positive, &negative);
+                magnitude.rounded_binary64(negative)
+            }
+            State::PlusInfinity => f64::INFINITY,
+            State::MinusInfinity => f64::NEG_INFINITY,
+            State::NaN => f64::NAN,
+        });
+    }
+    1
+}
+
+#[cfg(test)]
+mod precise_sum_tests {
+    use super::*;
+
+    fn native_sum(values: &[f64]) -> f64 {
+        let mut array = Vec::with_capacity(8 + values.len() * 8);
+        array.extend_from_slice(&(values.len() as u64).to_ne_bytes());
+        for value in values {
+            array.extend_from_slice(&value.to_ne_bytes());
+        }
+        let mut result = f64::NAN;
+        assert_eq!(unsafe { thaw_math_sum_precise(array.as_ptr(), std::ptr::null(), &mut result) }, 1);
+        result
+    }
+
+    #[test]
+    fn finite_partial_overflow_cancels_before_final_rounding() {
+        let max = f64::MAX;
+        assert_eq!(native_sum(&[max, max, -max]).to_bits(), max.to_bits());
+        assert_eq!(native_sum(&[-max, -max, max]).to_bits(), (-max).to_bits());
+        assert_eq!(native_sum(&[max, max, -max, -max]).to_bits(), 0.0f64.to_bits());
+        assert_eq!(native_sum(&[max, max]), f64::INFINITY);
+        assert_eq!(native_sum(&[1e16, 1.0, -1e16]), 1.0);
+    }
+
+    #[test]
+    fn exact_sum_rounds_once_and_preserves_zero_rules() {
+        let half_ulp = f64::EPSILON / 2.0;
+        assert_eq!(native_sum(&[1.0, half_ulp]).to_bits(), 1.0f64.to_bits());
+        assert_eq!(native_sum(&[1.0, half_ulp, half_ulp]).to_bits(), (1.0 + f64::EPSILON).to_bits());
+        assert_eq!(native_sum(&[f64::MIN_POSITIVE, -f64::MIN_POSITIVE, f64::from_bits(1)]).to_bits(), 1);
+        assert_eq!(native_sum(&[]).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(native_sum(&[-0.0, -0.0]).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(native_sum(&[-0.0, 0.0]).to_bits(), 0.0f64.to_bits());
+        assert_eq!(native_sum(&[1.0, -1.0]).to_bits(), 0.0f64.to_bits());
+        assert_eq!(native_sum(&[f64::INFINITY]), f64::INFINITY);
+        assert!(native_sum(&[f64::INFINITY, f64::NEG_INFINITY]).is_nan());
+    }
+}
+
+#[cfg(test)]
+mod numeric_whitespace_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_parsers_use_ecmascript_whitespace() {
+        for whitespace in ['\u{00a0}', '\u{2028}', '\u{3000}', '\u{feff}'] {
+            let wrapped = format!("{whitespace}1{whitespace}");
+            assert_eq!(javascript_string_number(&wrapped), 1.0);
+            assert_eq!(javascript_parse_float(&wrapped), 1.0);
+            assert_eq!(javascript_parse_int(&wrapped, 10.0), 1.0);
+        }
+        for non_whitespace in ['\u{0085}', '\u{180e}', '\u{200b}'] {
+            let leading = format!("{non_whitespace}1");
+            let trailing = format!("1{non_whitespace}");
+            assert!(javascript_string_number(&leading).is_nan());
+            assert!(javascript_string_number(&trailing).is_nan());
+            assert!(javascript_parse_float(&leading).is_nan());
+            assert!(javascript_parse_int(&leading, 10.0).is_nan());
+            assert_eq!(javascript_parse_float(&trailing), 1.0);
+            assert_eq!(javascript_parse_int(&trailing, 10.0), 1.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod parse_int_power_radix_tests {
+    use super::*;
+
+    #[test]
+    fn parse_int_rounds_power_of_two_radices_after_all_digits() {
+        let integer = 0x2000000000000101_u64;
+        let expected = 2_305_843_009_213_694_464.0_f64;
+        for radix in [2_u32, 4, 8, 16, 32] {
+            let mut remaining = integer;
+            let mut digits = Vec::new();
+            while remaining != 0 {
+                digits.push(char::from_digit((remaining % u64::from(radix)) as u32, radix).unwrap());
+                remaining /= u64::from(radix);
+            }
+            let digits: String = digits.into_iter().rev().collect();
+            assert_eq!(javascript_parse_int(&digits, f64::from(radix)), expected);
+            assert_eq!(javascript_parse_int(&format!("-{digits}!ignored"), f64::from(radix)), -expected);
+        }
+        assert_eq!(javascript_parse_int("0x2000000000000101suffix", 0.0), expected);
+        assert_eq!(javascript_parse_int("-0", 2.0).to_bits(), (-0.0_f64).to_bits());
+        assert!(javascript_parse_int("!", 32.0).is_nan());
+    }
 }

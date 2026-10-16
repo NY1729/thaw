@@ -228,7 +228,8 @@ extern "C" fn round_number(value: f64) -> f64 {
     if !value.is_finite() || value == 0.0 {
         return value;
     }
-    let rounded = (value + 0.5).floor();
+    let floor = value.floor();
+    let rounded = if value - floor < 0.5 { floor } else { floor + 1.0 };
     if rounded == 0.0 && value.is_sign_negative() {
         -0.0
     } else {
@@ -339,14 +340,14 @@ extern "C" fn imul_number(left: f64, right: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn string_argument(value: f64) -> Option<String> {
     let pointer = value.to_bits() as usize as *const c_char;
-    (!pointer.is_null()).then(|| CStr::from_ptr(pointer).to_string_lossy().into_owned())
+    (!pointer.is_null()).then(|| thaw_arena::NativeStr::from_ptr(pointer).to_string_lossy().into_owned())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_length(value: f64) -> f64 {
     unsafe {
-        string_argument(value)
-            .map(|value| value.encode_utf16().count() as f64)
+        string_utf16_argument(value)
+            .map(|value| value.len() as f64)
             .unwrap_or(0.0)
     }
 }
@@ -398,7 +399,7 @@ extern "C" fn array_length(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_value(value: f64) -> f64 {
     match unsafe { array_data(value) } {
-        Some((data, _)) => f64::from_bits(data as usize as u64),
+        Some((data, _)) => array_result(data as *mut u8),
         None => {
             CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
             0.0
@@ -693,3 +694,22 @@ extern "C" fn dynamic_array_join(value: f64, separator: f64) -> f64 {
     )
 }
 
+
+#[cfg(all(test, target_arch = "x86_64", target_family = "unix"))]
+#[test]
+fn round_number_preserves_integers_and_ecmascript_ties() {
+    for (input, expected) in [
+        (4_503_599_627_370_497.0_f64, 4_503_599_627_370_497.0_f64),
+        (0.49999999999999994, 0.0),
+        (0.5, 1.0),
+        (-1.5, -1.0),
+        (-0.5, -0.0),
+        (-0.1, -0.0),
+        (-0.0, -0.0),
+        (f64::INFINITY, f64::INFINITY),
+        (f64::NEG_INFINITY, f64::NEG_INFINITY),
+    ] {
+        assert_eq!(round_number(input).to_bits(), expected.to_bits());
+    }
+    assert!(round_number(f64::NAN).is_nan());
+}

@@ -34,12 +34,47 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
     )
     .unwrap();
     assert_eq!(output.stdout, b"ok");
+    let output = command_output_with_timeout(
+        Command::new("sh").args(["-c", "yes x | head -c 100000; yes y | head -c 100000 >&2"]),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 100000);
+    assert_eq!(output.stderr.len(), 100000);
+    let start = Instant::now();
     assert!(command_output_with_timeout(
-        Command::new("sh").args(["-c", "sleep 1"]),
-        Duration::from_millis(10),
+        Command::new("sh").args(["-c", "sleep 5 & exit 0"]),
+        Duration::from_millis(50),
     )
     .unwrap_err()
     .contains("timed out"));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    let partial = command_output_with_timeout(
+        Command::new("sh").args([
+            "-c",
+            "printf 'partial-stdout-marker\\n'; printf 'partial-stderr-marker\\n' >&2; sleep 5",
+        ]),
+        Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert!(partial.contains("timed out"));
+    assert!(partial.contains("partial-stdout-marker"));
+    assert!(partial.contains("partial-stderr-marker"));
+
+    let large_tail = command_output_with_timeout(
+        Command::new("sh").args([
+            "-c",
+            "head -c 16384 /dev/zero | tr '\\000' x; printf 'stdout-tail-marker\\n'; head -c 16384 /dev/zero | tr '\\000' y >&2; printf 'stderr-tail-marker\\n' >&2; sleep 5",
+        ]),
+        Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert!(large_tail.contains("stdout (truncated to last 8192 bytes)"));
+    assert!(large_tail.contains("stderr (truncated to last 8192 bytes)"));
+    assert!(large_tail.contains("stdout-tail-marker"));
+    assert!(large_tail.contains("stderr-tail-marker"));
+    assert!(large_tail.len() < 20_000);
 }
 
 /// `thaw completeness`'s composite index must stay consistent with the
@@ -160,6 +195,57 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
 }
 
 #[test]
+fn path_builtin_named_values_compile_with_default_and_subpath_imports() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-path-exports-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "import path, { posix as pathPosix, win32 as pathWin32 } from 'path';\n\
+         import nodePath, { posix as nodePosix, win32 as nodeWin32, join as nodeJoin } from 'node:path';\n\
+         import posixPath, { posix as barePosixPosix, win32 as barePosixWin32 } from 'path/posix';\n\
+         import nodePosixPath, { posix as nodePosixSubpathPosix, win32 as nodePosixSubpathWin32, join as nodePosixJoin } from 'node:path/posix';\n\
+         import win32Path, { posix as bareWin32Posix, win32 as bareWin32Win32 } from 'path/win32';\n\
+         import nodeWin32Path, { posix as nodeWin32SubpathPosix, win32 as nodeWin32SubpathWin32, join as nodeWin32Join } from 'node:path/win32';\n\
+         function main(): void {\n\
+           console.log(JSON.stringify([path === pathPosix, path.posix === pathPosix, path.win32 === pathWin32, path === nodePath, pathPosix === nodePosix, pathWin32 === nodeWin32]));\n\
+           console.log(JSON.stringify([posixPath === pathPosix, barePosixPosix === pathPosix, barePosixWin32 === pathWin32, nodePosixPath === pathPosix, nodePosixSubpathPosix === pathPosix, nodePosixSubpathWin32 === pathWin32]));\n\
+           console.log(JSON.stringify([win32Path === pathWin32, bareWin32Posix === pathPosix, bareWin32Win32 === pathWin32, nodeWin32Path === pathWin32, nodeWin32SubpathPosix === pathPosix, nodeWin32SubpathWin32 === pathWin32]));\n\
+           console.log(JSON.stringify([nodePosix.posix === nodePosix, nodePosix.win32 === nodeWin32, nodeWin32.posix === nodePosix, nodeWin32.win32 === nodeWin32]));\n\
+           console.log(JSON.stringify([nodeJoin('a', 'b'), nodePosixJoin('a', 'b'), nodeWin32Join('a', 'b'), nodePosix.join('a', 'b'), nodeWin32.join('a', 'b')]));\n\
+         }\n",
+    )
+    .unwrap();
+    build(
+        &input,
+        &output,
+        &[],
+        &[],
+        &[],
+        &directory.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[true,true,true,true,true,true]\n\
+         [true,true,true,true,true,true]\n\
+         [true,true,true,true,true,true]\n\
+         [true,true,true,true]\n\
+         [\"a/b\",\"a/b\",\"a\\\\b\",\"a/b\",\"a\\\\b\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn install_uses_the_project_directory() {
     let command = npm_install_command(Path::new("web"));
     assert_eq!(
@@ -190,15 +276,101 @@ fn add_installs_named_packages_into_the_project() {
 #[test]
 fn external_native_sidecars_replace_stale_contents() {
     let root = std::env::temp_dir().join(format!("thaw-sidecar-{}", std::process::id()));
-    let staging = root.join("staging");
-    let destination = root.join("app.native");
+    std::fs::create_dir_all(&root).unwrap();
+    let output = root.join("app");
+    let scratch = BuildScratch::new(&output).unwrap();
+    let (staging, destination) = external_native_directories(&output, &scratch).unwrap();
     std::fs::create_dir_all(staging.join("pkg")).unwrap();
     std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(&output, "old program").unwrap();
+    std::fs::write(scratch.path.join("program"), "new program").unwrap();
     std::fs::write(staging.join("pkg/native.node"), "new").unwrap();
     std::fs::write(destination.join("obsolete.node"), "old").unwrap();
-    promote_external_native_directory(&staging, &destination).unwrap();
+    publish_build_artifacts(&scratch, &output, Some(&(staging, destination.clone()))).unwrap();
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "new program");
     assert!(destination.join("pkg/native.node").is_file());
     assert!(!destination.join("obsolete.node").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn build_publication_rolls_back_executable_and_sidecar_together() {
+    let root = std::env::temp_dir().join(format!("thaw-publish-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let output = root.join("app");
+    std::fs::write(&output, "old program").unwrap();
+    std::fs::write(root.join("app.o"), "user object").unwrap();
+    let scratch = BuildScratch::new(&output).unwrap();
+    assert_ne!(scratch.path.join("input.o"), root.join("app.o"));
+    let (staging, destination) = external_native_directories(&output, &scratch).unwrap();
+    std::fs::write(staging.join("new.node"), "new addon").unwrap();
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("old.node"), "old addon").unwrap();
+    // With no staged program, its final rename fails after native promotion.
+    assert!(
+        publish_build_artifacts(&scratch, &output, Some(&(staging, destination.clone()))).is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "old program");
+    assert!(destination.join("old.node").is_file());
+    assert!(!destination.join("new.node").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("app.o")).unwrap(),
+        "user object"
+    );
+    drop(scratch);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn object_extension_output_is_published_from_a_distinct_intermediate() {
+    let root = std::env::temp_dir().join(format!("thaw-output-o-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let output = root.join("app.o");
+    let scratch = BuildScratch::new(&output).unwrap();
+    std::fs::write(scratch.path.join("input.o"), "object bytes").unwrap();
+    std::fs::write(scratch.path.join("program"), "final executable").unwrap();
+    publish_build_artifacts(&scratch, &output, None).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&output).unwrap(),
+        "final executable"
+    );
+    drop(scratch);
+    assert_eq!(
+        std::fs::read_to_string(&output).unwrap(),
+        "final executable"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn failed_rollback_keeps_saved_executable_in_scratch() {
+    let root = std::env::temp_dir().join(format!("thaw-rollback-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let output = root.join("app");
+    let scratch = BuildScratch::new(&output).unwrap();
+    let backup = scratch.path.join("old-program");
+    std::fs::write(&backup, "old program").unwrap();
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(
+        output.join("blocker"),
+        "cannot replace a nonempty directory",
+    )
+    .unwrap();
+    let error = rollback_publish_failure(
+        &scratch,
+        "install failed".into(),
+        &output,
+        &backup,
+        true,
+        None,
+        &scratch.path.join("old-native"),
+        false,
+        false,
+    );
+    assert!(error.contains("rollback failed"));
+    assert!(error.contains(&scratch.path.display().to_string()));
+    drop(scratch);
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), "old program");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -761,6 +933,140 @@ fn dev_fingerprint_tracks_sources_but_ignores_dependencies() {
 }
 
 #[test]
+fn dev_watch_tracks_module_graph_outside_entry_directory_and_missing_imports() {
+    let root = std::env::temp_dir().join(format!("thaw-dev-graph-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("shared")).unwrap();
+    let entry = root.join("src/server.ts");
+    let shared = root.join("shared/util.ts");
+    std::fs::write(
+        &entry,
+        "import { value } from '../shared/util'; console.log(value);",
+    )
+    .unwrap();
+    let roots = dev_watch_roots(&entry, Some(&root), &[]);
+    assert!(roots.contains(&shared));
+    let initial = source_fingerprint(&roots).unwrap();
+    std::fs::write(&shared, "export const value = 1;").unwrap();
+    assert_ne!(source_fingerprint(&roots).unwrap(), initial);
+    let roots = dev_watch_roots(&entry, Some(&root), &roots);
+    assert!(roots.contains(&shared.canonicalize().unwrap()));
+    std::fs::write(
+        &entry,
+        "import { next } from '../shared/next'; console.log(next);",
+    )
+    .unwrap();
+    let roots = dev_watch_roots(&entry, Some(&root), &roots);
+    assert!(roots.contains(&root.join("shared/next.ts")));
+    let missing = source_fingerprint(&roots).unwrap();
+    std::fs::write(root.join("shared/next.ts"), "export const next = 2;").unwrap();
+    assert_ne!(source_fingerprint(&roots).unwrap(), missing);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn dev_watch_tracks_mjs_cjs_vite_assets_and_project_manifest() {
+    let root = std::env::temp_dir().join(format!("thaw-dev-inputs-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("web")).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"thaw":{"entry":"src/server.mjs","vite":"web"}}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("src/server.mjs"), "console.log(1)").unwrap();
+    std::fs::write(root.join("src/helper.cjs"), "module.exports = 1").unwrap();
+    let roots = dev_watch_roots(&root.join("src/server.mjs"), Some(&root), &[]);
+    let before = source_fingerprint(&roots).unwrap();
+    std::fs::write(root.join("src/helper.cjs"), "module.exports = 100").unwrap();
+    assert_ne!(source_fingerprint(&roots).unwrap(), before);
+    let vite_before = vite_source_fingerprint(&root.join("web")).unwrap();
+    std::fs::write(root.join("web/image.png"), [1, 2, 3]).unwrap();
+    assert_ne!(
+        vite_source_fingerprint(&root.join("web")).unwrap(),
+        vite_before
+    );
+    let after_vite_input = vite_source_fingerprint(&root.join("web")).unwrap();
+    std::fs::create_dir_all(root.join("web/dist")).unwrap();
+    let assets_before = explicit_assets_fingerprint(&root.join("web/dist")).unwrap();
+    let vite_dist_before = vite_source_fingerprint(&root.join("web/dist")).unwrap();
+    std::fs::write(root.join("web/dist/font.woff2"), [1, 2, 3]).unwrap();
+    assert_ne!(
+        explicit_assets_fingerprint(&root.join("web/dist")).unwrap(),
+        assets_before
+    );
+    assert_ne!(
+        vite_source_fingerprint(&root.join("web/dist")).unwrap(),
+        vite_dist_before
+    );
+    assert_eq!(
+        vite_source_fingerprint(&root.join("web")).unwrap(),
+        after_vite_input
+    );
+    let nested_before = explicit_assets_fingerprint(&root.join("web/dist")).unwrap();
+    let vite_dist_after = vite_source_fingerprint(&root.join("web/dist")).unwrap();
+    std::fs::create_dir_all(root.join("web/dist/nested/dist")).unwrap();
+    std::fs::write(root.join("web/dist/nested/dist/image.png"), [4, 5, 6]).unwrap();
+    assert_ne!(
+        explicit_assets_fingerprint(&root.join("web/dist")).unwrap(),
+        nested_before
+    );
+    assert_eq!(
+        vite_source_fingerprint(&root.join("web/dist")).unwrap(),
+        vite_dist_after
+    );
+    #[cfg(unix)]
+    {
+        let without_link = explicit_assets_fingerprint(&root.join("web/dist")).unwrap();
+        std::os::unix::fs::symlink(root.join("web/dist"), root.join("web/dist/link")).unwrap();
+        assert_eq!(
+            explicit_assets_fingerprint(&root.join("web/dist")).unwrap(),
+            without_link
+        );
+    }
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"thaw":{"entry":"src/helper.cjs","vite":"web"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        dev_project_paths(&[root.display().to_string()], Path::new("."))
+            .unwrap()
+            .0,
+        root.join("src/helper.cjs")
+    );
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"thaw":{"entry":"new/server.ts"}}"#,
+    )
+    .unwrap();
+    let waiting = dev_watch_roots(&root.join("src/server.mjs"), Some(&root), &roots);
+    assert!(waiting.contains(&root.join("new/server.ts")));
+    let before_entry = source_fingerprint(&waiting).unwrap();
+    std::fs::create_dir_all(root.join("new")).unwrap();
+    std::fs::write(root.join("new/server.ts"), "console.log(2)").unwrap();
+    assert_ne!(source_fingerprint(&waiting).unwrap(), before_entry);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn dev_launch_resolves_bare_output_outside_path_search() {
+    let output = dev_executable_path(Path::new("app")).unwrap();
+    assert!(output.is_absolute());
+    assert_eq!(output, std::env::current_dir().unwrap().join("app"));
+}
+
+#[test]
+fn dev_entry_resolution_accepts_build_options_before_the_input() {
+    let args = ["-o".to_string(), "app".to_string(), "server.ts".to_string()];
+    assert_eq!(dev_input_arg(&args).unwrap(), Some("server.ts"));
+    assert_eq!(
+        dev_project_paths(&args, Path::new(".")).unwrap().0,
+        PathBuf::from("server.ts")
+    );
+}
+
+#[test]
 fn dev_reuses_built_vite_assets_for_backend_only_changes() {
     assert_eq!(
         reuse_vite_assets(
@@ -940,7 +1246,8 @@ fn vite_assets_are_embedded_with_routes_and_content_types() {
     .unwrap();
 
     let shim = generate_asset_shim(&directory).unwrap();
-    assert!(shim.contains("path = thawAssetPath(path);"));
+    assert!(shim.contains("decodeURIComponent(raw)"));
+    assert!(shim.contains("thawAssetRouteDecoded(thawAssetPath(path))"));
     assert!(shim.contains("if (path === \"/\") { return \"text/html; charset=utf-8\"; }"));
     assert!(shim.contains("if (path === \"/assets/app.js\") { return \"console.log('hello')\"; }"));
     assert!(shim.contains("if (path === \"/assets/image.png\") { return \"89504e47ff\"; }"));
@@ -949,6 +1256,90 @@ fn vite_assets_are_embedded_with_routes_and_content_types() {
     assert!(shim.contains("function thawServeAsset(response:"));
 
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn asset_paths_decode_once_before_lookup_and_reject_bad_escapes() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-asset-url-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("my image.png"), [1, 2]).unwrap();
+    std::fs::write(directory.join("literal%20#.txt"), "percent").unwrap();
+    let shim = generate_asset_shim(&directory).unwrap();
+    assert!(shim.contains("if (path === \"/my image.png\")"));
+    assert!(shim.contains("if (path === \"/literal%20#.txt\")"));
+    assert!(shim.contains("catch { return \"\"; }"));
+    assert!(shim.contains("thawHasAssetDecoded(path)"));
+    assert!(!shim.contains("path = thawAssetPath(path);"));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn encoded_asset_urls_match_literal_filenames_without_double_decoding() {
+    let root = std::env::temp_dir().join(format!("thaw-cli-asset-exec-{}", std::process::id()));
+    let assets = root.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("my image.png"), [1, 2]).unwrap();
+    std::fs::write(assets.join("literal%20#.txt"), "percent").unwrap();
+    let input = root.join("server.ts");
+    let output = root.join("app");
+    std::fs::write(&input, "function main(): void { console.log(thawHasAsset('/my%20image.png')); console.log(thawAsset('/literal%2520%23.txt')); console.log(thawHasAsset('/bad%ZZ')); }").unwrap();
+    build_with_assets(
+        &input,
+        &output,
+        &[],
+        &[],
+        &[],
+        &root.join("registry"),
+        &[],
+        false,
+        Some(&assets),
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\npercent\nfalse\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cargo_artifact_json_unescapes_staticlib_path() {
+    let filename = "/tmp/quoted\" target/libthaw_std.a";
+    let message = serde_json::json!({
+        "reason": "compiler-artifact",
+        "target": { "name": "thaw_std" },
+        "filenames": ["/tmp/other.rlib", filename],
+    });
+    assert_eq!(
+        staticlib_artifact_path(&message.to_string(), "thaw-std"),
+        Some(PathBuf::from(filename))
+    );
+}
+
+#[test]
+fn malformed_elf_program_offsets_return_error_without_overflow() {
+    let path = std::env::temp_dir().join(format!("thaw-cli-bad-elf-{}", std::process::id()));
+    let mut bytes = vec![0_u8; 64];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&2_u16.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    assert!(elf_has_program_interpreter(&path).is_err());
+    let mut short_header = vec![0_u8; 68];
+    short_header[..4].copy_from_slice(b"\x7fELF");
+    short_header[4] = 2;
+    short_header[5] = 1;
+    short_header[32..40].copy_from_slice(&64_u64.to_le_bytes());
+    short_header[54..56].copy_from_slice(&4_u16.to_le_bytes());
+    short_header[56..58].copy_from_slice(&1_u16.to_le_bytes());
+    std::fs::write(&path, short_header).unwrap();
+    assert!(elf_has_program_interpreter(&path).is_err());
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -1263,12 +1654,12 @@ fn brotli_host_detection_only_enables_brotli_users() {
 fn intl_host_detection_only_enables_intl_users() {
     assert!(!source_uses_intl("module.exports = value => value + 1"));
     assert!(!source_uses_intl("value.localeCompare(other)"));
-    // DateTimeFormat/NumberFormat/ListFormat keep a pure-JS,
-    // English-only fast path that needs no icu4x data -- only the
-    // capabilities with no non-icu4x implementation should enable this.
+    // Every Intl constructor is backed by the icu4x data now (see
+    // `required_runtime_features` and quickjs `intl_list.rs`), so each one
+    // enables the feature.
     assert!(source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
     assert!(source_uses_intl("new Intl.NumberFormat('de-DE')"));
-    assert!(!source_uses_intl("new Intl.ListFormat('fr')"));
+    assert!(source_uses_intl("new Intl.ListFormat('fr')"));
     assert!(source_uses_intl("new Intl.Locale('ja-JP')"));
     assert!(source_uses_intl(
         "Intl.PluralRules.supportedLocalesOf(['en'])"
@@ -1353,3 +1744,129 @@ include!("tests/jit_analysis.rs");
 include!("tests/external_classes.rs");
 include!("tests/overload_inference.rs");
 include!("tests/x.rs");
+
+#[test]
+fn embedded_compat_and_package_bundle_names_are_logical_sources() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let compat = compat_case_source_name("nested parse");
+    assert_eq!(compat, FileName::Custom("compat case nested parse".into()));
+    let source = "function main(): void {}";
+    let (module, map) =
+        thaw_parser::parse_typescript_with_source_map_named(source, compat.clone()).unwrap();
+    assert_eq!(
+        map.lookup_char_pos(module.body[0].span().lo)
+            .file
+            .name
+            .as_ref(),
+        &compat
+    );
+
+    let bundle = registry_bundle_js_source_name("pkg", true);
+    assert_eq!(bundle, FileName::Custom("pkg bundle JavaScript".into()));
+    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(
+        "exports.make = () => 1;",
+        bundle.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        map.lookup_char_pos(module.body[0].span().lo)
+            .file
+            .name
+            .as_ref(),
+        &bundle
+    );
+    assert_eq!(
+        registry_bundle_js_source_name("pkg", false),
+        FileName::Custom("pkg missing bundle JavaScript".into())
+    );
+
+    let function = thaw_bridge::parse_dts("export declare function make(): number;")
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        jit_export_named("exports.make = () => 1;", &bundle, "make", true, &function).is_some(),
+        jit_export("exports.make = () => 1;", "make", true, &function).is_some()
+    );
+    assert!(jit_export_named("exports.make = ;", &bundle, "make", true, &function).is_none());
+    assert_eq!(
+        jit_rejection_reason_named("exports.make = ;", &bundle, &function),
+        "package JavaScript could not be parsed for specialization"
+    );
+}
+
+#[test]
+fn text_encoding_named_util_and_globals_compile_and_run() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-text-encoding-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        r#"import { TextEncoder, TextDecoder } from 'node:util';
+
+function main(): void {
+  const encoder = new TextEncoder();
+  const destination = new Uint8Array(5);
+  destination.set = (): void => {};
+  const into = encoder.encodeInto('A😀B', destination);
+  const written = Array.from(new Uint8Array(destination.buffer));
+
+  let invalidInput = '';
+  try {
+    new TextDecoder().decode({ buffer: new ArrayBuffer(1), byteOffset: 0, byteLength: 1 } as any);
+  } catch (error: any) {
+    invalidInput = error.name;
+  }
+
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const first = decoder.decode(new Uint8Array([65]), { stream: true });
+  let fatal = false;
+  try {
+    decoder.decode(new Uint8Array([255]));
+  } catch (error: any) {
+    fatal = error.name === 'TypeError';
+  }
+  const fresh = decoder.decode(new Uint8Array([239, 187, 191, 66]));
+
+  const globalEncoder = new globalThis.TextEncoder();
+  const globalDecoder = new globalThis.TextDecoder();
+  console.log(JSON.stringify([
+    TextEncoder === globalThis.TextEncoder,
+    TextDecoder === globalThis.TextDecoder,
+    into,
+    written,
+    invalidInput,
+    [first, fatal, fresh],
+    globalDecoder.decode(globalEncoder.encode('web'))
+  ]));
+}
+
+// Expected stdout:
+// [true,true,{"read":3,"written":5},[65,240,159,152,128],"TypeError",["A",true,"B"],"web"]
+"#,
+    )
+    .unwrap();
+    build(
+        &input,
+        &output,
+        &[],
+        &[],
+        &[],
+        &directory.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[true,true,{\"read\":3,\"written\":5},[65,240,159,152,128],\"TypeError\",[\"A\",true,\"B\"],\"web\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}

@@ -74,8 +74,8 @@ fn perf_hooks_builtin_shares_the_performance_timeline() {
     let dir = temp_registry("builtin_perf_hooks");
     fs::write(
             dir.join("index.js"),
-            "var hooks = require('node:perf_hooks');\n\
-             module.exports = function () { hooks.performance.clearMarks(); hooks.performance.clearMeasures(); hooks.performance.mark('start', { startTime: 2 }); hooks.performance.mark('end', { startTime: 7 }); var measure = hooks.performance.measure('elapsed', 'start', 'end'); var histogram = hooks.monitorEventLoopDelay({ resolution: 10 }); var enabled = histogram.enable(); var disabled = histogram.disable(); var utilization = hooks.performance.eventLoopUtilization(); return [hooks.performance === globalThis.performance, measure.duration, hooks.PerformanceObserver === globalThis.PerformanceObserver, enabled, disabled, histogram.percentile(99), typeof histogram.percentileBigInt(99), utilization.idle, utilization.active >= 0, utilization.utilization >= 0, hooks.performance.nodeTiming.name, hooks.constants.NODE_PERFORMANCE_GC_MAJOR]; };",
+            "var originalHrtimeBigint = process.hrtime.bigint, clockValues = [10n, 20n, 25n, 25n, 30n, 100n, 104n], clockIndex = 0; process.hrtime.bigint = function() { if (clockIndex >= clockValues.length) throw new Error('fixture clock exhausted'); return clockValues[clockIndex++]; }; var hooks; try { hooks = require('node:perf_hooks'); } finally { process.hrtime.bigint = originalHrtimeBigint; }\n\
+             module.exports = function () { hooks.performance.clearMarks(); hooks.performance.clearMeasures(); hooks.performance.mark('start', { startTime: 2 }); hooks.performance.mark('end', { startTime: 7 }); var measure = hooks.performance.measure('elapsed', 'start', 'end'); var originalTimeoutRef = globalThis.__thaw_set_timeout_ref, scheduled = []; var owned; try { globalThis.__thaw_set_timeout_ref = function(callback, delay, refed) { var handle = originalTimeoutRef(callback, delay, refed); scheduled.push({ callback: callback, handle: handle, refed: refed }); return handle; }; owned = hooks.monitorEventLoopDelay({ resolution: 10 }); if (owned.enable() !== true || owned._timer.hasRef() !== false) throw new Error('initial monitor timer must be unreferenced'); if (owned.enable() !== false) throw new Error('redundant enable must return false'); var first = scheduled[0]; if (!first || first.refed !== false) throw new Error('initial bridge call must pass false'); clearTimeout(first.handle); first.callback(); var second = scheduled[1]; if (!second || second.handle === first.handle || second.refed !== false || second.handle.hasRef() !== false) throw new Error('sample timer must be a distinct unreferenced real handle'); if (owned.disable() !== true || owned.disable() !== false) throw new Error('disable transitions must be true then false'); var savedCallback = second.callback, scheduledAfterDisable = scheduled.length; savedCallback(); if (scheduled.length !== scheduledAfterDisable) throw new Error('disabled callback must not reschedule'); } finally { try { if (owned) owned.disable(); } finally { try { scheduled.forEach(function(entry) { clearTimeout(entry.handle); }); } finally { globalThis.__thaw_set_timeout_ref = originalTimeoutRef; } } } function expectCode(action, name, code) { var caught; try { action(); } catch (error) { caught = error; } if (!caught || caught.name !== name || caught.code !== code) throw new Error('expected ' + name + ' ' + code); } var recordable = hooks.createHistogram(), monitor = hooks.monitorEventLoopDelay({ resolution: 10 }); if (typeof recordable.record !== 'function' || typeof recordable.recordDelta !== 'function' || typeof recordable.enable !== 'undefined' || typeof monitor.record !== 'undefined' || typeof monitor.recordDelta !== 'undefined') throw new Error('recordable and monitoring histogram methods must remain separate'); if (recordable.record(5) !== undefined || recordable.count !== 1 || recordable.min !== 5 || recordable.max !== 5) throw new Error('number record must return undefined and update statistics'); if (recordable.record(9007199254740993n) !== undefined || recordable.count !== 2 || !(recordable.max > 9007199254740991)) throw new Error('large bigint record must be accepted'); if (recordable.record(9223372036854775807n) !== undefined || recordable.count !== 3 || !(recordable.max > 9e18)) throw new Error('maximum int64 bigint record must be accepted'); var beforeCount = recordable.count, beforeMin = recordable.min, beforeMax = recordable.max, beforeMean = recordable.mean, beforeStddev = recordable.stddev; function unchanged() { if (recordable.count !== beforeCount || recordable.min !== beforeMin || recordable.max !== beforeMax || recordable.mean !== beforeMean || recordable.stddev !== beforeStddev) throw new Error('failed record must not mutate statistics'); } expectCode(function() { recordable.record('5'); }, 'TypeError', 'ERR_INVALID_ARG_TYPE'); unchanged(); expectCode(function() { recordable.record(0); }, 'RangeError', 'ERR_OUT_OF_RANGE'); unchanged(); expectCode(function() { recordable.record(1.5); }, 'RangeError', 'ERR_OUT_OF_RANGE'); unchanged(); expectCode(function() { recordable.record(9007199254740992); }, 'RangeError', 'ERR_OUT_OF_RANGE'); unchanged(); expectCode(function() { recordable.record(Infinity); }, 'RangeError', 'ERR_OUT_OF_RANGE'); unchanged(); expectCode(function() { recordable.record(9223372036854775808n); }, 'RangeError', 'ERR_OUT_OF_RANGE'); unchanged(); expectCode(function() { recordable.record.call({}, 1); }, 'TypeError', 'ERR_INVALID_THIS'); unchanged(); expectCode(function() { recordable.recordDelta.call({}); }, 'TypeError', 'ERR_INVALID_THIS'); unchanged(); var deltaHistogram = hooks.createHistogram(); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 0) throw new Error('first delta call must only set the baseline'); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 1 || deltaHistogram.min !== 10) throw new Error('second delta call must record the nanosecond difference'); deltaHistogram.record(4); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 3 || deltaHistogram.min !== 4 || deltaHistogram.max !== 10) throw new Error('public record must not change the delta baseline'); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 4 || deltaHistogram.min !== 0) throw new Error('zero delta must be recorded internally'); expectCode(function() { deltaHistogram.record(0); }, 'RangeError', 'ERR_OUT_OF_RANGE'); if (deltaHistogram.count !== 4 || deltaHistogram.min !== 0) throw new Error('failed record must leave statistics and delta baseline intact'); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 5 || deltaHistogram.max !== 10) throw new Error('failed record must not move the delta baseline'); deltaHistogram.reset(); if (deltaHistogram.count !== 0 || deltaHistogram.min !== 9223372036854775807 || deltaHistogram.max !== 0) throw new Error('reset must clear record statistics'); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 0) throw new Error('reset must reinitialize the delta baseline'); if (deltaHistogram.recordDelta() !== undefined || deltaHistogram.count !== 1 || deltaHistogram.min !== 4 || deltaHistogram.max !== 4) throw new Error('post-reset delta must start from the new baseline'); var histogram = hooks.monitorEventLoopDelay({ resolution: 10 }); var enabled = histogram.enable(); var disabled = histogram.disable(); var utilization = hooks.performance.eventLoopUtilization(); return [hooks.performance === globalThis.performance, measure.duration, hooks.PerformanceObserver === globalThis.PerformanceObserver, enabled, disabled, histogram.percentile(99), typeof histogram.percentileBigInt(99), utilization.idle, utilization.active >= 0, utilization.utilization >= 0, hooks.performance.nodeTiming.name, hooks.constants.NODE_PERFORMANCE_GC_MAJOR]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_perf_hooks_node_modules");
@@ -111,7 +111,7 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
     fs::write(
             dir.join("index.js"),
             "var v8 = require('node:v8');\n\
-             module.exports = function () { var source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined }; source.self = source; var encoded = v8.serialize(source); var copy = v8.deserialize(encoded); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size, v8.cachedDataVersionTag()]; };",
+             module.exports = function () { var invalid = new Date(NaN), source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined, valid: new Date(1234), invalid: invalid, invalidAgain: invalid, array: [invalid], dateMap: new Map([[invalid, invalid]]), dateSet: new Set([invalid]) }; source.self = source; var encoded = v8.serialize(source); var wire = JSON.parse(encoded.toString()), copy = v8.deserialize(encoded), legacy = v8.deserialize(Buffer.from(JSON.stringify({ root: { t: 'r', v: 0 }, nodes: [{ k: 'd', v: '1970-01-01T00:00:00.000Z' }] }))); if (copy.valid.getTime() !== 1234 || !Number.isNaN(copy.invalid.getTime()) || copy.invalid === invalid || copy.invalidAgain !== copy.invalid || copy.array[0] !== copy.invalid || copy.dateMap.get(copy.invalid) !== copy.invalid || !copy.dateSet.has(copy.invalid) || legacy.getTime() !== 0 || !Number.isNaN(v8.deserialize(v8.serialize(new Date(NaN))).getTime())) throw new Error('Date roundtrip'); var dateNodes = wire.nodes.filter(function(node) { return node.k === 'd'; }); if (!dateNodes.some(function(node) { return node.v.t === 'p' && node.v.v === 1234; }) || !dateNodes.some(function(node) { return node.v.t === 'n' && node.v.v === 'NaN'; })) throw new Error('Date wire timestamp'); var malformedCaught = false; try { v8.deserialize(Buffer.from('{')); } catch (error) { malformedCaught = error instanceof SyntaxError; } if (!malformedCaught) throw new Error('Malformed JSON must throw SyntaxError'); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size > 0, v8.cachedDataVersionTag()]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_v8_node_modules");
@@ -133,7 +133,7 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,true,true,"thaw",42,true,true,true,1,true,0,0,0]"#
+        r#"[true,true,true,true,"thaw",42,true,true,true,1,true,0,true,0]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -143,7 +143,7 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
 fn zlib_builtin_compresses_sync_and_callback_values() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_zlib");
-    fs::write(dir.join("index.js"), "var zlib = require('node:zlib'), stream = require('node:stream'); module.exports = async function () { var source = Buffer.from('thaw compression '.repeat(8)); var gzip = zlib.gzipSync(source); var raw = zlib.deflateRawSync(source); var brotli = zlib.brotliCompressSync(source); var callback = await new Promise(function(resolve, reject) { zlib.gunzip(gzip, function(error, value) { error ? reject(error) : resolve(value); }); }); var brotliCallback = await new Promise(function(resolve, reject) { zlib.brotliDecompress(brotli, function(error, value) { error ? reject(error) : resolve(value); }); }); var compressor = zlib.createGzip(), compressed = []; compressor.on('data', function(value) { compressed.push(value); }); var streamDone = new Promise(function(resolve, reject) { compressor.on('error', reject); compressor.on('end', resolve); }); compressor.write(source.subarray(0, 7)); compressor.end(source.subarray(7)); await streamDone; var streamed = Buffer.concat(compressed), decompressor = zlib.createGunzip(), restored = []; decompressor.on('data', function(value) { restored.push(value); }); var restoreDone = new Promise(function(resolve, reject) { decompressor.on('error', reject); decompressor.on('end', resolve); }); stream.Readable.from([streamed.subarray(0, 5), streamed.subarray(5)]).pipe(decompressor); await restoreDone; var brotliStream = zlib.createBrotliCompress(), brotliChunks = []; brotliStream.on('data', function(value) { brotliChunks.push(value); }); var brotliDone = new Promise(function(resolve, reject) { brotliStream.on('error', reject); brotliStream.on('end', resolve); }); brotliStream.end(source); await brotliDone; var flushed = await new Promise(function(resolve) { compressor.flush(resolve); }); return [gzip[0], gzip[1], zlib.gunzipSync(gzip).toString() === source.toString(), zlib.inflateRawSync(raw).toString() === source.toString(), callback.toString() === source.toString(), zlib.constants.Z_OK, zlib.constants.Z_SYNC_FLUSH, compressor instanceof zlib.Gzip, compressor instanceof stream.Transform, compressor.bytesWritten, Buffer.concat(restored).toString() === source.toString(), flushed, zlib.brotliDecompressSync(brotli).toString() === source.toString(), brotliCallback.toString() === source.toString(), brotliStream instanceof zlib.BrotliCompress, zlib.brotliDecompressSync(Buffer.concat(brotliChunks)).toString() === source.toString(), zlib.constants.BROTLI_OPERATION_FINISH]; };").unwrap();
+    fs::write(dir.join("index.js"), "var zlib = require('node:zlib'), stream = require('node:stream'); module.exports = async function () { var source = Buffer.from('thaw compression '.repeat(8)); var gzip = zlib.gzipSync(source); var raw = zlib.deflateRawSync(source); var brotli = zlib.brotliCompressSync(source); var callback = await new Promise(function(resolve, reject) { zlib.gunzip(gzip, function(error, value) { error ? reject(error) : resolve(value); }); }); var brotliCallback = await new Promise(function(resolve, reject) { zlib.brotliDecompress(brotli, function(error, value) { error ? reject(error) : resolve(value); }); }); var compressor = zlib.createGzip(), compressed = []; compressor.on('data', function(value) { compressed.push(value); }); var streamDone = new Promise(function(resolve, reject) { compressor.on('error', reject); compressor.on('end', resolve); }); compressor.write(source.subarray(0, 7)); compressor.end(source.subarray(7)); await streamDone; var streamed = Buffer.concat(compressed), decompressor = zlib.createGunzip(), restored = []; decompressor.on('data', function(value) { restored.push(value); }); var restoreDone = new Promise(function(resolve, reject) { decompressor.on('error', reject); decompressor.on('end', resolve); }); stream.Readable.from([streamed.subarray(0, 5), streamed.subarray(5)]).pipe(decompressor); await restoreDone; var brotliStream = zlib.createBrotliCompress(), brotliChunks = []; brotliStream.on('data', function(value) { brotliChunks.push(value); }); var brotliDone = new Promise(function(resolve, reject) { brotliStream.on('error', reject); brotliStream.on('end', resolve); }); brotliStream.end(source); await brotliDone; var flushed = await new Promise(function(resolve) { compressor.flush(resolve); }); function released(owner, handle) { return owner._streamHandle === null && __thaw_zlib_stream_drop(handle) === false; } var owned = zlib.createGzip({ autoDestroy: false }), ownedHandle = owned._streamHandle; owned.on('data', function() {}); var ownedDone = new Promise(function(resolve, reject) { owned.on('error', reject); owned.end(source, resolve); }); await ownedDone; if (!released(owned, ownedHandle)) throw new Error('zlib buffered completion release'); var malformed = zlib.createGunzip({ autoDestroy: false }), malformedHandle = malformed._streamHandle; malformed.resume(); var malformedError = await new Promise(function(resolve) { malformed.once('error', resolve); malformed.end(Buffer.from('not gzip')); }); if (malformedError.code !== 'Z_DATA_ERROR' || !released(malformed, malformedHandle)) throw new Error('zlib malformed completion release'); var early = zlib.createGzip({ autoDestroy: false }), earlyHandle = early._streamHandle; early.destroy(); if (!released(early, earlyHandle)) throw new Error('zlib early destroy release'); var closeCalls = 0; await new Promise(function(resolve) { early.close(function() { closeCalls++; resolve(); }); }); await new Promise(function(resolve) { early.close(function() { closeCalls++; resolve(); }); }); early.destroy(); if (closeCalls !== 2 || !released(early, earlyHandle)) throw new Error('zlib repeated close'); var deliberate = new Error('intentional destroy'), destroyed = zlib.createGzip({ autoDestroy: false }), destroyedHandle = destroyed._streamHandle; var destroyedError = await new Promise(function(resolve) { destroyed.once('error', resolve); destroyed.destroy(deliberate); }); if (destroyedError !== deliberate || !released(destroyed, destroyedHandle)) throw new Error('zlib destroy error identity'); var flushRejected = (function() { try { zlib.createGzip({ autoDestroy: false, flush: function(callback) { callback(); } }); return null; } catch (error) { return error.code; } })(); if (flushRejected !== 'ERR_INVALID_ARG_TYPE') throw new Error('zlib custom flush option'); var destroyCalls = 0, destroyReceiver, customDestroy = zlib.createGzip({ autoDestroy: false, destroy: function(error, callback) { destroyCalls++; destroyReceiver = this; this.destroySeen = error; callback(error); } }), customDestroyHandle = customDestroy._streamHandle, customDestroyError = new Error('custom destroy'); var customDestroySeen = await new Promise(function(resolve) { customDestroy.once('error', resolve); customDestroy.destroy(customDestroyError); }); if (destroyCalls !== 1 || destroyReceiver !== customDestroy || customDestroySeen !== customDestroyError || customDestroy.destroySeen !== customDestroyError || !released(customDestroy, customDestroyHandle)) throw new Error('zlib custom destroy release'); var incremental = new zlib.Gzip({ autoDestroy: false }), incrementalHandle = incremental._streamHandle; incremental._processChunk(source, zlib.constants.Z_NO_FLUSH); incremental._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH); incremental.destroy(); if (!released(incremental, incrementalHandle)) throw new Error('zlib incremental finish release'); var emptyUnzip = new zlib.Unzip({ autoDestroy: false }); await new Promise(function(resolve) { emptyUnzip.once('close', resolve); emptyUnzip.destroy(); }); if (emptyUnzip._streamHandle !== null) throw new Error('zlib empty unzip destroy'); var lazyUnzip = new zlib.Unzip({ autoDestroy: false }); lazyUnzip._processChunk(gzip, zlib.constants.Z_NO_FLUSH); var lazyHandle = lazyUnzip._streamHandle; lazyUnzip.destroy(); if (!released(lazyUnzip, lazyHandle)) throw new Error('zlib lazy unzip destroy'); return [gzip[0], gzip[1], zlib.gunzipSync(gzip).toString() === source.toString(), zlib.inflateRawSync(raw).toString() === source.toString(), callback.toString() === source.toString(), zlib.constants.Z_OK, zlib.constants.Z_SYNC_FLUSH, compressor instanceof zlib.Gzip, compressor instanceof stream.Transform, compressor.bytesWritten, Buffer.concat(restored).toString() === source.toString(), flushed, zlib.brotliDecompressSync(brotli).toString() === source.toString(), brotliCallback.toString() === source.toString(), brotliStream instanceof zlib.BrotliCompress, zlib.brotliDecompressSync(Buffer.concat(brotliChunks)).toString() === source.toString(), zlib.constants.BROTLI_OPERATION_FINISH]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_zlib_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -306,18 +306,235 @@ fn zlib_gzip_exposes_the_private_handle_and_process_chunk_contract_minizlib_need
 }
 
 #[test]
+fn zlib_reset_discards_buffers_and_recreates_native_state() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_zlib_reset");
+        fs::write(
+            dir.join("index.js"),
+            r#"
+var zlib = require('node:zlib');
+module.exports = async function() {
+  var streams = [], createBase = globalThis.__thaw_zlib_stream_create;
+  var createCalls = 0;
+  globalThis.__thaw_zlib_stream_create = function(operation, format) {
+    createCalls++;
+    return createBase(operation, format);
+  };
+  function keep(stream) { streams.push(stream); return stream; }
+  function rejectedReset(stream) {
+    try { stream.reset(); return false; }
+    catch (error) { return error.message === 'Cannot reset a finished zlib stream'; }
+  }
+  function dropped(handle) { return __thaw_zlib_stream_drop(handle) === false; }
+  var bufferedText, bufferedBytes, bufferedSame, bufferedOldGone, bufferedHandleGone;
+  var deflateText, deflateOldGone, deflateHandleGone;
+  var inflateText, inflateOldGone;
+  var autoUnopened, autoResetNull, autoNoCreate, autoOldGone, autoText, autoHandleGone, autoTerminal;
+  var fixedTerminal, fixedNoCreate, truncatedFailed, truncatedErrorCaptured, truncatedReleased, truncatedTerminal, truncatedNoCreate;
+  var normalFinalTerminal, normalFinalReleased, resetCloseReleased, resetCloseTerminal, destroyTerminal;
+  var createFailureIdentity, createFailureKeepsHandle, createFailureContinues, createFailureReleased;
+  var bufferedCreateFailureIdentity, bufferedCreateFailureKeepsHandle, bufferedCreateFailureText, bufferedCreateFailureReleased;
+  try {
+    var buffered = keep(zlib.createGzip({ autoDestroy: false }));
+    var bufferedOld = buffered._streamHandle, bufferedChunks = [];
+    buffered.on('data', function(chunk) { bufferedChunks.push(chunk); });
+    buffered.write(Buffer.from('old'));
+    bufferedSame = buffered.reset() === buffered;
+    bufferedOldGone = dropped(bufferedOld);
+    var bufferedNew = buffered._streamHandle;
+    bufferedBytes = -1;
+    await new Promise(function(resolve, reject) {
+      buffered.on('error', reject);
+      buffered.end(Buffer.from('new'), resolve);
+    });
+    bufferedText = zlib.gunzipSync(Buffer.concat(bufferedChunks)).toString();
+    bufferedBytes = buffered.bytesWritten;
+    bufferedHandleGone = dropped(bufferedNew);
+    normalFinalTerminal = rejectedReset(buffered);
+    normalFinalReleased = bufferedHandleGone;
+
+    var deflater = keep(new zlib.Deflate({ autoDestroy: false }));
+    var deflateOld = deflater._streamHandle;
+    deflater._processChunk(Buffer.from('discarded-'), zlib.constants.Z_NO_FLUSH);
+    deflater.reset();
+    deflateOldGone = dropped(deflateOld);
+    var deflateNew = deflater._streamHandle;
+    var deflated = Buffer.concat([
+      deflater._processChunk(Buffer.from('fresh deflate'), zlib.constants.Z_NO_FLUSH),
+      deflater._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)
+    ]);
+    deflateText = zlib.inflateSync(deflated).toString();
+    deflateHandleGone = dropped(deflateNew);
+
+    var inflater = keep(new zlib.Inflate({ autoDestroy: false }));
+    var inflateOld = inflater._streamHandle;
+    inflater._processChunk(zlib.deflateSync(Buffer.from('discarded inflate')), zlib.constants.Z_NO_FLUSH);
+    inflater.reset();
+    inflateOldGone = dropped(inflateOld);
+    var inflated = Buffer.concat([
+      inflater._processChunk(zlib.deflateSync(Buffer.from('fresh inflate')), zlib.constants.Z_NO_FLUSH),
+      inflater._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)
+    ]);
+    inflateText = inflated.toString();
+
+    var auto = keep(new zlib.Unzip({ autoDestroy: false }));
+    var beforeAutoReset = createCalls;
+    autoUnopened = auto._streamHandle === null;
+    autoResetNull = auto.reset() === auto && auto._streamHandle === null;
+    autoNoCreate = createCalls === beforeAutoReset;
+    auto._processChunk(zlib.gzipSync(Buffer.from('discarded auto')), zlib.constants.Z_NO_FLUSH);
+    var autoOld = auto._streamHandle;
+    auto.reset();
+    autoOldGone = dropped(autoOld);
+    var autoFirst = auto._processChunk(zlib.deflateSync(Buffer.from('auto deflate')), zlib.constants.Z_NO_FLUSH);
+    var autoNew = auto._streamHandle;
+    var autoOutput = Buffer.concat([autoFirst, auto._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)]);
+    autoText = autoOutput.toString();
+    autoHandleGone = dropped(autoNew);
+    var autoCreatesBeforeReset = createCalls;
+    autoTerminal = rejectedReset(auto) && createCalls === autoCreatesBeforeReset;
+
+    var fixed = keep(new zlib.Gzip({ autoDestroy: false }));
+    fixed._processChunk(Buffer.from('finished'), zlib.constants.Z_FINISH);
+    var fixedCreatesBeforeReset = createCalls;
+    fixedTerminal = rejectedReset(fixed);
+    fixedNoCreate = createCalls === fixedCreatesBeforeReset;
+
+    var truncated = keep(new zlib.Gunzip({ autoDestroy: false }));
+    var truncatedHandle = truncated._streamHandle;
+    var truncatedGzip = zlib.gzipSync(Buffer.from('truncated payload'));
+    var truncatedInput = truncatedGzip.subarray(0, truncatedGzip.length - 4);
+    var truncatedError;
+    try { truncated._processChunk(truncatedInput, zlib.constants.Z_FINISH); }
+    catch (error) { truncatedError = error; truncatedFailed = true; }
+    truncatedErrorCaptured = truncatedError instanceof Error && truncatedError.message.length > 0;
+    truncatedReleased = dropped(truncatedHandle);
+    var truncatedCreatesBeforeReset = createCalls;
+    truncatedTerminal = rejectedReset(truncated);
+    truncatedNoCreate = createCalls === truncatedCreatesBeforeReset;
+
+    var closeAfterReset = keep(new zlib.Gzip({ autoDestroy: false }));
+    closeAfterReset.reset();
+    var closeReplacement = closeAfterReset._streamHandle;
+    closeAfterReset.close();
+    resetCloseReleased = dropped(closeReplacement);
+    resetCloseTerminal = rejectedReset(closeAfterReset);
+
+    var destroyed = keep(new zlib.Gzip({ autoDestroy: false }));
+    destroyed.destroy();
+    destroyTerminal = rejectedReset(destroyed);
+
+    var bufferedFailure = keep(new zlib.Gzip({ autoDestroy: false }));
+    var bufferedFailureHandle = bufferedFailure._streamHandle, bufferedFailureChunks = [];
+    bufferedFailure.on('data', function(chunk) { bufferedFailureChunks.push(chunk); });
+    bufferedFailure.write(Buffer.from('old-'));
+    var trackedCreate = globalThis.__thaw_zlib_stream_create;
+    var sentinel = new Error('create sentinel');
+    try {
+      globalThis.__thaw_zlib_stream_create = function() { throw sentinel; };
+      try { bufferedFailure.reset(); }
+      catch (error) { bufferedCreateFailureIdentity = error === sentinel; }
+    } finally {
+      globalThis.__thaw_zlib_stream_create = trackedCreate;
+    }
+    bufferedCreateFailureKeepsHandle = bufferedFailure._streamHandle === bufferedFailureHandle;
+    await new Promise(function(resolve, reject) {
+      bufferedFailure.on('error', reject);
+      bufferedFailure.end(Buffer.from('new'), resolve);
+    });
+    bufferedCreateFailureText = zlib.gunzipSync(Buffer.concat(bufferedFailureChunks)).toString();
+    bufferedCreateFailureReleased = dropped(bufferedFailureHandle);
+
+    var continuing = keep(new zlib.Deflate({ autoDestroy: false }));
+    var continuingHandle = continuing._streamHandle;
+    var oldOutput = continuing._processChunk(Buffer.from('old-'), zlib.constants.Z_NO_FLUSH);
+    trackedCreate = globalThis.__thaw_zlib_stream_create;
+    try {
+      globalThis.__thaw_zlib_stream_create = function() { throw sentinel; };
+      try { continuing.reset(); }
+      catch (error) { createFailureIdentity = error === sentinel; }
+    } finally {
+      globalThis.__thaw_zlib_stream_create = trackedCreate;
+    }
+    createFailureKeepsHandle = continuing._streamHandle === continuingHandle;
+    var continued = Buffer.concat([
+      oldOutput,
+      continuing._processChunk(Buffer.from('new'), zlib.constants.Z_NO_FLUSH),
+      continuing._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)
+    ]);
+    createFailureContinues = zlib.inflateSync(continued).toString();
+    createFailureReleased = dropped(continuingHandle);
+  } finally {
+    globalThis.__thaw_zlib_stream_create = createBase;
+    for (var index = 0; index < streams.length; index++) {
+      try { streams[index].destroy(); } catch (_) {}
+    }
+  }
+  return {
+    bufferedText: bufferedText, bufferedBytes: bufferedBytes, bufferedSame: bufferedSame,
+    bufferedOldGone: bufferedOldGone, bufferedHandleGone: bufferedHandleGone,
+    deflateText: deflateText, deflateOldGone: deflateOldGone, deflateHandleGone: deflateHandleGone,
+    inflateText: inflateText, inflateOldGone: inflateOldGone,
+    autoUnopened: autoUnopened, autoResetNull: autoResetNull, autoNoCreate: autoNoCreate,
+    autoOldGone: autoOldGone, autoText: autoText, autoHandleGone: autoHandleGone, autoTerminal: autoTerminal,
+    fixedTerminal: fixedTerminal, fixedNoCreate: fixedNoCreate,
+    truncatedFailed: truncatedFailed, truncatedErrorCaptured: truncatedErrorCaptured, truncatedReleased: truncatedReleased, truncatedTerminal: truncatedTerminal, truncatedNoCreate: truncatedNoCreate,
+    normalFinalTerminal: normalFinalTerminal, normalFinalReleased: normalFinalReleased,
+    resetCloseReleased: resetCloseReleased, resetCloseTerminal: resetCloseTerminal, destroyTerminal: destroyTerminal,
+    createFailureIdentity: createFailureIdentity, createFailureKeepsHandle: createFailureKeepsHandle,
+    createFailureContinues: createFailureContinues, createFailureReleased: createFailureReleased,
+    bufferedCreateFailureIdentity: bufferedCreateFailureIdentity, bufferedCreateFailureKeepsHandle: bufferedCreateFailureKeepsHandle,
+    bufferedCreateFailureText: bufferedCreateFailureText, bufferedCreateFailureReleased: bufferedCreateFailureReleased
+  };
+};
+"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_zlib_reset_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseZlibReset = module.exports;"
+        );
+        let source = CString::new(script).unwrap();
+        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+        let result = if loaded == 1 {
+            let result_ptr = thaw_quickjs::thaw_js_call(
+                CString::new("exerciseZlibReset").unwrap().as_ptr(),
+                CString::new("[]").unwrap().as_ptr(),
+            );
+            unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        };
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(loaded, 1);
+        assert_eq!(file_count, 3);
+        assert_eq!(
+            result,
+            r#"{"bufferedText":"oldnew","bufferedBytes":6,"bufferedSame":true,"bufferedOldGone":true,"bufferedHandleGone":true,"deflateText":"fresh deflate","deflateOldGone":true,"deflateHandleGone":true,"inflateText":"fresh inflate","inflateOldGone":true,"autoUnopened":true,"autoResetNull":true,"autoNoCreate":true,"autoOldGone":true,"autoText":"auto deflate","autoHandleGone":true,"autoTerminal":true,"fixedTerminal":true,"fixedNoCreate":true,"truncatedFailed":true,"truncatedErrorCaptured":true,"truncatedReleased":true,"truncatedTerminal":true,"truncatedNoCreate":true,"normalFinalTerminal":true,"normalFinalReleased":true,"resetCloseReleased":true,"resetCloseTerminal":true,"destroyTerminal":true,"createFailureIdentity":true,"createFailureKeepsHandle":true,"createFailureContinues":"old-new","createFailureReleased":true,"bufferedCreateFailureIdentity":true,"bufferedCreateFailureKeepsHandle":true,"bufferedCreateFailureText":"old-new","bufferedCreateFailureReleased":true}"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn worker_threads_builtin_exchanges_cloned_messages() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_threads");
     fs::write(
             dir.join("index.js"),
-            "var workers = require('node:worker_threads'); module.exports = async function () { var channel = new workers.MessageChannel(); var original = { value: 7 }; channel.port1.postMessage(original); original.value = 9; var received = workers.receiveMessageOnPort(channel.port2); var pending = new Promise(function(resolve) { channel.port2.once('message', resolve); }); channel.port1.postMessage(new Map([['answer', 42]])); var asynchronous = await pending; workers.setEnvironmentData('config', { enabled: true }); var environment = workers.getEnvironmentData('config'); environment.enabled = false; var freshEnvironment = workers.getEnvironmentData('config'); var protectedBuffer = new ArrayBuffer(4); workers.markAsUntransferable(protectedBuffer); var transferRejected = false; try { channel.port1.postMessage('x', [protectedBuffer]); } catch (error) { transferRejected = error.name === 'DataCloneError'; } var protectedObject = { value: 1 }; workers.markAsUncloneable(protectedObject); var cloneRejected = false; try { structuredClone({ nested: protectedObject }); } catch (error) { cloneRejected = error.name === 'DataCloneError'; } var extra = new workers.MessageChannel(); channel.port1.postMessage({ port: extra.port1 }, [extra.port1]); var transferred = workers.receiveMessageOnPort(channel.port2); transferred.message.port.postMessage('through'); var through = workers.receiveMessageOnPort(extra.port2).message; var broadcastSender = new workers.BroadcastChannel('sync-receive'), broadcastReceiver = new workers.BroadcastChannel('sync-receive'); broadcastSender.postMessage({ value: 5 }); var broadcast = workers.receiveMessageOnPort(broadcastReceiver); broadcastSender.close(); broadcastReceiver.close(); extra.port1.close(); extra.port2.close(); channel.port1.unref(); var refed = channel.port1.hasRef(); channel.port1.ref(); channel.port1.close(); channel.port2.close(); return [workers.isMainThread, workers.threadId, workers.parentPort, received.message.value, asynchronous.get('answer'), freshEnvironment.enabled, refed, channel.port1.hasRef(), workers.SHARE_ENV === Symbol.for('nodejs.worker_threads.SHARE_ENV'), workers.receiveMessageOnPort(channel.port2) === undefined, workers.isMarkedAsUntransferable(protectedBuffer), transferRejected, cloneRejected, broadcast.message.value, through]; };",
+            "var workers = require('node:worker_threads'); module.exports = async function () { var channel = new workers.MessageChannel(); var original = { value: 7 }; channel.port1.postMessage(original); original.value = 9; var received = workers.receiveMessageOnPort(channel.port2); var pending = new Promise(function(resolve) { channel.port2.once('message', resolve); }); channel.port1.postMessage(new Map([['answer', 42]])); var asynchronous = await pending; workers.setEnvironmentData('config', { enabled: true }); var environment = workers.getEnvironmentData('config'); environment.enabled = false; var freshEnvironment = workers.getEnvironmentData('config'); var protectedBuffer = new ArrayBuffer(4); workers.markAsUntransferable(protectedBuffer); var transferRejected = false; try { channel.port1.postMessage('x', [protectedBuffer]); } catch (error) { transferRejected = error.name === 'DataCloneError'; } var transferStillAttached = protectedBuffer.byteLength === 4; var cloneTransferRejected = false; try { structuredClone(protectedBuffer, { transfer: [protectedBuffer] }); } catch (error) { cloneTransferRejected = error.name === 'DataCloneError'; } var cloneTransferStillAttached = protectedBuffer.byteLength === 4; var originalSpawn = globalThis.__thaw_worker_spawn, nativeSpawns = 0; globalThis.__thaw_worker_spawn = function() { nativeSpawns++; return 48701; }; var workerTransferRejected = false; try { new workers.Worker(\"void 0;\", { eval: true, transferList: [protectedBuffer] }); } catch (error) { workerTransferRejected = error.name === \"DataCloneError\"; } finally { globalThis.__thaw_worker_spawn = originalSpawn; } var workerTransferStillAttached = protectedBuffer.byteLength === 4; var protectedObject = { value: 1 }; workers.markAsUncloneable(protectedObject); var cloneRejected = false; try { structuredClone({ nested: protectedObject }); } catch (error) { cloneRejected = error.name === 'DataCloneError'; } var cloneReads = 0, cloneGetter = structuredClone({ get value() { cloneReads++; return cloneReads; } }); var portReads = 0; channel.port1.postMessage({ get value() { portReads++; return portReads; } }); var portGetter = workers.receiveMessageOnPort(channel.port2); var nestedReads = 0, nestedRejected = false; try { structuredClone({ get nested() { nestedReads++; return protectedObject; } }); } catch (error) { nestedRejected = error.name === 'DataCloneError'; } var cycle = {}; cycle.self = cycle; cycle.marked = protectedObject; var mapRejected = false, setRejected = false; try { structuredClone(new Map([[cycle, 1]])); } catch (error) { mapRejected = error.name === 'DataCloneError'; } try { structuredClone(new Set([cycle])); } catch (error) { setRejected = error.name === 'DataCloneError'; } var portMarkedRejected = false; try { channel.port1.postMessage({ child: protectedObject }); } catch (error) { portMarkedRejected = error.name === 'DataCloneError'; } var extra = new workers.MessageChannel(); channel.port1.postMessage({ port: extra.port1 }, [extra.port1]); var transferred = workers.receiveMessageOnPort(channel.port2); transferred.message.port.postMessage('through'); var through = workers.receiveMessageOnPort(extra.port2).message; var broadcastSender = new workers.BroadcastChannel('sync-receive'), broadcastReceiver = new workers.BroadcastChannel('sync-receive'); broadcastSender.postMessage({ value: 5 }); var broadcast = workers.receiveMessageOnPort(broadcastReceiver); broadcastSender.close(); broadcastReceiver.close(); extra.port1.close(); extra.port2.close(); channel.port1.unref(); var refed = channel.port1.hasRef(); channel.port1.ref(); channel.port1.close(); channel.port2.close(); return [workers.isMainThread, workers.threadId, workers.parentPort, received.message.value, asynchronous.get('answer'), freshEnvironment.enabled, refed, channel.port1.hasRef(), workers.SHARE_ENV === Symbol.for('nodejs.worker_threads.SHARE_ENV'), workers.receiveMessageOnPort(channel.port2) === undefined, workers.isMarkedAsUntransferable(protectedBuffer), transferRejected, transferStillAttached, cloneTransferRejected, cloneTransferStillAttached, workerTransferRejected, workerTransferStillAttached, nativeSpawns, cloneRejected, cloneReads, cloneGetter.value, portReads, portGetter.message.value, nestedReads, nestedRejected, mapRejected, setRejected, portMarkedRejected, broadcast.message.value, through]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_worker_threads_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkers = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -327,7 +544,7 @@ fn worker_threads_builtin_exchanges_cloned_messages() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,0,null,7,42,true,false,true,true,true,true,true,true,5,"through"]"#
+        r#"[true,0,null,7,42,true,false,true,true,true,true,true,true,true,true,true,true,0,true,1,1,1,1,1,true,true,true,true,5,"through"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -370,7 +587,7 @@ fn worker_threads_eval_worker_isolates_state_and_exchanges_messages() {
     let empty_node_modules = temp_registry("builtin_worker_eval_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorker = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -378,9 +595,10 @@ fn worker_threads_eval_worker_isolates_state_and_exchanges_messages() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    // Node 22: worker.threadId is -1 once the worker has exited, so `worker.threadId > 0` is false after `await completed`.
     assert_eq!(
         result,
-        r#"[["online","message:42:false:true:alpha:99:one,2:--trace-warnings:child:function","exit:0"],"alpha",["first","regular","regular"],2,true,0,20,"undefined",null,"shared",64,true,true,true,0]"#
+        r#"[["online","message:42:false:true:alpha:99:one,2:--trace-warnings:child:function","exit:0"],"alpha",["first","regular","regular"],2,true,0,20,"undefined",null,"shared",64,false,true,true,0]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -398,7 +616,7 @@ fn worker_threads_share_environment_across_native_workers() {
     let node_modules = temp_registry("builtin_worker_native_share_env_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeShareEnv = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseNativeShareEnv").unwrap();
@@ -425,7 +643,7 @@ fn worker_threads_moves_message_ports_to_vm_contexts() {
     let node_modules = temp_registry("builtin_worker_move_port_context_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseMovePortToContext = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseMovePortToContext").unwrap();
@@ -449,7 +667,7 @@ fn worker_threads_transfers_worker_data_message_ports() {
     let node_modules = temp_registry("builtin_worker_data_transfer_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerDataTransfer = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseWorkerDataTransfer").unwrap();
@@ -473,7 +691,7 @@ fn worker_threads_transfer_message_ports_from_native_workers() {
     let node_modules = temp_registry("builtin_worker_native_outbound_port_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeOutboundPort = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseNativeOutboundPort").unwrap();
@@ -481,6 +699,126 @@ fn worker_threads_transfer_message_ports_from_native_workers() {
     let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
     assert_eq!(result, r#"["WORKER-PORT",0,"number",true]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_failed_clone_keeps_transfer_endpoints_attached() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_failed_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"require('node:worker_threads').parentPort.on('message', function() {});\", { eval: true }); var channel = new wt.MessageChannel(), buffer = new ArrayBuffer(3), reads = 0, thrown = new Error('getter failed'), same = false; var value = { port: channel.port1, get fail() { reads++; throw thrown; } }; try { worker.postMessage(value, [channel.port1, buffer]); } catch (error) { same = error === thrown; } var attached = !channel.port1.__thawClosed && channel.port1.__thawPeer === channel.port2 && channel.port2.__thawPeer === channel.port1 && buffer.byteLength === 3, delivered = new Promise(function(resolve) { channel.port1.once('message', resolve); }); channel.port2.postMessage('still-connected'); var ping = await delivered; await worker.terminate(); channel.port1.close(); channel.port2.close(); return [same, reads, attached, ping]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_failed_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeFailedTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeFailedTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,1,true,"still-connected"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_delivery() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_reentrant_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"var wt = require('node:worker_threads'); wt.parentPort.on('message', function(value) { wt.parentPort.postMessage(value === 'barrier' ? 'barrier' : 'unexpected'); });\", { eval: true }), unexpected = 0, barrier; await new Promise(function(resolve, reject) { worker.once('online', resolve); worker.once('error', reject); }); var drained = new Promise(function(resolve) { worker.on('message', function(value) { if (value === 'barrier') resolve(); else unexpected++; }); }); var first = new wt.MessageChannel(), second = new wt.MessageChannel(), value = { first: first.port1, get invalidate() { second.port1.close(); return true; } }, threw = false; try { worker.postMessage(value, [first.port1, second.port1]); } catch (_) { threw = true; } worker.postMessage('barrier'); await drained; var unchanged = !first.port1.__thawClosed && first.port1.__thawPeer === first.port2 && first.port2.__thawPeer === first.port1, getterEffect = second.port1.__thawClosed; await worker.terminate(); first.port1.close(); first.port2.close(); second.port2.close(); return [threw, unexpected, unchanged, getterEffect]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_reentrant_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeReentrantTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeReentrantTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,0,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_child_direct_invalid_transfer_does_not_pin_worker_exit() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_child_direct_invalid_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var delivered = 0, listener = function() { delivered++; }; process.on('workerMessage', listener); var source = \"var wt = require('node:worker_threads'), first = new wt.MessageChannel(), second = new wt.MessageChannel(); wt.postMessageToThread(0, { first: first.port1, get invalidate() { second.port1.close(); return true; } }, [first.port1, second.port1]).then(function() { wt.parentPort.postMessage('unexpected'); wt.parentPort.close(); }, function() { first.port1.close(); first.port2.close(); second.port2.close(); wt.parentPort.postMessage('rejected'); });\", worker = new wt.Worker(source, { eval: true }), exited = new Promise(function(resolve) { worker.once('exit', resolve); }), message = await new Promise(function(resolve, reject) { worker.once('message', resolve); worker.once('error', reject); }), code = await exited; process.off('workerMessage', listener); return [message, code, delivered]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_child_direct_invalid_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildDirectInvalidTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseChildDirectInvalidTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"["rejected",0,0]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_direct_failed_clone_keeps_buffer_attached() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_direct_failed_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"process.on('workerMessage', function() {});\", { eval: true }); await new Promise(function(resolve, reject) { worker.once('online', resolve); worker.once('error', reject); }); var buffer = new ArrayBuffer(2), reads = 0, thrown = new Error('getter failed'), same = false, value = { get fail() { reads++; throw thrown; } }; try { await wt.postMessageToThread(worker.threadId, value, [buffer]); } catch (error) { same = error === thrown; } var length = buffer.byteLength; await worker.terminate(); return [same, reads, length]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_direct_failed_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeDirectFailedTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeDirectFailedTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,1,2]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_transfers_native_ports_between_workers_in_both_directions() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_port_forward");
+    fs::write(
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var sourceA = \"var wt = require('node:worker_threads'), channel = new wt.MessageChannel(); channel.port2.on('message', function(value) { channel.port2.postMessage(value === 'ping' ? 'pong' : value); channel.port2.close(); wt.parentPort.close(); }); wt.parentPort.postMessage({ port: channel.port1 }, [channel.port1]);\"; var sourceB = \"var wt = require('node:worker_threads'); wt.parentPort.once('message', function(value) { var port = value.port; port.on('message', function(message) { wt.parentPort.postMessage(message); port.close(); wt.parentPort.close(); }); port.postMessage('ping'); });\"; var a = new Worker(sourceA, { eval: true }), b = new Worker(sourceB, { eval: true }), exits = Promise.all([new Promise(function(resolve) { a.once('exit', resolve); }), new Promise(function(resolve) { b.once('exit', resolve); })]); var port = await new Promise(function(resolve, reject) { a.once('message', function(value) { resolve(value.port); }); a.once('error', reject); }); var result = new Promise(function(resolve, reject) { b.once('message', resolve); b.once('error', reject); }); b.postMessage({ port: port }, [port]); var detached = port.__thawClosed; var value = await result; await exits; return [value, detached, typeof a._nativeHandle, typeof b._nativeHandle]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_port_forward_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativePortForward = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativePortForward").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"["pong",true,"number","number"]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
@@ -497,7 +835,7 @@ fn worker_threads_redirects_stdin_stdout_and_stderr() {
     let node_modules = temp_registry("builtin_worker_stdio_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdio = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseWorkerStdio").unwrap();
@@ -524,7 +862,7 @@ fn worker_terminate_resolves_with_one_shared_exit_code() {
     let node_modules = temp_registry("builtin_worker_terminate_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerTerminate = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseWorkerTerminate").unwrap();
@@ -532,6 +870,36 @@ fn worker_terminate_resolves_with_one_shared_exit_code() {
     let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
     assert_eq!(result, "[true,1,1,1,[1],true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_process_exit_and_chdir_are_worker_local() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_process_exit");
+    fs::write(
+            dir.join("index.js"),
+            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var cwd = process.cwd(); var worker = new Worker(\"var wt = require('node:worker_threads'); process.on('exit', function(c) { wt.parentPort.postMessage('exit-handler:' + c); }); var r; try { process.chdir('/'); } catch (e) { r = [e.name, e.code, e.message]; } wt.parentPort.postMessage(r); setTimeout(function() { wt.parentPort.postMessage('never'); }, 50); process.exit(7); wt.parentPort.postMessage('after');\", { eval: true }); var messages = []; worker.on('message', function(m) { messages.push(m); }); var code = await new Promise(function(resolve) { worker.on('exit', resolve); }); return [code, messages, process.cwd() === cwd]; };",
+        )
+        .unwrap();
+    let node_modules = temp_registry("builtin_worker_process_exit_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerProcessExit = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseWorkerProcessExit").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    // Verified against node 22.22.2: the exit code is the Worker's, chdir is
+    // unsupported, the timer scheduled before exit never fires, and the parent
+    // process (this test) survives.
+    assert_eq!(
+        result,
+        r#"[7,[["TypeError","ERR_WORKER_UNSUPPORTED_OPERATION","process.chdir() is not supported in workers"],"exit-handler:7"],true]"#
+    );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
@@ -548,7 +916,7 @@ fn worker_diagnostics_follow_running_state() {
     let node_modules = temp_registry("builtin_worker_diagnostics_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerDiagnostics = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseWorkerDiagnostics").unwrap();
@@ -575,7 +943,7 @@ fn worker_threads_routes_messages_by_thread_id() {
     let node_modules = temp_registry("builtin_worker_direct_messages_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDirectWorkerMessages = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseDirectWorkerMessages").unwrap();
@@ -602,7 +970,7 @@ fn worker_threads_route_direct_messages_between_native_workers() {
     let node_modules = temp_registry("builtin_worker_direct_between_workers_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeWorkerRouting = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseNativeWorkerRouting").unwrap();
@@ -626,7 +994,7 @@ fn worker_threads_data_url_worker_decodes_javascript() {
     let empty_node_modules = temp_registry("builtin_worker_data_url_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDataWorker = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -717,7 +1085,7 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
     let node_modules = temp_registry("builtin_worker_runtime_path_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ if (String(name).startsWith('runtime-worker-dependency')) return {{}}; throw new Error(name); }}; {bundle} globalThis.exerciseRuntimeWorkerPath = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseRuntimeWorkerPath").unwrap();
@@ -752,6 +1120,162 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
 }
 
 #[test]
+fn process_default_stdio_preserves_raw_buffer_bytes() {
+    use std::process::Command;
+    const CHILD: &str = "THAW_CAPTURE_PROCESS_STREAM_TEST";
+    if std::env::var_os(CHILD).is_some() {
+        let script = std::ffi::CString::new("globalThis.__thaw_check_process_bytes = async function() { var callbacks = 0, failures = 0, malformed = 0, backing = Buffer.from([90, 0, 255, 128, 195, 40, 91]); process.stdout.write(Buffer.from([250])); var out = process.stdout.write(backing.subarray(1, 6), function(error) { if (error) throw error; callbacks++; }); process.stdout.write(Buffer.from([251])); var err = process.stderr.write('05ff80c328', 'hex', function(error) { if (error) throw error; callbacks++; }), invalid = process.stdout.write(1, function(error) { if (!error) throw new Error('missing invalid chunk error'); failures++; }); try { globalThis.__thaw_process_write_bytes(1, '0g'); } catch (error) { malformed++; } try { globalThis.__thaw_process_write_bytes(1, '0'); } catch (error) { malformed++; } try { globalThis.__thaw_process_write_bytes(3, '00'); } catch (error) { malformed++; } await new Promise(function(resolve) { queueMicrotask(resolve); }); return [out, err, invalid, callbacks, failures, malformed]; };").unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        let function = std::ffi::CString::new("__thaw_check_process_bytes").unwrap();
+        let arguments = std::ffi::CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { std::ffi::CStr::from_ptr(result) }.to_string_lossy();
+        assert_eq!(result, "[true,true,false,2,1,3]");
+        let dir = temp_registry("process_default_stdio_worker_raw_bytes");
+        fs::write(
+            dir.join("index.js"),
+            r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { var spawn = globalThis.__thaw_worker_spawn; async function run(native, out, err, capture) { if (!native) globalThis.__thaw_worker_spawn = undefined; var source = "var wt = require('node:worker_threads'); process.stdout.write(Buffer.from([" + out + ", 255, 128, 195, 40])); process.stderr.write(Buffer.from([" + err + ", 255, 128, 195, 40])); wt.parentPort.close();"; var worker = new Worker(source, { eval: true, stdout: !!capture, stderr: !!capture }), waits = []; if (capture) { waits.push(new Promise(function(resolve) { worker.stdout.on('data', function(chunk) { process.stdout.write(chunk); }); worker.stdout.on('end', resolve); })); waits.push(new Promise(function(resolve) { worker.stderr.on('data', function(chunk) { process.stderr.write(chunk); }); worker.stderr.on('end', resolve); })); } waits.push(new Promise(function(resolve) { worker.on('exit', resolve); })); var values = await Promise.all(waits); globalThis.__thaw_worker_spawn = spawn; return values[values.length - 1]; } return [await run(true, 16, 21, false), await run(false, 32, 37, false), await run(true, 48, 53, true)]; };"#,
+        )
+        .unwrap();
+        let node_modules = temp_registry("process_default_stdio_worker_raw_bytes_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4);
+        let script = std::ffi::CString::new(format!(
+            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; {bundle} globalThis.exerciseWorkerDefaultBytes = module.exports;"
+        ))
+        .unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        let function = std::ffi::CString::new("exerciseWorkerDefaultBytes").unwrap();
+        let arguments = std::ffi::CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { std::ffi::CStr::from_ptr(result) }.to_string_lossy();
+        assert_eq!(result, "[0,0,0]");
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(node_modules);
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::process_default_stdio_preserves_raw_buffer_bytes",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child test failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.windows(7).any(|bytes| bytes == [250, 0, 255, 128, 195, 40, 251]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [5, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(5).any(|bytes| bytes == [16, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(5).any(|bytes| bytes == [32, 255, 128, 195, 40]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [21, 255, 128, 195, 40]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [37, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(5).any(|bytes| bytes == [48, 255, 128, 195, 40]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [53, 255, 128, 195, 40]));
+}
+
+#[test]
+fn worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_default_stdio");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { var output = '', errors = '', capturedOutput = '', capturedErrors = '', originalOut = process.stdout, originalErr = process.stderr, originalSpawn = globalThis.__thaw_worker_spawn; process.stdout = { write: function(value, encoding, callback) { if (typeof encoding === 'function') callback = encoding; output += Buffer.from(value).toString('hex'); if (callback) queueMicrotask(callback); return true; } }; process.stderr = { write: function(value, encoding, callback) { if (typeof encoding === 'function') callback = encoding; errors += Buffer.from(value).toString('hex'); if (callback) queueMicrotask(callback); return true; } }; var source = "var wt = require('node:worker_threads'), out = Buffer.from([99, 0, 255, 128, 100]); process.stdout.write(out.subarray(1, 4)); process.stderr.write('01fe81', 'hex'); wt.parentPort.close();"; try { var worker = new Worker(source, { eval: true }); var defaultExit = new Promise(function(resolve) { worker.on('exit', resolve); }); await defaultExit; var captured = new Worker("var wt = require('node:worker_threads'), out = new Uint8Array([99, 2, 253, 130, 100]); process.stdout.write(new DataView(out.buffer, 1, 3)); process.stderr.write('03fc83', 'hex'); wt.parentPort.close();", { eval: true, stdout: true, stderr: true }); captured.stdout.on('data', function(value) { capturedOutput += Buffer.from(value).toString('hex'); }); captured.stderr.on('data', function(value) { capturedErrors += Buffer.from(value).toString('hex'); }); var captureExit = new Promise(function(resolve) { captured.on('exit', resolve); }); await captureExit; globalThis.__thaw_worker_spawn = undefined; var fallbackSource = "var wt = require('node:worker_threads'), out = new Uint8Array([99, 4, 251, 132, 100]); process.stdout.write(out.subarray(1, 4)); process.stderr.write('05fa85', 'hex'); wt.parentPort.close();"; var fallback = new Worker(fallbackSource, { eval: true }); var fallbackExit = new Promise(function(resolve) { fallback.on('exit', resolve); }); await fallbackExit; return [worker.stdout === null, worker.stderr === null, output, errors, capturedOutput, capturedErrors, captured.stdout.readableEnded, captured.stderr.readableEnded, fallback.stdout === null, fallback.stderr === null]; } finally { globalThis.__thaw_worker_spawn = originalSpawn; process.stdout = originalOut; process.stderr = originalErr; } };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_default_stdio_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDefaultWorkerStdio = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseDefaultWorkerStdio").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,true,"00ff8004fb84","01fe8105fa85","02fd82","03fc83",true,true,true,true]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_stdin_transports_bytes_and_end_in_order() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_stdin_bytes");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { async function run(native) { var originalSpawn = globalThis.__thaw_worker_spawn; if (!native) globalThis.__thaw_worker_spawn = undefined; try { var source = "var wt = require('node:worker_threads'), received = []; process.stdin.on('data', function(chunk) { received.push([Buffer.isBuffer(chunk), Buffer.from(chunk).toString('hex')]); }); process.stdin.on('end', function() { wt.parentPort.postMessage(received); wt.parentPort.close(); });"; var worker = new Worker(source, { eval: true, stdin: true }), writes = 0, ends = 0, backing = Buffer.from([99, 0, 255, 88]), finalBacking = Buffer.from([77, 128, 66]); await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var messagesPromise = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); }), exitPromise = new Promise(function(resolve) { worker.on('exit', resolve); }); worker.stdin.write(backing.subarray(1, 3), function(error) { if (error) throw error; writes++; }); worker.stdin.write('Aÿ', 'latin1', function(error) { if (error) throw error; writes++; }); worker.stdin.end(finalBacking.subarray(1, 2), function(error) { if (error) throw error; ends++; }); var messages = await messagesPromise, code = await exitPromise; return [code, writes, ends, messages]; } finally { globalThis.__thaw_worker_spawn = originalSpawn; } } return [await run(true), await run(false)]; };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_stdin_bytes_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdinBytes = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseWorkerStdinBytes").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[[0,2,1,[[true,"00ff"],[true,"41ff"],[true,"80"]]],[0,2,1,[[true,"00ff"],[true,"41ff"],[true,"80"]]]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_stdin_reports_host_failures_once() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_stdin_host_failure");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { async function run(throws) { var original = globalThis.__thaw_worker_stdin, worker = new Worker("require('node:worker_threads').parentPort.on('message', function() {});", { eval: true, stdin: true }), calls = 0, errorEvents = 0; await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var streamError = new Promise(function(resolve) { worker.stdin.on('error', function(error) { errorEvents++; resolve(error && error.message || ''); }); }); globalThis.__thaw_worker_stdin = function() { if (throws) throw new Error('host stdin failure'); return false; }; var result = await new Promise(function(resolve) { worker.stdin.write(Buffer.from([1]), function(error) { calls++; resolve([error && error.code || '', error && error.message || '']); }); }); var emitted = await streamError; globalThis.__thaw_worker_stdin = original; var exited = new Promise(function(resolve) { worker.on('exit', resolve); }); await worker.terminate(); var code = await exited; return [calls, result, errorEvents, emitted, code]; } return [await run(false), await run(true)]; };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_stdin_host_failure_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdinFailures = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseWorkerStdinFailures").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[[1,["ERR_WORKER_NOT_RUNNING","Worker stdin is not available"],1,"Worker stdin is not available",1],[1,["","host stdin failure"],1,"host stdin failure",1]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_stdin_string_decoder_handles_split_utf8() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_stdin_string_decoder");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { async function run(native, incomplete) { var originalSpawn = globalThis.__thaw_worker_spawn; if (!native) globalThis.__thaw_worker_spawn = undefined; try { var source = "var wt = require('node:worker_threads'), events = []; process.stdin.setEncoding('utf8'); process.stdin.on('data', function(chunk) { events.push(chunk); }); process.stdin.on('end', function() { events.push('end'); wt.parentPort.postMessage([events, process.stdin.encoding]); wt.parentPort.close(); });"; var worker = new Worker(source, { eval: true, stdin: true }); await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var message = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); }), exit = new Promise(function(resolve) { worker.on('exit', resolve); }); worker.stdin.write(Buffer.from([226, 130])); if (incomplete) worker.stdin.end(); else worker.stdin.end(Buffer.from([172])); var result = await message, code = await exit; return [code, result]; } finally { globalThis.__thaw_worker_spawn = originalSpawn; } } return [await run(true, false), await run(true, true), await run(false, false), await run(false, true)]; };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_stdin_string_decoder_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerStdinDecoder = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseWorkerStdinDecoder").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[[0,[["€","end"],"utf8"]],[0,[["�","end"],"utf8"]],[0,[["€","end"],"utf8"]],[0,[["�","end"],"utf8"]]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn worker_threads_native_runtime_round_trips_parent_messages() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_native_round_trip");
@@ -763,7 +1287,7 @@ fn worker_threads_native_runtime_round_trips_parent_messages() {
     let node_modules = temp_registry("builtin_worker_native_round_trip_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeWorkerRoundTrip = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseNativeWorkerRoundTrip").unwrap();
@@ -771,6 +1295,33 @@ fn worker_threads_native_runtime_round_trips_parent_messages() {
     let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
     assert_eq!(result, r#"[42,true,0,"number"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+// The unref'd worker's reply must arrive while the ref'd sibling still keeps the host alive: once
+// only unref'd workers remain, the host (like Node) stops waiting, so awaiting both replies at
+// once raced on which worker answered first.
+#[test]
+fn worker_threads_native_ref_unreffed_workers_follow_host_liveness() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_ref");
+    fs::write(
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var source = \"var wt = require('node:worker_threads'); wt.parentPort.on('message', function(value) { wt.parentPort.postMessage(value); wt.parentPort.close(); });\"; var missingHandleNoOp = __thaw_worker_ref(4294967295, true) === false; var worker = new Worker(source, { eval: true }); var initiallyActive = __thaw_worker_active(); var unrefReturnsSelf = worker.unref() === worker, inactiveAfterUnref = !__thaw_worker_active(); var sibling = new Worker(source, { eval: true }); var siblingKeepsActivity = __thaw_worker_active(); var refReturnsSelf = worker.ref() === worker, activeAfterRef = __thaw_worker_active(); worker.unref(); var siblingStillKeepsActivity = __thaw_worker_active(); var exits = [new Promise(function(resolve) { worker.on('exit', resolve); }), new Promise(function(resolve) { sibling.on('exit', resolve); })]; var workerMessage = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); }), siblingMessage = new Promise(function(resolve, reject) { sibling.on('message', resolve); sibling.on('error', reject); }); worker.postMessage('unref'); var messages = [await workerMessage]; sibling.postMessage('refed'); messages.push(await siblingMessage); var codes = await Promise.all(exits); var endedNoOp = worker.ref() === worker && worker.unref() === worker && __thaw_worker_ref(worker._nativeHandle, true) === false; return [missingHandleNoOp, initiallyActive, unrefReturnsSelf, inactiveAfterUnref, siblingKeepsActivity, refReturnsSelf, activeAfterRef, siblingStillKeepsActivity, messages, codes, !__thaw_worker_active(), endedNoOp]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_ref_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeWorkerRef = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeWorkerRef").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,true,true,true,true,true,true,true,["unref","refed"],[0,0],true,true]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
@@ -787,7 +1338,7 @@ fn worker_threads_native_runtime_transfers_structured_array_buffers() {
     let node_modules = temp_registry("builtin_worker_native_structured_transfer_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeWorkerTransfer = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseNativeWorkerTransfer").unwrap();
@@ -806,6 +1357,7 @@ fn worker_threads_native_runtime_transfers_structured_array_buffers() {
 fn bundler_embeds_static_file_url_worker_sources() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_file_url");
+    fs::create_dir_all(dir.join("lib/sub")).unwrap();
     fs::write(
         dir.join("double.js"),
         "module.exports = function(value) { return value * 2; };",
@@ -817,14 +1369,33 @@ fn bundler_embeds_static_file_url_worker_sources() {
         )
         .unwrap();
     fs::write(
+        dir.join("lib/worker.js"),
+        "require('node:worker_threads').parentPort.postMessage(999);",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("stdin-worker.js"),
+        "import { parentPort } from 'node:worker_threads'; var text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', function(value) { text += value; }); process.stdin.on('end', function() { parentPort.postMessage(text); parentPort.close(); });",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/entry.js"),
+        "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); module.exports = async function(run, events) { await run(new Worker(path.join(__dirname, '../worker.js'), { workerData: 7 }), events); await run(new Worker(path.join(__dirname, 'sub', '../../worker.js'), { workerData: 8 }), events); await run(new Worker(path.resolve(__dirname, 'sub', '../../worker.js'), { workerData: 9 }), events); await run(new Worker('../worker.js', { workerData: 10 }), events); };",
+    )
+    .unwrap();
+    fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); const workerFile = './' + 'worker.js'; const joinedWorkerFile = path.join(__dirname, 'worker.js'); function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); await run(new Worker(joinedWorkerFile, { workerData: 2 }), events); return events; };",
+            "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); var nested = require('./lib/entry'); const workerFile = './' + 'worker.js'; const joinedWorkerFile = path.join(__dirname, 'worker.js'); function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); await run(new Worker(joinedWorkerFile, { workerData: 2 }), events); await nested(run, events); var stdinWorker = new Worker(new URL('./stdin-worker.js', import.meta.url), { stdin: true }), stdinExit = run(stdinWorker, events); await new Promise(function(resolve, reject) { stdinWorker.on('online', resolve); stdinWorker.on('error', reject); }); stdinWorker.stdin.write(Buffer.from([226, 130])); stdinWorker.stdin.end(Buffer.from([172])); await stdinExit; return events; };",
         )
         .unwrap();
+    let outside = "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); new Worker(path.join(__dirname, '../../outside.js'));";
+    let error = rewrite_static_worker_urls(outside, &dir.join("lib/entry.js"), "pkg", &dir)
+        .expect_err("a parent path escaping the package must be rejected before reading");
+    assert!(error.contains("outside package"), "{error}");
     let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 6);
+    assert_eq!(file_count, 9);
     fs::remove_dir_all(&dir).unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileWorker = module.exports;");
     let source = CString::new(script).unwrap();
@@ -833,8 +1404,56 @@ fn bundler_embeds_static_file_url_worker_sources() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, "[42,0,22,0,10,0,6,0,4,0]");
+    assert_eq!(result, r#"[42,0,22,0,10,0,6,0,4,0,14,0,16,0,18,0,20,0,"€",0]"#);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn bundled_worker_dynamic_import_converts_once_and_keeps_worker_module() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: the Worker entry's dynamic import helper must use
+    // the same ToString boundary while preserving its local worker_threads.
+    let dir = temp_registry("worker_dynamic_import_specifier");
+    let modules = temp_registry("worker_dynamic_import_specifier_modules");
+    fs::write(dir.join("dep.js"), "exports.value = 42;").unwrap();
+    fs::write(
+        dir.join("worker.js"),
+        "var wt = require('node:worker_threads'); var calls = 0, hint; \
+         var spec = { [Symbol.toPrimitive]: function(value) { calls++; hint = value; return 'node:worker_threads'; } }; \
+         wt.parentPort.on('message', function() { Promise.all([import(spec), import('./dep.js')]).then(function(values) { \
+           wt.parentPort.postMessage([values[0].parentPort === wt.parentPort, calls, hint, values[1].value]); \
+           wt.parentPort.close(); \
+         }); });",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; \
+         module.exports = function() { return new Promise(function(resolve, reject) { \
+           var worker = new Worker(new URL('./worker.js', import.meta.url)), result; \
+           worker.on('message', function(value) { result = value; }); \
+           worker.on('error', reject); worker.on('exit', function(code) { resolve([result, code]); }); \
+           worker.postMessage('go'); \
+         }); };",
+    )
+    .unwrap();
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 4);
+    fs::remove_dir_all(&dir).unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.runWorkerDynamicSpecifier = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"runWorkerDynamicSpecifier".as_ptr(), c"[]".as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[true,1,\"string\",42],0]"
+    );
+    let _ = fs::remove_dir_all(modules);
 }
 
 #[test]
@@ -867,7 +1486,7 @@ fn worker_threads_broadcast_channel_clones_between_matching_names() {
     let empty_node_modules = temp_registry("builtin_broadcast_channel_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBroadcast = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -878,4 +1497,771 @@ fn worker_threads_broadcast_channel_clones_between_matching_names() {
     assert_eq!(result, r#"[8,4,false,true,"room",true,true]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn worker_esm_star_diamond_uses_the_same_terminal_origin() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker-star-origin");
+    let modules = temp_registry("worker-star-origin-modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
+    fs::write(package.join("worker.js"), "import { parentPort } from 'node:worker_threads'; export * from './a.js'; export * from './b.js'; parentPort.postMessage(module.exports.value); parentPort.close();").unwrap();
+    fs::write(package.join("a.js"), "export * from './leaf.js';").unwrap();
+    fs::write(package.join("b.js"), "export * from './leaf.js';").unwrap();
+    fs::write(package.join("leaf.js"), "export const value = 7;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-origin-pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerStarResult = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerStarResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "7");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_esm_cycle_uses_one_cached_main_module_identity() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker-main-cycle-origin");
+    let modules = temp_registry("worker-main-cycle-origin-modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
+    fs::write(package.join("worker.js"), "import { parentPort } from 'node:worker_threads'; import { readMain } from './dep.js'; var __thaw_finish_worker_main_0 = 'user-finish'; var __thaw_worker_main_error_0 = 'user-error'; globalThis.workerMainRuns = (globalThis.workerMainRuns || 0) + 1; export const identity = {}; parentPort.postMessage([workerMainRuns, readMain() === module.exports.identity, module.filename, __thaw_finish_worker_main_0, __thaw_worker_main_error_0]); parentPort.close();").unwrap();
+    fs::write(package.join("dep.js"), "import * as main from './worker.js'; export function readMain() { return main.identity; }").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-origin-pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerCycleResult = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerCycleResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"/thaw_modules/worker-origin-pkg/worker.js\",\"user-finish\",\"user-error\"]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_main_ready_rejects_every_falsy_thrown_value() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker-falsy-main-ready");
+    let modules = temp_registry("worker-falsy-main-ready-modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Worker(new URL('./worker.js', import.meta.url)); };").unwrap();
+    fs::write(package.join("worker.js"), "throw 0;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-falsy-pkg", &package, "index.js").unwrap();
+    let script = format!(r#"globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}
+        (0, eval)(globalThis.__thaw_worker_bundle_source);
+        globalThis.workerFalsyReadyProbe = async function() {{
+          var reasons = [0, false, '', null, undefined], results = [];
+          for (var i = 0; i < reasons.length; i++) {{
+            var mod = {{ exports: {{}} }}, finish = globalThis.__thaw_bundle_register_worker_main('probe/' + i, mod);
+            finish(false, reasons[i]);
+            try {{ await mod.ready; results.push(false); }}
+            catch (error) {{ results.push(Object.is(error, reasons[i])); }}
+          }}
+          return results;
+        }};"#);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerFalsyReadyProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,true,true]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+#[test]
+fn bundled_worker_entry_require_resolve_does_not_load_target() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker_entry_require_resolve");
+    let modules = temp_registry("worker_entry_require_resolve_modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
+    fs::write(package.join("worker.js"), "var wt = require('node:worker_threads'); var present = require.resolve('./dep.js'), missing; try { require.resolve('./absent.js'); } catch (error) { missing = error.code; } wt.parentPort.postMessage([present, missing, globalThis.workerResolveDepRuns || 0]); wt.parentPort.close();").unwrap();
+    fs::write(package.join("dep.js"), "globalThis.workerResolveDepRuns = (globalThis.workerResolveDepRuns || 0) + 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerResolveEntry = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerResolveEntry".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"pkg/dep.js\",\"MODULE_NOT_FOUND\",0]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers() {
+    use std::ffi::{CStr, CString};
+
+    let modules = temp_registry("worker-affinity-modules");
+    let package_a = temp_registry("worker-affinity-a");
+    let package_b = temp_registry("worker-affinity-b");
+    let index = "var Worker = require('node:worker_threads').Worker; \
+        module.exports = { \
+          save: function() { var original = Worker, saved; Worker = function(url) { saved = url; }; \
+            try { new Worker(new URL('./worker.js', import.meta.url)); } finally { Worker = original; } \
+            return saved; }, \
+          run: function(url) { return new Promise(function(resolve, reject) { \
+            var worker = new Worker(url); worker.on('message', resolve); worker.on('error', reject); \
+          }); } \
+        };";
+    fs::write(package_a.join("index.js"), index).unwrap();
+    fs::write(package_b.join("index.js"), index).unwrap();
+    fs::write(package_a.join("worker.js"), "var parentPort = require('node:worker_threads').parentPort; require('./spawner.js')(function(value) { parentPort.postMessage(value); parentPort.close(); });").unwrap();
+    fs::write(package_a.join("spawner.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function(done) { var child = new Worker(new URL('./nested.js', import.meta.url)); child.on('message', done); child.on('error', function(error) { throw error; }); };").unwrap();
+    fs::write(package_a.join("nested.js"), "var parentPort = require('node:worker_threads').parentPort; var direct, created; try { require('affinity-missing'); } catch (error) { direct = error.code; } var makeRequire = require('node:module').createRequire(__filename); try { makeRequire('affinity-missing'); } catch (error) { created = error.code; } parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value, direct, created]); parentPort.close();").unwrap();
+    fs::write(package_a.join("dep.js"), "exports.value = 'A';").unwrap();
+    fs::write(package_b.join("worker.js"), "var parentPort = require('node:worker_threads').parentPort; parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value]); parentPort.close();").unwrap();
+    fs::write(package_b.join("dep.js"), "exports.value = 'B';").unwrap();
+    let dependency_a = package_a.join("node_modules/affinity-shared");
+    let dependency_b = package_b.join("node_modules/affinity-shared");
+    fs::create_dir_all(&dependency_a).unwrap();
+    fs::create_dir_all(&dependency_b).unwrap();
+    fs::write(dependency_a.join("package.json"), r#"{"name":"affinity-shared","main":"index.js"}"#).unwrap();
+    fs::write(dependency_b.join("package.json"), r#"{"name":"affinity-shared","main":"index.js"}"#).unwrap();
+    fs::write(dependency_a.join("index.js"), "exports.value = 'A-bare';").unwrap();
+    fs::write(dependency_b.join("index.js"), "exports.value = 'B-bare';").unwrap();
+    let (bundle_a, _, _, _) = bundle_commonjs_package(&modules, "affinity-a", &package_a, "index.js").unwrap();
+    let (bundle_b, _, _, _) = bundle_commonjs_package(&modules, "affinity-b", &package_b, "index.js").unwrap();
+    let script = format!(r#"globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports;
+        globalThis.require = function(name) {{ throw new Error(name); }};
+        {bundle_a}
+        globalThis.affinityA = module.exports;
+        globalThis.affinityUrlA = affinityA.save();
+        globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports;
+        {bundle_b}
+        globalThis.affinityB = module.exports;
+        globalThis.affinityUrlB = affinityB.save();
+        globalThis.workerAffinityProbe = async function() {{
+          var native = [await affinityA.run(affinityUrlA), await affinityB.run(affinityUrlB), await affinityA.run(affinityUrlA)];
+          var spawn = globalThis.__thaw_worker_spawn, fallback;
+          globalThis.__thaw_worker_spawn = undefined;
+          try {{ fallback = [await affinityA.run(affinityUrlA), await affinityB.run(affinityUrlB), await affinityA.run(affinityUrlA)]; }}
+          finally {{ globalThis.__thaw_worker_spawn = spawn; }}
+          return [native, fallback];
+        }};"#);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerAffinityProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"],[\"B\",\"B-bare\"],[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"]],[[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"],[\"B\",\"B-bare\"],[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"]]]");
+    let _ = fs::remove_dir_all(package_a);
+    let _ = fs::remove_dir_all(package_b);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_worker_and_main_keep_root_dirname_for_entry_and_dependencies() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_root_dirname");
+    let modules = temp_registry("worker_root_dirname_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return "module.exports = [__dirname, require('./child.js')];";
+                if (path.endsWith('child.js')) return 'module.exports = __dirname;';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) {
+                captured = source;
+                throw stop; // Capture generated source without starting a host worker.
+            };
+            try {
+                var workerValues = ['/entry.js', '/nested/entry.js', 'entry.js'].map(function(path) {
+                    captured = undefined;
+                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
+                    if (captured === undefined) throw new Error('Missing generated Worker source');
+                    var childModule = { exports: {} };
+                    Function('require', 'module', 'exports', captured)(
+                        function(name) { throw new Error(name); }, childModule, childModule.exports);
+                    return childModule.exports;
+                });
+                var mainValues = ['/entry.js', '/nested/entry.js'].map(function(path) {
+                    return globalThis.__thaw_run_main_file(path);
+                });
+                return [workerValues, mainValues];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerRootDirname = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerRootDirname".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[[\"/\",\"/\"],[\"/nested\",\"/nested\"],[\".\",\".\"]],[[\"/\",\"/\"],[\"/nested\",\"/nested\"]]]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_worker_preserves_unresolved_parent_path_components() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_parent_components");
+    let modules = temp_registry("worker_parent_components_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return "module.exports = require('../child.js');";
+                if (path.endsWith('child.js')) return 'module.exports = __filename;';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                var values = ['entry.js', '../entry.js', '../../entry.js', 'nested/entry.js',
+                              '/entry.js', '/nested/entry.js'].map(function(path) {
+                    captured = undefined;
+                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
+                    if (captured === undefined) throw new Error('Missing generated Worker source');
+                    var childModule = { exports: {} };
+                    Function('require', 'module', 'exports', captured)(
+                        function(name) { throw new Error(name); }, childModule, childModule.exports);
+                    return childModule.exports;
+                });
+                values.push(globalThis.__thaw_run_main_file('/entry.js'));
+                values.push(globalThis.__thaw_run_main_file('/nested/entry.js'));
+                return values;
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerParentComponents = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerParentComponents".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[\"../child.js\",\"../../child.js\",\"../../../child.js\",\"child.js\",\"/child.js\",\"/child.js\",\"/child.js\",\"/child.js\"]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_loaders_retry_failed_modules_and_bind_commonjs_this() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_cache_lifecycle");
+    let modules = temp_registry("worker_cache_lifecycle_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, jsonReads, stop = {};
+            globalThis.__thaw_cache_control_failure = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return [
+                    "var caught = false; try { require('./child.js'); } catch (error) { caught = error === globalThis.__thaw_cache_control_failure; }",
+                    "var second = require('./child.js'), third = require('./child.js');",
+                    "var jsonFailed = false; try { require('./data.json'); } catch (error) { jsonFailed = error instanceof SyntaxError; }",
+                    "module.exports = [caught, second.cycle, second.published, second === third, globalThis.__thaw_cache_control_attempts, jsonFailed, require('./data.json').value];"
+                ].join(';');
+                if (path.endsWith('child.js')) return [
+                    "'use strict'; globalThis.__thaw_cache_control_attempts++;",
+                    "exports.started = true; this.published = 42;",
+                    "exports.cycle = require('./cycle.js');",
+                    "if (globalThis.__thaw_cache_control_attempts === 1) throw globalThis.__thaw_cache_control_failure;"
+                ].join(';');
+                if (path.endsWith('cycle.js')) return "module.exports = require('./child.js').started;";
+                if (path.endsWith('data.json')) return jsonReads++ === 0 ? '{broken' : '{"value":13}';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                globalThis.__thaw_cache_control_attempts = 0; jsonReads = 0;
+                try { new Worker('/cache/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                var workerValue = childModule.exports;
+                globalThis.__thaw_cache_control_attempts = 0; jsonReads = 0;
+                var mainValue = globalThis.__thaw_run_main_file('/cache/entry.js');
+                return [workerValue, mainValue];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+                delete globalThis.__thaw_cache_control_attempts;
+                delete globalThis.__thaw_cache_control_failure;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerCacheLifecycle = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerCacheLifecycle".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[true,true,42,true,2,true,13],[true,true,42,true,2,true,13]]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_loaders_accept_hashbangs_without_stripping_json_or_interior_text() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_hashbang_lines");
+    let modules = temp_registry("worker_hashbang_lines_modules");
+    fs::write(dir.join("index.js"), r##"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return '#!/usr/bin/env node\n' +
+                    "var invalidJson = false; try { require('./invalid.json'); } catch (error) { invalidJson = error instanceof SyntaxError; }" +
+                    "module.exports = [require('./lf.js'), require('./crlf.cjs'), require('./ls.js'), require('./ps.js'), Object.keys(require('./empty.js')).length, require('./text.js'), invalidJson];";
+                if (path.endsWith('lf.js')) return '#!/usr/bin/env node\nmodule.exports = 1;';
+                if (path.endsWith('crlf.cjs')) return '#!/usr/bin/env node\r\nmodule.exports = 2;';
+                if (path.endsWith('ls.js')) return '#!/usr/bin/env node\u2028module.exports = 3;';
+                if (path.endsWith('ps.js')) return '#!/usr/bin/env node\u2029module.exports = 4;';
+                if (path.endsWith('empty.js')) return '#!/usr/bin/env node';
+                if (path.endsWith('text.js')) return 'module.exports = "#!kept";';
+                if (path.endsWith('invalid.json')) return '#!/usr/bin/env node\n{"value":1}';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                try { new Worker('/hashbang/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                return [childModule.exports, globalThis.__thaw_run_main_file('/hashbang/entry.js')];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "##).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerHashbangLines = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerHashbangLines".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[1,2,3,4,0,\"#!kept\",true],[1,2,3,4,0,\"#!kept\",true]]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_worker_package_main_rethrows_initialization_and_syntax_errors() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_package_main_errors");
+    let modules = temp_registry("worker_package_main_errors_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_package_control_failure = {};
+            globalThis.__thaw_package_control_attempts = Object.create(null);
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path === '/package/entry.js') return [
+                    "function retry(request) { var caught = false; try { require(request); } catch (error) { caught = error === globalThis.__thaw_package_control_failure; } return [caught, require(request)]; }",
+                    "var syntaxFailed = false; try { require('./syntax-package'); } catch (error) { syntaxFailed = error instanceof SyntaxError; }",
+                    "module.exports = [retry('./local-package'), retry('bare-package'), syntaxFailed];"
+                ].join(';');
+                if (path === '/package/syntax-package/package.json') return '{"main":"broken.js"}';
+                if (path === '/package/syntax-package/broken.js') return 'module.exports = (';
+                if (path === '/package/local-package/package.json' ||
+                    path === '/package/node_modules/bare-package/package.json') return '{"main":"main.js"}';
+                if (path === '/package/local-package/main.js' ||
+                    path === '/package/node_modules/bare-package/main.js') return 'var key = ' + JSON.stringify(path) + '; var counts = globalThis.__thaw_package_control_attempts;' +
+                    'if ((counts[key] = (counts[key] || 0) + 1) === 1) throw globalThis.__thaw_package_control_failure;' +
+                    'module.exports = 42;';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                try { new Worker('/package/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                return childModule.exports;
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+                delete globalThis.__thaw_package_control_failure;
+                delete globalThis.__thaw_package_control_attempts;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerPackageMainErrors = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerPackageMainErrors".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[true,42],[true,42],true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_loaders_resolve_dotted_files_and_directories_in_file_first_order() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_dotted_resolution");
+    let modules = temp_registry("worker_dotted_resolution_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, metadataReads = 0, stop = {};
+            var common = ["require('./helper.test')", "require('./data.v1')", "require('./dir.v1')",
+                          "require('./cjs.v1')", "require('./json.v1')"];
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path === '/resolve/entry.js') return 'module.exports = [' +
+                    common.concat(["require('./pkg.v1')", "require('./collision')", "require('./exact.v1')"]).join(',') + '];';
+                if (path === '/resolve/main-entry.js') return 'module.exports = [' +
+                    common.concat(["require('./collision')", "require('./exact.v1')"]).join(',') + '];';
+                switch (path) {
+                    case '/resolve/helper.test.js': return 'module.exports = 11;';
+                    case '/resolve/data.v1.json': return '12';
+                    case '/resolve/dir.v1/index.js': return 'module.exports = 13;';
+                    case '/resolve/cjs.v1/index.cjs': return 'module.exports = 14;';
+                    case '/resolve/json.v1/index.json': return '15';
+                    case '/resolve/pkg.v1/package.json': return '{"main":"main"}';
+                    case '/resolve/pkg.v1/main.js': return 'module.exports = 16;';
+                    case '/resolve/collision.js': return 'module.exports = 17;';
+                    case '/resolve/collision/package.json': metadataReads++; return '{"main":"wrong.js"}';
+                    case '/resolve/collision/wrong.js': return 'module.exports = 99;';
+                    case '/resolve/exact.v1': return 'module.exports = 18;';
+                    default: throw new Error('Unexpected read: ' + path);
+                }
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                try { new Worker('/resolve/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                return [childModule.exports, globalThis.__thaw_run_main_file('/resolve/main-entry.js'), metadataReads];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerDottedResolution = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerDottedResolution".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[11,12,13,14,15,16,17,18],[11,12,13,14,15,17,18],0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_entry_directives");
+    let modules = temp_registry("worker_entry_directives_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = async function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path === '/scope/dep.js') return "'use strict'; module.exports = (function() { return this === undefined; })();";
+                var directive;
+                if (path === '/scope/strict.js') directive = "/* leading comment */ 'other directive'; 'use strict';";
+                else if (path === '/scope/sloppy.js') directive = '';
+                else if (path === '/scope/escaped.js') directive = "'use\\x20strict';";
+                else throw new Error('Unexpected read: ' + path);
+                return directive +
+                    "var object = {}; Object.defineProperty(object, 'fixed', { value: 1, writable: false });" +
+                    "var rejectedWrite = false; try { object.fixed = 2; } catch (error) { rejectedWrite = error instanceof TypeError; }" +
+                    "var values = [rejectedWrite, (function() { return this === undefined; })(), this === exports, require('./dep.js')];" +
+                    "module.exports = values; var port = require('node:worker_threads').parentPort; port.postMessage(values); port.close();";
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                var capturedValues = ['/scope/strict.js', '/scope/sloppy.js', '/scope/escaped.js'].map(function(path) {
+                    captured = undefined;
+                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
+                    if (captured === undefined) throw new Error('Missing generated Worker source');
+                    var childModule = { exports: {} }, posted;
+                    Function('require', 'module', 'exports', captured)(function(name) {
+                        if (name === 'node:worker_threads') return { parentPort: {
+                            postMessage: function(value) { posted = value; }, close: function() {}
+                        } };
+                        throw new Error(name);
+                    }, childModule, childModule.exports);
+                    if (posted !== childModule.exports) throw new Error('Entry lost its module exports');
+                    return posted;
+                });
+                globalThis.__thaw_worker_spawn = undefined;
+                var fallback = new Worker('/scope/strict.js');
+                var message = new Promise(function(resolve, reject) {
+                    fallback.on('message', resolve); fallback.on('error', reject);
+                });
+                var exit = new Promise(function(resolve, reject) {
+                    fallback.on('exit', resolve); fallback.on('error', reject);
+                });
+                return [capturedValues, await message, await exit];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerEntryDirectives = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerEntryDirectives".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[[true,true,true,true],[false,false,true,true],[false,false,true,true]],[true,true,true,true],0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_thread_id_becomes_minus_one_after_routing_cleanup() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_terminal_thread_id");
+    let modules = temp_registry("worker_terminal_thread_id_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = async function () {
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var originalPoll = globalThis.__thaw_worker_poll;
+            var originalTerminate = globalThis.__thaw_worker_terminate;
+            try {
+                globalThis.__thaw_worker_spawn = undefined;
+                var normal = new Worker("require('node:worker_threads').parentPort.close();", { eval: true });
+                var normalId = normal.threadId, normalObserved;
+                await new Promise(function(resolve, reject) {
+                    normal.on('error', reject);
+                    normal.on('exit', function() { normalObserved = normal.threadId; resolve(); });
+                });
+                var stopped = new Worker("require('node:worker_threads').parentPort.on('message', function() {});", { eval: true });
+                await new Promise(function(resolve, reject) { stopped.on('error', reject); stopped.on('online', resolve); });
+                var stoppedId = stopped.threadId;
+                await stopped.terminate();
+                var stoppedAfterRepeat = await stopped.terminate();
+
+                var sendNativeExit = false, nativeExitSent = false;
+                globalThis.__thaw_worker_spawn = function() { return 48701; };
+                globalThis.__thaw_worker_terminate = function() {};
+                globalThis.__thaw_worker_poll = function() {
+                    if (!sendNativeExit || nativeExitSent) return '[]';
+                    nativeExitSent = true;
+                    return JSON.stringify([{ type: 'exit', handle: 48701, code: 0 }]);
+                };
+                var native = new Worker("void 0;", { eval: true });
+                var nativeId = native.threadId, nativeObserved, routingRemoved;
+                var nativeExit = new Promise(function(resolve, reject) {
+                    native.on('error', reject);
+                    native.on('exit', function() {
+                        nativeObserved = native.threadId;
+                        routingRemoved = !globalThis.__thaw_native_workers_by_thread.has(nativeId);
+                        resolve();
+                    });
+                });
+                var termination = native.terminate();
+                sendNativeExit = true;
+                globalThis.__thaw_poll_platform_events();
+                await Promise.all([nativeExit, termination]);
+                var nativeRepeated = await native.terminate();
+                return [normalId > 0, normalObserved, stoppedId > 0, stopped.threadId,
+                        stoppedAfterRepeat, nativeId > 0, nativeObserved, routingRemoved,
+                        native.threadId, nativeRepeated === 0];
+            } finally {
+                globalThis.__thaw_worker_spawn = originalSpawn;
+                globalThis.__thaw_worker_poll = originalPoll;
+                globalThis.__thaw_worker_terminate = originalTerminate;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.workerTerminalThreadIdProbe = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerTerminalThreadIdProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[true,-1,true,-1,1,true,-1,true,-1,true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+
+#[test]
+fn native_worker_can_run_a_fallback_nested_worker_until_exit() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("native_worker_fallback_nested_lifetime");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        module.exports = async function() {
+            var source = "globalThis.__thaw_worker_spawn = undefined; var wt = require('node:worker_threads'), child = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('exit', function(code) { wt.parentPort.postMessage(code); wt.parentPort.close(); });";
+            var worker = new Worker(source, { eval: true });
+            var message = await new Promise(function(resolve, reject) {
+                worker.on('message', resolve);
+                worker.on('error', reject);
+            });
+            var exit = await new Promise(function(resolve) { worker.on('exit', resolve); });
+            return [message, exit];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("native_worker_fallback_nested_lifetime_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseNativeFallbackNestedWorker = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseNativeFallbackNestedWorker".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[0,0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn fallback_nested_workers_keep_their_parent_alive_and_release_it() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("fallback_nested_worker_lifetime");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        module.exports = async function() {
+            var spawn = globalThis.__thaw_worker_spawn;
+            globalThis.__thaw_worker_spawn = undefined;
+            try {
+                function run(source, captureMessage) {
+                    var worker = new Worker(source, { eval: true });
+                    return new Promise(function(resolve) {
+                        var done = false, messages = [], timer = setTimeout(function() {
+                            if (done) return;
+                            done = true;
+                            resolve(-1);
+                            worker.terminate();
+                        }, 200);
+                        worker.on('message', function(value) { messages.push(value); });
+                        worker.on('exit', function(code) {
+                            if (done) return;
+                            done = true;
+                            clearTimeout(timer);
+                            resolve(captureMessage ? [code, messages] : code);
+                        });
+                    });
+                }
+                var failedConstructor = "var wt = require('node:worker_threads'); try { new wt.Worker('void 0', { eval: true, workerData: function() {} }); } catch (error) {}";
+                var nestedChild = "var wt = require('node:worker_threads'), child = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('exit', function(code) { wt.parentPort.postMessage(code); var replacement = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); replacement.on('exit', function(replacementCode) { wt.parentPort.postMessage('replacement:' + replacementCode); wt.parentPort.close(); }); }); child.unref(); child.ref();";
+                var unrefChild = "var wt = require('node:worker_threads'), child = new wt.Worker(\"setTimeout(function() { require('node:worker_threads').parentPort.close(); }, 50);\", { eval: true }); child.unref();";
+                return [await run(failedConstructor), await run(nestedChild, true), await run(unrefChild)];
+            } finally {
+                globalThis.__thaw_worker_spawn = spawn;
+            }
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("fallback_nested_worker_lifetime_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseFallbackNestedWorkerLifetime = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseFallbackNestedWorkerLifetime".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[0,[0,[0,\"replacement:0\"]],0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn native_child_of_fallback_inherits_parent_environment_and_stdio() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("native_child_of_fallback_inherited_state");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        module.exports = async function() {
+            var originalSpawn = globalThis.__thaw_worker_spawn, nativeSpawnCount = 0;
+            globalThis.__thaw_worker_spawn = function() { nativeSpawnCount++; return originalSpawn.apply(this, arguments); };
+            var countedSpawn = globalThis.__thaw_worker_spawn;
+            globalThis.__thaw_worker_spawn = undefined;
+            try {
+                var source = "var wt = require('node:worker_threads'), child = new wt.Worker(\"process.stdout.write('child-stdio'); require('node:worker_threads').parentPort.postMessage(process.env.THAW_NESTED); require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('message', function(value) { wt.parentPort.postMessage(value); }); child.on('exit', function() { wt.parentPort.close(); });";
+                var worker = new Worker(source, { eval: true, env: { THAW_NESTED: 'fallback-parent-env' }, stdout: true });
+                globalThis.__thaw_worker_spawn = countedSpawn;
+                var output = '';
+                worker.stdout.setEncoding('utf8');
+                worker.stdout.on('data', function(value) { output += value; });
+                var message = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); });
+                var outputDone = new Promise(function(resolve) { worker.stdout.on('end', resolve); });
+                var exit = new Promise(function(resolve, reject) { worker.on('exit', resolve); worker.on('error', reject); });
+                var values = await Promise.all([message, outputDone, exit]);
+                return [values[0], output, values[2], nativeSpawnCount];
+            } finally {
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("native_child_of_fallback_inherited_state_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseNativeChildOfFallback = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseNativeChildOfFallback".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"fallback-parent-env\",\"child-stdio\",0,1]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
 }

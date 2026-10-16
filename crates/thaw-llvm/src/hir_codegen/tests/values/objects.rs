@@ -86,6 +86,30 @@ fn compiles_object_has_own_for_fixed_objects() {
 }
 
 #[test]
+fn structurally_narrowed_native_object_uses_its_original_own_keys() {
+    let source = r#"
+        interface Prefix { a: number; b: number; }
+        interface Reverse { b: number; a: number; }
+        interface Leaf { a: number; }
+        function main(): void {
+            const owner = { a: 1, b: 2, c: 3 };
+            const prefix: Prefix = owner;
+            const reverse: Reverse = prefix;
+            const leaf: Leaf = reverse;
+            console.log(Object.keys(leaf).join(','));
+            console.log(Object.getOwnPropertyNames(reverse).join('|'));
+            console.log(Reflect.ownKeys(prefix).join('+'));
+            console.log(Object.hasOwn(leaf, 'c'), leaf.hasOwnProperty('b'));
+            console.log(Object.hasOwn(owner, 'missing'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structurally_narrowed_native_own_keys"),
+        "a,b,c\na|b|c\na+b+c\ntrue true\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_object_values_for_fixed_objects() {
     let source = r#"
         interface Config { first: number; second: string; enabled: boolean; }
@@ -985,6 +1009,41 @@ fn allocates_object_identity_before_field_assignment() {
 }
 
 #[test]
+fn only_class_allocations_register_nominal_identity() {
+    let object_type = HirType::Object(vec![(
+        "__thaw_class_identity_\u{1e}Base".into(),
+        HirType::Bool,
+    )]);
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "main".into(),
+            params: Vec::new(),
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![
+                HirStmt::Let(
+                    "user_shape".into(),
+                    object_type.clone(),
+                    HirExpr::ObjectAlloc(object_type.clone()),
+                ),
+                HirStmt::Let(
+                    "class_instance".into(),
+                    object_type.clone(),
+                    HirExpr::ClassAlloc(object_type),
+                ),
+                HirStmt::Return(None),
+            ],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "class_alloc_origin");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert_eq!(ir.matches("call i1 @thaw_object_set_class_identity").count(), 1);
+}
+
+#[test]
 fn compiles_and_runs_top_level_default_and_optional_parameters() {
     let source = r#"
         function describe(
@@ -1043,5 +1102,32 @@ fn frame_split_supports_fixed_object_for_in() {
     assert_eq!(
         compile_and_run(source, "object_for_in"),
         "source\nfirst\nlast\nomega\nsecond\nfirst\nten\ntwo\n0\n1\n1\ntwo\ntrue\nA\n😀\né\n雪\na\n"
+    );
+}
+
+#[test]
+fn dynamic_object_key_runs_getter_once_with_receiver_and_exception() {
+    let source = r#"
+        let calls = 0;
+        function key(name: string): string { console.log("key"); return name; }
+        function source() {
+            console.log("receiver");
+            return {
+                base: 40,
+                get value(): number { calls++; return this.base + 2; },
+                get broken(): number { calls++; throw "getter throw"; return 0; },
+            };
+        }
+        function main(): void {
+            console.log(source()[key("value")], calls);
+            const object = source();
+            console.log(object[key("base")], calls);
+            console.log(object[key("absent")], calls);
+            try { console.log(object[key("broken")]); } catch (error) { console.log(error, calls); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_key_getter"),
+        "receiver\nkey\n42 1\nreceiver\nkey\n40 1\nkey\nundefined 1\nkey\ngetter throw 2\n"
     );
 }

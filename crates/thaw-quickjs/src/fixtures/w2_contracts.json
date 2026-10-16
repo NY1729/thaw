@@ -1,0 +1,18 @@
+{
+  "sab_structured_clone": {
+    "source": "const shared = new SharedArrayBuffer(8); const view = new Int32Array(shared);\nconst copy = structuredClone(shared); Atomics.store(new Int32Array(copy), 1, 7);\nreturn { kind: Object.prototype.toString.call(copy), same: copy === shared, len: copy.byteLength, shared: view[1] };\n",
+    "expected": "{\"kind\":\"[object SharedArrayBuffer]\",\"same\":false,\"len\":8,\"shared\":7}"
+  },
+  "sab_typed_array_clone": {
+    "source": "const shared = new SharedArrayBuffer(16); const view = new Int32Array(shared, 4, 2);\nconst copy = structuredClone(view); Atomics.store(copy, 1, 9);\nreturn { kind: Object.prototype.toString.call(copy.buffer), offset: copy.byteOffset, length: copy.length, shared: view[1], plainStaysCopy: (() => { const buffer = new ArrayBuffer(4); const clone = structuredClone(buffer); new Uint8Array(clone)[0] = 5; return new Uint8Array(buffer)[0]; })() };\n",
+    "expected": "{\"kind\":\"[object SharedArrayBuffer]\",\"offset\":4,\"length\":2,\"shared\":9,\"plainStaysCopy\":0}"
+  },
+  "sab_message_port": {
+    "source": "const shared = new SharedArrayBuffer(8); const view = new Int32Array(shared);\nconst channel = new MessageChannel();\nconst received = await new Promise(resolve => { channel.port2.onmessage = event => resolve(event.data); channel.port1.postMessage(shared); });\nAtomics.store(new Int32Array(received), 1, 7); channel.port1.close(); channel.port2.close();\nreturn { kind: Object.prototype.toString.call(received), same: received === shared, shared: view[1] };\n",
+    "expected": "{\"kind\":\"[object SharedArrayBuffer]\",\"same\":false,\"shared\":7}"
+  },
+  "env_is_the_process_environment": {
+    "source": "const out = {};\nprocess.env.W2_ENV_A = 5; out.set = process.env.W2_ENV_A; out.type = typeof process.env.W2_ENV_A;\nout.has = 'W2_ENV_A' in process.env; out.keys = Object.keys(process.env).includes('W2_ENV_A');\nout.own = Object.prototype.hasOwnProperty.call(process.env, 'W2_ENV_A'); out.spread = { ...process.env }.W2_ENV_A;\ndelete process.env.W2_ENV_A; out.after = process.env.W2_ENV_A === undefined; out.hasAfter = 'W2_ENV_A' in process.env;\nprocess.env.W2_ENV_B = undefined; out.undef = process.env.W2_ENV_B; out.method = typeof process.env.hasOwnProperty;\nObject.defineProperty(process.env, 'W2_ENV_C', { value: 3, enumerable: true, configurable: true, writable: true }); out.defined = process.env.W2_ENV_C;\ndelete process.env.W2_ENV_B; delete process.env.W2_ENV_C; out.cleanup = [process.env.W2_ENV_B, process.env.W2_ENV_C].every(value => value === undefined);\nreturn out;\n",
+    "expected": "{\"set\":\"5\",\"type\":\"string\",\"has\":true,\"keys\":true,\"own\":true,\"spread\":\"5\",\"after\":true,\"hasAfter\":false,\"undef\":\"undefined\",\"method\":\"function\",\"defined\":\"3\",\"cleanup\":true}"
+  }
+}

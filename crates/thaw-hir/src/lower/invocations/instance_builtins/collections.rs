@@ -36,8 +36,10 @@ impl<'a> FnLowerer<'a> {
                     // separate map, not `self.narrowings` -- see
                     // `json_typeof_narrowing`.
                     .or_else(|| self.json_narrowings.get(&resolved))
-                    .or_else(|| self.scope.get(&resolved))
                     .cloned()
+                    .or_else(|| self.partial_nullable_narrowings.get(&resolved)
+                        .map(|payload| HirType::Nullable(Box::new(payload.clone()))))
+                    .or_else(|| self.scope.get(&resolved).cloned())
             }
             Expr::This(_) => {
                 let resolved = self.resolve_binding("this");
@@ -45,10 +47,12 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::Member(member) => {
                 if let MemberProp::Computed(_) = &member.prop {
-                    let HirType::Array(element) = self.peek_type_without_lowering(&member.obj)? else {
-                        return None;
+                    return match self.peek_type_without_lowering(&member.obj)? {
+                        HirType::Array(element) => Some(*element),
+                        // An element of a dynamic value is itself dynamic.
+                        dynamic @ (HirType::JsValue | HirType::Json) => Some(dynamic),
+                        _ => None,
                     };
-                    return Some(*element);
                 }
                 let MemberProp::Ident(field) = &member.prop else {
                     return None;
@@ -102,6 +106,17 @@ impl<'a> FnLowerer<'a> {
                     .then_some(receiver_type)
             }
             _ => None,
+        }
+    }
+
+    /// Like `receiver_is_map_or_set` for a `Buffer`/`Uint8Array` receiver: a call such as
+    /// `receiver().set(..)` is lowered (purely, then discarded) and its un-erased type read.
+    fn receiver_is_bytes(&mut self, expr: &Expr) -> bool {
+        match self.peek_type_without_lowering(expr) {
+            Some(ty) => ty == HirType::Bytes,
+            None => self.lower_expr(expr).is_ok_and(|value| {
+                self.infer_expr_type_inner(&value).is_ok_and(|ty| ty == HirType::Bytes)
+            }),
         }
     }
 
@@ -245,11 +260,34 @@ impl<'a> FnLowerer<'a> {
             )
         };
 
+        let scan_other_name = format!("__thaw_set_combine_scan_other_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(scan_other_name.clone(), HirType::Bool);
+        let size = |name: &str| HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_map_size".into())),
+            vec![var(name)],
+        );
+        let scan_other = if op == "intersection" {
+            HirExpr::BinOp(BinOp::Gt, Box::new(size(&receiver_name)), Box::new(size(&other_name)))
+        } else {
+            HirExpr::Lit(HirLit::Bool(false))
+        };
+        let initial_snapshot = if op == "intersection" {
+            HirExpr::Conditional(
+                Box::new(var(&scan_other_name)),
+                Box::new(snapshot(&other_name)),
+                Box::new(snapshot(&receiver_name)),
+                elements_type.clone(),
+            )
+        } else {
+            snapshot(&receiver_name)
+        };
         let mut body_stmts = vec![
+            HirStmt::Let(scan_other_name.clone(), HirType::Bool, scan_other),
             HirStmt::Let(
                 elements_name.clone(),
                 elements_type.clone(),
-                snapshot(&receiver_name),
+                initial_snapshot,
             ),
             HirStmt::Let(
                 length_name.clone(),
@@ -274,8 +312,8 @@ impl<'a> FnLowerer<'a> {
         // Difference` passes over both too, but on each pass keeps an
         // element only when the *other* operand doesn't also have it (so a
         // value present in both is dropped from both passes).
-        // `intersection`/`difference` need only the one pass over the
-        // receiver, handled in the final `else` branch below.
+        // Intersection scans the smaller operand (receiver on a tie).
+        // Difference scans the receiver.
         if op == "union" || op == "symmetricDifference" {
             let keep_if_other_lacks = op == "symmetricDifference";
             let guarded_insert = |other_name: &str| {
@@ -313,12 +351,20 @@ impl<'a> FnLowerer<'a> {
             second_pass.push(advance_index.clone());
             body_stmts.push(HirStmt::While(loop_condition(), second_pass));
         } else {
-            // `intersection`: keep a receiver element only if `other` also
-            // has it. `difference`: keep it only if `other` doesn't.
-            let membership = HirExpr::Call(
-                Box::new(HirExpr::Var(has_intrinsic)),
-                vec![var(&other_name), var(&element_name)],
+            let has = |name: &str| HirExpr::Call(
+                Box::new(HirExpr::Var(has_intrinsic.clone())),
+                vec![var(name), var(&element_name)],
             );
+            let membership = if op == "intersection" {
+                HirExpr::Conditional(
+                    Box::new(var(&scan_other_name)),
+                    Box::new(has(&receiver_name)),
+                    Box::new(has(&other_name)),
+                    HirType::Bool,
+                )
+            } else {
+                has(&other_name)
+            };
             let (then_branch, else_branch) = if op == "intersection" {
                 (vec![insert_element], Vec::new())
             } else {
@@ -497,6 +543,7 @@ impl<'a> FnLowerer<'a> {
         item_type: HirType,
         key_fn: HirExpr,
         object_result: bool,
+        live_length: bool,
     ) -> Result<HirExpr, String> {
         let HirType::Function(_, key_type) = self.infer_expr_type(&key_fn)? else {
             unreachable!("Map.groupBy key function was validated as a function")
@@ -539,7 +586,9 @@ impl<'a> FnLowerer<'a> {
             HirType::Map(Box::new(key_type.clone()), Box::new(items_type.clone()))
         };
         let bucket_type = items_type.clone();
-        self.scope.insert(length_name.clone(), HirType::F64);
+        if !live_length {
+            self.scope.insert(length_name.clone(), HirType::F64);
+        }
         self.scope.insert(result_name.clone(), result_type.clone());
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope.insert(item_name.clone(), item_type.clone());
@@ -603,12 +652,15 @@ impl<'a> FnLowerer<'a> {
         } else {
             HirExpr::Lit(HirLit::Bool(true))
         };
-        let body = HirExpr::Block(vec![
-            HirStmt::Let(
+        let mut statements = Vec::new();
+        if !live_length {
+            statements.push(HirStmt::Let(
                 length_name.clone(),
                 HirType::F64,
                 HirExpr::ArrayLen(Box::new(var(&items_name))),
-            ),
+            ));
+        }
+        statements.extend([
             HirStmt::Let(
                 result_name.clone(),
                 result_type,
@@ -626,7 +678,11 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::BinOp(
                     BinOp::Lt,
                     Box::new(var(&index_name)),
-                    Box::new(var(&length_name)),
+                    Box::new(if live_length {
+                        HirExpr::ArrayLen(Box::new(var(&items_name)))
+                    } else {
+                        var(&length_name)
+                    }),
                 ),
                 vec![
                     HirStmt::Let(
@@ -669,6 +725,7 @@ impl<'a> FnLowerer<'a> {
             ),
             HirStmt::Return(Some(var(&result_name))),
         ]);
+        let body = HirExpr::Block(statements);
         self.wrap_call_argument_bindings(
             body,
             &[
@@ -718,7 +775,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let key_fn = self.lower_array_from_callback(&callback.expr, &item_type)?;
-        self.lower_group_by(items, item_type, key_fn, object_result)
+        self.lower_group_by(items, item_type, key_fn, object_result, false)
     }
 
 }

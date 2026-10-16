@@ -62,6 +62,8 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -113,8 +115,43 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         declare function native_sum_i64(count: number, ...values: number[]): number;
         declare function native_sum_u32(count: number, ...values: number[]): number;
         declare function native_sum_u64(count: number, ...values: number[]): number;
+        declare function native_integer_call_count(): number;
 
-        function main(): void {
+        async function invalidBeforeAwait(): Promise<void> {
+            native_sum_i32(1, 0 / 0);
+            await sleep(1);
+        }
+
+        async function invalidAfterAwait(): Promise<void> {
+            await sleep(1);
+            native_sum_i32(1, 0 / 0);
+        }
+
+        async function catchBeforeAwait(): Promise<void> {
+            try {
+                native_sum_i32(1, 0 / 0);
+                console.log("unreachable-before");
+                await sleep(1);
+            } catch (error) {
+                console.log(error instanceof RangeError);
+            } finally {
+                console.log("finally-before");
+            }
+        }
+
+        async function catchAfterAwait(): Promise<void> {
+            try {
+                await sleep(1);
+                native_sum_i32(1, 0 / 0);
+                console.log("unreachable-after");
+            } catch (error) {
+                console.log(error instanceof RangeError);
+            } finally {
+                console.log("finally-after");
+            }
+        }
+
+        async function main(): Promise<void> {
             console.log(native_sum(0));
             console.log(native_sum(3, 2, 3, 5));
             console.log(native_true_count(4, true, false, true, true));
@@ -141,6 +178,23 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
             console.log(native_sum_i64(2, 0 - 4, 10));
             console.log(native_sum_u32(2, 20, 22));
             console.log(native_sum_u64(2, 40, 2));
+            try { native_sum_i32(1, 2147483648); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i64(1, 9223372036854775808); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_u32(1, 4294967296); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_u64(1, 18446744073709551616); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i32(1, 0 / 0); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i64(1, 1 / 0); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i32(1, -2147483649); } catch (error) { console.log(error instanceof RangeError); }
+            let laterArgument: number = 0;
+            try { native_sum_i32(2, 2147483648, laterArgument = 1); } catch (error) { console.log(error instanceof RangeError); }
+            console.log(laterArgument);
+            console.log(native_sum_u32(1, -0.5));
+            console.log(native_integer_call_count());
+            try { await invalidBeforeAwait(); } catch (error) { console.log(error instanceof RangeError); }
+            try { await invalidAfterAwait(); } catch (error) { console.log(error instanceof RangeError); }
+            await catchBeforeAwait();
+            await catchAfterAwait();
+            console.log(native_integer_call_count());
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -217,6 +271,8 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
     std::fs::write(
         &native_c_path,
         "#include <stdarg.h>\n#include <stdint.h>\n#include <string.h>\n\
+         static int integer_calls = 0;\n\
+         double native_integer_call_count(void) { return (double)integer_calls; }\n\
          double native_sum(double raw_count, ...) {\n\
            int count = (int)raw_count; double sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
@@ -328,24 +384,28 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
            va_end(args); return sum;\n\
          }\n\
          double native_sum_i32(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; int sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, int);\n\
            va_end(args); return (double)sum;\n\
          }\n\
          double native_sum_i64(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; long long sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, long long);\n\
            va_end(args); return (double)sum;\n\
          }\n\
          double native_sum_u32(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; unsigned int sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, unsigned int);\n\
            va_end(args); return (double)sum;\n\
          }\n\
          double native_sum_u64(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; unsigned long long sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, unsigned long long);\n\
@@ -372,6 +432,8 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -381,7 +443,7 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "0\n10\n3\n9\n40\n15\n6\n3\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
+        "0\n10\n3\n9\n40\n15\n6\n3\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n1\n0\n5\ntrue\ntrue\ntrue\nfinally-before\ntrue\nfinally-after\n5\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -453,6 +515,8 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -555,6 +619,8 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -654,6 +720,8 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -770,6 +838,8 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -869,6 +939,8 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1238,6 +1310,8 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1354,6 +1428,8 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1479,6 +1555,8 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1500,6 +1578,8 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
 
         function main(): void {
             console.log(native_slice("hello"));
+            const embedded: string = native_slice("a\u0000b");
+            console.log(embedded.length, embedded.charCodeAt(1), embedded.charCodeAt(2));
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -1531,7 +1611,9 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         "#include <stdint.h>\n\
          typedef struct { const char *data; int64_t len; } ThawStringSlice;\n\
          static const char result[] = {'O', 'K', '!'};\n\
+         static const char embedded[] = {'A', 0, 'B'};\n\
          ThawStringSlice native_slice(const char *value, int64_t len) {\n\
+           if (len == 3 && value[0] == 'a' && value[1] == 0 && value[2] == 'b') return (ThawStringSlice){embedded, 3};\n\
            return value[0] == 'h' && len == 5 ? (ThawStringSlice){result, 3} : (ThawStringSlice){result, 0};\n\
          }\n",
     )
@@ -1555,6 +1637,8 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1562,7 +1646,7 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         .success());
     let output = Command::new(&exe_path).output().unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "OK!\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "OK!\n3 0 66\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1646,6 +1730,8 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1727,6 +1813,8 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1803,6 +1891,8 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1894,6 +1984,8 @@ double flag_destroy_count(void) { return destroyed; }
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1972,6 +2064,8 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2054,6 +2148,8 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2151,6 +2247,8 @@ double native_tagged(
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2236,6 +2334,8 @@ TaggedNumber native_nullish(double state) {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2317,6 +2417,8 @@ NativeTuple native_tuple(double number, const char *text, bool flag) {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2412,6 +2514,8 @@ double tuple_destroy_count(void) { return destroyed; }
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2482,6 +2586,8 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2495,4 +2601,16 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "34\n");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nested_ffi_tuples_use_their_full_storage_layout() {
+    let pair = HirType::Tuple(vec![HirType::F64, HirType::F64]);
+    let object = HirType::Object(vec![("pair".into(), pair.clone()), ("z".into(), HirType::F64)]);
+    let tuple = HirType::Tuple(vec![pair, HirType::F64]);
+    for value in [&object, &tuple] {
+        assert_eq!(HirCompiler::ffi_aggregate_storage_layout(value, FfiAggregateAbi::Portable), (24, 8));
+        assert_eq!(HirCompiler::ffi_aggregate_storage_layout(value, FfiAggregateAbi::Packed), (24, 1));
+    }
+    assert_eq!(HirCompiler::ffi_aggregate_storage_layout(&object, FfiAggregateAbi::Internal), (8, 8));
 }

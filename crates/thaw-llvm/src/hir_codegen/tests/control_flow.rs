@@ -189,6 +189,61 @@ fn compiles_switch_selection_default_fallthrough_and_break() {
 }
 
 #[test]
+fn switch_empty_no_match_and_nested_fallthrough_keep_exact_output() {
+    let source = r#"
+        function main(): void {
+            switch (1) { }
+            switch (2) { case 1: console.log("wrong"); }
+            switch (1) {
+                case 1:
+                    console.log("outer-one");
+                    switch (2) {
+                        case 1: console.log("wrong-inner");
+                        case 2: console.log("inner-two");
+                        default: console.log("inner-default");
+                    }
+                    console.log("outer-after-inner");
+                case 2: console.log("outer-two");
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "switch_empty_no_match_nested_fallthrough"),
+        "outer-one\ninner-two\ninner-default\nouter-after-inner\nouter-two\n");
+}
+
+#[test]
+fn switch_cases_use_strict_kind_matching_in_source_order() {
+    let source = r#"
+        function probe(label: string, value: any): any {
+            console.log(label);
+            return value;
+        }
+        function main(): void {
+            switch (1) {
+                case probe("text", "1"): console.log("wrong-text"); break;
+                case probe("bool", true): console.log("wrong-bool"); break;
+                case probe("number", 1): console.log("matched"); break;
+                case probe("late", 1): console.log("wrong-late"); break;
+            }
+            switch (false) {
+                case probe("zero", 0): console.log("wrong-zero"); break;
+                case probe("empty", ""): console.log("wrong-empty"); break;
+                case probe("false", false): console.log("matched-false"); break;
+            }
+            const dynamic: any = "1";
+            switch (dynamic) {
+                case 1: console.log("wrong-number"); break;
+                case "1": console.log("matched-text"); break;
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_switch_case_kinds"),
+        "text\nbool\nnumber\nmatched\nzero\nempty\nfalse\nmatched-false\nmatched-text\n"
+    );
+}
+
+#[test]
 fn compiles_for_of_with_single_source_evaluation_continue_and_break() {
     let source = r#"
         function values(): number[] {
@@ -500,7 +555,10 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
     "#;
     assert_eq!(
         compile_and_run(source, "quickjs_result_abi"),
-        "`boom` threw: kaboom\ncleanup\n`later`'s promise rejected: nope\n`badThen`'s promise rejected: bad then\n"
+        // The old "`label` threw:" / "`label`'s promise rejected:" prefixes were Thaw-only
+        // decorations; a caught error prints its bare message (Node prints a stack trace
+        // here, which a native binary has no equivalent of, so only the message remains).
+        "kaboom\ncleanup\nnope\nbad then\n"
     );
 }
 
@@ -520,7 +578,7 @@ fn async_await_catches_a_typed_quickjs_promise_rejection() {
     "#;
     assert_eq!(
         compile_and_run(source, "typed_quickjs_async_rejection"),
-        "AbortError `laterAsync`'s promise rejected: stopped\n"
+        "AbortError stopped\n"
     );
 }
 
@@ -719,10 +777,11 @@ fn frame_split_runs_finally_then_rethrows_child_rejection() {
             console.log("also-unreachable");
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "async_rejection_finally"),
-        "before\nfinally\n"
-    );
+    // Node prints "before\nfinally\n", then exits 1 on the unhandled rejection.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_finally");
+    assert_eq!(stdout, "before\nfinally\n");
+    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]
@@ -777,10 +836,67 @@ fn frame_split_runs_finally_before_catch_rethrow() {
             console.log("unreachable");
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "async_catch_rethrow_finally"),
-        "original\nfinally\n"
-    );
+    // Node reports the unhandled rejection of `main` and exits 1.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_catch_rethrow_finally");
+    assert_eq!(stdout, "original\nfinally\n");
+    assert!(stderr.contains("Uncaught: wrapped"), "{stderr}");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn rejected_await_in_finalizer_skips_its_remaining_statements() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let cleanup = 0;
+            try {
+                try {
+                    return;
+                } finally {
+                    await Promise.reject("failed");
+                    cleanup++;
+                }
+            } catch (error) {
+                console.log(error, cleanup);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_finalizer_rejection_guard"), "failed 0\n");
+}
+
+#[test]
+fn conditional_and_loop_exit_finalizers_bypass_source_catch_after_await() {
+    let source = r#"
+        let wrong = 0;
+        async function conditional(flag: boolean): Promise<number> {
+            try {
+                if (flag) return 1;
+                return 2;
+            } catch (error) {
+                wrong++;
+                return 3;
+            } finally {
+                await Promise.reject("override");
+            }
+        }
+        async function loop(flag: boolean): Promise<number> {
+            try {
+                while (flag) return 1;
+                return 2;
+            } catch (error) {
+                wrong++;
+                return 3;
+            } finally {
+                await Promise.reject("override");
+            }
+        }
+        async function main(): Promise<void> {
+            try { await conditional(true); } catch (error) { console.log(error, wrong); }
+            try { await conditional(false); } catch (error) { console.log(error, wrong); }
+            try { await loop(true); } catch (error) { console.log(error, wrong); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_exit_finalizer_await_guard"),
+        "override 0\noverride 0\noverride 0\n");
 }
 
 #[test]
@@ -862,20 +978,24 @@ fn throwing_a_non_string_value_coerces_it_to_a_string() {
     "#;
     assert_eq!(
         compile_and_run(source, "throw_non_string_coerces"),
-        "42\ntrue\n[object Object]\n"
+        "42\ntrue\n{ code: 42, reason: 'bad' }\n"
     );
 }
 
 #[test]
 fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
-    let module = thaw_parser::parse_typescript(
+    // Any value is throwable. Node treats `throw Promise.resolve(1)` as an
+    // uncaught exception (exit status 1, `Promise { 1 }` on stderr); the
+    // native program must do the same instead of failing to compile or
+    // crashing.
+    let (stdout, stderr, status) = compile_and_run_failing(
         r#"function main(): void {
             throw Promise.resolve(1);
         }"#,
-    )
-    .unwrap();
-    let error = thaw_hir::lower_module(&module).unwrap_err();
-    assert!(error.contains("string conversion") || error.contains("Promise"), "{error}");
+        "throw_unsupported_value",
+    );
+    assert_eq!((stdout.as_str(), status), ("", Some(1)), "{stderr}");
+    assert!(stderr.starts_with("Uncaught:"), "{stderr}");
 }
 
 /// `const g: any = gen();` (coercing a generator's own internal
@@ -1182,5 +1302,963 @@ fn instanceof_guard_skips_object_access_for_an_unrelated_thrown_value() {
             "as_cast_guarded_by_instanceof"
         ),
         "not a MyError\nplain string\n"
+    );
+}
+
+#[test]
+fn generators_close_after_uncaught_throw_and_keep_caught_throws_resumable() {
+    let source = r#"
+        function* syncValues(): Generator<number> { yield 1; throw "sync boom"; }
+        async function* asyncValues(): AsyncGenerator<number> { yield 2; await sleep(1); throw "async boom"; }
+        function* caught(): Generator<number> { try { throw "caught"; } catch (e) { yield 3; } yield 4; }
+        async function main(): Promise<void> {
+            const s = syncValues(); console.log(s.next().value);
+            try { s.next(); } catch (e) { console.log(e); }
+            console.log(s.next().done, s.next().value);
+            const a = asyncValues(); console.log((await a.next()).value);
+            try { await a.next(); } catch (e) { console.log(e); }
+            console.log((await a.next()).done, (await a.next()).value);
+            const c = caught(); console.log(c.next().value, c.next().value, c.next().done);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generator_uncaught_completion"),
+        "1\nsync boom\ntrue undefined\n2\nasync boom\ntrue undefined\n3 4 true\n");
+}
+
+#[test]
+fn async_generators_close_without_erasing_caught_rejection_metadata() {
+    let source = r#"
+        async function* typed(): AsyncGenerator<number> {
+            yield 1;
+            await sleep(1);
+            throw new TypeError("typed boom");
+        }
+        async function* numeric(): AsyncGenerator<number> {
+            yield 2;
+            await sleep(1);
+            throw 42;
+        }
+        async function failNested(): Promise<void> {
+            await sleep(1);
+            throw new TypeError("nested boom");
+        }
+        async function* nested(): AsyncGenerator<number> {
+            yield 3;
+            try { await failNested(); }
+            catch (error) {
+                try { throw "inner"; } catch (ignored) {}
+                throw error;
+            }
+        }
+        async function* reassigned(): AsyncGenerator<number> {
+            yield 4;
+            try { await failNested(); }
+            catch (error) { error = "replacement"; throw error; }
+        }
+        async function main(): Promise<void> {
+            const a = typed();
+            console.log((await a.next()).value);
+            try { await a.next(); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+            console.log((await a.next()).done);
+            const b = numeric();
+            console.log((await b.next()).value);
+            try { await b.next(); }
+            catch (error) { console.log(typeof error, (error as number) + 1); }
+            console.log((await b.next()).done);
+            const c = nested();
+            console.log((await c.next()).value);
+            try { await c.next(); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+            console.log((await c.next()).done);
+            const d = reassigned();
+            console.log((await d.next()).value);
+            try { await d.next(); }
+            catch (error) { console.log(error instanceof TypeError, error); }
+            console.log((await d.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_uncaught_typed_completion"),
+        "1\ntrue typed boom\ntrue\n2\nnumber 43\ntrue\n3\ntrue nested boom\ntrue\n4\nfalse replacement\ntrue\n"
+    );
+}
+
+#[test]
+fn guarded_async_direct_throws_keep_string_and_typed_rejection_metadata() {
+    let source = r#"
+        async function stringFailure(): Promise<void> {
+            try { await sleep(1); throw "seed"; }
+            catch (ignored) { throw "direct text"; }
+        }
+        async function typedFailure(): Promise<void> {
+            try { await sleep(1); throw "seed"; }
+            catch (ignored) { throw new TypeError("direct typed"); }
+        }
+        async function main(): Promise<void> {
+            try { await stringFailure(); }
+            catch (error) { console.log(typeof error, error === "direct text"); }
+            try { await typedFailure(); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "guarded_async_direct_throw_metadata"),
+        "string true\ntrue direct typed\n"
+    );
+}
+
+
+#[test]
+fn error_constructor_messages_with_control_markers_are_bound_once() {
+    let source = r#"
+        class MarkerError extends Error {
+            constructor(message: string) { super(message); }
+        }
+        let calls = 0;
+        function message(): string {
+            calls++;
+            return "a\u0001b\u0002c\u0003d\u0004e\u0005f\u0006g";
+        }
+        function main(): void {
+            const expected = "a\u0001b\u0002c\u0003d\u0004e\u0005f\u0006g";
+            try { throw new Error(message()); }
+            catch (e) { console.log(e.message === expected); }
+            try { throw Error(message()); }
+            catch (e) { console.log(e.message === expected); }
+            try { throw new MarkerError(message()); }
+            catch (e) { console.log(e.message === expected, e instanceof MarkerError); }
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "error_constructor_control_messages"),
+        "true\ntrue\ntrue true\n3\n"
+    );
+}
+
+#[test]
+fn using_disposes_only_acquired_resources_once_on_return_failure() {
+    let source = r#"
+        function make(name: string) {
+            console.log("acquire " + name);
+            if (name === "b") throw new Error("acquire b");
+            return { [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function partial(): void {
+            using a = make("a"), b = make("b"), c = make("c");
+        }
+        function failing(name: string) {
+            return { [Symbol.dispose]() {
+                console.log("dispose " + name);
+                if (name === "b") throw new Error("dispose b");
+            } };
+        }
+        function early(): number {
+            using a = failing("a"), b = failing("b");
+            return 7;
+        }
+        function main(): void {
+            try { partial(); } catch (error) { console.log(error.message); }
+            try { console.log(early()); } catch (error) { console.log(error.message); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "using_acquired_once"),
+        "acquire a\nacquire b\ndispose a\nacquire b\ndispose b\ndispose a\ndispose b\n");
+}
+
+#[test]
+fn using_iteration_disposal_failure_does_not_repeat_after_continue() {
+    let source = r#"
+        function make(name: string) {
+            return { [Symbol.dispose]() {
+                console.log("dispose " + name);
+                throw new Error(name);
+            } };
+        }
+        function main(): void {
+            try {
+                for (using item of [make("first"), make("second")]) {
+                    console.log("body");
+                    continue;
+                }
+            } catch (error) { console.log("caught " + error.message); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "using_iteration_once"),
+        "body\ndispose first\ncaught first\n");
+}
+
+#[test]
+fn exit_finalizer_throw_bypasses_every_exited_catch() {
+    let source = r#"
+        function exit(): number {
+            try {
+                try { return 1; }
+                catch (inner) { console.log("wrong-inner"); return 2; }
+            } catch (outer) {
+                console.log("wrong-outer");
+                return 3;
+            } finally {
+                console.log("cleanup");
+                throw "override";
+            }
+        }
+        function main(): void {
+            try { console.log(exit()); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "exit_finalizer_bypasses_all_catches"),
+        "cleanup\noverride\n",
+    );
+}
+
+#[test]
+fn finally_keeps_evaluated_return_and_break_order() {
+    let source = r#"
+        function value(): number {
+            let state: number = 1;
+            try { return state; }
+            finally { state = 2; }
+        }
+        function main(): void {
+            console.log(value());
+            let state: number = 0;
+            while (true) {
+                try { break; }
+                finally { state = 3; }
+            }
+            console.log(state);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "finally_exit_evaluation_order"), "1\n3\n");
+}
+
+#[test]
+fn frame_split_finalizer_rejection_bypasses_exited_catches() {
+    let source = r#"
+        async function value(): Promise<number> {
+            try {
+                try { await sleep(1); return 1; }
+                catch (inner) { console.log("wrong-inner"); return 2; }
+            } catch (outer) {
+                console.log("wrong-outer");
+                return 3;
+            } finally {
+                await sleep(1);
+                console.log("cleanup");
+                throw "override";
+            }
+        }
+        async function main(): Promise<void> {
+            try { await value(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_exit_finalizer_bypasses_all_catches"),
+        "cleanup\noverride\n",
+    );
+}
+
+#[test]
+fn throwing_source_catch_runs_finalizer_once_with_original_failure() {
+    let source = r#"
+        let cleanups: number = 0;
+        function fail(): number { throw "second"; }
+        function run(): number {
+            try { throw "first"; }
+            catch (first) { fail(); return 0; }
+            finally { cleanups += 1; }
+        }
+        function main(): void {
+            try { run(); }
+            catch (error) { console.log(error); }
+            console.log(cleanups);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "throwing_catch_finalizer_once"),
+        "second\n1\n",
+    );
+}
+
+#[test]
+fn source_catch_explicit_throw_does_not_rerun_finalizer_guard() {
+    let source = r#"
+        let cleanups: number = 0;
+        function run(): void {
+            try { throw "first"; }
+            catch (first) { throw "second"; }
+            finally { cleanups += 1; }
+        }
+        function main(): void {
+            try { run(); }
+            catch (error) { console.log(error); }
+            console.log(cleanups);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "catch_rethrow_finalizer_once"),
+        "second\n1\n",
+    );
+}
+
+#[test]
+fn labeled_do_while_continue_checks_outer_condition_and_exits_outer_loop() {
+    let source = r#"
+        let checks = 0;
+        function condition(): boolean { checks++; return checks < 2; }
+        function main(): void {
+            let entries = 0;
+            outer: do {
+                entries++;
+                while (true) {
+                    while (true) { continue outer; }
+                }
+                console.log("unreachable");
+            } while (condition());
+            console.log(entries, checks);
+            let ordinary = 0;
+            do { ordinary++; continue; } while (ordinary < 2);
+            console.log(ordinary);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "do_while_continue_depth"), "2 2\n2\n");
+}
+
+/// `const err: any = caughtError` must keep `name`/`message` readable (Node: `Error boom`);
+/// the widened framed error used to leak as raw frame text with `undefined` properties.
+#[test]
+fn an_any_copy_of_a_caught_error_exposes_name_and_message() {
+    let output = compile_and_run(
+        r#"
+        function main(): void {
+            try {
+                throw new Error("boom");
+            } catch (e) {
+                const err: any = e;
+                console.log(err.name, err.message);
+            }
+        }
+        "#,
+        "any_copy_of_caught_error",
+    );
+    assert_eq!(output.trim(), "Error boom");
+}
+
+#[test]
+fn caught_primitive_strict_equality_uses_original_values() {
+    let source = r#"
+        let rhsCalls = 0;
+        function stringRhs(): string { rhsCalls++; return "token"; }
+        function main(): void {
+            try { throw "token"; } catch (error) {
+                console.log(error === "token", "token" === error, error !== "token", "token" !== error, error === "other", error === stringRhs(), rhsCalls);
+            }
+            try { throw 17; } catch (error) {
+                console.log(error === 17, 17 === error, error !== 17, 17 !== error, error === 18);
+            }
+            try { throw true; } catch (error) {
+                console.log(error === true, true === error, error !== true, true !== error, error === false);
+            }
+            try { throw null; } catch (error) {
+                console.log(error === null, null === error, error !== null, null !== error, error === undefined);
+            }
+            try { throw undefined; } catch (error) {
+                console.log(error === undefined, undefined === error, error !== undefined, undefined !== error, error === null);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_primitive_strict_equality_original_values"),
+        "true true false false false true 1\ntrue true false false false\ntrue true false false false\ntrue true false false false\ntrue true false false false\n"
+    );
+}
+
+#[test]
+fn caught_native_object_strict_identity_stays_exact() {
+    let source = r#"
+        function main(): void {
+            const original = { payload: 7 };
+            const different = { payload: 7 };
+            try { throw original; } catch (error) {
+                console.log(error === original, original === error, error !== different);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_native_object_strict_identity"),
+        "true true true\n"
+    );
+}
+
+#[test]
+fn caught_native_exception_strict_comparison_keeps_original_values() {
+    let source = r#"
+        let undefinedCalls = 0;
+        function readUndefined() {
+            undefinedCalls++;
+            return undefined;
+        }
+        function savedFunction(): void {}
+        function differentFunction(): void {}
+        function main(): void {
+            try { throw savedFunction; } catch (error) {
+                console.log(
+                    error === savedFunction,
+                    savedFunction === error,
+                    error !== differentFunction,
+                    differentFunction !== error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+            const symbol = Symbol("native symbol");
+            try { throw symbol; } catch (error) {
+                console.log(
+                    error !== undefined,
+                    undefined !== error,
+                    error === undefined,
+                    undefined === error
+                );
+            }
+            const values: number[] = [1, 2];
+            try { throw values; } catch (error) {
+                console.log(
+                    error === undefined,
+                    undefined === error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+            const bytes = new Uint8Array([1, 2]);
+            try { throw bytes; } catch (error) {
+                console.log(
+                    error === undefined,
+                    undefined === error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+            const tuple: readonly [number, string] = [1, "native tuple"];
+            try { throw tuple; } catch (error) {
+                console.log(
+                    error === undefined,
+                    undefined === error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_native_exception_strict_comparison_original_values"),
+        "true true true true true true false 1\ntrue true false false\nfalse false true true false 2\nfalse false true true false 3\nfalse false true true false 4\n"
+    );
+}
+
+#[test]
+fn caught_native_carrier_pairs_keep_original_owner_identity() {
+    let source = r#"
+        function savedFunction(): void {}
+        function differentFunction(): void {}
+        function main(): void {
+            try { throw savedFunction; } catch (outer) {
+                const alias = outer;
+                console.log(
+                    outer === outer,
+                    outer !== outer,
+                    alias === outer,
+                    outer === alias
+                );
+                try { throw savedFunction; } catch (same) {
+                    console.log(
+                        alias === same,
+                        same === alias,
+                        alias !== same,
+                        same !== alias
+                    );
+                }
+                try { throw differentFunction; } catch (different) {
+                    console.log(
+                        alias === different,
+                        different === alias,
+                        alias !== different,
+                        different !== alias
+                    );
+                }
+                try { throw undefined; } catch (scalar) {
+                    console.log(
+                        alias === scalar,
+                        scalar === alias,
+                        alias !== scalar,
+                        scalar !== alias
+                    );
+                }
+                const readLeft = () => { console.log("L"); return alias; };
+                const readRight = () => { console.log("R"); return alias; };
+                console.log(readLeft() === readRight());
+            }
+
+            const values: number[] = [1, 2];
+            const differentValues: number[] = [1, 2];
+            try { throw values; } catch (arrayOuter) {
+                const arrayAlias = arrayOuter;
+                console.log(
+                    arrayOuter === arrayOuter,
+                    arrayOuter !== arrayOuter,
+                    arrayAlias === arrayOuter,
+                    arrayOuter === arrayAlias
+                );
+                try { throw values; } catch (sameArray) {
+                    console.log(
+                        arrayAlias === sameArray,
+                        sameArray === arrayAlias,
+                        arrayAlias !== sameArray,
+                        sameArray !== arrayAlias
+                    );
+                }
+                try { throw differentValues; } catch (differentArray) {
+                    console.log(
+                        arrayAlias === differentArray,
+                        differentArray === arrayAlias,
+                        arrayAlias !== differentArray,
+                        differentArray !== arrayAlias
+                    );
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_native_carrier_pair_owner_identity"),
+        "true false true true\ntrue true false false\nfalse false true true\nfalse false true true\nL\nR\ntrue\ntrue false true true\ntrue true false false\nfalse false true true\n"
+    );
+}
+
+#[test]
+fn capture_free_named_function_references_share_identity() {
+    let source = r#"
+        function saved(): number { return 7; }
+        function different(): number { return 7; }
+        function main(): void {
+            const alias = saved;
+            console.log(alias === saved, saved === saved, saved === different, alias());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "capture_free_named_function_reference_identity"),
+        "true true false 7\n"
+    );
+}
+
+#[test]
+fn named_function_reference_cache_survives_global_symbol_collision() {
+    let source = r#"
+        function saved(): void {}
+        function __thaw_function_ref_0__closure(): void {}
+        function main(): void {
+            const first = saved;
+            const second = saved;
+            console.log(first === second, first === saved);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_function_reference_cache_global_symbol_collision"),
+        "true true\n"
+    );
+}
+
+#[test]
+fn captured_closure_references_keep_allocation_identity() {
+    let source = r#"
+        function make(value: number): () => number {
+            return () => value;
+        }
+        function main(): void {
+            const a = make(1);
+            const b = make(2);
+            console.log(a === a, a === b);
+            try { throw a; } catch (error) {
+                console.log(error === a, error === b, a(), b());
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "captured_closure_reference_identity_is_distinct"),
+        "true false\ntrue false 1 2\n"
+    );
+}
+
+#[test]
+fn typed_quickjs_catches_preserve_original_thrown_values() {
+    let source = r#"
+        declare function __thaw_typed_js_626f6f6d(): void;
+        declare function __thaw_typed_js_6c69746572616c(): void;
+        declare function __thaw_typed_js_70726f6d697365(): void;
+        declare function __thaw_typed_js_6163636573736f72(): void;
+        declare function __thaw_typed_js_66756e6374696f6e5468726f77(): void;
+        declare function __thaw_typed_js_68616e646c65(): JsValue;
+        declare function __thaw_typed_js_6c61746572(): number;
+        declare function __thaw_typed_js_74616b65(value: any): void;
+        declare function __thaw_typed_js_69734e756d626572(value: any): boolean;
+        declare function __thaw_typed_js_69734e756c6c(value: any): boolean;
+        declare function __thaw_typed_js_6973556e646566696e6564(value: any): boolean;
+        declare function __thaw_typed_js_697346756e6374696f6e(value: any): boolean;
+        declare function __thaw_typed_js_73616d654f726967696e616c(value: any): boolean;
+        declare function __thaw_typed_js_6e6f744f74686572(value: any): boolean;
+        declare function __thaw_typed_js_73616d6550726f7073(value: any): boolean;
+        declare function __thaw_typed_js_73616d654672616d65(value: string): boolean;
+        declare function __thaw_typed_js_73616d6550726f6d697365(value: any): boolean;
+        declare function __thaw_typed_js_73616d654163636573736f72(value: any): boolean;
+        declare function __thaw_typed_js_73616d655061796c6f6164(value: any): boolean;
+        function main(): void {
+            loadScript("globalThis.savedError = new Error('boom'); savedError.status = 418; savedError.expose = true; savedError.payload = { id: 9 }; Object.defineProperty(savedError, 'hidden', { value: 13 }); savedError[Symbol.for('identity')] = 17; globalThis.otherError = new Error('boom'); globalThis.savedPromise = Promise.resolve(1); globalThis.later = () => Promise.resolve(42); globalThis.accessorMarker = new Error('getter marker'); globalThis.savedAccessor = Object.defineProperty({}, 'message', { get() { throw accessorMarker; } }); globalThis.literalFrame = String.fromCharCode(1)+'Error'+String.fromCharCode(1,30)+'E1:4:-:boom'+String.fromCharCode(5)+'{'+String.fromCharCode(34)+'status'+String.fromCharCode(34)+':418}'; globalThis.boom = () => { throw savedError; }; globalThis.literal = () => { throw literalFrame; }; globalThis.promise = () => { throw savedPromise; }; globalThis.accessor = () => { throw savedAccessor; }; globalThis.handle = () => { throw savedError; }; globalThis.take = value => { throw value; }; globalThis.thrownFunction = () => 1; globalThis.functionThrow = () => { throw thrownFunction; }; globalThis.isNumber = value => Object.is(value, 17); globalThis.isNull = value => value === null; globalThis.isUndefined = value => value === undefined; globalThis.isFunction = value => value === thrownFunction; globalThis.sameOriginal = value => value === savedError; globalThis.notOther = value => value !== otherError; globalThis.sameProps = value => value.hidden === 13 && value[Symbol.for('identity')] === 17 && value.status === 418; globalThis.samePayload = value => value === savedError.payload; globalThis.sameFrame = value => value === literalFrame; globalThis.samePromise = value => value === savedPromise; globalThis.sameAccessor = value => value === savedAccessor;");
+            console.log(__thaw_typed_js_6c61746572());
+            try { __thaw_typed_js_68616e646c65(); } catch (error) {
+                const value: any = error;
+                console.log(__thaw_typed_js_73616d654f726967696e616c(value));
+            }
+            try { __thaw_typed_js_626f6f6d(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, value.status, __thaw_typed_js_73616d654f726967696e616c(value), __thaw_typed_js_6e6f744f74686572(value), __thaw_typed_js_73616d6550726f7073(value));
+            }
+            try { __thaw_typed_js_626f6f6d(); } catch (error) {
+                console.log(typeof error, error.status, error.expose, error.missing, __thaw_typed_js_73616d655061796c6f6164(error.payload));
+            }
+            try { __thaw_typed_js_6c69746572616c(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_73616d654672616d65(value));
+            }
+            try { __thaw_typed_js_70726f6d697365(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_73616d6550726f6d697365(value));
+            }
+            try { __thaw_typed_js_6163636573736f72(); } catch (error) {
+                const value: any = error;
+                console.log(__thaw_typed_js_73616d654163636573736f72(value));
+            }
+            try { __thaw_typed_js_74616b65(17); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_69734e756d626572(value));
+            }
+            try { __thaw_typed_js_74616b65(null); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_69734e756c6c(value));
+            }
+            try { __thaw_typed_js_74616b65(undefined); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_6973556e646566696e6564(value));
+            }
+            try { __thaw_typed_js_66756e6374696f6e5468726f77(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_697346756e6374696f6e(value));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_original_throw_identity"),
+        "42\ntrue\nobject 418 true true true\nobject 418 true undefined true\nstring true\nobject true\ntrue\nnumber true\nobject true\nundefined true\nfunction true\n"
+    );
+}
+
+#[test]
+fn typed_quickjs_error_instanceof_uses_the_original_value() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f774d794572726f72(): void;
+        declare function __thaw_typed_js_7468726f774572726f72(): void;
+        declare function __thaw_typed_js_7468726f774f626a656374(): void;
+        declare function __thaw_typed_js_7468726f77537472696e67(): void;
+        declare function __thaw_typed_js_7468726f775361766564(): void;
+        declare function __thaw_typed_js_73616d655361766564(value: any): boolean;
+        function main(): void {
+            loadScript("function MyError(message) { this.name = 'MyError'; this.message = message; } MyError.prototype = Object.create(Error.prototype); MyError.prototype.constructor = MyError; globalThis.MyError = MyError; globalThis.savedError = new MyError('saved'); globalThis.throwMyError = () => { throw new MyError('boom'); }; globalThis.throwError = () => { throw new Error('base'); }; globalThis.throwObject = () => { throw {name: 'Error', message: 'fake'}; }; globalThis.throwString = () => { throw 'Error: fake'; }; globalThis.throwSaved = () => { throw savedError; }; globalThis.sameSaved = value => value === savedError;");
+            try { __thaw_typed_js_7468726f774d794572726f72(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f774572726f72(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f774f626a656374(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f77537472696e67(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f775361766564(); }
+            catch (error) {
+                const value: any = error;
+                console.log(__thaw_typed_js_73616d655361766564(value), error instanceof Error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_error_instanceof_original_value"),
+        "true\ntrue\nfalse\nfalse\ntrue true\n"
+    );
+}
+
+#[test]
+fn legacy_caught_error_json_properties_stay_live_for_the_invocation() {
+    let source = r#"
+        function main(): void {
+            const legacy = String.fromCharCode(5) + "{\"status\":418,\"expose\":true,\"explicitNull\":null,\"payload\":{\"id\":9}}";
+            try {
+                throw legacy;
+            } catch (error) {
+                const payload = error.payload;
+                console.log(error.status, error.expose, error.explicitNull, error.missing, payload.id);
+                console.log(payload.id);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "legacy_caught_error_json_properties"),
+        "418 true null undefined 9\n9\n"
+    );
+}
+
+
+#[test]
+fn labeled_continue_and_switch_break_keep_their_source_targets() {
+    let source = r#"
+        let i = 0;
+        let checks = 0;
+        function condition(): boolean { checks++; return i < 3; }
+        function probe(label: string, value: number): number {
+            console.log(label);
+            return value;
+        }
+        function main(): void {
+            while (condition()) {
+                tag: {
+                    i++;
+                    if (i < 3) continue;
+                    break tag;
+                }
+            }
+            console.log(i, checks);
+            switch (probe("discriminant", 1)) {
+                case probe("case", 1):
+                    tag: {
+                        console.log("before");
+                        break;
+                        console.log("unreachable");
+                    }
+                case probe("late", 2): console.log("fallthrough");
+            }
+            console.log("after");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "labeled_continue_switch_break"),
+        "3 4\ndiscriminant\ncase\nbefore\nafter\n"
+    );
+}
+
+
+#[test]
+fn labeled_loop_exits_run_the_right_updates_and_finalizers() {
+    let source = r#"
+        function main(): void {
+            let values = "";
+            for (let i = 0; i < 3; i++) {
+                outer: {
+                    if (i < 2) continue;
+                    values += i;
+                    break outer;
+                }
+            }
+            console.log(values);
+            let i = 0;
+            do {
+                i++;
+                label: { continue; }
+            } while (i < 2);
+            console.log(i);
+            let j = 0;
+            while (j < 2) {
+                try {
+                    label: {
+                        j++;
+                        if (j < 2) continue;
+                        break label;
+                    }
+                } finally { console.log("continue-finally" + j); }
+            }
+            try {
+                switch (1) {
+                    default: console.log("switch"); break;
+                }
+                console.log("after-switch");
+            } finally { console.log("outer-finally"); }
+            switch (1) {
+                default:
+                    try { label: { break; } }
+                    finally { console.log("inner-finally"); }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "labeled_loop_cleanup"),
+        "2\n2\ncontinue-finally1\ncontinue-finally2\nswitch\nafter-switch\nouter-finally\ninner-finally\n"
+    );
+}
+
+
+#[test]
+fn exhaustive_switch_returns_remain_definite_exits() {
+    let source = r#"
+        function value(flag: boolean): number {
+            switch (flag) {
+                case true: return 1;
+                default: return 0;
+            }
+        }
+        function main(): void { console.log(value(true), value(false)); }
+    "#;
+    assert_eq!(compile_and_run(source, "exhaustive_switch_returns"), "1 0\n");
+}
+
+
+#[test]
+fn labeled_for_of_and_for_in_continue_preserve_advance_and_disposal() {
+    let source = r#"
+        function make(name: string) {
+            return { name, [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function main(): void {
+            for (const value of [1, 2]) {
+                label: { console.log("of" + value); continue; }
+            }
+            const object = { a: 1, b: 2 };
+            for (const key in object) {
+                label: { console.log("in" + key); continue; }
+            }
+            for (using item of [make("a"), make("b")]) {
+                label: { console.log("body " + item.name); continue; }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "labeled_iteration_advance_disposal"),
+        "of1\nof2\nina\ninb\nbody a\ndispose a\nbody b\ndispose b\n"
+    );
+}
+
+
+#[test]
+fn async_labeled_continue_and_switch_break_survive_frame_splitting() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let i = 0;
+            while (i < 2) {
+                await sleep(1);
+                label: {
+                    i++;
+                    if (i < 2) continue;
+                    break label;
+                }
+            }
+            switch (1) {
+                default: label: {
+                    await sleep(1);
+                    break;
+                    console.log("unreachable");
+                }
+            }
+            console.log(i);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_labeled_loop_switch_targets"), "2\n");
+}
+
+#[test]
+fn async_switch_and_label_exits_run_crossed_cleanup_once() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let i = 0;
+            while (i < 2) {
+                try {
+                    await sleep(1);
+                    switch (i) {
+                        case 0: label: { i++; continue; }
+                        default: label: { i++; break; }
+                    }
+                } finally { console.log("cleanup" + i); }
+            }
+            console.log("done" + i);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_switch_label_cleanup"), "cleanup1\ncleanup2\ndone2\n");
+}
+
+
+#[test]
+fn generator_close_runs_after_a_labeled_switch_exit() {
+    let source = r#"
+        function* values(): Generator<number> {
+            try { yield 1; yield 2; }
+            finally { console.log("closed"); }
+        }
+        function main(): void {
+            for (const value of values()) {
+                if (value === 1) {
+                    label: { console.log("first"); continue; }
+                }
+                switch (value) {
+                    default: label: { console.log("second"); break; }
+                }
+                break;
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generator_labeled_switch_close"), "first\nsecond\nclosed\n");
+}
+
+/// `return` inside a loop over a generator must leave the enclosing function
+/// (the loop is lowered into a synthetic Void lambda), and a `return` in a
+/// `try` body reading a loop-scoped binding must keep working with `finally`.
+/// Expected output taken from node 22.
+#[test]
+fn return_inside_loops_leaves_the_enclosing_function() {
+    let source = r#"function* gen(): Generator<number> { try { yield 1; yield 2; yield 3; } finally { console.log('gen-closed'); } }
+function v(): void {
+  for (const x of gen()) { console.log('v', x); if (x === 2) return; }
+  console.log('after-v');
+}
+function s(): string {
+  for (const x of gen()) { if (x === 2) return `got${x}`; }
+  return 'none';
+}
+function nested(): number {
+  for (const a of gen()) { for (const b of gen()) { if (b === 2) return a * 10 + b; } }
+  return -1;
+}
+function tf(): number {
+  try { for (const x of gen()) { if (x === 1) return 42; } } finally { console.log('tf-fin'); }
+  return -1;
+}
+function noret(): number {
+  let n = 0;
+  for (const x of gen()) { n += x; }
+  return n;
+}
+
+function f8(): number {
+  try { for (const x of [5, 6]) { return x; } } finally { console.log('fin'); }
+  return -1;
+}
+function main(): void { v(); console.log(s()); console.log(nested()); console.log(tf(), noret(), f8()); }
+"#;
+    assert_eq!(
+        compile_and_run(source, "return_inside_generator_loops"),
+        "v 1\nv 2\ngen-closed\ngen-closed\ngot2\ngen-closed\ngen-closed\n12\ngen-closed\ntf-fin\ngen-closed\nfin\n42 6 5\n"
     );
 }

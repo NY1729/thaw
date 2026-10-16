@@ -1,37 +1,167 @@
 impl<'ctx> HirCompiler<'ctx> {
+    // A Function-typed value can carry JavaScript `undefined` as a null
+    // closure pointer. This guards local LLVM dereferences; HIR prebindings
+    // can still evaluate source operands before this check.
+    fn guard_callable_closure(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        message: &str,
+    ) -> Result<(), String> {
+        let absent = self.builder.build_is_null(closure, "callable_is_undefined")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let rejected = self.context.append_basic_block(function, "undefined_callable");
+        let accepted = self.context.append_basic_block(function, "present_callable");
+        self.builder.build_conditional_branch(absent, rejected, accepted)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected);
+        self.compile_throw_type_error(message)?;
+        self.builder.position_at_end(accepted);
+        Ok(())
+    }
+
     fn compile_this_argument_word(
         &mut self,
         expression: &HirExpr,
-    ) -> Result<IntValue<'ctx>, String> {
+    ) -> Result<StructValue<'ctx>, String> {
         let value = self.compile_expr(expression)?;
-        match value {
-            BasicValueEnum::FloatValue(value) => self
-                .builder
-                .build_bit_cast(value, self.context.i64_type(), "this_number_word")
-                .map(|value| value.into_int_value())
-                .map_err(|error| error.to_string()),
-            BasicValueEnum::IntValue(value) => {
-                let width = value.get_type().get_bit_width();
-                if width < 64 {
-                    self.builder
-                        .build_int_z_extend(value, self.context.i64_type(), "this_int_word")
-                        .map_err(|error| error.to_string())
-                } else if width > 64 {
-                    self.builder
-                        .build_int_truncate(value, self.context.i64_type(), "this_int_word")
-                        .map_err(|error| error.to_string())
-                } else {
-                    Ok(value)
-                }
-            }
-            BasicValueEnum::PointerValue(value) => self
-                .builder
-                .build_ptr_to_int(value, self.context.i64_type(), "this_pointer_word")
-                .map_err(|error| error.to_string()),
-            other => Err(format!(
-                "explicit thisArg has unsupported native representation {other:?}"
-            )),
+        let ty = self
+            .expr_hir_type(expression)
+            .ok_or("explicit thisArg is missing its HIR type")?;
+        let (tag, payload) = self.compile_receiver_parts(value, &ty)?;
+        let receiver = self
+            .builder
+            .build_insert_value(
+                self.receiver_type().get_undef(),
+                tag,
+                0,
+                "receiver_with_kind",
+            )
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(receiver, payload, 1, "receiver_with_payload")
+            .map(|value| value.into_struct_value())
+            .map_err(|error| error.to_string())
+    }
+
+    // The physical layout is shared with a two-field native Union, but these
+    // tags are canonical across every closure call (Union member indices are
+    // local to one static union and cannot be passed through unchanged).
+    fn receiver_type(&self) -> inkwell::types::StructType<'ctx> {
+        self.context.struct_type(
+            &[self.context.i8_type().into(), self.context.i64_type().into()],
+            false,
+        )
+    }
+
+    fn this_entry_function_type(
+        &self,
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<FunctionType<'ctx>, String> {
+        let mut lowered = vec![BasicMetadataTypeEnum::from(
+            self.context.ptr_type(AddressSpace::default()),
+        )];
+        lowered.push(self.receiver_type().into());
+        lowered.extend(
+            params
+                .iter()
+                .map(|ty| self.basic_type(ty).map(BasicMetadataTypeEnum::from))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        if *ret == HirType::Void {
+            Ok(self.context.void_type().fn_type(&lowered, false))
+        } else {
+            Ok(self.basic_type(ret)?.fn_type(&lowered, false))
         }
+    }
+
+    fn compile_receiver_parts(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), String> {
+        let i8_type = self.context.i8_type();
+        let i64_type = self.context.i64_type();
+        match ty {
+            HirType::Optional(inner) | HirType::Nullable(inner) => {
+                let tagged = value.into_struct_value();
+                let present = self.builder.build_extract_value(tagged, 0, "receiver_present")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let payload = self.builder.build_extract_value(tagged, 1, "receiver_optional_value")
+                    .map_err(|error| error.to_string())?;
+                let (tag, word) = self.compile_receiver_parts(payload, inner)?;
+                let absent = if matches!(ty, HirType::Optional(_)) { 0 } else { 1 };
+                let tag = self.builder.build_select(present, tag, i8_type.const_int(absent, false), "receiver_optional_kind")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let word = self.builder.build_select(present, word, i64_type.const_zero(), "receiver_optional_word")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                return Ok((tag, word));
+            }
+            HirType::Nullish(inner) => {
+                let tagged = value.into_struct_value();
+                let source_tag = self.builder.build_extract_value(tagged, 0, "receiver_nullish_tag")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let payload = self.builder.build_extract_value(tagged, 1, "receiver_nullish_value")
+                    .map_err(|error| error.to_string())?;
+                let (present_tag, present_word) = self.compile_receiver_parts(payload, inner)?;
+                let is_present = self.builder.build_int_compare(IntPredicate::EQ, source_tag, i8_type.const_zero(), "receiver_nullish_present")
+                    .map_err(|error| error.to_string())?;
+                let is_null = self.builder.build_int_compare(IntPredicate::EQ, source_tag, i8_type.const_int(1, false), "receiver_nullish_null")
+                    .map_err(|error| error.to_string())?;
+                let absent_tag = self.builder.build_select(is_null, i8_type.const_int(1, false), i8_type.const_zero(), "receiver_nullish_absent")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let tag = self.builder.build_select(is_present, present_tag, absent_tag, "receiver_nullish_kind")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let word = self.builder.build_select(is_present, present_word, i64_type.const_zero(), "receiver_nullish_word")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                return Ok((tag, word));
+            }
+            HirType::Union(members) => {
+                let tagged = value.into_struct_value();
+                let member_tag = self.builder.build_extract_value(tagged, 0, "receiver_union_member")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let payload = self.builder.build_extract_value(tagged, 1, "receiver_union_payload")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let mut result_tag = i8_type.const_zero();
+                let mut result_word = i64_type.const_zero();
+                for (index, member) in members.iter().enumerate() {
+                    let member_value = self.unpack_union_payload(payload, member)?;
+                    let (tag, word) = self.compile_receiver_parts(member_value, member)?;
+                    let matches = self.builder.build_int_compare(IntPredicate::EQ, member_tag, i8_type.const_int(index as u64, false), "receiver_union_matches")
+                        .map_err(|error| error.to_string())?;
+                    result_tag = self.builder.build_select(matches, tag, result_tag, "receiver_union_kind")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                    result_word = self.builder.build_select(matches, word, result_word, "receiver_union_word")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                }
+                return Ok((result_tag, result_word));
+            }
+            _ => {}
+        }
+        let kind = match ty {
+            HirType::Undefined | HirType::Void => 0,
+            HirType::Null => 1,
+            HirType::Bool => 2,
+            HirType::F64 => 3,
+            HirType::I64 => 4,
+            HirType::Str | HirType::StrLiteral(_) => 5,
+            HirType::Symbol => 6,
+            HirType::Json | HirType::Dictionary(_) => 7,
+            HirType::JsValue => 8,
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+            | HirType::Bytes | HirType::Map(_, _) | HirType::WeakMap(_, _)
+            | HirType::Set(_) | HirType::WeakSet(_) | HirType::Function(_, _)
+            | HirType::CallableFunction(..) | HirType::Promise(_) => 9,
+            other => return Err(format!("unsupported explicit receiver type {other:?}")),
+        };
+        let word = if matches!(ty, HirType::Undefined | HirType::Null | HirType::Void) {
+            i64_type.const_zero()
+        } else {
+            self.encode_word(value)?
+        };
+        Ok((i8_type.const_int(kind, false), word))
     }
 
     fn compile_function_call_with_this(
@@ -43,6 +173,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ret: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let closure = self.compile_expr(callee)?.into_pointer_value();
+        self.guard_callable_closure(closure, "Cannot read a function property of undefined")?;
         let this_entry_slot = unsafe {
             self.builder
                 .build_in_bounds_gep(
@@ -75,13 +206,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
                 .collect::<Result<Vec<_>, _>>()?,
         );
-        let mut this_params = Vec::with_capacity(params.len() + 1);
-        this_params.push(HirType::I64);
-        this_params.extend_from_slice(params);
         let call = self
             .builder
             .build_indirect_call(
-                self.function_type(&this_params, ret)?,
+                self.this_entry_function_type(params, ret)?,
                 function_pointer,
                 &compiled_args,
                 "closure_call_with_this",
@@ -165,7 +293,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let this_slot = load_slot(self, BOUND_CLOSURE_THIS_OFFSET, "bound_this_slot")?;
         let this_word = self
             .builder
-            .build_load(i64_type, this_slot, "bound_this")
+            .build_load(self.receiver_type(), this_slot, "bound_this")
             .map_err(|error| error.to_string())?;
         let mut arguments = vec![
             BasicMetadataValueEnum::from(source),
@@ -183,20 +311,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?;
             arguments.push(value.into());
-            offset += object_field_storage_bytes(ty);
+            offset = checked_storage_add(offset, object_field_storage_bytes(ty)?)?;
         }
         arguments.extend(
             code.get_param_iter()
                 .skip(1)
                 .map(BasicMetadataValueEnum::from),
         );
-        let mut source_params = Vec::with_capacity(params.len() + 1);
-        source_params.push(HirType::I64);
-        source_params.extend_from_slice(params);
         let call = self
             .builder
             .build_indirect_call(
-                self.function_type(&source_params, ret)?,
+                self.this_entry_function_type(params, ret)?,
                 source_this_entry,
                 &arguments,
                 "invoke_bound_function",
@@ -223,15 +348,15 @@ impl<'ctx> HirCompiler<'ctx> {
         )?;
         self.builder.position_at_end(parent);
         let source = self.compile_expr(callee)?.into_pointer_value();
+        self.guard_callable_closure(source, "Cannot read properties of undefined (reading 'bind')")?;
         let this_word = self.compile_this_argument_word(this_arg)?;
         let bound_values = bound
             .iter()
             .map(|value| self.compile_expr(value))
             .collect::<Result<Vec<_>, _>>()?;
-        let payload_bytes = params[..bound.len()]
-            .iter()
-            .map(object_field_storage_bytes)
-            .sum::<u64>();
+        let payload_bytes = params[..bound.len()].iter().try_fold(0, |total, ty| {
+            checked_storage_add(total, object_field_storage_bytes(ty)?)
+        })?;
         let closure = self
             .builder
             .build_call(
@@ -284,7 +409,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(argument_slot, value)
                 .map_err(|error| error.to_string())?;
-            offset += object_field_storage_bytes(ty);
+            offset = checked_storage_add(offset, object_field_storage_bytes(ty)?)?;
         }
         Ok(closure.into())
     }
@@ -299,6 +424,13 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let function_type = self.function_type(params, ret)?;
         let closure = self.compile_expr(callee)?.into_pointer_value();
+        let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
+        compiled_args.extend(
+            args.iter()
+                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        self.guard_callable_closure(closure, "Value is not a function")?;
         let function_pointer = self
             .builder
             .build_load(
@@ -308,12 +440,6 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
-        compiled_args.extend(
-            args.iter()
-                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
-                .collect::<Result<Vec<_>, _>>()?,
-        );
         let call = self
             .builder
             .build_indirect_call(
@@ -338,6 +464,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         code: FunctionValue<'ctx>,
         promise: PointerValue<'ctx>,
+        params: &[HirType],
         name: &str,
     ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
@@ -356,6 +483,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("closure allocation returned no value")?
             .into_pointer_value();
+        let function = self.current_function();
+        let missing = self.context.append_basic_block(function, "special_closure_missing");
+        let ready = self.context.append_basic_block(function, "special_closure_ready");
+        let done = self.context.append_basic_block(function, "special_closure_done");
+        let failed = self.builder.build_is_null(closure, "special_closure_allocation_failed")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(failed, missing, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(missing);
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(ready);
         self.builder
             .build_store(closure, code.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
@@ -369,11 +507,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
+        let adapter = self.compile_ignored_this_adapter(
+            code,
+            params,
+            &HirType::Void,
+            &format!("{name}__thaw_this_adapter"),
+        )?;
         self.builder
-            .build_store(
-                this_entry,
-                self.context.ptr_type(AddressSpace::default()).const_null(),
-            )
+            .build_store(this_entry, adapter.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
         let promise_slot = unsafe {
             self.builder
@@ -388,6 +529,15 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(promise_slot, promise)
             .map_err(|error| error.to_string())?;
-        Ok(closure)
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let selected = self.builder.build_phi(
+            self.context.ptr_type(AddressSpace::default()), "special_closure_or_null",
+        ).map_err(|error| error.to_string())?;
+        selected.add_incoming(&[
+            (&self.context.ptr_type(AddressSpace::default()).const_null(), missing),
+            (&closure, ready),
+        ]);
+        Ok(selected.as_basic_value().into_pointer_value())
     }
 }

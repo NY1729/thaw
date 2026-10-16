@@ -170,6 +170,7 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
 fn generate_napi_class_constructors(
     class: &thaw_bridge::DtsClass,
     napi: bool,
+    observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
     shim: &mut String,
 ) -> Vec<(usize, String, Vec<thaw_hir::HirType>)> {
     if !class.constructible {
@@ -181,8 +182,19 @@ fn generate_napi_class_constructors(
         // Checked per arity, not once for the whole constructor. Types the
         // declaration parser cannot classify still cross the dynamic ABI as
         // Json, matching ordinary Fallback function parameters.
-        for arity in constructor.required_params..=constructor.params.len() {
-            let params = &constructor.params[..arity];
+        let mut arities = (constructor.required_params..=constructor.params.len())
+            .collect::<std::collections::BTreeSet<_>>();
+        if constructor.rest_param.is_some() {
+            arities.extend(observed_arities.get(&class.name).into_iter().flatten()
+                .copied().filter(|arity| *arity >= constructor.required_params));
+        }
+        for arity in arities {
+            let mut params = constructor.params[..arity.min(constructor.params.len())].to_vec();
+            if let Some((name, ty)) = &constructor.rest_param {
+                for index in constructor.params.len()..arity {
+                    params.push((format!("{name}{index}"), ty.clone()));
+                }
+            }
             if !params.iter().all(|(_, ty)| match ty {
                 thaw_bridge::DtsType::Native(native) => render_dynamic_type(native).is_some(),
                 thaw_bridge::DtsType::Unsupported(_) => true,
@@ -397,7 +409,7 @@ fn generate_napi_class_method_overloads_with_callback_instances(
     let mut generated = Vec::new();
     let mut method_names = std::collections::HashSet::new();
     for method in &class.methods {
-        if class.name == "Buffer" && method.name == "toString" {
+        if class.name.rsplit("::").next() == Some("Buffer") && method.name == "toString" {
             continue;
         }
         if method.is_static != is_static
@@ -616,20 +628,21 @@ type RegistryShims = (
     ExternalNamespaceAliases,
     ExternalNestedNamespaces,
     ExternalExportAssignments,
+    std::collections::HashMap<String, usize>,
     JitFallbackReasons,
+    std::collections::BTreeSet<&'static str>,
 );
 /// `package -> the symbol its own `export = X;` assignment names`, for a
 /// bare `import * as X from "pkg"` (`module_graph.rs`).
 type ExternalExportAssignments = std::collections::HashMap<String, String>;
 type JitFallbackReasons = std::collections::HashMap<(String, String), String>;
 
-/// `(factory function name, class name)` -- a Fallback factory function
+/// `(package-qualified factory function, package-qualified class)` -- a Fallback factory function
 /// call (real example: dayjs's `dayjs(...)`) that should be tracked as
 /// producing an instance of that class, the same way `new ClassName(...)`
 /// already is (see `class_methods.rs`'s `constructed_class`), even
-/// though the call itself doesn't say `new`. No qualifier: matched by
-/// bare callee name only, same simplification `ClassConstructorRewrite`
-/// already makes for a bare `new ClassName(...)`.
+/// though the call itself doesn't say `new`. Imported aliases resolve
+/// through their package; a bare name resolves only when unique.
 type FactoryClassRewrite = (String, String);
 
 /// The identifier a user writes as the object in `pkg.name(...)`
@@ -691,8 +704,110 @@ fn is_native_builtin(package: &str) -> bool {
     package == "node:http"
 }
 
-fn observed_member_call_arities(
+
+/// Resolve local import spellings to the package qualifier and exported class
+/// name used by constructor helpers. Unresolved imports still reserve their
+/// local name, so they cannot fall through to a different package's bare class.
+#[allow(clippy::type_complexity)]
+fn constructor_imports(
+    module: &thaw_parser::ast::Module,
+    package_qualifiers: &std::collections::HashMap<String, String>,
+) -> (
+    std::collections::HashMap<String, (String, String)>,
+    std::collections::HashMap<String, String>,
+    std::collections::HashSet<String>,
+) {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    let mut named = std::collections::HashMap::new();
+    let mut namespaces = std::collections::HashMap::new();
+    let mut imported = std::collections::HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue; };
+        let qualifier = import.src.value.as_str()
+            .and_then(|source| package_qualifiers.get(source));
+        for specifier in &import.specifiers {
+            let local = match specifier {
+                ImportSpecifier::Named(value) => value.local.sym.to_string(),
+                ImportSpecifier::Default(value) => value.local.sym.to_string(),
+                ImportSpecifier::Namespace(value) => value.local.sym.to_string(),
+            };
+            imported.insert(local.clone());
+            let Some(qualifier) = qualifier else { continue; };
+            if import.type_only { continue; }
+            match specifier {
+                ImportSpecifier::Named(value) if !value.is_type_only => {
+                    let exported = match &value.imported {
+                        Some(ModuleExportName::Ident(name)) => name.sym.to_string(),
+                        Some(ModuleExportName::Str(name)) => name.value.as_str()
+                            .unwrap_or_default().to_string(),
+                        None => value.local.sym.to_string(),
+                    };
+                    named.insert(local, (qualifier.clone(), exported));
+                }
+                ImportSpecifier::Default(_) => {
+                    named.insert(local.clone(), (qualifier.clone(), "default".to_string()));
+                    namespaces.insert(local, qualifier.clone());
+                }
+                ImportSpecifier::Namespace(_) => {
+                    namespaces.insert(local, qualifier.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    (named, namespaces, imported)
+}
+
+fn observed_constructor_arities_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
+) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Expr, MemberProp, NewExpr};
+    #[derive(Default)]
+    struct Finder {
+        arities: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    }
+    impl Visit for Finder {
+        fn visit_new_expr(&mut self, expression: &NewExpr) {
+            let name = match expression.callee.as_ref() {
+                Expr::Ident(name) => Some(name.sym.to_string()),
+                Expr::Member(member) => {
+                    let mut parts = Vec::new();
+                    let mut current = member;
+                    let root = loop {
+                        let MemberProp::Ident(property) = &current.prop else { break None; };
+                        parts.push(property.sym.to_string());
+                        match current.obj.as_ref() {
+                            Expr::Ident(root) => break Some(root.sym.to_string()),
+                            Expr::Member(parent) => current = parent,
+                            _ => break None,
+                        }
+                    };
+                    root.map(|root| {
+                        parts.push(root);
+                        parts.reverse();
+                        parts.join(".")
+                    })
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.arities.entry(name.to_string()).or_default()
+                    .insert(expression.args.as_ref().map_or(0, Vec::len));
+            }
+            expression.visit_children_with(self);
+        }
+    }
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    Ok(finder.arities)
+}
+
+fn observed_member_call_arities_named(
+    source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
@@ -718,7 +833,7 @@ fn observed_member_call_arities(
         }
     }
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.arities)
@@ -730,8 +845,9 @@ fn observed_member_call_arities(
 /// once imported. Keyed by that bare name only, same limitation as the
 /// member version: two same-named imports from different packages share
 /// one observed-arity set.
-fn observed_identifier_call_arities(
+fn observed_identifier_call_arities_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr};
@@ -755,7 +871,7 @@ fn observed_identifier_call_arities(
         }
     }
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.arities)
@@ -776,8 +892,9 @@ fn observed_identifier_call_arities(
 /// counterpart at all (real example: socket.io's own
 /// `StrictEventEmitter`, never referenced directly by name in real user
 /// code) to a value that would silently read back `undefined`.
-fn observed_bare_member_object_identifiers(
+fn observed_bare_member_object_identifiers_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashSet<String>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Expr, MemberExpr};
@@ -796,7 +913,7 @@ fn observed_bare_member_object_identifiers(
         }
     }
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.names)
@@ -815,12 +932,19 @@ fn observed_bare_member_object_identifiers(
 /// leven from "leven"` actually means: the only other source for
 /// `external_exports`'s `"default"` key is a package with *exactly one*
 /// function total, a fallback this bypasses entirely once it names one.
+#[allow(dead_code)]
 fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
+    commonjs_export_name_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+fn commonjs_export_name_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> Result<Option<String>, String> {
     use thaw_parser::ast::{
         DefaultDecl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem,
     };
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
             if let Expr::Ident(identifier) = export.expr.as_ref() {
@@ -838,6 +962,8 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
         }
         ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
             DefaultDecl::Fn(fn_expr) => fn_expr.ident.as_ref().map(|ident| ident.sym.to_string()),
+            DefaultDecl::Class(class_expr) => Some(class_expr.ident.as_ref()
+                .map_or_else(|| "default".to_string(), |ident| ident.sym.to_string())),
             _ => None,
         },
         // `export { helmet as default };` -- the ESM default spelled as a
@@ -880,10 +1006,17 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
 /// `export = Application` makes `new Koa()` valid), whereas a real ESM
 /// default export's namespace object is not constructible. Real example:
 /// koa's own `@types` barrel.
+#[allow(dead_code)]
 fn commonjs_export_assignment(source: &str) -> Result<Option<String>, String> {
+    commonjs_export_assignment_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+fn commonjs_export_assignment_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> Result<Option<String>, String> {
     use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
             if let Expr::Ident(identifier) = export.expr.as_ref() {
@@ -902,8 +1035,20 @@ fn commonjs_export_assignment(source: &str) -> Result<Option<String>, String> {
 /// `parse_dts` cannot recover their imported signature from this file.
 /// Only return properties the program actually calls; the dynamic host
 /// already handles their values and argument packing.
+#[allow(dead_code)]
 fn called_commonjs_namespace_properties(
     source: &str,
+    namespace: Option<&str>,
+    observed: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+) -> Result<Vec<String>, String> {
+    called_commonjs_namespace_properties_named(
+        source, &thaw_parser::common::FileName::Custom("input.ts".into()), namespace, observed,
+    )
+}
+
+fn called_commonjs_namespace_properties_named(
+    source: &str,
+    filename: &thaw_parser::common::FileName,
     namespace: Option<&str>,
     observed: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
 ) -> Result<Vec<String>, String> {
@@ -912,7 +1057,7 @@ fn called_commonjs_namespace_properties(
     let Some(namespace) = namespace else {
         return Ok(Vec::new());
     };
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     let mut names = Vec::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {

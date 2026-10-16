@@ -57,6 +57,7 @@ struct DateTimeOptions {
     hour: Option<String>,
     minute: Option<String>,
     second: Option<String>,
+    day_period: Option<String>,
     hour12: Option<bool>,
     hour_cycle: Option<String>,
 }
@@ -167,6 +168,7 @@ impl DateTimeOptions {
             hour: field("hour"),
             minute: field("minute"),
             second: field("second"),
+            day_period: field("dayPeriod"),
             hour12: value.get("hour12").and_then(|v| v.as_bool()),
             hour_cycle: field("hourCycle"),
         }
@@ -393,6 +395,61 @@ fn skeleton_calendar_name(kind: icu_calendar::AnyCalendarKind) -> Option<&'stati
     })
 }
 
+/// Report the same calendar and digit system selected by the formatter's
+/// curated locale and requested Unicode extensions.
+fn intl_datetime_resolved_options_json(locale_tag: &str) -> String {
+    use icu_provider::{DataIdentifierBorrowed, DataMarkerAttributes, DataProvider, DataRequest};
+    use std::str::FromStr;
+
+    let resolve = || -> Option<serde_json::Value> {
+        let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
+        let curated: icu_locale::Locale = resolve_curated_locale(&locale.id).parse().ok()?;
+        let mut prefs = icu_datetime::DateTimeFormatterPreferences::from(&curated);
+        let requested = icu_datetime::DateTimeFormatterPreferences::from(&locale);
+        prefs.calendar_algorithm = requested.calendar_algorithm;
+        prefs.numbering_system = requested.numbering_system;
+        let provider = &thaw_icu_data::ThawIcuDataProvider;
+        let formatter = icu_datetime::DateTimeFormatter::try_new_unstable(
+            provider, prefs, icu_datetime::fieldsets::YMD::medium(),
+        ).ok()?;
+        let calendar = match formatter.calendar().kind() {
+            icu_calendar::AnyCalendarKind::Gregorian => "gregory",
+            icu_calendar::AnyCalendarKind::HijriUmmAlQura => "islamic-umalqura",
+            icu_calendar::AnyCalendarKind::HijriTabularTypeIIFriday => "islamic-civil",
+            icu_calendar::AnyCalendarKind::HijriTabularTypeIIThursday => "islamic-tbla",
+            icu_calendar::AnyCalendarKind::HijriSimulatedMecca => "islamic",
+            icu_calendar::AnyCalendarKind::EthiopianAmeteAlem => "ethioaa",
+            kind => skeleton_calendar_name(kind)?,
+        };
+
+        let data_locale = icu_provider::DataLocale::from(curated.id);
+        let symbols = DataProvider::<icu_decimal::provider::DecimalSymbolsV1>::load(
+            provider,
+            DataRequest { id: DataIdentifierBorrowed::for_locale(&data_locale), ..Default::default() },
+        ).ok()?;
+        let default_numbering = symbols.payload.get().numsys();
+        let requested_numbering = locale.extensions.unicode.keywords
+            .get(&"nu".parse().ok()?)
+            .map(|value| value.to_string());
+        let numbering = requested_numbering.as_deref().filter(|name| {
+            DataMarkerAttributes::try_from_str(name).ok().is_some_and(|attributes| {
+                DataProvider::<icu_decimal::provider::DecimalDigitsV1>::load(
+                    provider,
+                    DataRequest { id: DataIdentifierBorrowed::for_marker_attributes(&attributes), ..Default::default() },
+                ).is_ok()
+            })
+        }).unwrap_or(default_numbering);
+        let requested_hour_cycle = locale.extensions.unicode.keywords
+            .get(&"hc".parse().ok()?).map(|value| value.to_string());
+        let hour_cycle = requested_hour_cycle.as_deref()
+            .filter(|cycle| matches!(*cycle, "h11" | "h12" | "h23" | "h24"))
+            .or(thaw_icu_data::preferred_hour_cycle(resolve_curated_locale(&locale.id)))
+            .unwrap_or("h23");
+        Some(serde_json::json!({ "calendar": calendar, "numberingSystem": numbering, "hourCycle": hour_cycle }))
+    };
+    resolve().map_or_else(|| "{}".to_string(), |value| value.to_string())
+}
+
 /// Builds the UTS-35 classical skeleton for an ECMA-402 option set --
 /// the piece icu4x's own `FieldSetBuilder` gets wrong (it derives widths
 /// from the locale's `dateFormats` length patterns instead of the
@@ -404,7 +461,7 @@ fn skeleton_fields(
     locale_hour_cycle: Option<&str>,
 ) -> (Vec<Field>, Option<FieldSymbol>) {
     use icu_datetime::provider::fields::{
-        Day, Field, FieldLength, FieldSymbol, Hour, Month, Second, Weekday, Year,
+        Day, DayPeriod, Field, FieldLength, FieldSymbol, Hour, Month, Second, Weekday, Year,
     };
 
     fn name_length(style: &str) -> FieldLength {
@@ -445,16 +502,17 @@ fn skeleton_fields(
     if let Some(style) = options.weekday.as_deref() {
         fields.push(Field { symbol: FieldSymbol::Weekday(Weekday::Format), length: name_length(style) });
     }
+    if let Some(style) = options.day_period.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::DayPeriod(DayPeriod::Flexible), length: name_length(style) });
+    }
     let mut hour_symbol = None;
     if let Some(style) = options.hour.as_deref() {
-        let cycle = options
-            .hour_cycle
-            .as_deref()
-            .or(match options.hour12 {
+        let cycle = match options.hour12 {
                 Some(true) => Some("h12"),
                 Some(false) => Some("h23"),
                 None => None,
-            })
+            }
+            .or(options.hour_cycle.as_deref())
             .or(locale_hour_cycle)
             .unwrap_or("h23");
         let symbol = match cycle {
@@ -518,7 +576,12 @@ fn intl_datetime_skeleton_parts_json(
         })
         .collect();
 
-    let locale_hour_cycle = thaw_icu_data::preferred_hour_cycle(curated_tag);
+    let requested_hour_cycle = locale.extensions.unicode.keywords
+        .get(&"hc".parse().ok()?)
+        .map(|value| value.to_string());
+    let locale_hour_cycle = requested_hour_cycle.as_deref()
+        .filter(|cycle| matches!(*cycle, "h11" | "h12" | "h23" | "h24"))
+        .or(thaw_icu_data::preferred_hour_cycle(curated_tag));
     let (fields, hour_symbol) = skeleton_fields(&options, locale_hour_cycle);
     if fields.is_empty() {
         return None;
@@ -934,4 +997,27 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
     // field combination). Unlike NumberFormat, where fr's U+202F grouping
     // is legitimate, so this must not leak into `intl_number.rs`.
     formatted.replace('\u{202f}', " ")
+}
+
+#[cfg(test)]
+mod hour_cycle_skeleton_tests {
+    use super::*;
+
+    #[test]
+    fn skeleton_hour_cycle_obeys_option_and_locale_precedence() {
+        let zoned = r#"{"year":2024,"month":7,"day":4,"hour":13,"minute":0,"second":0}"#;
+        for (locale, options, expected) in [
+            ("en-US-u-hc-h23", r#"{"hour":"numeric"}"#, "13"),
+            ("en-US-u-hc-h12", r#"{"hour":"numeric"}"#, "1"),
+            ("en-US-u-hc-h23", r#"{"hour":"numeric","hourCycle":"h12"}"#, "1"),
+            ("en-US-u-hc-h12", r#"{"hour":"numeric","hourCycle":"h12","hour12":false}"#, "13"),
+            ("en-US", r#"{"hour":"numeric"}"#, "1"),
+        ] {
+            let result = intl_datetime_skeleton_parts_json(locale, options, zoned).unwrap();
+            let parts: serde_json::Value = serde_json::from_str(&result).unwrap();
+            let hour = parts.as_array().unwrap().iter()
+                .find(|part| part["type"] == "hour").unwrap();
+            assert_eq!(hour["value"], expected, "{locale}: {options}");
+        }
+    }
 }

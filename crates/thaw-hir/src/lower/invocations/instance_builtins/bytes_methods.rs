@@ -1,4 +1,18 @@
 impl<'a> FnLowerer<'a> {
+    // Bind the byte buffer before argument bindings; use the raw Bytes type
+    // so chained byte methods retain their native dispatch identity.
+    fn bind_native_bytes_receiver(
+        &mut self,
+        receiver: HirExpr,
+        bindings: &mut Vec<LoweredBinding>,
+    ) -> HirExpr {
+        let name = format!("__thaw_bytes_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Bytes);
+        bindings.insert(0, (name.clone(), HirType::Bytes, receiver));
+        HirExpr::Var(name)
+    }
+
     /// `buf.readUInt16BE(offset)` / `buf.writeInt32LE(value, offset)` /
     /// `buf.readDoubleLE(offset)` &c. -- fixed-width integer / float
     /// reads and writes over the native byte layout, dispatched by
@@ -24,8 +38,9 @@ impl<'a> FnLowerer<'a> {
                 property.sym
             ));
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let kind = if float {
             2.0
         } else if signed {
@@ -89,8 +104,9 @@ impl<'a> FnLowerer<'a> {
                 property.sym
             ));
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let kind_lit = HirExpr::Lit(HirLit::F64(if signed { 1.0 } else { 0.0 }));
         let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
         let number = |lowerer: &mut Self, value: HirExpr| lowerer.coerce_primitive_to_number(value);
@@ -153,8 +169,9 @@ impl<'a> FnLowerer<'a> {
                 property.sym
             ));
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
         let result = if write {
             let [value, offset] = arguments.as_slice() else {
@@ -203,8 +220,9 @@ impl<'a> FnLowerer<'a> {
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err("`.copy()` is only supported on a Buffer / Uint8Array".into());
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, "Buffer.copy")?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         if arguments.is_empty() || arguments.len() > 4 {
             return Err(
                 "`Buffer.prototype.copy` expects a target and up to three offsets".into(),
@@ -232,6 +250,90 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
+    /// `Uint8Array.prototype.set(source, offset?)` -- copies `source`
+    /// (a numeric array or byte buffer) into the receiver starting at
+    /// `offset` (default 0). The inverse of `Buffer.prototype.copy`:
+    /// the receiver is the copy *target*, so it reuses the same in-place
+    /// copy with the operands swapped.
+    fn lower_native_bytes_set(
+        &mut self,
+        receiver: HirExpr,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let (arguments, mut bindings) =
+            self.lower_native_spread_values(&call.args, "Uint8Array.set")?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        let (source, offset) = match arguments.as_slice() {
+            [source] => (source.clone(), HirExpr::Lit(HirLit::F64(0.0))),
+            [source, offset] => (source.clone(), offset.clone()),
+            _ => return Err("native `.set()` expects a source and an optional offset".into()),
+        };
+        let offset = self.coerce_primitive_to_number(offset)?;
+        // Source and offset are read twice (range check, then copy): bind both once.
+        let source_type = self.infer_expr_type(&source)?;
+        let source_name = format!("__thaw_bytes_set_source_{}", self.next_binding);
+        let offset_name = format!("__thaw_bytes_set_offset_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), source_type.clone());
+        self.scope.insert(offset_name.clone(), HirType::F64);
+        bindings.push((source_name.clone(), source_type.clone(), source));
+        bindings.push((offset_name.clone(), HirType::F64, offset));
+        let source = HirExpr::Var(source_name);
+        let offset = HirExpr::Var(offset_name);
+        // A byte buffer shares the array layout, so both lengths read the same header.
+        let source_length = HirExpr::ArrayLen(Box::new(source.clone()));
+        let receiver_length = HirExpr::ArrayLen(Box::new(receiver.clone()));
+        // A source that does not fit raises RangeError before any byte is written.
+        let overflow = HirExpr::BinOp(
+            BinOp::Gt,
+            Box::new(HirExpr::BinOp(
+                BinOp::Add,
+                Box::new(offset.clone()),
+                Box::new(source_length),
+            )),
+            Box::new(receiver_length),
+        );
+        let negative = HirExpr::BinOp(
+            BinOp::Lt,
+            Box::new(offset.clone()),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        );
+        let out_of_range = HirExpr::Conditional(
+            Box::new(negative),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            Box::new(overflow),
+            HirType::Bool,
+        );
+        let range_check = HirExpr::Conditional(
+            Box::new(out_of_range),
+            Box::new(HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}RangeError\u{1}offset is out of bounds".into(),
+                ))),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            HirType::F64,
+        );
+        let copy = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_copy".to_string())),
+            vec![
+                source,
+                receiver,
+                offset,
+                HirExpr::Lit(HirLit::F64(0.0)),
+                HirExpr::Lit(HirLit::F64(-1.0)),
+            ],
+        );
+        // `Uint8Array.prototype.set` mutates the receiver but returns undefined.
+        // Keep `__thaw_bytes_copy`'s numeric result for Buffer.copy callers.
+        let result = HirExpr::EvalThen(
+            Box::new(HirExpr::EvalThen(Box::new(range_check), Box::new(copy))),
+            Box::new(HirExpr::Lit(HirLit::Undefined)),
+        );
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// `buf.indexOf` / `includes` / `lastIndexOf` with a string or
     /// sub-buffer needle -- a byte-subsequence search. The needle is
     /// normalised to a byte buffer (a string decodes as `utf8`, a number
@@ -245,8 +347,9 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         method: &str,
         arguments: Vec<HirExpr>,
-        spread_bindings: Vec<(Symbol, HirType, HirExpr)>,
+        mut spread_bindings: Vec<(Symbol, HirType, HirExpr)>,
     ) -> Result<HirExpr, String> {
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut spread_bindings);
         let needle = arguments[0].clone();
         let needle_type = self.infer_expr_type(&needle)?;
         let needle_bytes = match &needle_type {
@@ -292,8 +395,7 @@ impl<'a> FnLowerer<'a> {
     /// `Uint8Array.prototype.toHex()` / `.toBase64()` and
     /// `.setFromHex(text)` / `.setFromBase64(text)` (ECMAScript 2026). The
     /// `set*` variants write into the buffer from offset 0 and return
-    /// `{ read, written }` (`read` is approximated as the source length, so
-    /// a fully valid input matches the spec).
+    /// `{ read, written }` from the native capacity-bounded decoder.
     fn lower_native_bytes_encoding_method(
         &mut self,
         member: &MemberExpr,
@@ -313,8 +415,9 @@ impl<'a> FnLowerer<'a> {
             "base64"
         };
         let encoding_lit = HirExpr::Lit(HirLit::Str(encoding.to_string()));
-        let (arguments, bindings) = self
+        let (arguments, mut bindings) = self
             .lower_native_spread_values(&call.args, &format!("Uint8Array.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         if matches!(property.sym.as_ref(), "toHex" | "toBase64") {
             if !arguments.is_empty() {
                 return Err(format!("`{}` expects no arguments", property.sym));
@@ -331,43 +434,10 @@ impl<'a> FnLowerer<'a> {
             return Err(format!("`{}` expects exactly one argument", property.sym));
         };
         let source = self.coerce_primitive_to_string(source.clone())?;
-        let written_call = HirExpr::Call(
+        let result = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_bytes_set_from_string".to_string())),
             vec![receiver, source, encoding_lit],
         );
-        let written_name = format!("__thaw_bytes_written_{}", self.next_binding);
-        self.next_binding += 1;
-        self.scope.insert(written_name.clone(), HirType::F64);
-        let written = HirExpr::Var(written_name.clone());
-        // `read` is the number of source characters consumed to produce
-        // `written` bytes: 2 per byte for hex, 4 per 3-byte group for
-        // base64 (so a truncating write stops at a group boundary).
-        let read = if encoding == "hex" {
-            HirExpr::BinOp(
-                BinOp::Mul,
-                Box::new(written.clone()),
-                Box::new(HirExpr::Lit(HirLit::F64(2.0))),
-            )
-        } else {
-            HirExpr::BinOp(
-                BinOp::Mul,
-                Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_math_ceil".to_string())),
-                    vec![HirExpr::BinOp(
-                        BinOp::Div,
-                        Box::new(written.clone()),
-                        Box::new(HirExpr::Lit(HirLit::F64(3.0))),
-                    )],
-                )),
-                Box::new(HirExpr::Lit(HirLit::F64(4.0))),
-            )
-        };
-        let result = HirExpr::ObjectLit(vec![
-            ("read".to_string(), read),
-            ("written".to_string(), written),
-        ]);
-        let mut bindings = bindings;
-        bindings.push((written_name, HirType::F64, written_call));
         self.wrap_call_argument_bindings(result, &bindings)
     }
 }

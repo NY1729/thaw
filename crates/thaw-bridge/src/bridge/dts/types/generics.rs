@@ -100,6 +100,12 @@ fn resolve_generic_interface(
         }
     }
 
+    let (scoped_interfaces, scoped_generic) = scoped_type_context(
+        declaration_scope(name), interfaces, generic_interfaces,
+    );
+    let interfaces = &scoped_interfaces;
+    let generic_interfaces = &scoped_generic;
+
     if decl
         .body
         .body
@@ -199,6 +205,21 @@ fn bridge_type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> b
         return true;
     }
     match constraint {
+        HirType::Optional(inner) => match actual {
+            HirType::Optional(value) => bridge_type_satisfies_constraint(value, inner),
+            HirType::Nullable(_) | HirType::Nullish(_) => false,
+            other => bridge_type_satisfies_constraint(other, inner),
+        },
+        HirType::Nullable(inner) => match actual {
+            HirType::Nullable(value) => bridge_type_satisfies_constraint(value, inner),
+            HirType::Optional(_) | HirType::Nullish(_) => false,
+            other => bridge_type_satisfies_constraint(other, inner),
+        },
+        HirType::Nullish(inner) => match actual {
+            HirType::Optional(value) | HirType::Nullable(value) | HirType::Nullish(value) =>
+                bridge_type_satisfies_constraint(value, inner),
+            other => bridge_type_satisfies_constraint(other, inner),
+        },
         HirType::Union(elements) => elements
             .iter()
             .any(|element| bridge_type_satisfies_constraint(actual, element)),
@@ -256,6 +277,10 @@ fn resolve_generic_alias(
         ));
     }
 
+    let (scoped_interfaces, scoped_generic) = scoped_type_context(
+        declaration_scope(name), interfaces, generic_interfaces,
+    );
+
     let mut substitution = HashMap::new();
     for (index, parameter) in parameters.iter().enumerate() {
         let concrete = if let Some(argument) = arguments.get(index) {
@@ -276,8 +301,8 @@ fn resolve_generic_alias(
                     .as_ref()
                     .expect("arity validation requires a default"),
                 &substitution,
-                interfaces,
-                generic_interfaces,
+                &scoped_interfaces,
+                &scoped_generic,
                 in_progress,
             )
         };
@@ -315,8 +340,8 @@ fn resolve_generic_alias(
             let constraint = resolve_ts_type_with_substitution(
                 constraint,
                 &substitution,
-                interfaces,
-                generic_interfaces,
+                &scoped_interfaces,
+                &scoped_generic,
                 in_progress,
             );
             let constraint = match constraint {
@@ -337,8 +362,8 @@ fn resolve_generic_alias(
     let result = resolve_ts_type_with_substitution(
         &decl.type_ann,
         &substitution,
-        interfaces,
-        generic_interfaces,
+        &scoped_interfaces,
+        &scoped_generic,
         in_progress,
     );
     in_progress.pop();
@@ -499,14 +524,12 @@ fn project_native_aggregate(
             )
         }
         TsType::TsTypeRef(ty_ref) => {
-            let ref_name = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            let ref_name = type_reference_name(&ty_ref.type_name);
             if let Some(concrete) = substitution.get(&ref_name) {
                 return concrete.clone();
             }
-            if generic_interfaces.classes.contains(&ref_name) {
+            let scoped = scoped_reference(&ref_name, interfaces, generic_interfaces);
+            if generic_interfaces.classes.contains(&scoped) {
                 return HirType::JsValue;
             }
             // `Array<T>` / `ReadonlyArray<T>`: keep the array skeleton so
@@ -528,7 +551,7 @@ fn project_native_aggregate(
                     )));
                 }
             }
-            if let Some(decl) = generic_interfaces.aliases.get(&ref_name) {
+            if let Some(decl) = generic_interfaces.aliases.get(&scoped) {
                 if in_progress.iter().any(|active| active == &ref_name) {
                     return HirType::Json;
                 }
@@ -634,14 +657,11 @@ fn resolve_ts_type_with_substitution(
     in_progress: &mut Vec<String>,
 ) -> DtsType {
     if let TsType::TsTypeRef(ty_ref) = ty {
-        if let TsEntityName::TsQualifiedName(qualified) = &ty_ref.type_name {
-            let ref_name = qualified.right.sym.as_str();
-            if let Some(concrete) = substitution.get(ref_name) {
-                return DtsType::Native(concrete.clone());
-            }
-            if let Some(decl) = generic_interfaces.interfaces.get(ref_name) {
+        if let TsEntityName::TsQualifiedName(_) = &ty_ref.type_name {
+            let ref_name = scoped_reference(&type_reference_name(&ty_ref.type_name), interfaces, generic_interfaces);
+            if let Some(decl) = generic_interfaces.interfaces.get(&ref_name) {
                 return resolve_generic_interface(
-                    ref_name,
+                    generic_canonical_name(&ref_name, generic_interfaces),
                     decl,
                     ty_ref,
                     Some(substitution),
@@ -650,9 +670,9 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 );
             }
-            if let Some(decl) = generic_interfaces.aliases.get(ref_name) {
+            if let Some(decl) = generic_interfaces.aliases.get(&ref_name) {
                 return resolve_generic_alias(
-                    ref_name,
+                    generic_canonical_name(&ref_name, generic_interfaces),
                     decl,
                     ty_ref,
                     Some(substitution),
@@ -669,9 +689,10 @@ fn resolve_ts_type_with_substitution(
             if let Some(concrete) = substitution.get(ref_name) {
                 return DtsType::Native(concrete.clone());
             }
-            if let Some(decl) = generic_interfaces.interfaces.get(ref_name) {
+            let scoped = scoped_reference(ref_name, interfaces, generic_interfaces);
+            if let Some(decl) = generic_interfaces.interfaces.get(&scoped) {
                 return resolve_generic_interface(
-                    ref_name,
+                    generic_canonical_name(&scoped, generic_interfaces),
                     decl,
                     ty_ref,
                     Some(substitution),
@@ -680,9 +701,9 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 );
             }
-            if let Some(decl) = generic_interfaces.aliases.get(ref_name) {
+            if let Some(decl) = generic_interfaces.aliases.get(&scoped) {
                 return resolve_generic_alias(
-                    ref_name,
+                    generic_canonical_name(&scoped, generic_interfaces),
                     decl,
                     ty_ref,
                     Some(substitution),

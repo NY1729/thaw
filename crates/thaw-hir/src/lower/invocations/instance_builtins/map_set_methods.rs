@@ -28,11 +28,16 @@ impl<'a> FnLowerer<'a> {
                             return Err("native `.get()` expects exactly one argument".into());
                         };
                         let key = self.coerce_to_declared(&HirType::Json, key.clone())?;
+                        let receiver_name = format!("__thaw_map_get_any_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Json);
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_get".to_string())),
-                            vec![receiver, key],
+                            vec![HirExpr::Var(receiver_name.clone()), key],
                         );
-                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                        let mut bindings = vec![(receiver_name, HirType::Json, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let (key_type, value_type) = match &receiver_type {
                         HirType::Map(key_type, value_type)
@@ -116,34 +121,19 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"set" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    // `.set()` on a `Map` value stored in `any` -- Stage
-                    // B. Unlike Stage A's read-only methods, a mutation
-                    // has to be visible to every other reader of the
-                    // same variable afterward, but `Json`/`any` values
-                    // in this compiler are snapshots, not references.
-                    // Only supported when the receiver is a plain local
-                    // variable: computes the whole new sentinel object
-                    // (`__thaw_json_map_or_set_set`, thaw-std's
-                    // `json.rs`) and assigns it straight back onto that
-                    // variable's own binding -- a closure capturing a
-                    // local retains that local's real storage cell
-                    // (`allocate_lambda_environment`'s own doc comment,
-                    // thaw-llvm's `closures.rs`), so the `Assign` below
-                    // genuinely writes back, not just to a copy. A
-                    // receiver that's a property chain (or any other
-                    // non-identifier expression) is a narrower,
-                    // documented limitation, matching this session's
-                    // established scope-drawing precedent (round8's
-                    // RegExp `lastIndex`).
+                    // `Uint8Array.prototype.set` shares the `.set` name
+                    // with `Map`, so dispatch on the receiver type first.
+                    // `infer_expr_type` normalizes `Bytes` away, so use
+                    // the un-normalized inference for this check.
+                    if self.infer_expr_type_inner(&receiver)? == HirType::Bytes {
+                        return self.lower_native_bytes_set(receiver, call);
+                    }
+                    // Dynamic Map values share their underlying object, so the
+                    // mutation must use the receiver captured before arguments.
                     if receiver_type == HirType::Json {
-                        let Expr::Ident(ident) = member.obj.as_ref() else {
-                            return Err(
-                                "`.set()` on a Map stored in `any` is only supported when the \
-                                 receiver is a plain local variable, not a property chain"
-                                    .into(),
-                            );
-                        };
-                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let receiver_name = format!("__thaw_map_set_any_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Json);
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "Map.set")?;
                         let [key, value] = arguments.as_slice() else {
@@ -160,15 +150,16 @@ impl<'a> FnLowerer<'a> {
                         let var = |name: &str| HirExpr::Var(name.to_string());
                         let new_value = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_set".to_string())),
-                            vec![var(&var_name), var(&key_name), var(&value_name)],
+                            vec![var(&receiver_name), var(&key_name), var(&value_name)],
                         );
                         let body = HirExpr::Block(vec![
-                            HirStmt::Expr(HirExpr::Assign(var_name.clone(), Box::new(new_value))),
-                            HirStmt::Return(Some(var(&var_name))),
+                            HirStmt::Expr(new_value),
+                            HirStmt::Return(Some(var(&receiver_name))),
                         ]);
-                        let mut bindings = vec![(key_name, HirType::Json, key)];
-                        bindings.push((value_name, HirType::Json, value));
+                        let mut bindings = vec![(receiver_name, HirType::Json, receiver)];
                         bindings.extend(spread_bindings);
+                        bindings.push((key_name, HirType::Json, key));
+                        bindings.push((value_name, HirType::Json, value));
                         return self.wrap_call_argument_bindings(body, &bindings);
                     }
                     let (key_type, value_type) = match &receiver_type {
@@ -273,14 +264,22 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         raw_get
                     };
-                    let mut body = vec![HirStmt::If(
+                    let mut body = if key_suffix == "any" && matches!(receiver_type, HirType::WeakMap(_, _)) {
+                        self.weak_key_runtime_guard(
+                            var(&key_name),
+                            "Invalid value used as weak map key",
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    body.push(HirStmt::If(
                         HirExpr::Call(
                             Box::new(HirExpr::Var(has_intrinsic)),
                             vec![var(&receiver_name), var(&key_name)],
                         ),
                         vec![HirStmt::Return(Some(decoded))],
                         Vec::new(),
-                    )];
+                    ));
                     let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((key_name.clone(), key_type, key.clone()));
@@ -292,7 +291,7 @@ impl<'a> FnLowerer<'a> {
                             format!("__thaw_map_get_or_insert_computed_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(computed_name.clone(), value_type.clone());
-                        let call = HirExpr::Call(Box::new(second.clone()), vec![key]);
+                        let call = HirExpr::Call(Box::new(second.clone()), vec![var(&key_name)]);
                         let call = self
                             .coerce_to_declared(&value_type, call)
                             .map_err(|error| format!("Map.getOrInsertComputed callback result: {error}"))?;
@@ -344,18 +343,11 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"add" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    // `.add()` on a Set stored in `any` -- same
-                    // lvalue-write-back rationale as `.set()`'s own
-                    // `Json` branch just above.
+                    // `.add()` on a Set stored in `any` mutates the saved shared value.
                     if receiver_type == HirType::Json {
-                        let Expr::Ident(ident) = member.obj.as_ref() else {
-                            return Err(
-                                "`.add()` on a Set stored in `any` is only supported when the \
-                                 receiver is a plain local variable, not a property chain"
-                                    .into(),
-                            );
-                        };
-                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let receiver_name = format!("__thaw_set_add_any_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Json);
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "Set.add")?;
                         let [element] = arguments.as_slice() else {
@@ -368,14 +360,15 @@ impl<'a> FnLowerer<'a> {
                         let var = |name: &str| HirExpr::Var(name.to_string());
                         let new_value = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_add".to_string())),
-                            vec![var(&var_name), var(&element_name)],
+                            vec![var(&receiver_name), var(&element_name)],
                         );
                         let body = HirExpr::Block(vec![
-                            HirStmt::Expr(HirExpr::Assign(var_name.clone(), Box::new(new_value))),
-                            HirStmt::Return(Some(var(&var_name))),
+                            HirStmt::Expr(new_value),
+                            HirStmt::Return(Some(var(&receiver_name))),
                         ]);
-                        let mut bindings = vec![(element_name, HirType::Json, element)];
+                        let mut bindings = vec![(receiver_name, HirType::Json, receiver)];
                         bindings.extend(spread_bindings);
+                        bindings.push((element_name, HirType::Json, element));
                         return self.wrap_call_argument_bindings(body, &bindings);
                     }
                     let element_type = match &receiver_type {
@@ -440,27 +433,23 @@ impl<'a> FnLowerer<'a> {
                             return Err("native `.has()` expects exactly one argument".into());
                         };
                         let key = self.coerce_to_declared(&HirType::Json, key.clone())?;
+                        let receiver_name = format!("__thaw_map_has_any_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Json);
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_has".to_string())),
-                            vec![receiver, key],
+                            vec![HirExpr::Var(receiver_name.clone()), key],
                         );
-                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                        let mut bindings = vec![(receiver_name, HirType::Json, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
-                    // `.delete()` (mutating) -- Stage B, same
-                    // lvalue-write-back rationale as `.set()`/`.add()`.
-                    // Returns whether a matching key/element was
-                    // actually present (`.has()`, evaluated on the
-                    // *original* value before the write-back), matching
-                    // real `Map.prototype.delete`/`Set.prototype.delete`.
+                    // `.delete()` returns whether the original receiver had
+                    // the key before mutating that same shared container.
                     if property.sym == *"delete" && receiver_type == HirType::Json {
-                        let Expr::Ident(ident) = member.obj.as_ref() else {
-                            return Err(
-                                "`.delete()` on a Map/Set stored in `any` is only supported when \
-                                 the receiver is a plain local variable, not a property chain"
-                                    .into(),
-                            );
-                        };
-                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let receiver_name = format!("__thaw_map_delete_any_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Json);
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "Map/Set.delete")?;
                         let [key] = arguments.as_slice() else {
@@ -477,19 +466,20 @@ impl<'a> FnLowerer<'a> {
                         let var = |name: &str| HirExpr::Var(name.to_string());
                         let had_key = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_has".to_string())),
-                            vec![var(&var_name), var(&key_name)],
+                            vec![var(&receiver_name), var(&key_name)],
                         );
                         let new_value = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_delete".to_string())),
-                            vec![var(&var_name), var(&key_name)],
+                            vec![var(&receiver_name), var(&key_name)],
                         );
                         let body = HirExpr::Block(vec![
                             HirStmt::Let(existed_name.clone(), HirType::Bool, had_key),
-                            HirStmt::Expr(HirExpr::Assign(var_name.clone(), Box::new(new_value))),
+                            HirStmt::Expr(new_value),
                             HirStmt::Return(Some(var(&existed_name))),
                         ]);
-                        let mut bindings = vec![(key_name, HirType::Json, key)];
+                        let mut bindings = vec![(receiver_name, HirType::Json, receiver)];
                         bindings.extend(spread_bindings);
+                        bindings.push((key_name, HirType::Json, key));
                         return self.wrap_call_argument_bindings(body, &bindings);
                     }
                     let key_type = match &receiver_type {
@@ -543,26 +533,19 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"clear" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    // `.clear()` on a Map/Set stored in `any` -- same
-                    // lvalue-write-back rationale as `.set()`/`.add()`/
-                    // `.delete()`.
+                    // Dynamic containers are shared; `.clear()` needs no local writeback.
                     if receiver_type == HirType::Json {
-                        let Expr::Ident(ident) = member.obj.as_ref() else {
-                            return Err(
-                                "`.clear()` on a Map/Set stored in `any` is only supported when \
-                                 the receiver is a plain local variable, not a property chain"
-                                    .into(),
-                            );
-                        };
                         if !call.args.is_empty() {
                             return Err("native `.clear()` expects no arguments".into());
                         }
-                        let var_name = self.resolve_binding(ident.sym.as_ref());
                         let new_value = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_clear".to_string())),
-                            vec![HirExpr::Var(var_name.clone())],
+                            vec![receiver],
                         );
-                        return Ok(HirExpr::Assign(var_name, Box::new(new_value)));
+                        return Ok(HirExpr::Block(vec![
+                            HirStmt::Expr(new_value),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))),
+                        ]));
                     }
                     if !matches!(receiver_type, HirType::Map(_, _) | HirType::Set(_)) {
                         return Err(format!(
@@ -813,7 +796,7 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 
-    fn lower_map_iterator(
+    pub(crate) fn lower_map_iterator(
         &mut self,
         receiver: HirExpr,
         receiver_type: HirType,
@@ -963,6 +946,7 @@ impl<'a> FnLowerer<'a> {
         key: HirExpr,
         message: &str,
     ) -> Result<Vec<HirStmt>, String> {
+        let key_copy = key.clone();
         let typeof_name = format!("__thaw_weak_key_typeof_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(typeof_name.clone(), HirType::Str);
@@ -982,14 +966,24 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Lit(HirLit::Str("function".to_string()))),
         );
         let is_valid = self.lower_logical_expr(is_object, is_function, false)?;
+        // `typeof null` is "object", but null is never a valid weak key.
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_null".to_string())),
+            vec![key_copy],
+        );
+        let invalid = self.lower_logical_expr(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(is_valid),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            ),
+            is_null,
+            false,
+        )?;
         Ok(vec![
             HirStmt::Let(typeof_name, HirType::Str, typeof_call),
             HirStmt::If(
-                HirExpr::BinOp(
-                    BinOp::EqEqEq,
-                    Box::new(is_valid),
-                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                ),
+                invalid,
                 vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
                     "\u{1}TypeError\u{1}{message}"
                 ))))],

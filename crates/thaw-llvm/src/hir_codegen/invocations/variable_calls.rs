@@ -5,7 +5,11 @@ impl<'ctx> HirCompiler<'ctx> {
         callee: &HirExpr,
         args: &[HirExpr],
     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
-        match self.variable_hir_types.get(name).cloned()? {
+        let ty = match self.variable_hir_types.get(name).cloned()? {
+            HirType::FunctionWithThis(_, visible) => *visible,
+            other => other,
+        };
+        match ty {
             HirType::Function(params, ret) => {
                 Some(self.compile_closure_call(callee, &params, &ret, args, name))
             }

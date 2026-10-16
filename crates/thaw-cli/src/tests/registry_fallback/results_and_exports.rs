@@ -1603,6 +1603,58 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A package's *default export* function that is overloaded by argument type
+/// (`(value: number): string` / `(value: string): number`, `export = conv`) is
+/// reached through a default import under any local name. The call must be
+/// narrowed to the overload its argument statically matches: the default-export
+/// function's overload candidates are registered under the `default` alias a
+/// default import resolves to, not only under the function's own name.
+#[test]
+fn a_default_imported_overloaded_function_narrows_by_argument_type() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-default-overloads-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("dualconv");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare function conv(value: number): string;\n\
+         declare function conv(value: string): number;\n\
+         export = conv;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = function(value) { \
+         return typeof value === 'number' ? 'n' + value : Number(value) * 2; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import convert from "dualconv";
+function main(): void {
+    const text: string = convert(7);
+    const doubled: number = convert("21");
+    console.log(text, doubled);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "n7 42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function whose real JS implementation genuinely returns
 /// `undefined` used to have that result marshaled back indistinguishably
 /// from a real `null` (`resolve_value_impl`, `crates/thaw-quickjs/src/
@@ -2202,6 +2254,179 @@ function main(): void {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "W:x\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn deep_namespace_functions_keep_independent_bindings_and_receivers() {
+    // Unrun integration regression: both a named namespace import and a
+    // package namespace import resolve the complete qualified path.
+    let dir = std::env::temp_dir().join(format!("thaw-deep-function-ns-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("deep-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        export declare namespace Outer {
+            namespace Left { function make(): string; }
+            namespace Right { function make(): string; }
+        }
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "module.exports = { Outer: { Left: { tag: 'left', make: function() { return this.tag; } }, Right: { tag: 'right', make: function() { return this.tag; } } } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { Outer } from "deep-kit";
+        import * as whole from "deep-kit";
+        function main(): void {
+            console.log(Outer.Left.make(), whole.Outer.Right.make());
+        }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "left right\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn direct_namespace_function_and_class_capture_qualified_runtime_members() {
+    // Unrun integration regression for the declaration shape emitted by
+    // ordinary `export * as api`: sibling types resolve lexically while
+    // the function and constructor bind to module.exports.api.*.
+    let dir = std::env::temp_dir().join(format!("thaw-direct-namespace-shape-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        export declare namespace api {
+            interface Options { label: string; }
+            class Client { constructor(options: Options); label(): string; }
+            function make(options: Options): Client;
+            const create: (options: Options) => Client;
+        }
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "class Client { constructor(options) { this.value = options.label; } label() { return this.value; } } module.exports = { api: { Client, make: function(options) { return new Client(options); }, create: function(options) { return new Client(options); } } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { api } from "shape-kit";
+        import * as whole from "shape-kit";
+        function main(): void {
+            const first = api.make({ label: "x" });
+            const second = new whole.api.Client({ label: "y" });
+            const third = api.create({ label: "z" });
+            console.log(first.label(), second.label(), third.label());
+        }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "x y z\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn marked_private_support_values_do_not_capture_missing_runtime_members() {
+    // Unrun integration regression: typeof-only support value declarations
+    // exist for type resolution, but never name bundle.js properties.
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-private-support-values-{}", std::process::id(),
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("support-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        declare namespace __thaw_support_test {
+            type __thaw_private_support_marker__ = never;
+            export interface Id { value: string; }
+            export function missing(): Id;
+            export const absent: Id;
+        }
+        export interface Model { maker: typeof __thaw_support_test.missing; }
+        export declare function live(): string;
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "module.exports = { live: function() { return 'ok'; } };",
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { live } from "support-kit";
+        function main(): void { console.log(live()); }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn namespace_type_only_class_origin_does_not_capture_a_hidden_runtime_member() {
+    // The type-only origin supplies the class shape; only its public value
+    // alias exists on the JavaScript namespace object.
+    let dir = std::env::temp_dir().join(format!("thaw-namespace-hidden-class-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("hidden-class-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        declare namespace api {
+            class Hidden { constructor(name: string); label(): string; }
+            export type { Hidden };
+            export { Hidden as PublicClient };
+        }
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "class Client { constructor(name) { this.name = name; } label() { return this.name; } } module.exports = { api: { PublicClient: Client } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { api } from "hidden-class-kit";
+        function main(): void {
+            console.log(new api.PublicClient("ok").label());
+        }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn namespace_value_alias_exposes_runtime_member_while_type_alias_stays_inert() {
+    // Unrun integration regression: the declaration's source namespace is
+    // not necessarily its public JavaScript property path.
+    let dir = std::env::temp_dir().join(format!("thaw-namespace-value-alias-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("alias-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        declare namespace Shared {
+            class Result { method(): string; }
+            function make(): Result;
+        }
+        export type { Shared as Shape };
+        export { Shared as Runtime };
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "function Result() {} Result.prototype.method = function() { return 'runtime'; }; module.exports = { Runtime: { Result: Result, make: function() { return new Result(); } } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { Runtime, type Shape } from "alias-kit";
+        function main(): void { console.log(Runtime.make().method()); }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "runtime\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -903,6 +903,12 @@ fn dynamic_array_search(operation: u8, value: f64, needle: f64, from_index: f64)
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     };
+    if !matches!(value.tag, DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG)
+        || operation > 2
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
     let search = match (value.tag, needle.tag, operation) {
         (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG, 0..=1) => operation,
         (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG, 0..=1) => operation + 2,
@@ -911,8 +917,11 @@ fn dynamic_array_search(operation: u8, value: f64, needle: f64, from_index: f64)
         (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG, 2) => 7,
         (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG, 2) => 8,
         _ => {
-            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
-            return 0.0;
+            if unsafe { array_data(f64::from_bits(value.payload)) }.is_none() {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                return 0.0;
+            }
+            return if operation == 1 { 0.0 } else { -1.0 };
         }
     };
     array_search(
@@ -952,8 +961,8 @@ extern "C" fn string_char_code_at(value: f64, index: f64) -> f64 {
         return f64::NAN;
     }
     unsafe {
-        string_argument(value)
-            .and_then(|value| value.encode_utf16().nth(index as usize))
+        string_utf16_argument(value)
+            .and_then(|value| value.get(index as usize).copied())
             .map_or(f64::NAN, f64::from)
     }
 }
@@ -964,17 +973,17 @@ extern "C" fn string_char_at(value: f64, index: f64) -> f64 {
     if code.is_nan() {
         arena_string(String::new())
     } else {
-        arena_string(String::from_utf16_lossy(&[code as u16]))
+        arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&[code as u16]))
     }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_at(value: f64, index: f64) -> f64 {
-    let Some(value) = (unsafe { string_argument(value) }) else {
+    let Some(value) = (unsafe { string_utf16_argument(value) }) else {
         CALL_PRESENT.with(|present| present.set(false));
         return f64::from_bits(0);
     };
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = value;
     let index = if index.is_nan() { 0.0 } else { index.trunc() };
     let index = if index < 0.0 {
         units.len() as f64 + index
@@ -988,16 +997,16 @@ extern "C" fn string_at(value: f64, index: f64) -> f64 {
         CALL_PRESENT.with(|present| present.set(false));
         return f64::from_bits(0);
     };
-    arena_string(String::from_utf16_lossy(&[*unit]))
+    arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&[*unit]))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_code_point_at(value: f64, index: f64) -> f64 {
-    let Some(value) = (unsafe { string_argument(value) }) else {
+    let Some(value) = (unsafe { string_utf16_argument(value) }) else {
         CALL_PRESENT.with(|present| present.set(false));
         return 0.0;
     };
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = value;
     let index = if index.is_nan() { 0.0 } else { index.trunc() };
     let Some(&first) = (index.is_finite() && index >= 0.0)
         .then(|| units.get(index as usize))
@@ -1019,13 +1028,13 @@ extern "C" fn string_code_point_at(value: f64, index: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_compare(left: f64, right: f64) -> f64 {
     unsafe {
-        let Some(left) = string_argument(left) else {
+        let Some(left) = string_utf16_argument(left) else {
             return 0.0;
         };
-        let Some(right) = string_argument(right) else {
+        let Some(right) = string_utf16_argument(right) else {
             return 0.0;
         };
-        match left.encode_utf16().cmp(right.encode_utf16()) {
+        match left.cmp(&right) {
             std::cmp::Ordering::Less => -1.0,
             std::cmp::Ordering::Equal => 0.0,
             std::cmp::Ordering::Greater => 1.0,
@@ -1043,7 +1052,7 @@ extern "C" fn number_same_value(left: f64, right: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_same_value(left: f64, right: f64) -> f64 {
     f64::from(u8::from(unsafe {
-        string_argument(left) == string_argument(right)
+        string_utf16_argument(left) == string_utf16_argument(right)
     }))
 }
 
@@ -1073,6 +1082,24 @@ extern "C" fn type_of_object(_: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn string_is_well_formed(_: f64) -> f64 {
-    1.0
+extern "C" fn string_is_well_formed(value: f64) -> f64 {
+    let Some(units) = (unsafe { string_utf16_argument(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    f64::from(char::decode_utf16(units).all(|character| character.is_ok()))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_to_well_formed(value: f64) -> f64 {
+    let Some(units) = (unsafe { string_utf16_argument(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return f64::from_bits(0);
+    };
+    if char::decode_utf16(units.iter().copied()).all(|character| character.is_ok()) {
+        return value;
+    }
+    let repaired: String = char::decode_utf16(units)
+        .map(|character| character.unwrap_or(char::REPLACEMENT_CHARACTER)).collect();
+    arena_string(repaired)
 }

@@ -20,6 +20,7 @@ wasm = ["dep:wasmi", "dep:wasmi_wasi"]
 # references `Intl`.
 intl = [
     "dep:thaw-icu-data",
+    "dep:fixed_decimal",
     "dep:icu_calendar",
     "dep:icu_collator",
     "dep:icu_datetime",
@@ -38,14 +39,15 @@ intl = [
 # it makes the generated program link the system `libicui18n`/`libicuuc`
 # dynamically, so it is opt-in via `thaw build --icu4c` and never part
 # of the default/static build.
-icu4c = []
+icu4c = ["intl"]
 
 [dependencies]
+thaw-arena = { path = "../thaw-arena" }
 aes = "0.8"
 base64 = "0.22"
 brotli = { version = "8", optional = true }
 cbc = { version = "0.1", features = ["alloc"] }
-flate2 = "1"
+flate2 = { version = "1", features = ["zlib-rs"] }
 getrandom = "0.2"
 httlib-huffman = "0.3.4"
 ecdsa = "0.16"
@@ -59,6 +61,7 @@ icu_calendar = { version = "=2.3.0", default-features = false, optional = true }
 icu_collator = { version = "=2.3.1", default-features = false, optional = true }
 icu_datetime = { version = "=2.3.0", default-features = false, optional = true }
 icu_decimal = { version = "=2.3.0", default-features = false, features = ["unstable"], optional = true }
+fixed_decimal = { version = "=0.7.2", default-features = false, optional = true }
 icu_experimental = { version = "=0.6.0", default-features = false, optional = true }
 icu_list = { version = "=2.3.0", default-features = false, optional = true }
 icu_locale = { version = "=2.3.1", default-features = false, optional = true }
@@ -76,7 +79,8 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-rquickjs = "0.12.2"
+rquickjs = { version = "0.12.2", features = ["loader"] }
+url = "=2.5.8"
 rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 sec1 = { version = "0.7", features = ["pem"] }

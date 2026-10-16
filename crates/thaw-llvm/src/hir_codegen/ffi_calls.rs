@@ -33,7 +33,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(copy_bb);
-        let strlen = self.module.get_function("strlen").unwrap();
+        let strlen = self.module.get_function("thaw_string_byte_length").unwrap();
         let length = self
             .builder
             .build_call(strlen, &[source.into()], &format!("{name}_length"))
@@ -74,6 +74,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 &format!("{name}_memcpy"),
             )
             .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_string_register").unwrap(),
+            &[copied.into(), length.into()], "register_owned_string_length").map_err(|error| error.to_string())?;
         let destroy = match ownership {
             FfiOwnership::Owned { destroy } => Some(destroy),
             FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
@@ -268,45 +270,58 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(native, 0, "ffi_tagged_return_tag")
             .map_err(|error| error.to_string())?
             .into_int_value();
-        let mut value = self
+        let native_value = self
             .builder
             .build_extract_value(native, 1, "ffi_tagged_return_payload")
             .map_err(|error| error.to_string())?;
-        value = match payload {
+        let present = if matches!(ty, HirType::Nullish(_)) {
+            self.builder.build_int_compare(IntPredicate::EQ, tag, tag.get_type().const_zero(), "ffi_tagged_return_present")
+        } else {
+            self.builder.build_int_compare(IntPredicate::NE, tag, tag.get_type().const_zero(), "ffi_tagged_return_present")
+        }.map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let present_bb = self.context.append_basic_block(function, "ffi_tagged_payload_present");
+        let absent_bb = self.context.append_basic_block(function, "ffi_tagged_payload_absent");
+        let merge_bb = self.context.append_basic_block(function, "ffi_tagged_payload_merge");
+        self.builder.build_conditional_branch(present, present_bb, absent_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(present_bb);
+        let value = match payload {
             HirType::Str if *ownership != FfiOwnership::Borrowed => self
                 .apply_ffi_string_ownership(
-                    value.into_pointer_value(),
+                    native_value.into_pointer_value(),
                     ownership,
                     "ffi_tagged_return_string",
                 )?
                 .into(),
             HirType::Array(_)
+            | HirType::Tuple(_)
             | HirType::Object(_)
             | HirType::Optional(_)
             | HirType::Nullable(_)
             | HirType::Nullish(_)
-                if value.is_struct_value() => self.marshal_ffi_return(
-                value,
+                if native_value.is_struct_value() => self.marshal_ffi_return(
+                native_value,
                 payload,
                 FfiStringAbi::NullTerminated,
                 ownership,
                 aggregate_abi,
                 None,
             )?,
-            _ => value,
+            _ => native_value,
         };
+        let present_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(absent_bb);
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_bb);
+        let payload_type = self.basic_type(payload)?;
+        let merged = self.builder.build_phi(payload_type, "ffi_tagged_payload").map_err(|error| error.to_string())?;
+        let absent_value = payload_type.const_zero();
+        merged.add_incoming(&[(&value, present_end), (&absent_value, absent_bb)]);
+        let value = merged.as_basic_value();
         if matches!(ty, HirType::Nullish(_)) {
             return self.build_nullish_tagged_value(value, payload, tag);
         }
-        let present = self
-            .builder
-            .build_int_compare(
-                IntPredicate::NE,
-                tag,
-                tag.get_type().const_zero(),
-                "ffi_tagged_return_present",
-            )
-            .map_err(|error| error.to_string())?;
         let tagged_type = self.basic_type(ty)?.into_struct_type();
         let tagged = self
             .builder
@@ -332,12 +347,8 @@ impl<'ctx> HirCompiler<'ctx> {
         aggregate_abi: FfiAggregateAbi,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let element_bytes = elements
-            .iter()
-            .map(array_element_storage_bytes)
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
-        let size = ARRAY_HEADER_BYTES + element_bytes * elements.len() as u64;
+        let element_bytes = tuple_element_storage_bytes(elements)?;
+        let size = checked_array_offset(element_bytes, elements.len())?;
         let tuple = self
             .builder
             .build_call(
@@ -386,7 +397,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 _ => value,
             };
             let offset = i64_type.const_int(
-                ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                checked_array_offset(element_bytes, index)?,
                 false,
             );
             let pointer = unsafe {
@@ -467,6 +478,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(terminator, self.context.i8_type().const_zero())
                     .map_err(|error| error.to_string())?;
+                self.builder.build_call(self.module.get_function("thaw_string_register").unwrap(),
+                    &[result.into(), length.into()], "register_ffi_string_length").map_err(|error| error.to_string())?;
                 let destroy = match ownership {
                     FfiOwnership::Owned { destroy } => Some(destroy),
                     FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
@@ -553,6 +566,36 @@ impl<'ctx> HirCompiler<'ctx> {
                         "ffi_array_copy",
                     )
                     .map_err(|error| error.to_string())?;
+                if **element == HirType::Str && *ownership != FfiOwnership::Borrowed {
+                    let function = self.current_function();
+                    let entry = self.builder.get_insert_block().unwrap();
+                    let loop_bb = self.context.append_basic_block(function, "ffi_string_array_loop");
+                    let body_bb = self.context.append_basic_block(function, "ffi_string_array_body");
+                    let done_bb = self.context.append_basic_block(function, "ffi_string_array_done");
+                    self.builder.build_unconditional_branch(loop_bb).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(loop_bb);
+                    let index = self.builder.build_phi(i64_type, "ffi_string_array_index").map_err(|error| error.to_string())?;
+                    index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+                    let current = index.as_basic_value().into_int_value();
+                    let more = self.builder.build_int_compare(IntPredicate::ULT, current, length, "ffi_string_array_more").map_err(|error| error.to_string())?;
+                    self.builder.build_conditional_branch(more, body_bb, done_bb).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(body_bb);
+                    let slot = unsafe { self.builder.build_in_bounds_gep(
+                        self.context.ptr_type(AddressSpace::default()), elements, &[current], "ffi_string_array_slot",
+                    ).map_err(|error| error.to_string())? };
+                    let source = self.builder.build_load(
+                        self.context.ptr_type(AddressSpace::default()), slot, "ffi_string_array_source",
+                    ).map_err(|error| error.to_string())?.into_pointer_value();
+                    let copied = self.apply_ffi_string_ownership(
+                        source, &FfiOwnership::ArenaCopy { destroy: None }, "ffi_string_array_element",
+                    )?;
+                    self.builder.build_store(slot, copied).map_err(|error| error.to_string())?;
+                    let next = self.builder.build_int_add(current, i64_type.const_int(1, false), "ffi_string_array_next").map_err(|error| error.to_string())?;
+                    let body_end = self.builder.get_insert_block().unwrap();
+                    self.builder.build_unconditional_branch(loop_bb).map_err(|error| error.to_string())?;
+                    index.add_incoming(&[(&next, body_end)]);
+                    self.builder.position_at_end(done_bb);
+                }
                 let destroy = match ownership {
                     FfiOwnership::Owned { destroy } => Some(destroy),
                     FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
@@ -618,7 +661,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         arena_alloc,
                         &[
                             i64_type
-                                .const_int(object_storage_bytes(fields), false)
+                                .const_int(object_storage_bytes(fields)?, false)
                                 .into(),
                             i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
                         ],
@@ -740,7 +783,9 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &format!("ffi_{name}"),
                             )?
                             .into(),
-                        HirType::Object(_) | HirType::Array(_) if field.is_struct_value() => self
+                        HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)
+                        | HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                            if field.is_struct_value() => self
                             .marshal_ffi_return(
                             field,
                             field_ty,
@@ -757,7 +802,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_in_bounds_gep(
                                 self.context.i8_type(),
                                 result,
-                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                &[i64_type.const_int(object_field_offset(fields, index)?, false)],
                                 "ffi_object_field",
                             )
                             .map_err(|error| error.to_string())?
@@ -1022,14 +1067,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 let handle = value.into_pointer_value();
                 let base = self.compile_array_data(handle)?;
                 let i64_type = self.context.i64_type();
-                let element_bytes = elements
-                    .iter()
-                    .map(array_element_storage_bytes)
-                    .max()
-                    .unwrap_or(ARRAY_ELEM_BYTES);
+                let element_bytes = tuple_element_storage_bytes(elements)?;
                 for (index, element) in elements.iter().enumerate() {
                     let offset = i64_type.const_int(
-                        ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                        checked_array_offset(element_bytes, index)?,
                         false,
                     );
                     let pointer = unsafe {
@@ -1058,18 +1099,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Object(fields) => {
                 let base = value.into_pointer_value();
-                let i64_type = self.context.i64_type();
+                let _i64_type = self.context.i64_type();
                 for (index, (name, field_ty)) in fields.iter().enumerate() {
-                    let pointer = unsafe {
-                        self.builder
-                            .build_in_bounds_gep(
-                                self.context.i8_type(),
-                                base,
-                                &[i64_type.const_int(object_field_offset(fields, index), false)],
-                                "ffi_object_field_pointer",
-                            )
-                            .map_err(|error| error.to_string())?
-                    };
+                    let pointer = self.compile_field_ptr_from_pointer(base, fields, index)?;
                     let field = self
                         .builder
                         .build_load(
@@ -1219,19 +1251,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(fields) => {
                 let base = value.into_pointer_value();
                 for (index, (_, field_type)) in fields.iter().enumerate() {
-                    let field_pointer = unsafe {
-                        self.builder
-                            .build_in_bounds_gep(
-                                self.context.i8_type(),
-                                base,
-                                &[self
-                                    .context
-                                    .i64_type()
-                                    .const_int(object_field_offset(fields, index), false)],
-                                "ffi_aggregate_vararg_field",
-                            )
-                            .map_err(|error| error.to_string())?
-                    };
+                    let field_pointer = self.compile_field_ptr_from_pointer(base, fields, index)?;
                     let field = self
                         .builder
                         .build_load(
@@ -1246,6 +1266,55 @@ impl<'ctx> HirCompiler<'ctx> {
             other => return Err(format!("unsupported aggregate variadic type {other:?}")),
         }
         Ok(())
+    }
+
+    fn guard_ffi_variadic_integer(
+        &mut self,
+        value: FloatValue<'ctx>,
+        abi: FfiVariadicAbi,
+    ) -> Result<FloatValue<'ctx>, String> {
+        let (lower, upper) = match abi {
+            FfiVariadicAbi::I32 => (-(2.0_f64).powi(31), (2.0_f64).powi(31)),
+            FfiVariadicAbi::I64 => (-(2.0_f64).powi(63), (2.0_f64).powi(63)),
+            FfiVariadicAbi::U32 => (0.0, (2.0_f64).powi(32)),
+            FfiVariadicAbi::U64 => (0.0, (2.0_f64).powi(64)),
+            FfiVariadicAbi::Native => return Ok(value),
+        };
+        let truncated = self.builder.build_call(
+            self.module.get_function("llvm.trunc.f64").unwrap(),
+            &[value.into()],
+            "ffi_vararg_truncated",
+        ).map_err(|error| error.to_string())?
+        .try_as_basic_value().basic().ok_or("llvm.trunc returned no FFI variadic value")?
+        .into_float_value();
+        let f64_type = self.context.f64_type();
+        let above_lower = self.builder.build_float_compare(
+            FloatPredicate::OGE, truncated, f64_type.const_float(lower), "ffi_vararg_above_lower",
+        ).map_err(|error| error.to_string())?;
+        let below_upper = self.builder.build_float_compare(
+            FloatPredicate::OLT, truncated, f64_type.const_float(upper), "ffi_vararg_below_upper",
+        ).map_err(|error| error.to_string())?;
+        let valid = self.builder.build_and(above_lower, below_upper, "ffi_vararg_in_range")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let error_bb = self.context.append_basic_block(function, "ffi_vararg_range_error");
+        let valid_bb = self.context.append_basic_block(function, "ffi_vararg_valid");
+        self.builder.build_conditional_branch(valid, valid_bb, error_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(error_bb);
+        let error = self.builder.build_global_string_ptr(
+            "\u{1}RangeError\u{1}FFI variadic integer out of range",
+            "ffi_vararg_range_message",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error.as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error.as_pointer_value())?;
+        self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(valid_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(valid_bb);
+        Ok(truncated)
     }
 
     fn compile_ffi_call(
@@ -1264,15 +1333,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_function(&sig.symbol)
             .expect("extern function was declared in compile_program's pre-pass");
 
+        // Evaluate every source argument before ABI conversion can reject one.
+        let values = args.iter().map(|arg| self.compile_expr(arg)).collect::<Result<Vec<_>, _>>()?;
         let mut compiled_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
-        for (index, (param_ty, arg)) in sig.params.iter().zip(args).enumerate() {
-            let value = self.compile_expr(arg)?;
+        for (index, (param_ty, value)) in sig.params.iter().zip(&values).enumerate() {
+            let value = *value;
             match param_ty {
                 HirType::Str
                     if sig.param_string_abis.get(index) == Some(&FfiStringAbi::PointerLength) =>
                 {
                     let pointer = value.into_pointer_value();
-                    let strlen = self.module.get_function("strlen").unwrap();
+                    let strlen = self.module.get_function("thaw_string_byte_length").unwrap();
                     let length = self
                         .builder
                         .build_call(strlen, &[pointer.into()], "ffi_string_length")
@@ -1287,11 +1358,12 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
         if let Some(variadic) = &sig.variadic {
-            for arg in &args[sig.params.len()..] {
-                let value = self.compile_expr(arg)?;
+            for value in &values[sig.params.len()..] {
+                let value = *value;
                 match variadic {
                     HirType::F64 => {
                         let value = value.into_float_value();
+                        let value = self.guard_ffi_variadic_integer(value, sig.variadic_abi)?;
                         let converted: BasicValueEnum<'ctx> = match sig.variadic_abi {
                             FfiVariadicAbi::Native => value.into(),
                             FfiVariadicAbi::I32 => self
@@ -1422,6 +1494,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|e| e.to_string())?;
+            self.clear_pending_native_text()?;
+            self.mark_pending_native_text(error)?;
             self.branch_on_pending_exception()?;
             return Ok(None);
         }
@@ -1465,6 +1539,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|e| e.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         if sig.ret == HirType::Str && sig.return_string_abi == FfiStringAbi::NullTerminated {
             return self

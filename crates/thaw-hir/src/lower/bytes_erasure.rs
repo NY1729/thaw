@@ -21,6 +21,7 @@ fn erase_bytes(program: &mut HirProgram) {
         match step {
             HirInitStep::StoreGlobal(_, value) => erase_expr(value),
             HirInitStep::Statement(stmt) => erase_stmt(stmt),
+            HirInitStep::ExecutionBoundary(_) | HirInitStep::ModuleBoundary { .. } => {}
         }
     }
     for function in &mut program.functions {
@@ -142,6 +143,10 @@ fn erase_ty(ty: &mut HirType) {
             }
             erase_ty(ret);
         }
+        HirType::FunctionWithThis(receiver, signature) => {
+            erase_ty(receiver);
+            erase_ty(signature);
+        }
         HirType::CallableFunction(params, _, rest, ret) => {
             for param in params {
                 erase_ty(param);
@@ -162,6 +167,7 @@ fn erase_ty(ty: &mut HirType) {
         | HirType::StrLiteral(_)
         | HirType::Json
         | HirType::JsValue
+        | HirType::NativeException
         | HirType::Dynamic => {}
     }
 }
@@ -199,6 +205,7 @@ fn erase_stmt(stmt: &mut HirStmt) {
             erase_expr(cond);
             erase_stmts(body);
         }
+        HirStmt::Finally(body, _) => erase_stmts(body),
         HirStmt::Try(body, _, handler, _) => {
             erase_stmts(body);
             erase_stmts(handler);
@@ -224,6 +231,7 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::PostfixUpdate(_, _) => {}
 
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::Index(left, right)
         | HirExpr::JsonKey(left, right)
         | HirExpr::JsonIndex(left, right)
@@ -264,7 +272,8 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::NullableNone(ty)
         | HirExpr::NullishNull(ty)
         | HirExpr::NullishUndefined(ty)
-        | HirExpr::ObjectAlloc(ty) => erase_ty(ty),
+        | HirExpr::ObjectAlloc(ty)
+        | HirExpr::ClassAlloc(ty) => erase_ty(ty),
 
         HirExpr::UnionInject(value, _, types) | HirExpr::UnionValue(value, _, types) => {
             erase_expr(value);
@@ -323,11 +332,25 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_expr(value);
             erase_ty(ty);
         }
+        HirExpr::PromiseNewMixed(value, ty, resolver) => {
+            erase_expr(value);
+            erase_ty(ty);
+            erase_ty(resolver);
+        }
         HirExpr::PromiseThen(source, callback, a, b, _, _) => {
             erase_expr(source);
             erase_expr(callback);
             erase_ty(a);
             erase_ty(b);
+        }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, input, output, _, _) => {
+            erase_expr(source);
+            if let Some(fulfilled) = fulfilled {
+                erase_expr(fulfilled);
+            }
+            erase_expr(rejected);
+            erase_ty(input);
+            erase_ty(output);
         }
         HirExpr::PromiseFinally(source, callback, a, b) => {
             erase_expr(source);
@@ -348,7 +371,13 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_ty(ty);
             erase_expr(closure);
         }
-        HirExpr::FunctionRef(_, types, ret) | HirExpr::MethodRef(_, _, types, ret, _) => {
+        HirExpr::NonArrowFunction(closure) => erase_expr(closure),
+        HirExpr::FunctionRef(_, types, ret) | HirExpr::MethodRef(_, _, types, ret, _, _) => {
+            erase_tys(types);
+            erase_ty(ret);
+        }
+        HirExpr::FunctionRefThis(_, receiver, types, ret) => {
+            erase_ty(receiver);
             erase_tys(types);
             erase_ty(ret);
         }
@@ -424,5 +453,63 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
         | HirExpr::JsValueAsJson(value) => erase_expr(value),
+    }
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_bytes_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_bytes_erasure_visits_this_signature_and_callable_reference_types() {
+        let mut program = HirProgram {
+            globals: vec![crate::HirGlobal {
+                name: "callable".into(),
+                ty: HirType::FunctionWithThis(
+                    Box::new(HirType::Bytes),
+                    Box::new(HirType::Function(
+                        vec![HirType::Bytes],
+                        Box::new(HirType::Bytes),
+                    )),
+                ),
+                init: HirExpr::FunctionRefThis(
+                    "callable_with_this".into(),
+                    HirType::Bytes,
+                    vec![HirType::Bytes],
+                    HirType::Bytes,
+                ),
+                mutable: false,
+            }],
+            ..HirProgram::default()
+        };
+
+        erase_bytes(&mut program);
+
+        let bytes_array = || HirType::Array(Box::new(HirType::F64));
+        assert_eq!(
+            program.globals[0].ty,
+            HirType::FunctionWithThis(
+                Box::new(bytes_array()),
+                Box::new(HirType::Function(
+                    vec![bytes_array()],
+                    Box::new(bytes_array()),
+                )),
+            )
+        );
+        let HirExpr::FunctionRefThis(_, receiver, params, ret) = &program.globals[0].init else {
+            panic!("expected function reference with explicit receiver");
+        };
+        assert_eq!(receiver, &bytes_array());
+        assert_eq!(params, &vec![bytes_array()]);
+        assert_eq!(ret, &bytes_array());
+    }
+
+    #[test]
+    fn thaw_remaining_native_exception_is_preserved_as_an_opaque_type_leaf() {
+        let mut ty = HirType::NativeException;
+
+        erase_ty(&mut ty);
+
+        assert_eq!(ty, HirType::NativeException);
     }
 }

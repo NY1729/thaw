@@ -12,6 +12,191 @@ fn function_type_substitution(function: &swc_ecma_ast::Function) -> HashMap<Symb
         .unwrap_or_default()
 }
 
+// A receiver envelope carries a value kind and one native word, not the
+// source type's wrapper nesting. Canonicalize the hidden receiver to its
+// distinct runtime leaves before HIR assigns the lambda parameter's ABI.
+fn canonical_non_arrow_receiver_type(receiver: HirType) -> HirType {
+    fn collect(receiver: HirType, leaves: &mut Vec<HirType>) {
+        match receiver {
+            HirType::Union(members) => {
+                for member in members { collect(member, leaves); }
+            }
+            HirType::Optional(inner) => {
+                collect(*inner, leaves);
+                collect(HirType::Undefined, leaves);
+            }
+            HirType::Nullable(inner) => {
+                collect(*inner, leaves);
+                collect(HirType::Null, leaves);
+            }
+            HirType::Nullish(inner) => {
+                collect(*inner, leaves);
+                collect(HirType::Null, leaves);
+                collect(HirType::Undefined, leaves);
+            }
+            leaf if !leaves.contains(&leaf) => leaves.push(leaf),
+            _ => {}
+        }
+    }
+    let mut leaves = Vec::new();
+    collect(receiver, &mut leaves);
+    if leaves.len() == 2 {
+        if let Some(index) = leaves.iter().position(|leaf| *leaf == HirType::Undefined) {
+            leaves.remove(index);
+            return HirType::Optional(Box::new(leaves.remove(0)));
+        }
+        if let Some(index) = leaves.iter().position(|leaf| *leaf == HirType::Null) {
+            leaves.remove(index);
+            return HirType::Nullable(Box::new(leaves.remove(0)));
+        }
+    }
+    if leaves.len() == 3 && leaves.contains(&HirType::Null)
+        && leaves.contains(&HirType::Undefined)
+    {
+        leaves.retain(|leaf| !matches!(leaf, HirType::Null | HirType::Undefined));
+        return HirType::Nullish(Box::new(leaves.remove(0)));
+    }
+    if leaves.len() == 1 { leaves.remove(0) } else { HirType::Union(leaves) }
+}
+
+// Only a function expression's hidden receiver needs the exact spelling of
+// string literals. Other type annotations continue to widen them to string.
+fn lower_non_arrow_receiver_type(
+    ty: &TsType,
+    substitution: &HashMap<Symbol, HirType>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    match ty {
+        TsType::TsTypeRef(reference) => {
+            if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                let name: &str = name.sym.as_ref();
+                if reference.type_params.is_none() {
+                    if let Some(concrete) = substitution.get(name) {
+                        return Ok(concrete.clone());
+                    }
+                    if let Some(alias) = generic_interfaces.plain_aliases.get(name) {
+                        if in_progress.iter().any(|active| active == name) {
+                            return Err(format!("receiver type alias `{name}` is (indirectly) self-referential"));
+                        }
+                        in_progress.push(name.to_string());
+                        let result = lower_non_arrow_receiver_type(&alias.type_ann, substitution,
+                            interfaces, generic_interfaces, in_progress);
+                        in_progress.pop();
+                        return result;
+                    }
+                }
+                if let Some(alias) = generic_interfaces.aliases.get(name) {
+                    if in_progress.iter().any(|active| active == name) {
+                        return Err(format!("receiver type alias `{name}` is (indirectly) self-referential"));
+                    }
+                    let parameters = &alias.type_params.as_ref()
+                        .expect("generic alias has type parameters").params;
+                    let arguments = reference.type_params.as_ref()
+                        .map(|arguments| arguments.params.as_slice()).unwrap_or_default();
+                    let required = parameters.iter().take_while(|parameter|
+                        parameter.default.is_none()).count();
+                    if arguments.len() < required || arguments.len() > parameters.len() {
+                        return Err(format!("receiver type alias `{name}` expects {required}..={} type arguments, got {}",
+                            parameters.len(), arguments.len()));
+                    }
+                    // Supplied arguments belong to the caller's type scope:
+                    // Choice<Choice<"closed">> is finite. Only defaults and
+                    // the alias body can recurse into this alias definition.
+                    let supplied = arguments.iter().map(|argument|
+                        lower_non_arrow_receiver_type(argument, substitution, interfaces,
+                            generic_interfaces, in_progress)).collect::<Result<Vec<_>, _>>()?;
+                    in_progress.push(name.to_string());
+                    let result = (|| {
+                        let mut concrete = HashMap::new();
+                        for (index, parameter) in parameters.iter().enumerate() {
+                            let argument = if let Some(argument) = supplied.get(index) {
+                                argument.clone()
+                            } else {
+                                lower_non_arrow_receiver_type(parameter.default.as_ref()
+                                    .expect("arity validation requires default"), &concrete,
+                                    interfaces, generic_interfaces, in_progress)?
+                            };
+                            if let Some(constraint) = &parameter.constraint {
+                                let constraint = resolve_ts_type_with_substitution(constraint,
+                                    &concrete, interfaces, generic_interfaces, in_progress)?;
+                                if !type_satisfies_constraint(&argument, &constraint) {
+                                    return Err(format!("type argument {argument:?} does not satisfy constraint {constraint:?} for `{}` in receiver alias `{name}`",
+                                        parameter.name.sym));
+                                }
+                            }
+                            concrete.insert(parameter.name.sym.to_string(), argument);
+                        }
+                        lower_non_arrow_receiver_type(&alias.type_ann, &concrete, interfaces,
+                            generic_interfaces, in_progress)
+                    })();
+                    in_progress.pop();
+                    return result;
+                }
+            }
+            resolve_ts_type_with_substitution(ty, substitution, interfaces,
+                generic_interfaces, in_progress)
+        }
+        TsType::TsParenthesizedType(parenthesized) => lower_non_arrow_receiver_type(
+            &parenthesized.type_ann, substitution, interfaces, generic_interfaces, in_progress),
+        TsType::TsLitType(literal) => {
+            if let swc_ecma_ast::TsLit::Str(value) = &literal.lit {
+                if let Ok(value) = std::str::from_utf8(value.value.as_wtf8().as_bytes()) {
+                    return Ok(HirType::StrLiteral(value.to_string()));
+                }
+            }
+            lower_ts_type(ty, interfaces, generic_interfaces)
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let mut elements = Vec::new();
+            for member in &union.types {
+                let member = lower_non_arrow_receiver_type(member, substitution, interfaces,
+                    generic_interfaces, in_progress)?;
+                // A referenced alias can itself be a union. Keep this
+                // receiver union flat so its member tag still names a leaf.
+                let leaves = match member {
+                    HirType::Union(leaves) => leaves,
+                    leaf => vec![leaf],
+                };
+                for leaf in leaves {
+                    if !elements.contains(&leaf) {
+                        elements.push(leaf);
+                    }
+                }
+            }
+            if let [single] = elements.as_slice() {
+                return Ok(single.clone());
+            }
+            if elements.len() == 3 && elements.contains(&HirType::Null)
+                && elements.contains(&HirType::Undefined)
+            {
+                if let Some(payload) = elements.iter()
+                    .find(|element| !matches!(element, HirType::Null | HirType::Undefined))
+                {
+                    return Ok(HirType::Nullish(Box::new(payload.clone())));
+                }
+            }
+            if elements.len() == 2 {
+                if let Some(payload) = elements.iter().find(|element| **element != HirType::Undefined)
+                    .filter(|_| elements.contains(&HirType::Undefined))
+                {
+                    return Ok(HirType::Optional(Box::new(payload.clone())));
+                }
+                if let Some(payload) = elements.iter().find(|element| **element != HirType::Null)
+                    .filter(|_| elements.contains(&HirType::Null))
+                {
+                    return Ok(HirType::Nullable(Box::new(payload.clone())));
+                }
+            }
+            Ok(HirType::Union(elements))
+        }
+        _ if substitution.is_empty() => lower_ts_type(ty, interfaces, generic_interfaces),
+        _ => resolve_ts_type_with_substitution(ty, substitution, interfaces,
+            generic_interfaces, in_progress),
+    }
+}
+
 fn lower_ts_type(
     ty: &TsType,
     interfaces: &HashMap<Symbol, HirType>,
@@ -126,6 +311,30 @@ fn lower_ts_type(
                 if elements[1] == HirType::Null {
                     return Ok(HirType::Nullable(Box::new(elements[0].clone())));
                 }
+                // The Promise constructor's resolver may accept either its
+                // result layout or a promise for that same layout. Keep the
+                // result as one member even when it is itself a wrapper,
+                // union, or aggregate that the general union grammar does
+                // not otherwise expose as a leaf.
+                let mixed_value = if matches!(&elements[1], HirType::Promise(inner)
+                    if inner.as_ref() == &elements[0]) {
+                    Some(elements[0].clone())
+                } else if matches!(&elements[0], HirType::Promise(inner)
+                    if inner.as_ref() == &elements[1]) {
+                    Some(elements[1].clone())
+                } else {
+                    None
+                };
+                if let Some(value) = mixed_value {
+                    if value == HirType::Void {
+                        return Ok(HirType::Optional(Box::new(HirType::Promise(
+                            Box::new(HirType::Void),
+                        ))));
+                    }
+                    return Ok(HirType::Union(vec![
+                        value.clone(), HirType::Promise(Box::new(value)),
+                    ]));
+                }
             }
             if elements.len() >= 2
                 && elements.iter().all(|element| {
@@ -135,12 +344,19 @@ fn lower_ts_type(
                             | HirType::I64
                             | HirType::Bool
                             | HirType::Str
+                            | HirType::StrLiteral(_)
                             | HirType::Json
                             | HirType::JsValue
                             | HirType::Array(_)
                             | HirType::Tuple(_)
                             | HirType::Object(_)
+                            | HirType::Promise(_)
+                            | HirType::Optional(_)
+                            | HirType::Nullable(_)
+                            | HirType::Nullish(_)
+                            | HirType::Union(_)
                             | HirType::Function(_, _)
+                            | HirType::CallableFunction(_, _, _, _)
                             | HirType::Undefined
                             | HirType::Null
                     )
@@ -536,6 +752,22 @@ fn lower_ts_type(
                 return Ok(HirType::Array(Box::new(HirType::Str)));
             }
 
+            // Explicit resource management: `Disposable` is `{ [Symbol.dispose](): void }`,
+            // `AsyncDisposable` the same with `[Symbol.asyncDispose](): Promise<void>`.
+            if let (Some(name @ ("Disposable" | "AsyncDisposable")), None) =
+                (ref_name, ty_ref.type_params.as_ref())
+            {
+                let (key, returned) = if name == "Disposable" {
+                    ("dispose", HirType::Void)
+                } else {
+                    ("asyncDispose", HirType::Promise(Box::new(HirType::Void)))
+                };
+                return Ok(HirType::Object(vec![(
+                    well_known_symbol_key(key),
+                    HirType::Function(Vec::new(), Box::new(returned)),
+                )]));
+            }
+
             if matches!(
                 ref_name,
                 Some("Generator" | "IterableIterator" | "AsyncGenerator" | "AsyncIterableIterator")
@@ -582,6 +814,54 @@ fn lower_ts_type(
                     interfaces,
                     generic_interfaces,
                 )?))),
+                // `WeakRef<T>` is modeled as a one-element array holding a
+                // strong reference (see `new WeakRef()` in expression
+                // lowering), so `.deref()` is a plain index-0 read.
+                (Some("WeakRef"), Some(inner)) => Ok(HirType::Array(Box::new(lower_ts_type(
+                    inner,
+                    interfaces,
+                    generic_interfaces,
+                )?))),
+                // Structural iteration annotations, common in real TS.
+                // `IteratorResult<T>`/`Iterator<T>`/`Iterable<T>` resolve
+                // to the object shapes the iteration lowering already
+                // recognizes (`next` returning `{ value, done }`; a
+                // `[Symbol.iterator]` method normalized to
+                // `__thaw_symbol_iterator`), so an object literal
+                // implementing them type-checks and `for...of`/spread work.
+                (Some("IteratorResult"), Some(elem)) => {
+                    let value = lower_ts_type(elem, interfaces, generic_interfaces)?;
+                    Ok(HirType::Object(vec![
+                        ("value".into(), value),
+                        ("done".into(), HirType::Bool),
+                    ]))
+                }
+                (Some("Iterator"), Some(elem)) => {
+                    let value = lower_ts_type(elem, interfaces, generic_interfaces)?;
+                    let result = HirType::Object(vec![
+                        ("value".into(), value),
+                        ("done".into(), HirType::Bool),
+                    ]);
+                    Ok(HirType::Object(vec![(
+                        "next".into(),
+                        HirType::Function(Vec::new(), Box::new(result)),
+                    )]))
+                }
+                (Some("Iterable"), Some(elem)) => {
+                    let value = lower_ts_type(elem, interfaces, generic_interfaces)?;
+                    let result = HirType::Object(vec![
+                        ("value".into(), value),
+                        ("done".into(), HirType::Bool),
+                    ]);
+                    let iterator = HirType::Object(vec![(
+                        "next".into(),
+                        HirType::Function(Vec::new(), Box::new(result)),
+                    )]);
+                    Ok(HirType::Object(vec![(
+                        "__thaw_symbol_iterator".into(),
+                        HirType::Function(Vec::new(), Box::new(iterator)),
+                    )]))
+                }
                 (Some("Readonly"), Some(inner)) => {
                     lower_ts_type(inner, interfaces, generic_interfaces)
                 }
@@ -1094,6 +1374,51 @@ fn resolve_ts_type_with_substitution(
                     Some(substitution),
                     in_progress,
                 );
+            }
+            if !interfaces.contains_key(ref_name) && matches!(ref_name, "Map" | "WeakMap") {
+                let name = ref_name;
+                let [key, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!("{name}<K, V> requires exactly two type arguments"));
+                };
+                let key = resolve_ts_type_with_substitution(key, substitution, interfaces, generic_interfaces, in_progress)?;
+                if name == "WeakMap" {
+                    weak_key_intrinsic_suffix(&key)?;
+                } else {
+                    map_key_intrinsic_suffix(&key)?;
+                }
+                let value = resolve_ts_type_with_substitution(value, substitution, interfaces, generic_interfaces, in_progress)?;
+                return Ok(if name == "WeakMap" {
+                    HirType::WeakMap(Box::new(key), Box::new(value))
+                } else {
+                    HirType::Map(Box::new(key), Box::new(value))
+                });
+            }
+            if !interfaces.contains_key(ref_name) && matches!(ref_name, "Set" | "WeakSet") {
+                let name = ref_name;
+                let [element] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!("{name}<T> requires exactly one type argument"));
+                };
+                let element = resolve_ts_type_with_substitution(element, substitution, interfaces, generic_interfaces, in_progress)?;
+                if name == "WeakSet" {
+                    weak_key_intrinsic_suffix(&element)?;
+                } else {
+                    map_key_intrinsic_suffix(&element)?;
+                }
+                return Ok(if name == "WeakSet" {
+                    HirType::WeakSet(Box::new(element))
+                } else {
+                    HirType::Set(Box::new(element))
+                });
             }
             // TypeScript's built-in legacy-decorator aliases (`lib.es5.d.ts`)
             // have no ambient `.d.ts` of their own in thaw, so a package

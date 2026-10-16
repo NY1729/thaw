@@ -40,6 +40,12 @@ struct ResolvedPackage {
     /// at all -- both are bound purely by an `import *`).
     namespace_self_aliases: std::collections::HashSet<String>,
     type_only_exports: std::collections::HashSet<String>,
+    /// Source-owned support shapes: never public named imports or runtime values.
+    internal_support_classes: std::collections::HashSet<String>,
+    /// Explicit type exports with no corresponding public value export.
+    /// Their class instance signatures remain available, but they do not
+    /// have a constructor, static member, or module value at runtime.
+    type_only_value_names: std::collections::HashSet<String>,
     /// Every `NAME -> { member name -> real flattened function name }`
     /// nested-namespace table this package's own `.d.ts` declares -- see
     /// `thaw_bridge::nested_namespace_members`'s own doc comment. Real
@@ -187,8 +193,28 @@ include!("jit/loop_bodies.rs");
 include!("jit/loop_aliases.rs");
 include!("jit/callables.rs");
 
+fn registry_bundle_js_source_name(package: &str, has_bundle: bool) -> thaw_parser::common::FileName {
+    let kind = if has_bundle { "bundle" } else { "missing bundle" };
+    thaw_parser::common::FileName::Custom(format!("{package} {kind} JavaScript"))
+}
+
+#[allow(dead_code)]
 fn jit_export(
     source: &str,
+    export_name: &str,
+    allow_default: bool,
+    function: &thaw_bridge::DtsFunction,
+) -> Option<JitExport> {
+    jit_export_named(
+        source,
+        &thaw_parser::common::FileName::Custom("input.js".into()),
+        export_name, allow_default, function,
+    )
+}
+
+fn jit_export_named(
+    source: &str,
+    source_name: &thaw_parser::common::FileName,
     export_name: &str,
     allow_default: bool,
     function: &thaw_bridge::DtsFunction,
@@ -278,7 +304,7 @@ fn jit_export(
         return None;
     }
 
-    let module = thaw_parser::parse_javascript(source).ok()?;
+    let module = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?.0;
     let mut module_functions = std::collections::HashMap::new();
     for item in &module.body {
         if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) = item {

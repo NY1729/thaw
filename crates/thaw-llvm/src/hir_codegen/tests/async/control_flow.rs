@@ -101,6 +101,30 @@ fn frame_split_supports_await_inside_while_loop() {
     assert_eq!(compile_and_run(source, "await_while_loop"), "3\n3\n");
 }
 
+#[test]
+fn async_nested_loop_runs_until_first_await_synchronously() {
+    let source = r#"
+        async function update(trace: { value: number }): Promise<void> {
+            while (true) {
+                trace.value = 1;
+                while (true) {
+                    trace.value = 2;
+                    await sleep(1);
+                    break;
+                }
+                break;
+            }
+        }
+
+        function main(): void {
+            const trace: { value: number } = { value: 0 };
+            update(trace);
+            console.log(trace.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_nested_loop_sync_prefix"), "2\n");
+}
+
 /// Baseline coverage for a local declared *inside* an async `while`
 /// loop's body (re-declared every iteration, unlike a local declared
 /// before the loop) and captured by the closure `&&`/`||` desugar into
@@ -461,7 +485,12 @@ fn frame_split_propagates_async_rejection_through_await_chain() {
     let ir = compiler.print_to_string();
     assert!(ir.contains("call i8 @thaw_promise_reject"));
     assert!(ir.contains("propagate_rejection"));
-    assert_eq!(compile_and_run(source, "async_rejection_chain"), "before\n");
+    assert!(ir.contains("@thaw_promise_forward_rejection"), "{ir}");
+    // Node prints "before", reports the unhandled rejection and exits 1.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_chain");
+    assert_eq!(stdout, "before\n");
+    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]
@@ -553,10 +582,11 @@ fn frame_split_rethrows_after_await_in_catch() {
             console.log("main-unreachable");
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "async_catch_rethrow"),
-        "before\noriginal\nrethrowing\n"
-    );
+    // Node reports the unhandled rejection of `main` and exits 1.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_catch_rethrow");
+    assert_eq!(stdout, "before\noriginal\nrethrowing\n");
+    assert!(stderr.contains("Uncaught: wrapped"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]
@@ -722,4 +752,92 @@ fn frame_split_supports_async_if_and_while_inside_try() {
         compile_and_run(source, "async_if_while_in_try"),
         "branch\nloop-error\ncaught\ndone\n"
     );
+}
+
+#[test]
+fn async_catch_rethrow_carries_owned_native_text_provenance() {
+    let source = r#"
+        async function fail(): Promise<void> {
+            await sleep(1);
+            throw new TypeError("native failure");
+        }
+        async function main(): Promise<void> {
+            const error__thaw_exception_native_text = "source-controlled spoof";
+            try {
+                await fail();
+            } catch (error) {
+                console.log(error__thaw_exception_native_text);
+                throw error;
+            }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "async_catch_native_text_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_promise_exception_native_text_copy"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
+    // Current design: the catch copies the rejected Promise's native text into the
+    // frame slot `@@thaw_catch_native_text:error`, and the rethrow settles through the
+    // native-provenance variant of the typed reject ABI.
+    assert!(ir.contains("@@thaw_catch_native_text:"), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_reject_typed_with_native_provenance")), "{ir}");
+    assert!(ir.lines().any(|line| line.trim_start().starts_with("store ptr %caught_promise_native_text, ptr %\"frame_@@thaw_catch_native_text:error")), "{ir}");
+    // The source binding named like the old synthetic suffix must never become
+    // pending-exception provenance.
+    let spoof = ir.lines()
+        .find(|line| line.starts_with('@') && line.contains("c\"source-controlled spoof"))
+        .and_then(|line| line.split_whitespace().next())
+        .expect(&ir);
+    assert!(!ir.lines().any(|line| line.contains(&format!("store ptr {spoof},"))
+        && line.contains("@__thaw_pending_exception_native_text")), "{ir}");
+}
+
+// Compiler transport only: this asserts the companion is copied while the
+// rejected Promise is live and forwarded through the pending/catch ABI.
+#[test]
+fn promise_any_aggregate_metadata_reaches_async_catch_and_rethrow() {
+    let source = r#"
+        async function fail(): Promise<number> { throw 1; }
+        async function main(): Promise<void> {
+            try { await Promise.any([fail(), fail()]); }
+            catch (error) { throw error; }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "promise_any_aggregate_transport_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_promise_exception_aggregate_errors"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
+    assert!(ir.contains("__thaw_pending_exception_aggregate_errors"), "{ir}");
+    assert!(ir.contains("__thaw_exception_aggregate"), "{ir}");
+}
+
+#[test]
+fn promise_catch_direct_rethrow_keeps_native_text_and_aggregate_companion() {
+    let source = r#"
+        async function main(): Promise<void> {
+            await Promise.any([Promise.reject<number>(1)]).catch(error => {
+                try { throw "inner"; } catch (inner) { console.log(inner); }
+                throw error;
+            });
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "promise_catch_aggregate_transport_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("chain_native_text"), "{ir}");
+    assert!(ir.contains("same_rejection_binding"), "{ir}");
+    assert!(ir.contains("rethrow_aggregate"), "{ir}");
+    assert!(ir.contains("@thaw_promise_exception_aggregate_errors"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
 }

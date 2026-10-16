@@ -78,6 +78,7 @@ pub struct DtsGenericFunction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtsClass {
+    /// Qualified declaration and runtime path, e.g. `API.Client`.
     pub name: String,
     pub extends: Option<String>,
     pub constructible: bool,
@@ -90,6 +91,7 @@ pub struct DtsClass {
 pub struct DtsConstructor {
     pub params: Vec<(String, DtsType)>,
     pub required_params: usize,
+    pub rest_param: Option<(String, DtsType)>,
     pub overloaded: bool,
 }
 
@@ -104,7 +106,7 @@ pub struct DtsMethod {
     /// the array type written in TypeScript.
     pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
-    /// Bare class name named by the declared return type, when present.
+    /// Qualified class identity named by the declared return type, when present.
     pub return_instance_class: Option<String>,
     /// For each method parameter, class identities of values delivered to
     /// its callback parameters. `None` means an ordinary non-class value.
@@ -157,8 +159,7 @@ pub enum Classification {
     /// (`thaw_hir::HirExpr::FfiCall`), no QuickJS-NG involved.
     FastPath(Box<FfiSignature>),
     /// At least one parameter or the return type didn't map -- needs the
-    /// QuickJS-NG fallback path (docs/design/bridge.md section 7, not
-    /// implemented yet).
+    /// QuickJS-NG fallback path.
     Fallback { function: String, reason: String },
 }
 

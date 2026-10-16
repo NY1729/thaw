@@ -43,8 +43,21 @@ fn jit_numeric_export(
     Some(format!("expr:{}", tokens(export)?.join(",")))
 }
 
+#[allow(dead_code)]
 fn jit_rejection_reason(
     source: &str,
+    function: &thaw_bridge::DtsFunction,
+) -> String {
+    jit_rejection_reason_named(
+        source,
+        &thaw_parser::common::FileName::Custom("input.js".into()),
+        function,
+    )
+}
+
+fn jit_rejection_reason_named(
+    source: &str,
+    source_name: &thaw_parser::common::FileName,
     function: &thaw_bridge::DtsFunction,
 ) -> String {
     if function.generic.is_some() {
@@ -62,7 +75,7 @@ fn jit_rejection_reason(
     {
         return format!("return value has unsupported JIT type {:?}", function.ret);
     }
-    if thaw_parser::parse_javascript(source).is_err() {
+    if thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).is_err() {
         return "package JavaScript could not be parsed for specialization".into();
     }
     "function body uses an expression, closure, external state, or control flow outside the specialization JIT IR".into()
@@ -164,9 +177,7 @@ fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
         Some(left)
     } else if matches!(left, JitKind::Number | JitKind::Boolean)
         && matches!(right, JitKind::Number | JitKind::Boolean)
-    {
-        Some(JitKind::Boolean)
-    } else if matches!(
+        || matches!(
         (left, right),
         (JitKind::Number, JitKind::String)
             | (JitKind::String, JitKind::Number)
@@ -399,6 +410,18 @@ fn normalize_callable_branches<'a>(
     Some(kind)
 }
 
+fn mark_dictionary_get_presence(operation: &mut [String]) {
+    if let Some(last) = operation.last_mut() {
+        let replacement = match last.as_str() {
+            "dnget" => "dngetoptional",
+            "dbget" => "dbgetoptional",
+            "dsget" => "dsgetoptional",
+            _ => return,
+        };
+        *last = replacement.into();
+    }
+}
+
 fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     if operation.iter().any(|token| {
         matches!(
@@ -440,6 +463,12 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     matches!(
         token,
         "at"
+            | "dnget"
+            | "dbget"
+            | "dsget"
+            | "dngetoptional"
+            | "dbgetoptional"
+            | "dsgetoptional"
             | "codepointat"
             | "rnat"
             | "rbat"

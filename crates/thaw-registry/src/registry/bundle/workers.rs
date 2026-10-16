@@ -1,7 +1,21 @@
+#[cfg(test)]
 fn rewrite_static_worker_urls(
     source: &str,
     module_path: &Path,
-    package_name: &str,
+    package_instance: &str,
+    package_dir: &Path,
+) -> Result<String, String> {
+    rewrite_static_worker_urls_named(
+        source, module_path, thaw_parser::common::FileName::Real(module_path.to_path_buf()),
+        package_instance, package_dir,
+    )
+}
+
+fn rewrite_static_worker_urls_named(
+    source: &str,
+    module_path: &Path,
+    source_name: thaw_parser::common::FileName,
+    package_instance: &str,
     package_dir: &Path,
 ) -> Result<String, String> {
     use std::collections::{BTreeMap, BTreeSet};
@@ -142,6 +156,20 @@ fn rewrite_static_worker_urls(
         true
     }
 
+    fn normalize_worker_relative_path(path: &str) -> String {
+        let mut parts = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." if parts.last().is_some_and(|previous| *previous != "..") => {
+                    parts.pop();
+                }
+                _ => parts.push(part),
+            }
+        }
+        parts.join("/")
+    }
+
     fn static_worker_path(
         expression: &Expr,
         constants: &BTreeMap<String, String>,
@@ -205,8 +233,14 @@ fn rewrite_static_worker_urls(
                         path_namespaces,
                     )?);
                 }
-                let normalized = normalize_path_string(&parts.join("/"));
-                (!normalized.is_empty()).then(|| format!("./{normalized}"))
+                let normalized = normalize_worker_relative_path(&parts.join("/"));
+                if normalized.is_empty() {
+                    None
+                } else if normalized == ".." || normalized.starts_with("../") {
+                    Some(normalized)
+                } else {
+                    Some(format!("./{normalized}"))
+                }
             }
             _ => None,
         }
@@ -325,7 +359,7 @@ fn rewrite_static_worker_urls(
         }
     }
 
-    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map_named(source, source_name) else {
         return Ok(source.to_string());
     };
     let mut bindings = WorkerBindings::default();
@@ -374,13 +408,6 @@ fn rewrite_static_worker_urls(
             }
         }
         let worker_path = directory.join(&relative);
-        let worker_source = fs::read_to_string(&worker_path).map_err(|error| {
-            format!(
-                "failed to read Worker source `{}` referenced by `{}`: {error}",
-                worker_path.display(),
-                module_path.display()
-            )
-        })?;
         let worker_relative = worker_path.strip_prefix(package_dir).map_err(|_| {
             format!(
                 "Worker source `{}` is outside package `{}`",
@@ -388,20 +415,61 @@ fn rewrite_static_worker_urls(
                 package_dir.display()
             )
         })?;
-        let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
-        let worker_key = format!("{package_name}/{worker_relative}");
+        let worker_relative = normalize_worker_relative_path(&worker_relative.to_string_lossy());
+        if worker_relative == ".." || worker_relative.starts_with("../") {
+            return Err(format!(
+                "Worker source `{}` is outside package `{}`",
+                worker_path.display(),
+                package_dir.display()
+            ));
+        }
+        let worker_source = fs::read_to_string(&worker_path).map_err(|error| {
+            format!(
+                "failed to read Worker source `{}` referenced by `{}`: {error}",
+                worker_path.display(),
+                module_path.display()
+            )
+        })?;
+        let worker_key = format!("{package_instance}/{worker_relative}");
+        let worker_source_name = thaw_parser::common::FileName::Real(worker_path.clone());
+        let origin_parameter = esm_origin_parameter_named(&worker_source, &worker_source_name);
         let worker_bootstrap = format!(
-            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nvar __thaw_require = require;\n",
-            js_string_literal(&worker_key)
+            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({0});\nvar __thaw_worker_import = globalThis.__thaw_bundle_create_import({0});\nvar __thaw_worker_import_async = globalThis.__thaw_bundle_create_import_async({0}, globalThis.__thaw_worker_module);\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nrequire.addon = __thaw_worker_require.addon;\nrequire.resolve = __thaw_worker_require.resolve;\nvar __thaw_require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_import(name); }};\nvar requireAsync = __thaw_worker_import_async;\n// CommonJS worker scripts see their own file as `__filename`/`__dirname`, as module factories do.\nglobalThis.__filename = {1};\nglobalThis.__dirname = {2};\n",
+            js_string_literal(&worker_key),
+            js_string_literal(&format!("/thaw_modules/{worker_key}")),
+            js_string_literal(&format!(
+                "/thaw_modules/{}",
+                worker_key.rsplit_once('/').map_or("", |(directory, _)| directory)
+            ))
         );
+        let worker_bootstrap = if let Some(origin) = origin_parameter {
+            format!("{worker_bootstrap}var {origin} = globalThis.__thaw_bundle_worker_origin({});\n", js_string_literal(&worker_key))
+        } else { worker_bootstrap };
         let worker_source =
-            rewrite_esm_to_commonjs_mode(&worker_source, false).unwrap_or(worker_source);
+            rewrite_esm_to_commonjs_mode_named(&worker_source, false, &worker_source_name).unwrap_or(worker_source);
+        // These bindings share the Worker source's function scope after the
+        // QuickJS host wrapper. Choose names absent from its original text.
+        let synthetic = (0..).find(|index| {
+            !worker_source.contains(&format!("__thaw_finish_worker_main_{index}"))
+                && !worker_source.contains(&format!("__thaw_worker_main_error_{index}"))
+        }).expect("unused Worker internal names exist");
+        let finish = format!("__thaw_finish_worker_main_{synthetic}");
+        let error = format!("__thaw_worker_main_error_{synthetic}");
+        let worker_bootstrap = format!(
+            "{worker_bootstrap}var {finish} = globalThis.__thaw_bundle_register_worker_main({}, module);\ndelete globalThis.__thaw_bundle_worker_origin;\ndelete globalThis.__thaw_bundle_register_worker_main;\n",
+            js_string_literal(&worker_key),
+        );
+        // The host already executes this text inside one function. A second
+        // function would alter lexical bindings and reject top-level await.
+        let worker_source = format!(
+            "try {{\n{worker_source}\n{finish}(true); }} catch ({error}) {{ {finish}(false, {error}); throw {error}; }}\n"
+        );
         let encoded = worker_bootstrap
             .bytes()
             .chain(worker_source.bytes())
             .map(|byte| format!("%{byte:02X}"))
             .collect::<String>();
-        let replacement = serde_json::to_string(&format!("data:text/javascript,{encoded}"))
+        let encoded_tail = serde_json::to_string(&format!("%0A{encoded}"))
             .expect("Worker data URL is serializable");
         let lo = source_map
             .lookup_byte_offset(thaw_parser::common::BytePos(lo))
@@ -415,7 +483,13 @@ fn rewrite_static_worker_urls(
             continue;
         }
         output.push_str(&source[cursor..lo]);
-        output.push_str(&replacement);
+        // The URL carries this package instance's complete resolver snapshot.
+        // A saved URL must not use a later bundle's shared Worker helpers.
+        // ponytail: Each URL duplicates the bundle source; use a registry only if
+        // measured Worker URL size or memory becomes a problem.
+        output.push_str("(\"data:text/javascript;thaw-bundle,\" + encodeURIComponent(\"globalThis.__thaw_worker_bundle_source = \" + JSON.stringify(__thaw_worker_bundle_source) + \";\\n\" + __thaw_worker_bundle_source) + ");
+        output.push_str(&encoded_tail);
+        output.push(')');
         cursor = hi;
         if !worker_requires.contains(&relative) {
             worker_requires.push(relative);

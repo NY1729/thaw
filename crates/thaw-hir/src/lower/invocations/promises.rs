@@ -165,7 +165,7 @@ impl<'a> FnLowerer<'a> {
         let reject_name = format!("__thaw_with_resolvers_reject_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(result_name.clone(), result_type.clone());
-        self.scope.insert(promise_name.clone(), promise_type.clone());
+        let _ = &promise_name;
 
         let assign = |field: &str, value: &str| {
             HirStmt::Expr(HirExpr::PropAssign(
@@ -203,12 +203,14 @@ impl<'a> FnLowerer<'a> {
                 result_type.clone(),
                 HirExpr::ObjectAlloc(result_type.clone()),
             ),
-            HirStmt::Let(
-                promise_name.clone(),
-                promise_type,
-                HirExpr::PromiseNew(Box::new(executor), resolved, false, false),
-            ),
-            assign("promise", &promise_name),
+            // The object's `promise` field takes ownership of the new Promise
+            // directly: a local would release it again when this block exits.
+            HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(HirExpr::Var(result_name.clone())),
+                result_type.clone(),
+                "promise".into(),
+                Box::new(HirExpr::PromiseNew(Box::new(executor), resolved, false, false)),
+            )),
             HirStmt::Return(Some(HirExpr::Var(result_name))),
         ]);
         Ok(HirExpr::Call(
@@ -251,8 +253,9 @@ impl<'a> FnLowerer<'a> {
                             );
                         };
                         self.validate_promise_callback_value(callback, &[], None)?;
+                        let callback = self.normalize_promise_callback(callback.clone(), &[])?;
                         bindings.insert(0, (source_name.clone(), source_type, source));
-                        (HirExpr::Var(source_name), callback.clone(), bindings)
+                        (HirExpr::Var(source_name), callback, bindings)
                     } else {
                         (
                             source,
@@ -276,8 +279,9 @@ impl<'a> FnLowerer<'a> {
                     && call.args.len() == 2
                     && call.args.iter().all(|argument| argument.spread.is_none())
                 {
-                    // `p.then(onFulfilled, onRejected)` is exactly
-                    // `p.then(onFulfilled).catch(onRejected)` in behavior.
+                    // Both handlers observe the original settlement. A
+                    // fulfillment callback's own failure must not enter the
+                    // rejection callback supplied as the second argument.
                     let source = self.lower_expr(&member.obj)?;
                     let HirType::Promise(input) = self.infer_expr_type(&source)? else {
                         return Err("`.then` requires a Promise receiver".into());
@@ -292,13 +296,32 @@ impl<'a> FnLowerer<'a> {
                         call.args[0].expr.as_ref(),
                         Expr::Ident(ident) if ident.sym == *"undefined"
                     ) || matches!(call.args[0].expr.as_ref(), Expr::Lit(Lit::Null(_)));
+                    // A callback that always throws has no result of its own;
+                    // it takes the other handler's result type.
+                    let fulfilled_throws = !omitted_fulfilled
+                        && ast_callback_always_throws(&call.args[0].expr);
+                    let rejected_throws =
+                        ast_callback_always_throws(&call.args[1].expr);
+                    let mut early_rejected = None;
+                    let mut fulfilled_expected = None;
+                    if fulfilled_throws && !rejected_throws {
+                        let on_rejected =
+                            self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
+                        if let HirType::Function(_, rejected_output) = self.infer_expr_type(&on_rejected)? {
+                            fulfilled_expected = Some(match rejected_output.as_ref() {
+                                HirType::Promise(inner) => inner.as_ref().clone(),
+                                other => other.clone(),
+                            });
+                        }
+                        early_rejected = Some(on_rejected);
+                    }
                     let fulfilled = if omitted_fulfilled {
                         None
                     } else {
                         let callback = self.lower_promise_callback(
                             &call.args[0].expr,
                             &fulfilled_params,
-                            None,
+                            fulfilled_expected.as_ref(),
                         )?;
                         let HirType::Function(_, callback_output) =
                             self.infer_expr_type(&callback)?
@@ -314,8 +337,14 @@ impl<'a> FnLowerer<'a> {
                     let output = fulfilled
                         .as_ref()
                         .map_or_else(|| input.clone(), |(_, output, _)| output.clone());
-                    let on_rejected =
-                        self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
+                    let rejected_expected = (rejected_throws && fulfilled.is_some()).then(|| output.clone());
+                    let on_rejected = match early_rejected {
+                        Some(done) => done,
+                        None => self.lower_promise_rejection_callback(
+                            &call.args[1].expr,
+                            rejected_expected.as_ref(),
+                        )?,
+                    };
                     let HirType::Function(_, rejected_output) =
                         self.infer_expr_type(&on_rejected)?
                     else {
@@ -330,23 +359,14 @@ impl<'a> FnLowerer<'a> {
                             "`.then` rejection callback resolves to {rejected_output:?}, expected {output:?}"
                         ));
                     }
-                    let fulfilled = match fulfilled {
-                        Some((callback, output, flatten)) => HirExpr::PromiseThen(
-                            Box::new(source),
-                            Box::new(callback),
-                            input,
-                            output,
-                            false,
-                            flatten,
-                        ),
-                        None => source,
-                    };
-                    return Ok(HirExpr::PromiseThen(
-                        Box::new(fulfilled),
+                    let flatten_fulfilled = fulfilled.as_ref().is_some_and(|(_, _, flatten)| *flatten);
+                    return Ok(HirExpr::PromiseThenBoth(
+                        Box::new(source),
+                        fulfilled.map(|(callback, _, _)| Box::new(callback)),
                         Box::new(on_rejected),
-                        output.clone(),
+                        input,
                         output,
-                        true,
+                        flatten_fulfilled,
                         flatten_rejected,
                     ));
                 }
@@ -384,13 +404,16 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         self.validate_promise_callback_value(callback, &callback_params, None)?;
+                        let callback = self.normalize_promise_callback(callback.clone(), &callback_params)?;
                         bindings.insert(0, (source_name.clone(), source_type, source));
-                        (HirExpr::Var(source_name), callback.clone(), bindings)
+                        (HirExpr::Var(source_name), callback, bindings)
                     } else {
                         (
                             source,
                             if on_rejected {
-                                self.lower_promise_rejection_callback(&callback.expr, None)?
+                                let expected = ast_callback_always_throws(&callback.expr)
+                                    .then(|| input.as_ref().clone());
+                                self.lower_promise_rejection_callback(&callback.expr, expected.as_ref())?
                             } else {
                                 self.lower_promise_callback(
                                     &callback.expr,
@@ -485,6 +508,64 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// `await x` where `x` is `Json`/`any`: a value with a callable `then`
+    /// (a user-written thenable) is assimilated through QuickJS's own
+    /// `Promise.resolve` -- same settle-at-the-boundary path as
+    /// `try_dynamic_promise_combinator`; any other value is returned as is.
+    fn lower_await_json_thenable(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let name = format!("__thaw_await_json_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Json);
+        let ident = || Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.as_str().into(), swc_common::DUMMY_SP));
+        let str_lit = |text: &str| Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+            span: swc_common::DUMMY_SP, value: text.into(), raw: None,
+        }));
+        let typeof_of = |arg: Expr| Expr::Unary(swc_ecma_ast::UnaryExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::UnaryOp::TypeOf, arg: Box::new(arg),
+        });
+        let strictly = |left: Expr, right: Expr| Expr::Bin(swc_ecma_ast::BinExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::BinaryOp::EqEqEq,
+            left: Box::new(left), right: Box::new(right),
+        });
+        let then_member = Expr::Member(swc_ecma_ast::MemberExpr {
+            span: swc_common::DUMMY_SP,
+            obj: Box::new(ident()),
+            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("then".into(), swc_common::DUMMY_SP)),
+        });
+        let is_object = strictly(typeof_of(ident()), str_lit("object"));
+        let not_null = Expr::Bin(swc_ecma_ast::BinExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::BinaryOp::NotEqEq,
+            left: Box::new(ident()),
+            right: Box::new(Expr::Lit(Lit::Null(swc_ecma_ast::Null { span: swc_common::DUMMY_SP }))),
+        });
+        let has_then = strictly(typeof_of(then_member), str_lit("function"));
+        let and = |left: Expr, right: Expr| Expr::Bin(swc_ecma_ast::BinExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::BinaryOp::LogicalAnd,
+            left: Box::new(left), right: Box::new(right),
+        });
+        let test = self.lower_expr(&and(and(is_object, not_null), has_then))?;
+        let argument = self.coerce_to_declared(&HirType::Json, HirExpr::Var(name.clone()))?;
+        let args = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![argument]))?;
+        let resolved = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                    vec![HirExpr::Lit(HirLit::Str("Promise".to_string()))],
+                ),
+                HirExpr::Lit(HirLit::Str("resolve".to_string())),
+                args,
+            ],
+        );
+        let result = HirExpr::Conditional(
+            Box::new(test),
+            Box::new(resolved),
+            Box::new(HirExpr::Await(Box::new(HirExpr::Var(name.clone())))),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, HirType::Json, value)])
+    }
+
     fn lower_promise_static_call(
         &mut self,
         callee_name: &str,
@@ -530,6 +611,18 @@ impl<'a> FnLowerer<'a> {
                 promises.push(value);
                 resolved_types.push(resolved);
             }
+            let mut bindings = Vec::new();
+            let promises = promises
+                .into_iter()
+                .map(|value| {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_promise_operand_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, value));
+                    Ok(HirExpr::Var(name))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let mut field_types = Vec::new();
             let mut settled_slots: Option<Vec<HirType>> = None;
             let (joined, joined_type) = if all_keyed {
@@ -622,14 +715,17 @@ impl<'a> FnLowerer<'a> {
                 output_type.clone(),
                 Box::new(body),
             );
-            return Ok(HirExpr::PromiseThen(
-                Box::new(joined),
-                Box::new(callback),
-                joined_type,
-                output_type,
-                false,
-                false,
-            ));
+            return self.wrap_call_argument_bindings(
+                HirExpr::PromiseThen(
+                    Box::new(joined),
+                    Box::new(callback),
+                    joined_type,
+                    output_type,
+                    false,
+                    false,
+                ),
+                &bindings,
+            );
         }
 
         if callee_name == "Promise.all" {
@@ -693,11 +789,25 @@ impl<'a> FnLowerer<'a> {
                     Ok(value)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            let mut bindings = Vec::new();
+            let promises = promises
+                .into_iter()
+                .map(|value| {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_promise_operand_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, value));
+                    Ok(HirExpr::Var(name))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let first = element_types.first().cloned().unwrap_or(HirType::F64);
-            if element_types.iter().all(|element| element == &first) {
-                return Ok(HirExpr::PromiseAll(promises, first));
-            }
-            return Ok(HirExpr::PromiseAllTuple(promises, element_types));
+            let result = if element_types.iter().all(|element| element == &first) {
+                HirExpr::PromiseAll(promises, first)
+            } else {
+                HirExpr::PromiseAllTuple(promises, element_types)
+            };
+            return self.wrap_call_argument_bindings(result, &bindings);
         }
 
         if callee_name == "Promise.allSettled" {
@@ -718,7 +828,7 @@ impl<'a> FnLowerer<'a> {
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
                 let values = self.lower_expr(&arg.expr)?;
-                return self.lower_spread_promise_combinator(values, "allSettled");
+                return self.lower_all_settled_array_value(values);
             };
             if array
                 .elems
@@ -727,12 +837,37 @@ impl<'a> FnLowerer<'a> {
                 .any(|element| element.spread.is_some())
             {
                 let values = self.lower_expr(&arg.expr)?;
-                return self.lower_spread_promise_combinator(values, "allSettled");
+                return self.lower_all_settled_array_value(values);
             }
             if let Some(dynamic) =
                 self.try_dynamic_promise_combinator("allSettled", &array.elems)?
             {
                 return Ok(dynamic);
+            }
+            if !array.elems.is_empty() && array.elems.iter().all(Option::is_some) {
+                let mut inputs = Vec::with_capacity(array.elems.len());
+                let mut keep_native_record = false;
+                for element in array.elems.iter().flatten() {
+                    let probe = self.lower_expr(&element.expr)?;
+                    let probe_type = self.infer_expr_type(&probe)?;
+                    // ponytail: a discriminated-union value cannot be read back from the
+                    // Json entry (Json -> union decoding is not reliable), so such
+                    // inputs keep the typed native record below.
+                    keep_native_record |= matches!(&probe_type,
+                        HirType::Promise(inner) if matches!(inner.as_ref(), HirType::Union(_)));
+                    let is_async_call = matches!(&probe, HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Var(name)
+                            if self.signatures.get(name).is_some_and(|signature| signature.is_async)));
+                    let void = is_untyped_promise_reject(&element.expr)
+                        || matches!(&probe_type, HirType::Promise(inner) if **inner == HirType::Void);
+                    // A plain value settles as fulfilled; wrap it so the wrapper awaits a Promise.
+                    let plain = !matches!(probe_type, HirType::Promise(_)) && !is_async_call;
+                    let input = element.expr.as_ref().clone();
+                    inputs.push((if plain { settled_ast::promise_resolve(input) } else { input }, void));
+                }
+                if !keep_native_record {
+                    return self.lower_expr(&settled_ast::settle_all_literal(inputs));
+                }
             }
             let mut element_type = None;
             let promises = array
@@ -779,10 +914,22 @@ impl<'a> FnLowerer<'a> {
                     Ok(value)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            return Ok(HirExpr::PromiseAllSettled(
-                promises,
-                element_type.unwrap_or(HirType::F64),
-            ));
+            let mut bindings = Vec::new();
+            let promises = promises
+                .into_iter()
+                .map(|value| {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_promise_operand_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, value));
+                    Ok(HirExpr::Var(name))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return self.wrap_call_argument_bindings(
+                HirExpr::PromiseAllSettled(promises, element_type.unwrap_or(HirType::F64)),
+                &bindings,
+            );
         }
 
         if callee_name == "Promise.race" {
@@ -937,5 +1084,226 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         unreachable!("promise static dispatch was checked before lowering")
+    }
+}
+
+impl<'a> FnLowerer<'a> {
+    /// `Promise.allSettled(values)` for an already lowered array value: a typed
+    /// array settles through per-input wrappers, anything dynamic keeps the
+    /// runtime combinator.
+    fn lower_all_settled_array_value(&mut self, values: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&values)?;
+        let union_values = matches!(&ty, HirType::Array(element)
+            if matches!(element.as_ref(), HirType::Promise(inner) if matches!(inner.as_ref(), HirType::Union(_))));
+        if !matches!(ty, HirType::Array(_)) || union_values {
+            return self.lower_spread_promise_combinator(values, "allSettled");
+        }
+        let name = format!("__thaw_settle_inputs_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let void = matches!(&ty, HirType::Array(element)
+            if matches!(element.as_ref(), HirType::Promise(inner) if **inner == HirType::Void));
+        let resolve = matches!(&ty, HirType::Array(element)
+            if !matches!(element.as_ref(), HirType::Promise(_)));
+        let rewritten = settled_ast::settle_all_mapped(Expr::Ident(
+            swc_ecma_ast::Ident::new_no_ctxt(name.clone().into(), swc_common::DUMMY_SP),
+        ), void, resolve);
+        let result = self.lower_expr(&rewritten)?;
+        self.wrap_call_argument_bindings(result, &[(name, ty, values)])
+    }
+}
+
+// `Promise.allSettled` is lowered as `Promise.all` over one async settle
+// wrapper per input, so every entry has the per-status shape of Node
+// (`{status, value}` / `{status, reason}`) and `reason` is the caught value
+// itself instead of its native text encoding. The wrapper is built as a
+// TypeScript AST and lowered like user code:
+//
+//   (async (): Promise<any> => {
+//     try { const value = await INPUT; return { status: 'fulfilled', value }; }
+//     catch (e: any) { const r: any = e; return { status: 'rejected', reason: r }; }
+//   })()
+mod settled_ast {
+    use swc_common::{SyntaxContext, DUMMY_SP};
+    use swc_ecma_ast::*;
+
+    fn ident(name: &str) -> Ident {
+        Ident::new_no_ctxt(name.into(), DUMMY_SP)
+    }
+
+    fn any_ann() -> Box<TsTypeAnn> {
+        Box::new(TsTypeAnn {
+            span: DUMMY_SP,
+            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                span: DUMMY_SP,
+                kind: TsKeywordTypeKind::TsAnyKeyword,
+            })),
+        })
+    }
+
+    fn binding(name: &str, any: bool) -> Pat {
+        Pat::Ident(BindingIdent {
+            id: ident(name),
+            type_ann: any.then(any_ann),
+        })
+    }
+
+    fn const_decl(name: &str, any: bool, init: Expr) -> Stmt {
+        Stmt::Decl(Decl::Var(Box::new(VarDecl {
+            span: DUMMY_SP,
+            ctxt: SyntaxContext::empty(),
+            kind: VarDeclKind::Const,
+            declare: false,
+            decls: vec![VarDeclarator {
+                span: DUMMY_SP,
+                name: binding(name, any),
+                init: Some(Box::new(init)),
+                definite: false,
+            }],
+        })))
+    }
+
+    fn key_value(key: &str, value: Expr) -> PropOrSpread {
+        PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+            key: PropName::Ident(IdentName::new(key.into(), DUMMY_SP)),
+            value: Box::new(value),
+        })))
+    }
+
+    fn status(text: &str) -> PropOrSpread {
+        key_value(
+            "status",
+            Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: text.into(), raw: None })),
+        )
+    }
+
+    fn returned(props: Vec<PropOrSpread>) -> Stmt {
+        Stmt::Return(ReturnStmt {
+            span: DUMMY_SP,
+            arg: Some(Box::new(Expr::Object(ObjectLit { span: DUMMY_SP, props }))),
+        })
+    }
+
+    fn block(stmts: Vec<Stmt>) -> BlockStmt {
+        BlockStmt { span: DUMMY_SP, ctxt: SyntaxContext::empty(), stmts }
+    }
+
+    fn promise_any() -> Box<TsTypeAnn> {
+        Box::new(TsTypeAnn {
+            span: DUMMY_SP,
+            type_ann: Box::new(TsType::TsTypeRef(TsTypeRef {
+                span: DUMMY_SP,
+                type_name: TsEntityName::Ident(ident("Promise")),
+                type_params: Some(Box::new(TsTypeParamInstantiation {
+                    span: DUMMY_SP,
+                    params: vec![any_ann().type_ann],
+                })),
+            })),
+        })
+    }
+
+    /// The async settle wrapper over `input`; `params` are the arrow's own
+    /// parameters (empty for an immediately invoked wrapper).
+    fn settle_arrow(input: Expr, params: Vec<Pat>, void: bool) -> ArrowExpr {
+        let await_input = Expr::Await(AwaitExpr { span: DUMMY_SP, arg: Box::new(input) });
+        let value = Expr::Ident(ident("value"));
+        // A void input has no value to bind: it settles with `value: undefined`.
+        let fulfilled = if void {
+            vec![
+                Stmt::Expr(ExprStmt { span: DUMMY_SP, expr: Box::new(await_input) }),
+                returned(vec![
+                    status("fulfilled"),
+                    key_value("value", Expr::Ident(ident("undefined"))),
+                ]),
+            ]
+        } else {
+            vec![
+                const_decl("value", false, await_input),
+                returned(vec![status("fulfilled"), key_value("value", value)]),
+            ]
+        };
+        let try_stmt = Stmt::Try(Box::new(TryStmt {
+            span: DUMMY_SP,
+            block: block(fulfilled),
+            handler: Some(CatchClause {
+                span: DUMMY_SP,
+                param: Some(binding("e", true)),
+                body: block(vec![
+                    const_decl("r", true, Expr::Ident(ident("e"))),
+                    returned(vec![
+                        status("rejected"),
+                        key_value("reason", Expr::Ident(ident("r"))),
+                    ]),
+                ]),
+            }),
+            finalizer: None,
+        }));
+        ArrowExpr {
+            span: DUMMY_SP,
+            ctxt: SyntaxContext::empty(),
+            params,
+            body: Box::new(ArrowFunctionBody::FunctionBody(FunctionBody {
+                span: DUMMY_SP,
+                stmts: vec![try_stmt],
+            })),
+            is_async: true,
+            is_generator: false,
+            type_params: None,
+            return_type: Some(promise_any()),
+        }
+    }
+
+    fn call(callee: Expr, args: Vec<Expr>) -> Expr {
+        Expr::Call(CallExpr {
+            span: DUMMY_SP,
+            ctxt: SyntaxContext::empty(),
+            callee: Callee::Expr(Box::new(callee)),
+            args: args
+                .into_iter()
+                .map(|expr| ExprOrSpread { spread: None, expr: Box::new(expr) })
+                .collect(),
+            type_args: None,
+        })
+    }
+
+    fn member(object: Expr, property: &str) -> Expr {
+        Expr::Member(MemberExpr {
+            span: DUMMY_SP,
+            obj: Box::new(object),
+            prop: MemberProp::Ident(IdentName::new(property.into(), DUMMY_SP)),
+        })
+    }
+
+    /// `(async () => settle(INPUT))()`
+    pub(super) fn settle_now(input: Expr, void: bool) -> Expr {
+        let arrow = settle_arrow(input, Vec::new(), void);
+        call(Expr::Paren(ParenExpr { span: DUMMY_SP, expr: Box::new(Expr::Arrow(arrow)) }), Vec::new())
+    }
+
+    /// `Promise.resolve(INPUT)`: a plain value settles as fulfilled.
+    pub(super) fn promise_resolve(input: Expr) -> Expr {
+        call(member(Expr::Ident(ident("Promise")), "resolve"), vec![input])
+    }
+
+    /// `Promise.all(ARRAY.map(async (p): Promise<any> => settle(p)))`
+    pub(super) fn settle_all_mapped(array: Expr, void: bool, resolve: bool) -> Expr {
+        let parameter = binding("__thaw_settle_input", false);
+        let input = Expr::Ident(ident("__thaw_settle_input"));
+        let input = if resolve { promise_resolve(input) } else { input };
+        let arrow = settle_arrow(input, vec![parameter], void);
+        let mapped = call(member(array, "map"), vec![Expr::Arrow(arrow)]);
+        call(member(Expr::Ident(ident("Promise")), "all"), vec![mapped])
+    }
+
+    /// `Promise.all([settle(INPUT), ...])`
+    pub(super) fn settle_all_literal(inputs: Vec<(Expr, bool)>) -> Expr {
+        let elems = inputs
+            .into_iter()
+            .map(|(input, void)| Some(ExprOrSpread { spread: None, expr: Box::new(settle_now(input, void)) }))
+            .collect();
+        call(
+            member(Expr::Ident(ident("Promise")), "all"),
+            vec![Expr::Array(ArrayLit { span: DUMMY_SP, elems })],
+        )
     }
 }

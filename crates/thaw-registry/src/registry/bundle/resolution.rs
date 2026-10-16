@@ -17,7 +17,7 @@ fn split_bare_spec(spec: &str) -> (&str, Option<&str>) {
     }
 }
 /// Finds the real directory a bare dependency name resolves to, given
-/// the directory of the package doing the requiring -- Node's actual
+/// the directory of the file doing the requiring -- Node's actual
 /// `node_modules` resolution walks up from the requiring module's own
 /// directory, checking `<ancestor>/node_modules/<dep_name>` at every
 /// level, not just the flat top-level `node_modules_dir`. npm only
@@ -27,20 +27,20 @@ fn split_bare_spec(spec: &str) -> (&str, Option<&str>) {
 /// `entities@^7`, but something else in the tree pins `entities@4`,
 /// which wins the top-level slot) leaves the conflicting version nested
 /// under the dependent's own `node_modules` instead, exactly like a real
-/// `npm install` would. Checking `requiring_pkg_dir`'s own ancestors
+/// `npm install` would. Checking `caller_dir`'s own ancestors
 /// first (before falling back to `node_modules_dir`) reproduces that
-/// real algorithm; `node_modules_dir` itself is `requiring_pkg_dir`'s
+/// real algorithm; `node_modules_dir` itself is `caller_dir`'s
 /// own eventual ancestor when nothing more specific shadows it (a plain
 /// top-level dependency, the overwhelmingly common case), so this is a
 /// pure generalization, not a behavior change for anything that already
 /// worked.
 fn resolve_dependency_dir(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     dep_name: &str,
 ) -> PathBuf {
     let project_root = node_modules_dir.parent().unwrap_or(node_modules_dir);
-    for ancestor in requiring_pkg_dir.ancestors() {
+    for ancestor in caller_dir.ancestors() {
         let candidate = ancestor.join("node_modules").join(dep_name);
         if read_manifest(&candidate).is_ok() {
             return candidate;
@@ -53,7 +53,7 @@ fn resolve_dependency_dir(
 }
 
 /// Resolves a bare require spec to the file it actually points to,
-/// searching `requiring_pkg_dir`'s own nested `node_modules` before
+/// searching the calling file's nested `node_modules` before
 /// falling back to the flat `node_modules_dir` (see
 /// `resolve_dependency_dir`). With no subpath, that's the target
 /// package's own `main` field (or the `index.js` default); with a "deep
@@ -68,12 +68,12 @@ fn resolve_dependency_dir(
 /// report, same as any other unresolvable require.
 fn resolve_bare_require(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     spec: &str,
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     resolve_bare_specifier(
         node_modules_dir,
-        requiring_pkg_dir,
+        caller_dir,
         spec,
         &["require", "node", "default"],
     )
@@ -81,12 +81,12 @@ fn resolve_bare_require(
 
 fn resolve_bare_import(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     spec: &str,
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     resolve_bare_specifier(
         node_modules_dir,
-        requiring_pkg_dir,
+        caller_dir,
         spec,
         &["import", "node", "default"],
     )
@@ -94,23 +94,35 @@ fn resolve_bare_import(
 
 fn resolve_bare_specifier(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     spec: &str,
     conditions: &[&str],
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     let (dep_name, subpath) = split_bare_spec(spec);
-    let dep_dir = resolve_dependency_dir(node_modules_dir, requiring_pkg_dir, dep_name);
+    let dep_dir = resolve_dependency_dir(node_modules_dir, caller_dir, dep_name);
     let target = match subpath {
-        Some(sub) => read_manifest(&dep_dir)
-            .ok()
-            .and_then(|manifest| package_subpath_runtime_target(&manifest, sub, conditions))
-            .unwrap_or_else(|| sub.to_string()),
+        Some(sub) => {
+            // A deep import into a directory without its own package.json
+            // (e.g. `node_modules/.generated/client/default`) is a plain
+            // path under node_modules, same as Node.
+            let manifest = read_manifest(&dep_dir).unwrap_or(serde_json::Value::Null);
+            if manifest.get("exports").is_some() {
+                package_subpath_runtime_target(&manifest, sub, conditions)?
+            } else {
+                sub.to_string()
+            }
+        }
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            package_export_target(&manifest, None, conditions)
-                .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
-                .unwrap_or("index.js")
-                .to_string()
+            if manifest.get("exports").is_some() {
+                package_export_target(&manifest, None, conditions)?.to_string()
+            } else {
+                manifest
+                    .get("main")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("index.js")
+                    .to_string()
+            }
         }
     };
     let (dep_relative, dep_abs) = resolve_module_path(&dep_dir, &target).ok()?;
@@ -122,45 +134,69 @@ fn package_subpath_runtime_target(
     subpath: &str,
     conditions: &[&str],
 ) -> Option<String> {
-    if let Some(target) = package_export_target(manifest, Some(subpath), conditions) {
-        return Some(target.to_string());
-    }
     let exports = manifest.get("exports")?.as_object()?;
-    for (key, value) in exports {
-        let Some(pattern) = key.strip_prefix("./") else {
-            continue;
-        };
-        let Some(capture) = wildcard_capture(pattern, subpath) else {
-            continue;
-        };
-        if let Some(target) = select_export_condition(value, conditions) {
-            return Some(target.replace('*', capture));
-        }
-    }
-    None
+    let (value, capture) = matched_package_subpath_export(exports, subpath)?;
+    let target = select_export_condition(value, conditions)?;
+    Some(capture.map_or_else(|| target.to_string(), |value| target.replace('*', value)))
 }
 
-fn resolve_package_import(path: &Path, spec: &str) -> Option<(String, PathBuf)> {
+enum PackageImportResolution {
+    Local(PathBuf),
+    External(String, String, PathBuf, PathBuf),
+    Builtin(String),
+}
+
+fn resolve_package_import(
+    node_modules_dir: &Path,
+    path: &Path,
+    spec: &str,
+    conditions: &[&str],
+) -> Option<PackageImportResolution> {
     let package_dir = path
         .ancestors()
         .find(|directory| read_manifest(directory).is_ok())?;
     let manifest = read_manifest(package_dir).ok()?;
     let imports = manifest.get("imports")?.as_object()?;
-    if let Some(value) = imports.get(spec) {
-        let target = select_export_condition(value, &["require", "node", "default"])?;
-        return resolve_module_path(package_dir, target).ok();
+    let (value, capture) = if let Some(value) = imports.get(spec) {
+        (value, None)
+    } else {
+        // A selected pattern with a null or unmatched condition blocks
+        // fallback to a less specific pattern.
+        let mut matches = imports.iter().filter_map(|(key, value)| {
+            let capture = wildcard_capture(key, spec)?;
+            let (prefix, suffix) = key.split_once('*')?;
+            Some((prefix.len(), suffix.len(), value, capture))
+        }).collect::<Vec<_>>();
+        matches.sort_by_key(|(prefix, suffix, _, _)| {
+            (std::cmp::Reverse(*prefix), std::cmp::Reverse(*suffix))
+        });
+        let (_, _, value, capture) = *matches.first()?;
+        (value, Some(capture))
+    };
+    let target = select_export_condition(value, conditions)?;
+    let target = capture.map_or_else(|| target.to_string(), |value| target.replace('*', value));
+    if target.starts_with("./") {
+        return resolve_module_path(package_dir, &target)
+            .ok()
+            .map(|(_, absolute)| PackageImportResolution::Local(absolute));
     }
-    for (pattern, value) in imports {
-        let Some(capture) = wildcard_capture(pattern, spec) else {
-            continue;
-        };
-        if let Some(target) =
-            select_export_condition(value, &["require", "node", "default"])
-        {
-            return resolve_module_path(package_dir, &target.replace('*', capture)).ok();
-        }
+    let builtin_name = target.strip_prefix("node:").unwrap_or(&target);
+    if builtin_module_source(builtin_name).is_some() {
+        return Some(PackageImportResolution::Builtin(builtin_name.to_string()));
     }
-    None
+    if target.starts_with("node:") {
+        return None;
+    }
+    if target.starts_with('.') || target.starts_with('/') || target.starts_with('#') {
+        return None;
+    }
+    let (name, relative, absolute, directory) = resolve_bare_specifier(
+        node_modules_dir,
+        package_dir,
+        &target,
+        conditions,
+    )?;
+    Some(PackageImportResolution::External(name, relative, absolute, directory))
 }
 
 /// Collapses `.`/`..` segments in a `/`-separated path string (npm

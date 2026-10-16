@@ -334,7 +334,16 @@ impl<'a> FnLowerer<'a> {
                     }
                     let target_length = self.coerce_primitive_to_number(arguments[0].clone())?;
                     let pad = match arguments.get(1) {
-                        Some(pad) => self.coerce_primitive_to_string(pad.clone())?,
+                        Some(pad) => {
+                            let ty = self.infer_expr_type(pad)?;
+                            let missing = self.number_format_is_undefined(pad.clone(), &ty);
+                            HirExpr::Conditional(
+                                Box::new(missing),
+                                Box::new(HirExpr::Lit(HirLit::Str(" ".into()))),
+                                Box::new(self.coerce_primitive_to_string(pad.clone())?),
+                                HirType::Str,
+                            )
+                        },
                         None => HirExpr::Lit(HirLit::Str(" ".into())),
                     };
                     let suffix = if property.sym == *"padStart" {
@@ -395,7 +404,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let range_error = || {
                         HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "toFixed() digits argument must be between 0 and 100".into(),
+                            "\u{1}RangeError\u{1}toFixed() digits argument must be between 0 and 100".into(),
                         )))
                     };
                     let body = HirExpr::Block(vec![
@@ -463,7 +472,9 @@ impl<'a> FnLowerer<'a> {
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     };
-                    let precision = self.coerce_primitive_to_number(argument.clone())?;
+                    let argument_type = self.infer_expr_type(argument)?;
+                    let missing = self.number_format_is_undefined(argument.clone(), &argument_type);
+                    let precision = self.number_format_to_number(argument.clone(), &argument_type)?;
                     let precision_name =
                         format!("__thaw_to_precision_digits_{}", self.next_binding);
                     self.next_binding += 1;
@@ -478,10 +489,19 @@ impl<'a> FnLowerer<'a> {
                     };
                     let range_error = || {
                         HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "toPrecision() argument must be between 1 and 100".into(),
+                            "\u{1}RangeError\u{1}toPrecision() argument must be between 1 and 100".into(),
                         )))
                     };
                     let body = HirExpr::Block(vec![
+                        HirStmt::If(
+                            missing,
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&receiver_name)],
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Let(precision_name.clone(), HirType::F64, precision),
                         HirStmt::Let(normalized_name.clone(), HirType::F64, var(&precision_name)),
                         HirStmt::If(
                             HirExpr::BinOp(
@@ -496,6 +516,17 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_math_trunc".into())),
                             vec![var(&normalized_name)],
                         )),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_is_finite".into())),
+                                vec![var(&receiver_name)],
+                            ),
+                            Vec::new(),
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&receiver_name)],
+                            )))],
+                        ),
                         HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::Lt,
@@ -521,7 +552,6 @@ impl<'a> FnLowerer<'a> {
                     ]);
                     let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
                     bindings.extend(spread_bindings);
-                    bindings.push((precision_name, HirType::F64, precision));
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if property.sym == *"toExponential" {
@@ -550,7 +580,9 @@ impl<'a> FnLowerer<'a> {
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     };
-                    let digits = self.coerce_primitive_to_number(argument.clone())?;
+                    let argument_type = self.infer_expr_type(argument)?;
+                    let missing = self.number_format_is_undefined(argument.clone(), &argument_type);
+                    let digits = self.number_format_to_number(argument.clone(), &argument_type)?;
                     let digits_name = format!("__thaw_to_exponential_digits_{}", self.next_binding);
                     self.next_binding += 1;
                     let normalized_name =
@@ -564,10 +596,19 @@ impl<'a> FnLowerer<'a> {
                     };
                     let range_error = || {
                         HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "toExponential() argument must be between 0 and 100".into(),
+                            "\u{1}RangeError\u{1}toExponential() argument must be between 0 and 100".into(),
                         )))
                     };
                     let body = HirExpr::Block(vec![
+                        HirStmt::If(
+                            missing,
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_exponential".into())),
+                                vec![var(&receiver_name), HirExpr::Lit(HirLit::F64(-1.0))],
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Let(digits_name.clone(), HirType::F64, digits),
                         HirStmt::Let(normalized_name.clone(), HirType::F64, var(&digits_name)),
                         HirStmt::If(
                             HirExpr::BinOp(
@@ -582,6 +623,17 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_math_trunc".into())),
                             vec![var(&normalized_name)],
                         )),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_is_finite".into())),
+                                vec![var(&receiver_name)],
+                            ),
+                            Vec::new(),
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&receiver_name)],
+                            )))],
+                        ),
                         HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::Lt,
@@ -607,7 +659,6 @@ impl<'a> FnLowerer<'a> {
                     ]);
                     let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
                     bindings.extend(spread_bindings);
-                    bindings.push((digits_name, HirType::F64, digits));
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if matches!(
@@ -666,17 +717,19 @@ impl<'a> FnLowerer<'a> {
                         &receiver,
                         &format!("string {} receiver", property.sym),
                     )?;
-                    if property.sym == *"toWellFormed" {
-                        return Ok(receiver);
-                    }
-                    let receiver_name =
-                        format!("__thaw_well_formed_receiver_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(receiver_name.clone(), HirType::Str);
-                    return self.wrap_call_argument_bindings(
-                        HirExpr::Lit(HirLit::Bool(true)),
-                        &[(receiver_name, HirType::Str, receiver)],
-                    );
+                    // Real WTF-8-aware runtime checks: `isWellFormed`
+                    // detects a lone surrogate; `toWellFormed` replaces it
+                    // with U+FFFD (it used to be a no-op because literals
+                    // were already lossily replaced at parse time).
+                    let intrinsic = if property.sym == *"toWellFormed" {
+                        "__thaw_string_to_well_formed"
+                    } else {
+                        "__thaw_string_is_well_formed"
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(intrinsic.to_string())),
+                        vec![receiver],
+                    ));
                 }
         unreachable!("instance builtin category was checked before lowering")
     }

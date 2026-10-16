@@ -45,16 +45,110 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
     }
 
+    fn optional_fixed_object_property_read_type(
+        fields: &[(Symbol, HirType)],
+        property: &str,
+    ) -> Result<Option<HirType>, String> {
+        let getter = format!("__thaw_getter_{property}");
+        let setter = format!("__thaw_setter_{property}");
+        if fields.iter().any(|(name, _)| name == property || name == &getter || name == &setter) {
+            Self::fixed_object_property_read_type(fields, property).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     fn lower_union_property_read(
         &mut self,
         object: HirExpr,
         elements: &[HirType],
         property: &str,
     ) -> Result<HirExpr, String> {
+        if HirType::Union(elements.to_vec()) == crate::caught_exception_carrier_type() {
+            let carrier_type = crate::caught_exception_carrier_type();
+            let name = format!("__thaw_caught_property_{}", self.next_binding);
+            self.next_binding += 1;
+            let previous = self.scope.insert(name.clone(), carrier_type.clone());
+            let bound = HirExpr::Var(name.clone());
+            let tag = HirExpr::UnionTag(Box::new(bound.clone()), elements.to_vec());
+            let absent = HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                    Box::new(tag.clone()), Box::new(HirExpr::Lit(HirLit::F64(4.0))))),
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                    Box::new(tag), Box::new(HirExpr::Lit(HirLit::F64(5.0))))),
+                HirType::Bool,
+            );
+            // Legacy framed strings (carrier member 3) use the tagged
+            // error helpers; live JavaScript exceptions stay on JsonGet.
+            let error_helper = match property {
+                "message" => Some("__thaw_error_message"),
+                "name" => Some("__thaw_error_name"),
+                "cause" => Some("__thaw_error_cause"),
+                "code" => Some("__thaw_error_code"),
+                "stack" => Some("__thaw_error_stack"),
+                "error" => Some("__thaw_error_suppressed_error"),
+                "suppressed" => Some("__thaw_error_suppressed"),
+                _ => None,
+            };
+            let framed_field = match error_helper {
+                Some(helper) => HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_receiver_string".into())),
+                    vec![HirExpr::Call(
+                        Box::new(HirExpr::Var(helper.into())),
+                        vec![HirExpr::UnionValue(Box::new(bound.clone()), 3, elements.to_vec())],
+                    )],
+                ),
+                None => HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_error_property_json".into())),
+                    vec![
+                        HirExpr::UnionValue(Box::new(bound.clone()), 3, elements.to_vec()),
+                        HirExpr::Lit(HirLit::Str(property.to_string())),
+                    ],
+                ),
+            };
+            let live = self.caught_carrier_as_json(bound.clone())?;
+            // `error.stack` of a live caught object without its own `stack`: the first line a real
+            // stack starts with (`Name: message`); a native binary has no frames to append.
+            let live_read = if property == "stack" {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_error_stack".into())),
+                    vec![live],
+                )
+            } else {
+                HirExpr::JsonGet(Box::new(live), property.into())
+            };
+            let read = HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(Box::new(bound.clone()), elements.to_vec())),
+                    Box::new(HirExpr::Lit(HirLit::F64(3.0))))),
+                Box::new(framed_field), Box::new(live_read), HirType::Json,
+            );
+            let result = HirExpr::Conditional(
+                Box::new(absent),
+                Box::new(HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(format!(
+                        "Cannot read properties of null or undefined (reading '{property}')",
+                    )))),
+                    Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+                )),
+                Box::new(read),
+                HirType::Json,
+            );
+            let lowered = self.wrap_call_argument_bindings(
+                result, &[(name.clone(), carrier_type, object)],
+            );
+            match previous {
+                Some(previous) => { self.scope.insert(name, previous); }
+                None => { self.scope.remove(&name); }
+            }
+            return lowered;
+        }
         if property == "length" && elements.iter().all(|e| matches!(e, HirType::Array(_))) {
             return self.lower_union_array_length(object, elements);
         }
         let mut field_types = Vec::with_capacity(elements.len());
+        let mut has_property = false;
         for element in elements {
             if matches!(element, HirType::Undefined | HirType::Null) {
                 continue;
@@ -64,12 +158,16 @@ impl<'a> FnLowerer<'a> {
                     "cannot access `.{property}` because union member {element:?} is not an object"
                 ));
             };
-            let field = Self::fixed_object_property_read_type(fields, property).map_err(|_| {
-                format!("cannot access `.{property}` because a union member has no such field")
-            })?;
+            let field = match Self::optional_fixed_object_property_read_type(fields, property)? {
+                Some(field) => { has_property = true; field }
+                None => HirType::Undefined,
+            };
             if !field_types.contains(&field) {
                 field_types.push(field);
             }
+        }
+        if !has_property {
+            return Err(format!("cannot access `.{property}` because no union member has such a field"));
         }
         let result_type = match field_types.as_slice() {
             [] => return Err("cannot read a property from an empty union".into()),
@@ -119,8 +217,13 @@ impl<'a> FnLowerer<'a> {
             let HirType::Object(fields) = element else {
                 unreachable!("union property was validated above")
             };
-            let field = self.lower_fixed_object_property_read(union_value, fields, property)?;
-            let field_type = Self::fixed_object_property_read_type(fields, property)?;
+            let (field, field_type) = match Self::optional_fixed_object_property_read_type(fields, property)? {
+                Some(field_type) => (
+                    self.lower_fixed_object_property_read(union_value, fields, property)?,
+                    field_type,
+                ),
+                None => (HirExpr::Lit(HirLit::Undefined), HirType::Undefined),
+            };
             let returns = if field_types.len() == 1 {
                 vec![HirStmt::Return(Some(field))]
             } else {
@@ -213,6 +316,25 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_flattened_property_return(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+        result: &HirType,
+    ) -> Result<Vec<HirStmt>, String> {
+        if matches!(&value, HirExpr::Var(_) | HirExpr::Lit(_)) {
+            return self.lower_flattened_bound_property_return(value, ty, result);
+        }
+        let name = format!("__thaw_property_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let body = self.lower_flattened_bound_property_return(HirExpr::Var(name.clone()), ty, result);
+        self.scope.remove(&name);
+        let mut statements = vec![HirStmt::Let(name, ty.clone(), value)];
+        statements.extend(body?);
+        Ok(statements)
+    }
+
+    fn lower_flattened_bound_property_return(
         &mut self,
         value: HirExpr,
         ty: &HirType,

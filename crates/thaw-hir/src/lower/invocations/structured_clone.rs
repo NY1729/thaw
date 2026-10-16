@@ -35,23 +35,53 @@ impl<'a> FnLowerer<'a> {
                 let source_name = format!("__thaw_clone_object_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(source_name.clone(), value_type.clone());
+                let source = HirExpr::Var(source_name.clone());
                 let mut cloned = Vec::new();
                 for index in ecmascript_field_order(fields) {
                     let name = &fields[index].0;
                     let read = self.lower_fixed_object_property_read(
-                        HirExpr::Var(source_name.clone()),
-                        fields,
-                        name,
+                        source.clone(), fields, name,
                     )?;
                     let read_type = Self::fixed_object_property_read_type(fields, name)?;
-                    cloned.push((
-                        name.clone(),
-                        self.structured_clone_expr(read, read_type)?,
-                    ));
+                    let clone = self.structured_clone_expr(read, read_type)?;
+                    let clone_type = self.infer_expr_type(&clone)?;
+                    cloned.push((index, name.clone(), clone_type, clone));
                 }
-                let result = HirExpr::ObjectLit(cloned);
+                let result_type = HirType::Object(cloned.iter()
+                    .map(|(_, name, ty, _)| (name.clone(), ty.clone())).collect());
+                let result_name = format!("__thaw_clone_result_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(result_name.clone(), result_type.clone());
+                let result = HirExpr::Var(result_name.clone());
+                let mut body = vec![HirStmt::Let(result_name, result_type.clone(),
+                    HirExpr::ObjectAlloc(result_type.clone()))];
+                body.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_order_begin".into())),
+                    vec![result.clone()],
+                )));
+                for (_, name, _, _) in &cloned {
+                    if name.starts_with("__thaw_class_identity_\u{1e}") {
+                        body.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
+                            vec![result.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
+                        )));
+                    }
+                }
+                let actions = cloned.into_iter().map(|(index, name, _, clone)| {
+                    let write = HirStmt::Expr(HirExpr::PropAssign(
+                        Box::new(result.clone()), result_type.clone(), name.clone(),
+                        Box::new(clone),
+                    ));
+                    let seed = HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                        vec![result.clone(), HirExpr::Lit(HirLit::Str(name))],
+                    ));
+                    (index, vec![write, seed])
+                }).collect();
+                body.extend(self.lower_ordered_fixed_field_statements(source, fields, actions)?);
+                body.push(HirStmt::Return(Some(result)));
                 self.wrap_call_argument_bindings(
-                    result,
+                    HirExpr::Block(body),
                     &[(source_name, value_type, value)],
                 )
             }

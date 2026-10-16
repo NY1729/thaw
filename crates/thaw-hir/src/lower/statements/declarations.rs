@@ -26,6 +26,109 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    fn initializer_closure_references(expression: &Expr, name: &str) -> bool {
+        use swc_ecma_visit::{Visit, VisitWith};
+
+        fn pattern_binds(pattern: &Pat, name: &str) -> bool {
+            let mut names = Vec::new();
+            FnLowerer::collect_pattern_bindings(pattern, &mut names);
+            names.iter().any(|bound| bound == name)
+        }
+        fn declarations_shadow(statements: &[Stmt], name: &str) -> bool {
+            statements.iter().any(|statement| match statement {
+                Stmt::Decl(Decl::Var(declaration)) => declaration.decls.iter()
+                    .any(|item| pattern_binds(&item.name, name)),
+                Stmt::Decl(Decl::Using(declaration)) => declaration.decls.iter()
+                    .any(|item| pattern_binds(&item.name, name)),
+                Stmt::Decl(Decl::Fn(function)) => function.ident.sym == name,
+                Stmt::Decl(Decl::Class(class)) => class.ident.sym == name,
+                _ => false,
+            })
+        }
+        struct Finder<'a> { name: &'a str, found: bool }
+        impl Visit for Finder<'_> {
+            fn visit_expr(&mut self, expression: &Expr) {
+                if let Expr::Ident(identifier) = expression {
+                    self.found |= identifier.sym == self.name;
+                } else {
+                    expression.visit_children_with(self);
+                }
+            }
+            fn visit_simple_assign_target(&mut self, target: &swc_ecma_ast::SimpleAssignTarget) {
+                if let swc_ecma_ast::SimpleAssignTarget::Ident(binding) = target {
+                    self.found |= binding.id.sym == self.name;
+                } else {
+                    target.visit_children_with(self);
+                }
+            }
+            fn visit_prop(&mut self, property: &swc_ecma_ast::Prop) {
+                if let swc_ecma_ast::Prop::Shorthand(identifier) = property {
+                    self.found |= identifier.sym == self.name;
+                } else {
+                    property.visit_children_with(self);
+                }
+            }
+            fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+                if !arrow.params.iter().any(|item| pattern_binds(item, self.name)) {
+                    arrow.body.visit_with(self);
+                }
+            }
+            fn visit_fn_expr(&mut self, function: &swc_ecma_ast::FnExpr) {
+                if function.ident.as_ref().is_some_and(|id| id.sym == self.name) { return; }
+                function.function.visit_with(self);
+            }
+            fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+                if !function.params.iter().any(|item| pattern_binds(&item.pat, self.name)) {
+                    function.body.visit_with(self);
+                }
+            }
+            fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
+                if !declarations_shadow(&block.stmts, self.name) {
+                    block.visit_children_with(self);
+                }
+            }
+            fn visit_catch_clause(&mut self, catch: &swc_ecma_ast::CatchClause) {
+                if !catch.param.as_ref().is_some_and(|item| pattern_binds(item, self.name)) {
+                    catch.visit_children_with(self);
+                }
+            }
+            fn visit_for_stmt(&mut self, statement: &swc_ecma_ast::ForStmt) {
+                if !matches!(statement.init.as_ref(), Some(swc_ecma_ast::VarDeclOrExpr::VarDecl(declaration))
+                    if declaration.decls.iter().any(|item| pattern_binds(&item.name, self.name))) {
+                    statement.visit_children_with(self);
+                }
+            }
+            fn visit_for_in_stmt(&mut self, statement: &swc_ecma_ast::ForInStmt) {
+                if matches!(&statement.left, swc_ecma_ast::ForHead::VarDecl(declaration)
+                    if declaration.decls.iter().any(|item| pattern_binds(&item.name, self.name))) {
+                    statement.right.visit_with(self);
+                } else { statement.visit_children_with(self); }
+            }
+            fn visit_for_of_stmt(&mut self, statement: &swc_ecma_ast::ForOfStmt) {
+                if matches!(&statement.left, swc_ecma_ast::ForHead::VarDecl(declaration)
+                    if declaration.decls.iter().any(|item| pattern_binds(&item.name, self.name))) {
+                    statement.right.visit_with(self);
+                } else { statement.visit_children_with(self); }
+            }
+        }
+        let mut finder = Finder { name, found: false };
+        match expression {
+            Expr::Arrow(arrow) => {
+                if arrow.params.iter().any(|item| pattern_binds(item, name)) { return false; }
+                arrow.body.visit_with(&mut finder);
+            }
+            Expr::Fn(function) => {
+                if function.ident.as_ref().is_some_and(|id| id.sym == name)
+                    || function.function.params.iter().any(|item| pattern_binds(&item.pat, name)) {
+                    return false;
+                }
+                function.function.body.visit_with(&mut finder);
+            }
+            _ => return false,
+        }
+        finder.found
+    }
+
     /// `using x = expr;` / `await using x = expr;` bind `x` like a `const`;
     /// the enclosing block's disposal (see `lower_stmts`) is what runs
     /// `x[Symbol.dispose]()` / `await x[Symbol.asyncDispose]()`.
@@ -74,6 +177,59 @@ impl<'a> FnLowerer<'a> {
             args: Vec::new(),
             type_args: None,
         });
+        // `using x = null` / `undefined` is allowed and disposes nothing.
+        let binding = self.resolve_binding(source_name);
+        let nullish = |ty: &HirType| matches!(ty, HirType::Null | HirType::Undefined);
+        match self.scope.get(&binding).cloned() {
+            Some(ty) if nullish(&ty) => {
+                return Ok(HirStmt::Expr(HirExpr::Lit(HirLit::Undefined)));
+            }
+            Some(ty @ (HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_))) => {
+                // The comparison form each absence wrapper narrows on.
+                let (op, absent) = match ty {
+                    HirType::Optional(_) => (
+                        BinaryOp::NotEqEq,
+                        Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("undefined".into(), span)),
+                    ),
+                    HirType::Nullable(_) => (
+                        BinaryOp::NotEqEq,
+                        Expr::Lit(swc_ecma_ast::Lit::Null(swc_ecma_ast::Null { span })),
+                    ),
+                    _ => (
+                        BinaryOp::NotEq,
+                        Expr::Lit(swc_ecma_ast::Lit::Null(swc_ecma_ast::Null { span })),
+                    ),
+                };
+                let statement = Stmt::If(swc_ecma_ast::IfStmt {
+                    span,
+                    test: Box::new(Expr::Bin(swc_ecma_ast::BinExpr {
+                        span,
+                        op,
+                        left: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            source_name.into(),
+                            span,
+                        ))),
+                        right: Box::new(absent),
+                    })),
+                    cons: Box::new(Stmt::Expr(swc_ecma_ast::ExprStmt {
+                        span,
+                        expr: Box::new(if is_await {
+                            Expr::Await(AwaitExpr { span, arg: Box::new(call) })
+                        } else {
+                            call
+                        }),
+                    })),
+                    alt: None,
+                });
+                let statements = self.lower_stmt_seq(&statement)?;
+                return Ok(HirStmt::If(
+                    HirExpr::Lit(HirLit::Bool(true)),
+                    statements,
+                    Vec::new(),
+                ));
+            }
+            _ => {}
+        }
         let value = if is_await {
             self.lower_expr(&Expr::Await(AwaitExpr {
                 span,
@@ -85,7 +241,49 @@ impl<'a> FnLowerer<'a> {
         Ok(HirStmt::Expr(value))
     }
 
+    /// The HIR binding a repeated `var name` declaration must reuse: `var`
+    /// is function-scoped, so a second declaration of the same name in the
+    /// same function is the same variable (an initializer assigns to it).
+    fn reusable_var_binding(&self, var_decl: &VarDecl, pattern: &Pat) -> Option<Symbol> {
+        let Pat::Ident(binding) = pattern else { return None };
+        if var_decl.kind != VarDeclKind::Var || binding.type_ann.is_some() {
+            return None;
+        }
+        let name = binding.id.sym.to_string();
+        let owned = self.function_var_names.get(&name)?;
+        (self.resolve_binding(&name) == *owned && self.scope.contains_key(owned))
+            .then(|| owned.clone())
+    }
+
     fn lower_var_decl(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
+        if var_decl.kind != VarDeclKind::Var {
+            return self.lower_var_decl_inner(var_decl);
+        }
+        let mut statements = Vec::new();
+        for declarator in &var_decl.decls {
+            if let Some(owned) = self.reusable_var_binding(var_decl, &declarator.name) {
+                if let Some(init) = &declarator.init {
+                    let value = self.lower_expr(init)?;
+                    let declared = self.scope.get(&owned).cloned().ok_or("unknown `var` binding")?;
+                    let value = self.coerce_to_declared(&declared, value)?;
+                    self.record_binding_write(&owned);
+                    statements.push(HirStmt::Expr(HirExpr::Assign(owned, Box::new(value))));
+                }
+                continue;
+            }
+            let mut single = var_decl.clone();
+            single.decls = vec![declarator.clone()];
+            statements.extend(self.lower_var_decl_inner(&single)?);
+            if let Pat::Ident(binding) = &declarator.name {
+                let name = binding.id.sym.to_string();
+                let owned = self.resolve_binding(&name);
+                self.function_var_names.insert(name, owned);
+            }
+        }
+        Ok(statements)
+    }
+
+    fn lower_var_decl_inner(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
         let mut statements = Vec::new();
         for decl in &var_decl.decls {
             if let Pat::Ident(binding) = &decl.name {
@@ -134,7 +332,7 @@ impl<'a> FnLowerer<'a> {
                                  no default value: {error})"
                             )
                         })?;
-                    let hir_name = self.bind_local(&name, ty.clone());
+                    let hir_name = self.bind_decl_local(&name, ty.clone(), var_decl.kind == VarDeclKind::Const);
                     statements.push(HirStmt::Let(hir_name, ty, value));
                     continue;
                 }
@@ -261,7 +459,7 @@ impl<'a> FnLowerer<'a> {
                         .map(|(value, _)| value)
                         .unwrap_or_else(|| HirExpr::Var(input));
                     let resumed = self.coerce_to_declared(&declared, resumed)?;
-                    let hir_name = self.bind_local(&name, declared.clone());
+                    let hir_name = self.bind_decl_local(&name, declared.clone(), var_decl.kind == VarDeclKind::Const);
                     statements.extend(emission);
                     statements.push(HirStmt::Let(hir_name, declared, resumed));
                     continue;
@@ -278,7 +476,7 @@ impl<'a> FnLowerer<'a> {
                                 &actual,
                                 &callable_name,
                             )?;
-                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                             self.generic_arrows.insert(hir_name, arrow.clone());
                             continue;
                         }
@@ -296,8 +494,10 @@ impl<'a> FnLowerer<'a> {
                                 &actual,
                                 &callable_name,
                             )?;
-                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                             self.generic_arrows.insert(hir_name.clone(), arrow);
+                            self.generic_non_arrow_names.insert(hir_name.clone());
+                            self.store_generic_function_expression_receiver(&hir_name, function)?;
                             if named_function_is_recursive(function) {
                                 self.generic_arrow_self_names.insert(
                                     hir_name,
@@ -321,7 +521,7 @@ impl<'a> FnLowerer<'a> {
                                     actual,
                                     &callable_name,
                                 )?;
-                                let hir_name = self.bind_local(&name, HirType::Dynamic);
+                                let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                                 self.generic_named_templates
                                     .insert(hir_name, identifier.sym.to_string());
                                 continue;
@@ -343,8 +543,17 @@ impl<'a> FnLowerer<'a> {
                                 &actual,
                                 &callable_name,
                             )?;
-                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                             self.generic_arrows.insert(hir_name.clone(), arrow);
+                            if self.generic_non_arrow_names.contains(&source_name) {
+                                self.generic_non_arrow_names.insert(hir_name.clone());
+                                if let Some(receiver) = self.generic_non_arrow_receivers.get(&source_name).cloned() {
+                                    self.generic_non_arrow_receivers.insert(hir_name.clone(), receiver);
+                                }
+                                if let Some(template) = self.generic_non_arrow_receiver_templates.get(&source_name).cloned() {
+                                    self.generic_non_arrow_receiver_templates.insert(hir_name.clone(), template);
+                                }
+                            }
                             if let Some(self_name) =
                                 self.generic_arrow_self_names.get(&source_name).cloned()
                             {
@@ -364,7 +573,7 @@ impl<'a> FnLowerer<'a> {
                                 actual,
                                 &callable_name,
                             )?;
-                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                             self.generic_named_templates.insert(hir_name, target);
                             continue;
                         }
@@ -373,8 +582,17 @@ impl<'a> FnLowerer<'a> {
                 if let (Expr::Ident(identifier), None) = (init, binding.type_ann.as_ref()) {
                     let source_name = self.resolve_binding(identifier.sym.as_ref());
                     if let Some(arrow) = self.generic_arrows.get(&source_name).cloned() {
-                        let hir_name = self.bind_local(&name, HirType::Dynamic);
+                        let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                         self.generic_arrows.insert(hir_name.clone(), arrow);
+                        if self.generic_non_arrow_names.contains(&source_name) {
+                            self.generic_non_arrow_names.insert(hir_name.clone());
+                            if let Some(receiver) = self.generic_non_arrow_receivers.get(&source_name).cloned() {
+                                self.generic_non_arrow_receivers.insert(hir_name.clone(), receiver);
+                            }
+                            if let Some(template) = self.generic_non_arrow_receiver_templates.get(&source_name).cloned() {
+                                self.generic_non_arrow_receiver_templates.insert(hir_name.clone(), template);
+                            }
+                        }
                         if let Some(self_name) =
                             self.generic_arrow_self_names.get(&source_name).cloned()
                         {
@@ -383,7 +601,7 @@ impl<'a> FnLowerer<'a> {
                         continue;
                     }
                     if let Some(target) = self.generic_named_templates.get(&source_name).cloned() {
-                        let hir_name = self.bind_local(&name, HirType::Dynamic);
+                        let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                         self.generic_named_templates.insert(hir_name, target);
                         continue;
                     }
@@ -400,6 +618,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .transpose()?;
                 let recursive_binding_type = if Self::initializer_callback_references(init, &name)
+                    || (annotated.is_some() && Self::initializer_closure_references(init, &name))
                 {
                     annotated.clone().or_else(|| {
                         let Expr::Call(call) = init else {
@@ -429,12 +648,13 @@ impl<'a> FnLowerer<'a> {
                 };
                 let recursive_binding = recursive_binding_type
                     .as_ref()
-                    .map(|ty| self.bind_local(&name, ty.clone()));
+                    .map(|ty| self.bind_decl_local(&name, ty.clone(), var_decl.kind == VarDeclKind::Const));
                 if let Expr::Fn(function) = init {
                     if let Some((hir_name, ty, value)) = self.lower_recursive_function_expression(
                         &name,
                         function,
                         annotated.as_ref(),
+                        var_decl.kind == VarDeclKind::Const,
                     )? {
                         statements.push(HirStmt::Let(hir_name, ty, value));
                         continue;
@@ -460,8 +680,12 @@ impl<'a> FnLowerer<'a> {
                             "async generic arrow variables are not supported".into(),
                         );
                     }
-                    let hir_name = self.bind_local(&name, HirType::Dynamic);
+                    let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                     self.generic_arrows.insert(hir_name.clone(), arrow);
+                    if let Expr::Fn(function) = init {
+                        self.generic_non_arrow_names.insert(hir_name.clone());
+                        self.store_generic_function_expression_receiver(&hir_name, function)?;
+                    }
                     if let Some(self_name) = recursive_self {
                         self.generic_arrow_self_names.insert(hir_name, self_name);
                     }
@@ -537,16 +761,14 @@ impl<'a> FnLowerer<'a> {
                         self.lower_contextual_arrow(arrow, &abi_params, Some(ret))?
                     }
                     (Expr::Fn(function), Some(HirType::Function(params, ret))) => {
-                        let arrow = function_expression_as_arrow(function)?;
-                        self.lower_contextual_arrow(&arrow, params, Some(ret))?
+                        self.lower_function_expression(function, Some((params, Some(ret))))?
                     }
                     (Expr::Fn(function), Some(HirType::CallableFunction(params, _, rest, ret))) => {
-                        let arrow = function_expression_as_arrow(function)?;
                         let mut abi_params = params.clone();
                         if let Some(rest) = rest {
                             abi_params.push(HirType::Array(rest.clone()));
                         }
-                        self.lower_contextual_arrow(&arrow, &abi_params, Some(ret))?
+                        self.lower_function_expression(function, Some((&abi_params, Some(ret))))?
                     }
                     (
                         Expr::Ident(identifier),
@@ -605,11 +827,25 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty
                 };
+                // An `any`/`Json`-annotated local whose initializer is a
+                // live `JsValue` (a class token/prototype, an npm object,
+                // ...) keeps the live handle as its storage type instead of
+                // the `Json` handle-placeholder snapshot -- otherwise a
+                // dynamically-obtained method (`const p: any =
+                // A.prototype; p.greet`) reads back `undefined`, since the
+                // placeholder object only carries the handle id.
+                let ty = if matches!(ty, HirType::Dynamic | HirType::Json)
+                    && actual_type == HirType::JsValue
+                {
+                    HirType::JsValue
+                } else {
+                    ty
+                };
                 let sparse_index = self.is_primitive_array_index(init, &ty);
                 let mut value = if binding.type_ann.is_some() && sparse_index {
                     self.coerce_primitive_array_argument(value, &ty)?
                 } else {
-                    self.coerce_to_declared(&ty, value)?
+                    self.coerce_to_declared_aliasing(&ty, value)?
                 };
 
                 let storage_type = if class_name_from_type(&actual_type).is_some()
@@ -638,12 +874,15 @@ impl<'a> FnLowerer<'a> {
                     );
                     hir_name
                 } else {
-                    self.bind_local(&name, storage_type.clone())
+                    self.bind_decl_local(&name, storage_type.clone(), var_decl.kind == VarDeclKind::Const)
                 };
                 if let Some(value) = static_string {
                     self.static_string_bindings.insert(hir_name.clone(), value);
                 }
-                if class_name_from_type(&actual_type).is_some() && actual_type != storage_type {
+                // `any` holds a Json snapshot, not the native object: an alias
+                // would dispatch methods on a pointer that is not a class instance.
+                if class_name_from_type(&actual_type).is_some() && actual_type != storage_type
+                    && !matches!(storage_type, HirType::Dynamic | HirType::Json | HirType::JsValue) {
                     self.native_class_aliases
                         .insert(hir_name.clone(), actual_type);
                 }
@@ -905,7 +1144,13 @@ impl<'a> FnLowerer<'a> {
                     .insert(temporary.clone(), discriminants);
             }
             statements.push(HirStmt::Let(temporary.clone(), ty.clone(), value));
-            self.lower_binding_pattern(&decl.name, HirExpr::Var(temporary), &ty, &mut statements)?;
+            self.lower_binding_pattern_impl(
+                &decl.name,
+                HirExpr::Var(temporary),
+                &ty,
+                &mut statements,
+                var_decl.kind == VarDeclKind::Const,
+            )?;
         }
         Ok(statements)
     }

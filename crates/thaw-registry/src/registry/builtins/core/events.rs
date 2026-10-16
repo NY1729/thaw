@@ -1,3 +1,60 @@
+macro_rules! assert_source {
+    ($tail:literal) => {
+        concat!(
+            "function AssertionError(options) {\n\
+             \x20\x20options = options || {}; this.name = 'AssertionError'; this.code = 'ERR_ASSERTION';\n\
+             \x20\x20this.actual = options.actual; this.expected = options.expected; this.operator = options.operator;\n\
+             \x20\x20this.generatedMessage = options.message === undefined;\n\
+             \x20\x20this.message = options.message === undefined ? 'Expected values to satisfy ' + (options.operator || 'assertion') : String(options.message);\n\
+             \x20\x20if (Error.captureStackTrace) Error.captureStackTrace(this, options.stackStartFn || AssertionError);\n\
+             }\n\
+             AssertionError.prototype = Object.create(Error.prototype); AssertionError.prototype.constructor = AssertionError;\n\
+             function failure(actual, expected, message, operator, start) { throw new AssertionError({ actual: actual, expected: expected, message: message, operator: operator, stackStartFn: start }); }\n\
+             function deep(actual, expected, seen) {\n\
+             if (Object.is(actual, expected)) return true;\n\
+             if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return false;\n\
+             if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;\n\
+             seen = seen || new Map(); if (seen.get(actual) === expected) return true; seen.set(actual, expected);\n\
+             if (actual instanceof Date) return expected instanceof Date && actual.getTime() === expected.getTime();\n\
+             if (actual instanceof RegExp) return expected instanceof RegExp && actual.source === expected.source && actual.flags === expected.flags;\n\
+             if ((actual instanceof Number || actual instanceof String || actual instanceof Boolean) && !Object.is(actual.valueOf(), expected.valueOf())) return false;\n\
+             if (actual instanceof Error) { if (actual.name !== expected.name || actual.message !== expected.message || ('cause' in actual) !== ('cause' in expected) || !deep(actual.cause, expected.cause, seen) || !deep(actual.errors, expected.errors, seen)) return false; }\n\
+             if (Array.isArray(actual) && actual.length !== expected.length) return false;\n\
+             if (actual instanceof ArrayBuffer || actual instanceof DataView) { if (actual.byteLength !== expected.byteLength) return false; var left = actual instanceof DataView ? new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength) : new Uint8Array(actual), right = expected instanceof DataView ? new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength) : new Uint8Array(expected); for (var at = 0; at < left.length; at++) if (left[at] !== right[at]) return false; return true; }\n\
+             if (ArrayBuffer.isView(actual)) { if (!ArrayBuffer.isView(expected) || actual.length !== expected.length) return false; for (var i = 0; i < actual.length; i++) if (!Object.is(actual[i], expected[i])) return false; return true; }\n\
+             if (actual instanceof Map) { if (actual.size !== expected.size) return false; var usedKeys = new Set(); for (var entry of actual) { if (expected.has(entry[0]) && deep(entry[1], expected.get(entry[0]), seen)) { usedKeys.add(entry[0]); continue; } var found = false; for (var other of expected) { if (usedKeys.has(other[0])) continue; if (deep(entry[0], other[0], seen) && deep(entry[1], other[1], seen)) { usedKeys.add(other[0]); found = true; break; } } if (!found) return false; } }\n\
+             if (actual instanceof Set) { if (actual.size !== expected.size) return false; var usedValues = new Set(); for (var item of actual) { if (expected.has(item)) { usedValues.add(item); continue; } var matched = false; for (var candidate of expected) { if (usedValues.has(candidate)) continue; if (deep(item, candidate, seen)) { usedValues.add(candidate); matched = true; break; } } if (!matched) return false; } }\n\
+             var left = Object.keys(actual); var right = Object.keys(expected); if (left.length !== right.length) return false;\n\
+             for (var index = 0; index < left.length; index++) { var key = left[index]; if (!Object.prototype.hasOwnProperty.call(expected, key) || !deep(actual[key], expected[key], seen)) return false; }\n\
+             return true;\n\
+             }\n\
+             function ok(value, message) { if (!value) failure(value, true, message, '==', ok); }\n\
+             function equal(actual, expected, message) { if (actual != expected) failure(actual, expected, message, '==', equal); }\n\
+             function notEqual(actual, expected, message) { if (actual == expected) failure(actual, expected, message, '!=', notEqual); }\n\
+             function strictEqual(actual, expected, message) { if (!Object.is(actual, expected)) failure(actual, expected, message, 'strictEqual', strictEqual); }\n\
+             function notStrictEqual(actual, expected, message) { if (Object.is(actual, expected)) failure(actual, expected, message, 'notStrictEqual', notStrictEqual); }\n\
+             function deepStrictEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepStrictEqual', deepStrictEqual); }\n\
+             function notDeepStrictEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepStrictEqual', notDeepStrictEqual); }\n\
+             function fail(message) { failure(undefined, undefined, message || 'Failed', 'fail', fail); }\n\
+             function matches(error, expected) {\n\
+             if (expected === undefined) return true;\n\
+             if (expected instanceof RegExp) return expected.test(String(error && error.message || error));\n\
+             if (typeof expected === 'function') { if (expected.prototype !== undefined && error instanceof expected) return true; if (Error.isPrototypeOf(expected)) return false; return expected.call({}, error) === true; }\n\
+             if (expected !== null && typeof expected === 'object') { if (error === null || typeof error !== 'object') return false; var keys = Object.keys(expected); if (expected instanceof Error) keys.push('name', 'message'); return keys.every(function(key) { if (!(key in error)) return false; var want = expected[key]; if (want instanceof RegExp && typeof error[key] === 'string') return want.test(error[key]); return deep(error[key], want); }); }\n\
+             return true;\n\
+             }\n\
+             function throws(block, expected, message) { var caught; try { block(); } catch (error) { caught = error; } if (caught === undefined || !matches(caught, expected)) failure(caught, expected, message, 'throws', throws); return caught; }\n\
+             function doesNotThrow(block, expected, message) { try { block(); } catch (error) { if (matches(error, expected)) failure(error, undefined, message, 'doesNotThrow', doesNotThrow); throw error; } }\n\
+             ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = notEqual; ok.strictEqual = strictEqual; ok.notStrictEqual = notStrictEqual;\n\
+             ok.deepEqual = deepStrictEqual; ok.notDeepEqual = notDeepStrictEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;\n\
+             ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.default = ok; ok.__esModule = true;\n\
+             function strict(value, message) { if (!value) failure(value, true, message, '==', strict); }\n\
+             Object.assign(strict, ok, { equal: strictEqual, notEqual: notStrictEqual, deepEqual: deepStrictEqual, notDeepEqual: notDeepStrictEqual }); strict.strict = strict; strict.default = strict; ok.strict = strict;\n",
+            $tail
+        )
+    };
+}
+
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "domain" => Some(
@@ -51,6 +108,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              EventEmitter.prototype.once = function(event, listener) { return addEventListener(this, event, listener, false, true); };\n\
              EventEmitter.prototype.prependListener = function(event, listener) { return addEventListener(this, event, listener, true, false); };\n\
              EventEmitter.prototype.prependOnceListener = function(event, listener) { return addEventListener(this, event, listener, true, true); };\n\
+             function removeEntry(emitter, name, entry) { var events = emitter._events; var list = events ? events[name] : undefined; var at = list ? list.indexOf(entry) : -1; if (at < 0) return; list.splice(at, 1); if (list.length === 0) delete events[name]; if (events.removeListener && events.removeListener.length) emitter.emit('removeListener', name, entry.listener); }\n\
              EventEmitter.prototype.emit = function(event) {\n\
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); var events = this._events; var list = events ? events[name] : undefined;\n\
              \x20\x20if (name === 'error' && events && events[errorMonitor] && events[errorMonitor].length) this.emit.apply(this, [errorMonitor].concat(Array.prototype.slice.call(arguments, 1)));\n\
@@ -60,7 +118,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20}\n\
              \x20\x20var args = Array.prototype.slice.call(arguments, 1);\n\
              \x20\x20list.slice().forEach(function(entry) {\n\
-             \x20\x20\x20\x20if (entry.once) this.removeListener(name, entry.listener);\n\
+             \x20\x20\x20\x20if (entry.once) { if (entry.fired) return; entry.fired = true; removeEntry(this, name, entry); }\n\
              \x20\x20\x20\x20entry.listener.apply(this, args);\n\
              \x20\x20}, this);\n\
              \x20\x20return true;\n\
@@ -71,7 +129,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              };\n\
              EventEmitter.prototype.removeAllListeners = function(event) { var emitter = this; var events = this._events; if (!events) return this; if (!events.removeListener || !events.removeListener.length) { if (event === undefined) this._events = Object.create(null); else delete events[typeof event === 'symbol' ? event : String(event)]; return this; } if (event !== undefined) { var name = typeof event === 'symbol' ? event : String(event), list = (events[name] || []).slice(); for (var index = list.length - 1; index >= 0; index--) this.removeListener(name, list[index].listener); return this; } Reflect.ownKeys(events).filter(function(name) { return name !== 'removeListener'; }).forEach(function(name) { emitter.removeAllListeners(name); }); this.removeAllListeners('removeListener'); return this; };\n\
              EventEmitter.prototype.listeners = function(event) { var events = this._events; var list = (events ? events[typeof event === 'symbol' ? event : String(event)] : undefined) || []; return list.map(function(entry) { return entry.listener.listener || entry.listener; }); };\n\
-             EventEmitter.prototype.rawListeners = function(event) { var events = this._events; var list = (events ? events[typeof event === 'symbol' ? event : String(event)] : undefined) || []; return list.map(function(entry) { return entry.listener; }); };\n\
+             EventEmitter.prototype.rawListeners = function(event) { var events = this._events; var list = (events ? events[typeof event === 'symbol' ? event : String(event)] : undefined) || []; var emitter = this; return list.map(function(entry) { if (!entry.once) return entry.listener; if (!entry.wrapper) { entry.wrapper = function() { if (entry.fired) return; entry.fired = true; removeEntry(emitter, typeof event === 'symbol' ? event : String(event), entry); return entry.listener.apply(emitter, arguments); }; entry.wrapper.listener = entry.listener; } return entry.wrapper; }); };\n\
              EventEmitter.prototype.listenerCount = function(event) { var events = this._events; var list = events ? events[typeof event === 'symbol' ? event : String(event)] : undefined; return list ? list.length : 0; };\n\
              EventEmitter.prototype.eventNames = function() { return this._events ? Reflect.ownKeys(this._events) : []; };\n\
              EventEmitter.prototype.setMaxListeners = function(value) { value = Number(value); if (!Number.isFinite(value) || value < 0) throw new RangeError('The value of n is out of range'); this._maxListeners = value; return this; }; EventEmitter.prototype.getMaxListeners = function() { return this._maxListeners === undefined ? EventEmitter.defaultMaxListeners : this._maxListeners; }; EventEmitter.defaultMaxListeners = 10;\n\
@@ -82,10 +140,11 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20function done() { var values = Array.prototype.slice.call(arguments); cleanup(); resolve(values); }\n\
              \x20\x20\x20\x20function failed(error) { cleanup(); reject(error); }\n\
              \x20\x20\x20\x20function aborted() { var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = options.signal.reason; cleanup(); reject(error); }\n\
-             \x20\x20\x20\x20if (options && options.signal && options.signal.aborted) { aborted(); return; } emitter.once(event, done); if (event !== 'error') emitter.once('error', failed); if (options && options.signal) options.signal.addEventListener('abort', aborted, { once: true });\n\
+             \x20\x20\x20\x20if (options && options.signal && options.signal.aborted) { aborted(); return; } // shortcut: stream end is emitted synchronously, Node emits it on a later tick, so awaiting it afterwards must still resolve.
+ if (event === 'end' && emitter._endEmitted === true) { resolve([]); return; } emitter.once(event, done); if (event !== 'error') emitter.once('error', failed); if (options && options.signal) options.signal.addEventListener('abort', aborted, { once: true });\n\
              \x20\x20});\n\
              }\n\
-             function on(emitter, event, options) { options = options || {}; var values = [], waiters = [], ended = false, failure; function received() { var value = Array.prototype.slice.call(arguments); if (waiters.length) waiters.shift().resolve({ value: value, done: false }); else values.push(value); } function fail(error) { failure = error; finish(); } function finish() { if (ended) return; ended = true; emitter.removeListener(event, received); if (event !== 'error') emitter.removeListener('error', fail); while (waiters.length) { var waiter = waiters.shift(); if (failure) waiter.reject(failure); else waiter.resolve({ value: undefined, done: true }); } } emitter.on(event, received); if (event !== 'error') emitter.on('error', fail); if (options.signal) { var abort = function() { var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = options.signal.reason; failure = error; finish(); }; if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, { once: true }); } return { next: function() { if (values.length) return Promise.resolve({ value: values.shift(), done: false }); if (failure) return Promise.reject(failure); if (ended) return Promise.resolve({ value: undefined, done: true }); return new Promise(function(resolve, reject) { waiters.push({ resolve: resolve, reject: reject }); }); }, return: function() { finish(); return Promise.resolve({ value: undefined, done: true }); }, throw: function(error) { failure = error; finish(); return Promise.reject(error); }, [Symbol.asyncIterator]: function() { return this; } }; }\n\
+             function on(emitter, event, options) { options = options || {}; var values = [], waiters = [], ended = false, failure; function received() { var value = Array.prototype.slice.call(arguments); if (waiters.length) waiters.shift().resolve({ value: value, done: false }); else values.push(value); } function fail(error) { failure = error; finish(); } function finish() { if (ended) return; ended = true; closeNames.forEach(function(name) { emitter.removeListener(name, finish); }); emitter.removeListener(event, received); if (event !== 'error') emitter.removeListener('error', fail); while (waiters.length) { var waiter = waiters.shift(); if (failure) waiter.reject(failure); else waiter.resolve({ value: undefined, done: true }); } } var closeNames = Array.isArray(options.close) ? options.close : []; closeNames.forEach(function(name) { emitter.on(name, finish); }); emitter.on(event, received); if (event !== 'error') emitter.on('error', fail); if (options.signal) { var abort = function() { var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = options.signal.reason; failure = error; finish(); }; if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, { once: true }); } return { next: function() { if (values.length) return Promise.resolve({ value: values.shift(), done: false }); if (failure) return Promise.reject(failure); if (ended) return Promise.resolve({ value: undefined, done: true }); return new Promise(function(resolve, reject) { waiters.push({ resolve: resolve, reject: reject }); }); }, return: function() { finish(); return Promise.resolve({ value: undefined, done: true }); }, throw: function(error) { failure = error; finish(); return Promise.reject(error); }, [Symbol.asyncIterator]: function() { return this; } }; }\n\
              function getEventListeners(emitter, event) { return typeof emitter.listeners === 'function' ? emitter.listeners(event) : []; } function getMaxListeners(emitter) { return typeof emitter.getMaxListeners === 'function' ? emitter.getMaxListeners() : EventEmitter.defaultMaxListeners; } function setMaxListeners(value) { var emitters = Array.prototype.slice.call(arguments, 1); value = Number(value); if (!Number.isFinite(value) || value < 0) throw new RangeError('The value of n is out of range'); if (!emitters.length) EventEmitter.defaultMaxListeners = value; else emitters.forEach(function(emitter) { emitter.setMaxListeners(value); }); }\n\
              module.exports = EventEmitter;\n\
              module.exports.EventEmitter = EventEmitter;\n\
@@ -94,44 +153,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports.default = EventEmitter;\n\
              module.exports.__esModule = true;\n",
         ),
-        "assert" | "assert/strict" => Some(
-            "function AssertionError(options) {\n\
-             \x20\x20options = options || {}; this.name = 'AssertionError'; this.code = 'ERR_ASSERTION';\n\
-             \x20\x20this.actual = options.actual; this.expected = options.expected; this.operator = options.operator;\n\
-             \x20\x20this.generatedMessage = options.message === undefined;\n\
-             \x20\x20this.message = options.message === undefined ? 'Expected values to satisfy ' + (options.operator || 'assertion') : String(options.message);\n\
-             \x20\x20if (Error.captureStackTrace) Error.captureStackTrace(this, options.stackStartFn || AssertionError);\n\
-             }\n\
-             AssertionError.prototype = Object.create(Error.prototype); AssertionError.prototype.constructor = AssertionError;\n\
-             function failure(actual, expected, message, operator, start) { throw new AssertionError({ actual: actual, expected: expected, message: message, operator: operator, stackStartFn: start }); }\n\
-             function deep(actual, expected, seen) {\n\
-             \x20\x20if (Object.is(actual, expected)) return true;\n\
-             \x20\x20if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return false;\n\
-             \x20\x20if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;\n\
-             \x20\x20seen = seen || new Map(); if (seen.get(actual) === expected) return true; seen.set(actual, expected);\n\
-             \x20\x20if (actual instanceof Date) return expected instanceof Date && actual.getTime() === expected.getTime();\n\
-             \x20\x20if (actual instanceof RegExp) return expected instanceof RegExp && actual.source === expected.source && actual.flags === expected.flags;\n\
-             \x20\x20if (ArrayBuffer.isView(actual)) { if (!ArrayBuffer.isView(expected) || actual.length !== expected.length) return false; for (var i = 0; i < actual.length; i++) if (!Object.is(actual[i], expected[i])) return false; return true; }\n\
-             \x20\x20var left = Object.keys(actual); var right = Object.keys(expected); if (left.length !== right.length) return false;\n\
-             \x20\x20for (var index = 0; index < left.length; index++) { var key = left[index]; if (!Object.prototype.hasOwnProperty.call(expected, key) || !deep(actual[key], expected[key], seen)) return false; }\n\
-             \x20\x20return true;\n\
-             }\n\
-             function ok(value, message) { if (!value) failure(value, true, message, '==', ok); }\n\
-             function equal(actual, expected, message) { if (actual != expected) failure(actual, expected, message, '==', equal); }\n\
-             function notEqual(actual, expected, message) { if (actual == expected) failure(actual, expected, message, '!=', notEqual); }\n\
-             function strictEqual(actual, expected, message) { if (!Object.is(actual, expected)) failure(actual, expected, message, 'strictEqual', strictEqual); }\n\
-             function notStrictEqual(actual, expected, message) { if (Object.is(actual, expected)) failure(actual, expected, message, 'notStrictEqual', notStrictEqual); }\n\
-             function deepStrictEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepStrictEqual', deepStrictEqual); }\n\
-             function notDeepStrictEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepStrictEqual', notDeepStrictEqual); }\n\
-             function fail(message) { failure(undefined, undefined, message || 'Failed', 'fail', fail); }\n\
-             function matches(error, expected) { if (expected === undefined) return true; if (expected instanceof RegExp) return expected.test(String(error && error.message || error)); if (typeof expected === 'function') return error instanceof expected || expected(error) === true; return true; }\n\
-             function throws(block, expected, message) { var caught; try { block(); } catch (error) { caught = error; } if (caught === undefined || !matches(caught, expected)) failure(caught, expected, message, 'throws', throws); return caught; }\n\
-             function doesNotThrow(block, expected, message) { try { block(); } catch (error) { if (matches(error, expected)) failure(error, undefined, message, 'doesNotThrow', doesNotThrow); throw error; } }\n\
-             ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = notEqual; ok.strictEqual = strictEqual; ok.notStrictEqual = notStrictEqual;\n\
-             ok.deepEqual = deepStrictEqual; ok.notDeepEqual = notDeepStrictEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;\n\
-             ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.strict = ok; ok.default = ok; ok.__esModule = true;\n\
-             module.exports = ok;\n",
-        ),
+        "assert" => Some(assert_source!("module.exports = ok;\n")),
+        "assert/strict" => Some(assert_source!("module.exports = ok.strict;\n")),
         _ => None,
     }
 }

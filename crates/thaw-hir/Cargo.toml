@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
+swc_ecma_codegen = "32"
+swc_ecma_transforms_typescript = "55"
 swc_ecma_visit = "29.0.0"
 
 [dev-dependencies]

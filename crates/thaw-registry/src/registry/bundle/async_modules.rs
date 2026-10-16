@@ -2,6 +2,12 @@ fn prepare_async_modules(
     modules: &mut [BundledModule],
     source_cache: &mut SourceCache,
 ) -> Result<(), String> {
+    mark_async_modules(modules)?;
+    rewrite_async_modules(modules, source_cache, &std::collections::BTreeSet::new());
+    Ok(())
+}
+
+fn mark_async_modules(modules: &mut [BundledModule]) -> Result<(), String> {
     use std::collections::BTreeSet;
 
     for module in modules.iter_mut() {
@@ -20,7 +26,7 @@ fn prepare_async_modules(
             }
             if module.static_esm_specs.iter().any(|specifier| {
                 module
-                    .requires
+                    .imports
                     .iter()
                     .any(|(source, target)| source == specifier && async_keys.contains(target))
             }) {
@@ -54,7 +60,7 @@ fn prepare_async_modules(
             return Ok(());
         };
         visiting.push(key.to_string());
-        for (specifier, target) in &module.requires {
+        for (specifier, target) in &module.imports {
             if module.static_esm_specs.contains(specifier)
                 && modules
                     .iter()
@@ -72,27 +78,36 @@ fn prepare_async_modules(
         visit(&module.key, modules, &mut Vec::new(), &mut visited)?;
     }
 
-    for module in modules.iter_mut() {
+    Ok(())
+}
+
+fn rewrite_async_modules(
+    modules: &mut [BundledModule], source_cache: &mut SourceCache,
+    preserve_native: &std::collections::BTreeSet<String>,
+) {
+    for module in modules.iter_mut().filter(|module| !preserve_native.contains(&module.key)) {
         // Reuse the rewrite of a file already rewritten in an earlier
         // subpath bundle (same file, same async-ness); only a module with
         // no real file behind it (a Node builtin polyfill) is rewritten
         // unconditionally, which is cheap and rare.
         let rewritten = match &module.source_path {
             Some(path) => {
-                let cache_key = (path.clone(), module.async_module);
+                let cache_key = (path.clone(), module.key.clone(), module.async_module);
                 if let Some(cached) = source_cache.rewritten.get(&cache_key) {
                     cached.clone()
                 } else {
-                    let result = rewrite_esm_to_commonjs_mode(&module.source, module.async_module);
+                    let result = rewrite_esm_to_commonjs_mode_named(&module.source, module.async_module, &module.source_name);
                     source_cache.rewritten.insert(cache_key, result.clone());
                     result
                 }
             }
-            None => rewrite_esm_to_commonjs_mode(&module.source, module.async_module),
+            None => rewrite_esm_to_commonjs_mode_named(&module.source, module.async_module, &module.source_name),
         };
         if let Some(source) = rewritten {
+            if source != module.source {
+                module.source_name = rewritten_js_source_name(&module.source_name, "CommonJS rewrite");
+            }
             module.source = source;
         }
     }
-    Ok(())
 }

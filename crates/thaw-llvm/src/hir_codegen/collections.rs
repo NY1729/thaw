@@ -98,6 +98,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_int_to_ptr(tagged_buffer, ptr_type, "jit_array_tagged_buffer")
             .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let tagged_bb = self.context.append_basic_block(function, "jit_array_tagged");
+        let handle_bb = self.context.append_basic_block(function, "jit_array_handle");
+        let merge_bb = self.context.append_basic_block(function, "jit_array_merge");
+        self.builder.build_conditional_branch(tagged, tagged_bb, handle_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(tagged_bb);
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(handle_bb);
         let guard = self
             .builder
             .build_alloca(i64_type, "jit_array_null_guard")
@@ -127,16 +135,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .into_pointer_value();
         let handle_buffer = self.compile_array_data(handle_pointer)?;
-        let buffer = self
-            .builder
-            .build_select(
-                tagged,
-                tagged_buffer,
-                handle_buffer,
-                "jit_array_buffer",
-            )
-            .map_err(|error| error.to_string())?
-            .into_pointer_value();
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_bb);
+        let buffer = self.builder.build_phi(ptr_type, "jit_array_buffer").map_err(|error| error.to_string())?;
+        buffer.add_incoming(&[(&tagged_buffer, tagged_bb), (&handle_buffer, handle_bb)]);
+        let buffer = buffer.as_basic_value().into_pointer_value();
         self.compile_array_wrap(buffer)
     }
 
@@ -204,13 +207,27 @@ impl<'ctx> HirCompiler<'ctx> {
         index: IntValue<'ctx>,
     ) -> Result<IntValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let presence = self.compile_array_presence(handle)?;
+        let data = self.compile_array_data(handle)?;
+        let length = self.builder
+            .build_load(i64_type, data, "array_current_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let in_range = self.builder
+            .build_int_compare(IntPredicate::ULT, index, length, "array_index_in_current_length")
+            .map_err(|error| error.to_string())?;
         let function = self.current_function();
+        let check_presence = self.context.append_basic_block(function, "array_check_presence");
+        let out_of_range = self.context.append_basic_block(function, "array_out_of_range");
         let dense = self.context.append_basic_block(function, "array_dense");
         let sparse = self.context.append_basic_block(function, "array_sparse");
         let sparse_present = self.context.append_basic_block(function, "array_sparse_present");
         let beyond_mask = self.context.append_basic_block(function, "array_beyond_presence_mask");
         let done = self.context.append_basic_block(function, "array_presence_done");
+        self.builder
+            .build_conditional_branch(in_range, check_presence, out_of_range)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(check_presence);
+        let presence = self.compile_array_presence(handle)?;
         let is_dense = self
             .builder
             .build_is_null(presence, "array_is_dense")
@@ -268,13 +285,19 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(out_of_range);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
         let phi = self
             .builder
             .build_phi(self.context.i8_type(), "array_index_state")
             .map_err(|error| error.to_string())?;
         let present_by_default = self.context.i8_type().const_int(1, false);
+        let absent = self.context.i8_type().const_zero();
         phi.add_incoming(&[
+            (&absent, out_of_range),
             (&present_by_default, dense),
             (&state, sparse_present),
             (&present_by_default, beyond_mask),
@@ -378,18 +401,27 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut element_bytes = elems
             .iter()
             .filter_map(|element| self.expr_hir_type(element))
-            .map(|element| array_element_storage_bytes(&element))
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
+            .try_fold(ARRAY_ELEM_BYTES, |width, element| {
+                Ok::<_, String>(width.max(array_element_storage_bytes(&element)?))
+            })?;
         let elem_vals = elems
             .iter()
             .map(|e| self.compile_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
-        if elem_vals.iter().any(|value| value.is_struct_value()) {
-            element_bytes = element_bytes.max(ASYNC_SLOT_BYTES);
+        for (expr, value) in elems.iter().zip(&elem_vals) {
+            let bytes = compiled_value_layout(value.get_type())?.0;
+            let actual = align_storage(bytes, 8)?
+                .max(if value.is_struct_value() { ASYNC_SLOT_BYTES } else { ARRAY_ELEM_BYTES });
+            if let Some(declared) = self.expr_hir_type(expr) {
+                if actual > array_element_storage_bytes(&declared)? {
+                    return Err("array element exceeds its declared storage".into());
+                }
+            }
+            element_bytes = element_bytes.max(actual);
         }
 
-        let size = ARRAY_HEADER_BYTES + element_bytes * elem_vals.len() as u64;
+        let size = checked_storage_add(ARRAY_HEADER_BYTES,
+            checked_storage_mul(element_bytes, elem_vals.len() as u64)?)?;
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size, false);
         let align_val = i64_type.const_int(element_bytes.min(8), false);
@@ -410,7 +442,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         for (i, val) in elem_vals.into_iter().enumerate() {
-            let offset = i64_type.const_int(ARRAY_HEADER_BYTES + element_bytes * i as u64, false);
+            let offset = i64_type.const_int(checked_array_offset(element_bytes, i)?, false);
             let elem_ptr = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "elem_ptr")
@@ -469,6 +501,59 @@ impl<'ctx> HirCompiler<'ctx> {
             .into())
     }
 
+    fn checked_array_allocation_size(
+        &mut self,
+        length: IntValue<'ctx>,
+        stride: u64,
+        name: &str,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let max_length = ((isize::MAX as u64) - ARRAY_HEADER_BYTES) / stride;
+        let too_long = self.builder.build_int_compare(
+            IntPredicate::UGT, length, i64_type.const_int(max_length, false),
+            &format!("{name}_too_long"),
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let valid = self.context.append_basic_block(function, &format!("{name}_valid"));
+        let invalid = self.context.append_basic_block(function, &format!("{name}_invalid"));
+        self.builder.build_conditional_branch(too_long, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_type_error("Array allocation exceeds addressable storage")?;
+        self.builder.position_at_end(valid);
+        let payload = self.builder.build_int_mul(length, i64_type.const_int(stride, false),
+            &format!("{name}_payload")).map_err(|error| error.to_string())?;
+        self.builder.build_int_add(payload, i64_type.const_int(ARRAY_HEADER_BYTES, false),
+            &format!("{name}_size")).map_err(|error| error.to_string())
+    }
+
+    fn checked_array_length_add(
+        &mut self,
+        left: IntValue<'ctx>,
+        right: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let max = i64_type.const_int(isize::MAX as u64, false);
+        let right_invalid = self.builder.build_int_compare(IntPredicate::UGT, right, max,
+            "array_part_length_invalid").map_err(|error| error.to_string())?;
+        let remaining = self.builder.build_int_sub(max, right, "array_length_remaining")
+            .map_err(|error| error.to_string())?;
+        let sum_invalid = self.builder.build_int_compare(IntPredicate::UGT, left, remaining,
+            "array_total_length_invalid").map_err(|error| error.to_string())?;
+        let invalid = self.builder.build_or(right_invalid, sum_invalid, "array_length_invalid")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let valid_block = self.context.append_basic_block(function, "array_length_valid");
+        let invalid_block = self.context.append_basic_block(function, "array_length_overflow");
+        self.builder.build_conditional_branch(invalid, invalid_block, valid_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid_block);
+        self.compile_throw_type_error("Array length exceeds addressable storage")?;
+        self.builder.position_at_end(valid_block);
+        self.builder.build_int_add(left, right, "spread_total")
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_array_alloc(
         &mut self,
         length: &HirExpr,
@@ -480,22 +565,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_float_to_signed_int(length, i64_type, "array_alloc_length")
             .map_err(|error| error.to_string())?;
-        let payload_size = self
-            .builder
-            .build_int_mul(
-                length,
-                i64_type.const_int(array_element_storage_bytes(element), false),
-                "array_alloc_payload_size",
-            )
-            .map_err(|error| error.to_string())?;
-        let allocation_size = self
-            .builder
-            .build_int_add(
-                payload_size,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "array_alloc_size",
-            )
-            .map_err(|error| error.to_string())?;
+        let allocation_size = self.checked_array_allocation_size(
+            length, array_element_storage_bytes(element)?, "array_alloc")?;
         let result = self
             .builder
             .build_call(
@@ -503,7 +574,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     allocation_size.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element).min(8), false)
+                        .const_int((array_element_storage_bytes(element)?).min(8), false)
                         .into(),
                 ],
                 "array_alloc",
@@ -513,14 +584,39 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_arena_alloc did not return an array")?
             .into_pointer_value();
+        let unavailable = self.builder.build_is_null(result, "array_alloc_unavailable")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "array_alloc_failed");
+        let ready = self.context.append_basic_block(function, "array_alloc_ready");
+        self.builder.build_conditional_branch(unavailable, failed, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.compile_throw_type_error("Unable to allocate Array storage")?;
+        self.builder.position_at_end(ready);
         self.builder
             .build_store(result, length)
             .map_err(|error| error.to_string())?;
+        if *element == HirType::Undefined {
+            // Array.from's no-mapper path creates present undefined slots.
+            // Arena allocations are zeroed only while tracing is active.
+            let zero = self.builder.build_alloca(i64_type, "array_undefined_zero")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(zero, i64_type.const_zero())
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_array_fill").unwrap(),
+                &[result.into(), zero.into(), i64_type.const_int(8, false).into(),
+                    self.context.f64_type().const_zero().into(),
+                    self.context.f64_type().const_float(f64::INFINITY).into()],
+                "initialize_undefined_array",
+            ).map_err(|error| error.to_string())?;
+        }
         Ok(self.compile_array_wrap(result)?.into())
     }
 
     /// Evaluates each array part once from left to right and copies their
-    /// uniform eight-byte element slots into one arena-owned result array.
+    /// uniform type-sized element slots into one arena-owned result array.
     fn compile_array_concat(
         &mut self,
         parts: &[HirExpr],
@@ -537,27 +633,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_load(i64_type, array, "spread_length")
                 .map_err(|error| error.to_string())?
                 .into_int_value();
-            total = self
-                .builder
-                .build_int_add(total, length, "spread_total")
-                .map_err(|error| error.to_string())?;
+            total = self.checked_array_length_add(total, length)?;
             arrays.push((handle, array, length));
         }
 
-        let element_width = array_element_storage_bytes(element);
-        let element_bytes = i64_type.const_int(element_width, false);
-        let payload_size = self
-            .builder
-            .build_int_mul(total, element_bytes, "spread_payload_size")
-            .map_err(|error| error.to_string())?;
-        let allocation_size = self
-            .builder
-            .build_int_add(
-                payload_size,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "spread_allocation_size",
-            )
-            .map_err(|error| error.to_string())?;
+        let element_width = array_element_storage_bytes(element)?;
+        let allocation_size = self.checked_array_allocation_size(
+            total, element_width, "spread_allocation")?;
         let result = self
             .builder
             .build_call(
@@ -606,7 +688,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (handle, array, length) in arrays {
             let bytes = self
                 .builder
-                .build_int_mul(length, element_bytes, "spread_copy_size")
+                .build_int_mul(length, i64_type.const_int(element_width, false), "spread_copy_size")
                 .map_err(|error| error.to_string())?;
             let source = unsafe {
                 self.builder
@@ -705,12 +787,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_float_to_signed_int(idx_val, i64_type, "idx")
             .map_err(|e| e.to_string())?;
         let element_bytes = match self.expr_hir_type(array) {
-            Some(HirType::Array(element)) => array_element_storage_bytes(&element),
-            Some(HirType::Tuple(elements)) => elements
-                .iter()
-                .map(array_element_storage_bytes)
-                .max()
-                .unwrap_or(ARRAY_ELEM_BYTES),
+            Some(HirType::Array(element)) => array_element_storage_bytes(&element)?,
+            Some(HirType::Tuple(elements)) => tuple_element_storage_bytes(&elements)?,
             _ => ARRAY_ELEM_BYTES,
         };
         // Bounds/negative/non-integer-checked in `thaw_array_read_ptr`
@@ -738,12 +816,41 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((element, handle, idx_int))
     }
 
+    /// Preserve the existing static order for marker-capable allocations.
+    /// A fixed copy explicitly resets this list before creating its keys.
+    fn compile_initial_object_order(
+        &mut self,
+        object: PointerValue<'ctx>,
+        names: &[String],
+    ) -> Result<(), String> {
+        if !names.iter().any(|name| name.starts_with("__thaw_class_identity_\u{1e}")) {
+            return Ok(());
+        }
+        self.builder.build_call(
+            self.module.get_function("thaw_object_order_begin").unwrap(),
+            &[object.into()],
+            "object_order_begin",
+        ).map_err(|error| error.to_string())?;
+        let mut indices = names.iter().enumerate()
+            .filter_map(|(index, name)| (!is_hidden_accessor_field(name))
+                .then_some((index, object_array_index_key(name))))
+            .collect::<Vec<_>>();
+        indices.sort_by_key(|(index, numeric)| (numeric.is_none(), numeric.unwrap_or(*index as u32)));
+        for (index, _) in indices {
+            let key = self.compile_expr(&HirExpr::Lit(HirLit::Str(names[index].clone())))?
+                .into_pointer_value();
+            self.builder.build_call(
+                self.module.get_function("thaw_object_order_seed").unwrap(),
+                &[object.into(), key.into()],
+                "object_order_seed",
+            ).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Allocates native fields from the arena in the order `fields` lists
-    /// them (thaw-hir's lowering already reordered
-    /// the literal to match its declared type, so this order is always the
-    /// declared one, not whatever order the user happened to write). No
-    /// length header: field count/order is static, part of the type, so
-    /// unlike arrays there's nothing to record at runtime.
+    /// them (thaw-hir's lowering already reordered the literal to match its
+    /// declared type). Marker-capable values also seed their visible key order.
     fn compile_object_lit(
         &mut self,
         fields: &[(String, HirExpr)],
@@ -753,17 +860,25 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|(_, expr)| self.compile_expr(expr))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let field_sizes = field_vals
-            .iter()
-            .map(|value| {
-                if value.is_struct_value() {
-                    ASYNC_SLOT_BYTES
+        let field_sizes = field_vals.iter().enumerate()
+            .map(|(index, value)| {
+                let declared = self.expr_hir_type(&fields[index].1)
+                    .map(|ty| object_field_storage_bytes(&ty))
+                    .transpose()?;
+                let actual = compiled_value_layout(value.get_type())?.0;
+                let actual = align_storage(actual, 8)?
+                    .max(if value.is_struct_value() { ASYNC_SLOT_BYTES } else { OBJECT_FIELD_BYTES });
+                if let Some(declared) = declared {
+                    if actual > declared {
+                        return Err(format!("object field `{}` exceeds its declared storage", fields[index].0));
+                    }
+                    Ok::<_, String>(declared)
                 } else {
-                    OBJECT_FIELD_BYTES
+                    Ok(actual)
                 }
             })
-            .collect::<Vec<_>>();
-        let size = field_sizes.iter().sum::<u64>();
+            .collect::<Result<Vec<_>, _>>()?;
+        let size = field_sizes.iter().try_fold(0, |total, width| checked_storage_add(total, *width))?;
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size.max(1), false);
         let align_val = i64_type.const_int(OBJECT_FIELD_BYTES, false);
@@ -799,15 +914,14 @@ impl<'ctx> HirCompiler<'ctx> {
             };
             if let Some(property) = property {
                 let property = self
-                    .builder
-                    .build_global_string_ptr(property, "object_accessor_property")
-                    .map_err(|error| error.to_string())?;
+                    .compile_raw_string_literal(property.as_bytes())?
+                    .into_pointer_value();
                 self.builder
                     .build_call(
                         self.module.get_function("thaw_object_set_accessor").unwrap(),
                         &[
                             base_ptr.into(),
-                            property.as_pointer_value().into(),
+                            property.into(),
                             val.into_pointer_value().into(),
                             self.context.bool_type().const_int(setter as u64, false).into(),
                         ],
@@ -815,26 +929,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
             }
-            byte_offset += field_sizes[i];
+            byte_offset = checked_storage_add(byte_offset, field_sizes[i])?;
         }
 
+        self.compile_initial_object_order(
+            base_ptr,
+            &fields.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+        )?;
         Ok(base_ptr.into())
     }
 
     fn compile_object_alloc(
         &mut self,
         object_type: &HirType,
+        class_constructor: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let HirType::Object(fields) = object_type else {
             return Err(format!(
                 "object allocation requires an object type, got {object_type:?}"
             ));
         };
-        let size = fields
-            .iter()
-            .map(|(_, field_type)| object_field_storage_bytes(field_type))
-            .sum::<u64>()
-            .max(1);
+        let size = object_storage_bytes(fields)?.max(1);
         let i64_type = self.context.i64_type();
         let allocation = self
             .builder
@@ -867,8 +982,32 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(field_pointer, zero)
                 .map_err(|error| error.to_string())?;
-            byte_offset += object_field_storage_bytes(field_type);
+            byte_offset = checked_storage_add(byte_offset, object_field_storage_bytes(field_type)?)?;
         }
+        // Only a constructor's ClassAlloc may register nominal identity.
+        // Ordinary ObjectAlloc can originate from typed fallback values,
+        // even when a user supplied a marker-like field name.
+        if let Some((marker, HirType::Bool)) = fields.first().filter(|_| class_constructor) {
+            if marker.starts_with("__thaw_class_identity_\u{1e}") {
+                let marker = self
+                    .builder
+                    .build_global_string_ptr(marker, "class_identity_marker")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_object_set_class_identity")
+                            .unwrap(),
+                        &[allocation.into(), marker.as_pointer_value().into()],
+                        "register_class_identity",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        self.compile_initial_object_order(
+            allocation,
+            &fields.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+        )?;
         Ok(allocation.into())
     }
 
@@ -878,11 +1017,35 @@ impl<'ctx> HirCompiler<'ctx> {
         fields: &[(String, HirType)],
         index: usize,
     ) -> Result<PointerValue<'ctx>, String> {
-        let offset = self
-            .context
-            .i64_type()
-            .const_int(object_field_offset(fields, index), false);
-
+        let static_offset = self.context.i64_type()
+            .const_int(object_field_offset(fields, index)?, false);
+        if !self.tracks_physical_object_layouts {
+            return unsafe { self.builder.build_in_bounds_gep(
+                self.context.i8_type(), object, &[static_offset], "field_ptr",
+            ) }.map_err(|error| error.to_string());
+        }
+        let field_hex = fields[index].0.as_bytes().iter()
+            .map(|byte| format!("{byte:02x}")).collect::<String>();
+        let field_hex = self.builder.build_global_string_ptr(&field_hex, "native_field_name_hex")
+            .map_err(|error| error.to_string())?;
+        let offset = self.builder.build_call(
+            self.module.get_function("thaw_object_field_offset").unwrap(),
+            &[object.into(), field_hex.as_pointer_value().into(), static_offset.into()],
+            "native_physical_field_offset",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native field offset returned no value")?.into_int_value();
+        let missing = self.builder.build_int_compare(
+            IntPredicate::EQ, offset, self.context.i64_type().const_all_ones(),
+            "native_physical_field_missing",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let invalid = self.context.append_basic_block(function, "native_field_invalid");
+        let valid = self.context.append_basic_block(function, "native_field_valid");
+        self.builder.build_conditional_branch(missing, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_builtin_error("TypeError", "Incompatible native object field layout")?;
+        self.builder.position_at_end(valid);
         unsafe {
             self.builder
                 .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "field_ptr")
@@ -897,15 +1060,14 @@ impl<'ctx> HirCompiler<'ctx> {
         setter: bool,
     ) -> Result<PointerValue<'ctx>, String> {
         let property = self
-            .builder
-            .build_global_string_ptr(property, "object_accessor_lookup_property")
-            .map_err(|error| error.to_string())?;
+            .compile_raw_string_literal(property.as_bytes())?
+            .into_pointer_value();
         self.builder
             .build_call(
                 self.module.get_function("thaw_object_accessor").unwrap(),
                 &[
                     object.into(),
-                    property.as_pointer_value().into(),
+                    property.into(),
                     self.context.bool_type().const_int(setter as u64, false).into(),
                 ],
                 "object_accessor_lookup",

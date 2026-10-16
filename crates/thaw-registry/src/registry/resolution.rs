@@ -4,6 +4,8 @@
 pub struct ResolvedPackage {
     pub name: String,
     pub dts_source: String,
+    /// Exact installed declaration file read into `dts_source`; generated builtins have none.
+    pub dts_path: Option<PathBuf>,
     pub native_lib: Option<PathBuf>,
     /// A synchronous Node-API addon loaded through thaw-napi. Kept separate
     /// from `native_lib` because `.node` uses N-API handles, not the Fast-path
@@ -12,15 +14,21 @@ pub struct ResolvedPackage {
     pub native_dependencies: Vec<PathBuf>,
     pub platform_executable: Option<PathBuf>,
     pub bundle_js: Option<String>,
+    /// Environment defaults this package needs at run time (`runtime-env.json`), already applied
+    /// as a prelude of `bundle_js`; kept for inspection. `$self` is this executable.
+    pub runtime_env: BTreeMap<String, String>,
     /// The version `add` recorded in `version.txt`, if this package went
     /// through `add` (rather than hand-curation, or an `add` run before
     /// this field existed) -- see `AddedPackage::resolved_version`.
     pub version: Option<String>,
     /// Every *other* real npm package `add` folded into `bundle.js`,
-    /// mapped to its resolved version, read back from `lock.json` -- see
+    /// mapped to its resolved version, read back from the package's root
+    /// `lock.json` or its indexed export instances. Duplicate
+    /// installed names use node_modules-relative locator keys; unique names
+    /// retain their historical keys. See
     /// `AddedPackage::dependency_versions`. `None` if there's no
-    /// `lock.json` (a single-file package with no dependencies never gets
-    /// one written; nor does a hand-curated or pre-`lock.json` package).
+    /// version metadata (a single-file package with no dependencies never
+    /// gets a lock; nor does a hand-curated or pre-lock package).
     pub dependency_versions: Option<BTreeMap<String, String>>,
 }
 
@@ -30,7 +38,8 @@ pub struct ResolvedPackage {
 /// have nothing for thaw-bridge's shim to call.
 pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, String> {
     let (package, subpath) = split_bare_spec(name);
-    let mut dir = registry_dir.join(package);
+    let package_root = registry_dir.join(package);
+    let mut dir = package_root.clone();
     if let Some(subpath) = subpath {
         validate_export_subpath(subpath)?;
         dir = dir.join("subpaths").join(subpath);
@@ -91,25 +100,64 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         None
     };
 
+    let runtime_env: BTreeMap<String, String> = fs::read_to_string(package_root.join("runtime-env.json"))
+        .ok()
+        .and_then(|source| serde_json::from_str(&source).ok())
+        .unwrap_or_default();
+    // ponytail: the defaults ride on the package's bundle, so a native-only package without a bundle
+    // runs no JS to apply them; give such packages a prelude-only bundle if one ever needs this.
+    let bundle_js = match bundle_js {
+        Some(source) if !runtime_env.is_empty() => Some(format!("{}{source}", runtime_env_prelude(&runtime_env))),
+        other => other,
+    };
+
     let version = fs::read_to_string(dir.join("version.txt"))
         .ok()
         .map(|s| s.trim().to_string());
 
-    let dependency_versions = fs::read_to_string(dir.join("lock.json"))
+    let legacy_lock = || fs::read_to_string(dir.join("lock.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<BTreeMap<String, String>>(&s).ok());
+    let dependency_versions = if let Some(subpath) = subpath {
+        match fs::symlink_metadata(package_root.join("instances.json")) {
+            Ok(_) => {
+                let index = read_instance_index(&package_root)?;
+                let records = index.exports.get(subpath).ok_or_else(|| {
+                    format!("registry package `{name}` has no recorded version instances; re-register it")
+                })?;
+                let versions = project_package_versions(instance_versions(records, &package_root.join("instances.json"))?)?;
+                (versions.len() > 1).then_some(versions)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => legacy_lock(),
+            Err(error) => return Err(format!("cannot inspect registry package `{name}` instance index: {error}")),
+        }
+    } else {
+        legacy_lock()
+    };
 
     Ok(ResolvedPackage {
         name: name.to_string(),
         dts_source,
+        dts_path: Some(dts_path),
         native_lib,
         native_addon,
         native_dependencies,
         platform_executable,
         bundle_js,
+        runtime_env,
         version,
         dependency_versions,
     })
+}
+
+/// JavaScript that gives each environment variable a default unless the process already sets it;
+/// `$self` expands to this executable (it embeds the package's native addons).
+fn runtime_env_prelude(env: &BTreeMap<String, String>) -> String {
+    let defaults = serde_json::to_string(env).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "(function(defaults) {{ var env = globalThis.process.env, self = globalThis.process.execPath; \
+         Object.keys(defaults).forEach(function(key) {{ if (env[key] === undefined) env[key] = defaults[key].split('$self').join(self); }}); }})({defaults});\n"
+    )
 }
 
 /// Resolves the deliberately small built-in surface exposed to user imports.
@@ -126,7 +174,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function isDate(value: Json): boolean;\nexport declare function isRegExp(value: Json): boolean;\nexport declare function isMap(value: Json): boolean;\nexport declare function isSet(value: Json): boolean;\nexport declare function isPromise(value: Json): boolean;\nexport declare function isArrayBuffer(value: Json): boolean;\nexport declare function isTypedArray(value: Json): boolean;\nexport declare function isNativeError(value: Json): boolean;\n"
         }
         "path" | "path/posix" | "path/win32" => {
-            "export interface ParsedPath { root: string; dir: string; base: string; ext: string; name: string; }\nexport declare function resolve(...paths: string[]): string;\nexport declare function join(...paths: string[]): string;\nexport declare function dirname(path: string): string;\nexport declare function basename(path: string, suffix?: string): string;\nexport declare function extname(path: string): string;\nexport declare function normalize(path: string): string;\nexport declare function relative(from: string, to: string): string;\nexport declare function isAbsolute(path: string): boolean;\nexport declare function parse(path: string): ParsedPath;\nexport declare function format(pathObject: Json): string;\nexport declare function toNamespacedPath(path: string): string;\n"
+            "export interface ParsedPath { root: string; dir: string; base: string; ext: string; name: string; }\nexport declare function resolve(...paths: string[]): string;\nexport declare function join(...paths: string[]): string;\nexport declare function dirname(path: string): string;\nexport declare function basename(path: string, suffix?: string): string;\nexport declare function extname(path: string): string;\nexport declare function normalize(path: string): string;\nexport declare function relative(from: string, to: string): string;\nexport declare function isAbsolute(path: string): boolean;\nexport declare function parse(path: string): ParsedPath;\nexport declare function format(pathObject: Json): string;\nexport declare function toNamespacedPath(path: string): string;\nexport declare const posix: any;\nexport declare const win32: any;\n"
         }
         "process" => {
             "export declare const argv: string[];\nexport declare const connected: boolean;\nexport declare function cwd(): string;\nexport declare function chdir(directory: string): void;\nexport declare function disconnect(): void;\nexport declare function exit(code?: number): never;\nexport declare function uptime(): number;\nexport declare function hrtime(time?: any): any;\nexport declare function memoryUsage(): any;\nexport declare function cpuUsage(previousValue?: any): any;\nexport declare function emitWarning(warning: any, options?: any): void;\n"
@@ -170,7 +218,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare const Stream: any;\nexport declare const Readable: any;\nexport declare const Writable: any;\nexport declare const Duplex: any;\nexport declare const Transform: any;\nexport declare const PassThrough: any;\n"
         }
         "child_process" => {
-            "export declare class Buffer { toString(encoding?: string): string; }\nexport declare class ChildProcess { on(event: string, listener: (...args: any[]) => void): ChildProcess; send(message: any, callback?: (error: any) => void): boolean; }\nexport declare function spawn(command: string, args?: string[], options?: any): JsValue;\nexport declare function fork(modulePath: string, args?: string[], options?: any): ChildProcess;\nexport declare function exec(command: string, callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function exec(command: string, options: any, callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function execFile(file: string, callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function execFile(file: string, args: string[], callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function spawnSync(argsArray: any): any;\nexport declare function execFileSync(file: string, args?: string[]): Buffer;\nexport declare function execSync(argsArray: any): any;\n"
+            "export declare class Buffer { toString(encoding?: string): string; }\nexport declare class ChildProcess { on(event: string, listener: (...args: any[]) => void): ChildProcess; send(message: any, callback?: (error: any) => void): boolean; }\nexport declare function spawn(command: string, args?: string[], options?: any): JsValue;\nexport declare function fork(modulePath: string, args?: string[], options?: any): ChildProcess;\nexport declare function exec(command: string, callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function exec(command: string, options: any, callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function execFile(file: string, callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function execFile(file: string, args: string[], callback: (error: Json, stdout: string, stderr: string) => void): JsValue;\nexport declare function execFile(file: string, options: any, callback: (error: Json, stdout: any, stderr: any) => void): JsValue;\nexport declare function execFile(file: string, args: string[], options: any, callback: (error: Json, stdout: any, stderr: any) => void): JsValue;\nexport declare function spawnSync(argsArray: any): any;\nexport declare function execFileSync(file: string, args?: string[]): Buffer;\nexport declare function execFileSync(file: string, args: string[], options: any): any;\nexport declare function execSync(argsArray: any): any;\n"
         }
         "punycode" => {
             "export declare function encode(input: string): string;\nexport declare function decode(input: string): string;\nexport declare function toASCII(input: string): string;\nexport declare function toUnicode(input: string): string;\n"
@@ -223,7 +271,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function arrayBuffer(stream: JsValue): JsValue;\nexport declare function blob(stream: JsValue): JsValue;\nexport declare function buffer(stream: JsValue): JsValue;\nexport declare function json(stream: JsValue): JsValue;\nexport declare function text(stream: JsValue): JsValue;\n"
         }
         "stream/web" => {
-            "export declare const ReadableStreamDefaultController: any;\nexport interface UnderlyingSource { start?: (controller: JsValue) => void; }\nexport declare class ReadableStream { constructor(source?: UnderlyingSource); getReader(): JsValue; }\nexport interface UnderlyingSink { write?: (chunk: Json) => void; close?: () => void; }\nexport declare class WritableStream { constructor(sink?: UnderlyingSink); getWriter(): JsValue; }\nexport interface UnderlyingTransformer { transform?: (chunk: Json, controller: JsValue) => void; }\nexport declare class TransformStream { constructor(transformer?: UnderlyingTransformer); readable: JsValue; writable: JsValue; }\nexport declare class TextEncoderStream { constructor(); readable: JsValue; writable: JsValue; }\nexport declare class TextDecoderStream { constructor(); readable: JsValue; writable: JsValue; }\nexport declare class CompressionStream { constructor(format: string); readable: JsValue; writable: JsValue; }\nexport declare class DecompressionStream { constructor(format: string); readable: JsValue; writable: JsValue; }\nexport declare const ReadableByteStreamController: any;\nexport declare const ReadableStreamBYOBReader: any;\nexport declare const ReadableStreamBYOBRequest: any;\nexport declare const WritableStreamDefaultController: any;\nexport declare const TransformStreamDefaultController: any;\n"
+            "export declare const ReadableStreamDefaultController: any;\nexport interface UnderlyingSource { start?: (controller: JsValue) => void; pull?: (controller: JsValue) => void; cancel?: (reason: JsValue) => void; type?: string; autoAllocateChunkSize?: number; }\nexport interface QueuingStrategy { highWaterMark?: number; }\nexport interface ReadableStreamGetReaderOptions { mode?: string; }\nexport declare class ReadableStream { constructor(source?: UnderlyingSource, strategy?: QueuingStrategy); getReader(options?: ReadableStreamGetReaderOptions): JsValue; tee(): JsValue; cancel(reason?: JsValue): JsValue; locked: boolean; }\nexport interface UnderlyingSink { write?: (chunk: Json) => void; close?: () => void; }\nexport declare class WritableStream { constructor(sink?: UnderlyingSink); getWriter(): JsValue; }\nexport interface UnderlyingTransformer { transform?: (chunk: Json, controller: JsValue) => void; }\nexport declare class TransformStream { constructor(transformer?: UnderlyingTransformer); readable: JsValue; writable: JsValue; }\nexport declare class TextEncoderStream { constructor(); readable: JsValue; writable: JsValue; }\nexport declare class TextDecoderStream { constructor(); readable: JsValue; writable: JsValue; }\nexport declare class CompressionStream { constructor(format: string); readable: JsValue; writable: JsValue; }\nexport declare class DecompressionStream { constructor(format: string); readable: JsValue; writable: JsValue; }\nexport declare const ReadableByteStreamController: any;\nexport declare const ReadableStreamBYOBReader: any;\nexport declare const ReadableStreamBYOBRequest: any;\nexport declare const WritableStreamDefaultController: any;\nexport declare const TransformStreamDefaultController: any;\n"
         }
         "readline" => {
             "export declare class Interface { constructor(options: any); on(event: string, listener: (line: string) => void): Interface; on(event: string, listener: () => void): Interface; once(event: string, listener: (line: string) => void): Interface; close(): void; pause(): Interface; resume(): Interface; question(query: string, callback: (answer: string) => void): void; }\nexport declare function createInterface(options: any): Interface;\nexport declare function clearLine(argsArray: any): boolean;\nexport declare function clearScreenDown(argsArray: any): boolean;\nexport declare function cursorTo(argsArray: any): boolean;\nexport declare function moveCursor(argsArray: any): boolean;\n"
@@ -244,7 +292,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export interface SocketAddressInfo { address: string; family: string; port: number; }\nexport declare class Socket { constructor(type: string, listener?: JsValue); bind(port: number, address: string, callback: () => void): Socket; bind(port: number, callback: () => void): Socket; address(): SocketAddressInfo; close(callback?: () => void): Socket; ref(): Socket; unref(): Socket; hasRef(): boolean; }\nexport declare function createSocket(type: string, listener?: JsValue): Socket;\n"
         }
         "async_hooks" => {
-            "export declare class AsyncLocalStorage { constructor(options?: any); disable(): void; getStore(): JsValue; enterWith(store: Json): void; run(store: Json, callback: () => void): void; exit(callback: () => void): void; }\nexport declare function AsyncResource(argsArray: any): any;\nexport declare function createHook(argsArray: any): any;\nexport declare function executionAsyncId(argsArray: any): any;\nexport declare function triggerAsyncId(argsArray: any): any;\nexport declare function executionAsyncResource(argsArray: any): any;\n"
+            "export declare class AsyncLocalStorage { constructor(options?: any); disable(): void; getStore(): JsValue; enterWith(store: Json): void; run(store: Json, callback: () => void): void; exit(callback: () => void): void; }\nexport declare class AsyncResource { constructor(type: string, options?: any); static bind(callback: JsValue, type?: string, thisArg?: JsValue): JsValue; asyncId(): number; triggerAsyncId(): number; runInAsyncScope(callback: JsValue, thisArg?: JsValue, ...args: JsValue[]): JsValue; emitDestroy(): AsyncResource; bind(callback: JsValue, thisArg?: JsValue): JsValue; }\nexport declare class AsyncHook { enable(): AsyncHook; disable(): AsyncHook; }\nexport declare function createHook(callbacks: JsValue): AsyncHook;\nexport declare function executionAsyncId(): number;\nexport declare function triggerAsyncId(): number;\nexport declare function executionAsyncResource(): JsValue;\n"
         }
         "tty" => {
             "export declare function isatty(fd: number): boolean;\nexport declare function ReadStream(argsArray: any): any;\nexport declare function WriteStream(argsArray: any): any;\n"
@@ -275,7 +323,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function Script(argsArray: any): any;\nexport declare function createContext(argsArray: any): any;\nexport declare function isContext(argsArray: any): boolean;\nexport declare function runInContext(argsArray: any): any;\nexport declare function runInNewContext(argsArray: any): any;\nexport declare function runInThisContext(argsArray: any): any;\nexport declare function compileFunction(argsArray: any): any;\nexport declare function measureMemory(argsArray: any): any;\n"
         }
         "zlib" => {
-            "export declare class Buffer { length: number; toString(encoding?: string): string; }\nexport declare function gzipSync(value: Json): Buffer;\nexport declare function gunzipSync(value: Json): Buffer;\nexport declare function deflateSync(value: Json): Buffer;\nexport declare function inflateSync(value: Json): Buffer;\nexport declare function deflateRawSync(argsArray: any): any;\nexport declare function inflateRawSync(argsArray: any): any;\nexport declare function brotliCompressSync(value: Json, options?: any): Buffer;\nexport declare function brotliDecompressSync(value: Json, options?: any): Buffer;\nexport declare function gzip(argsArray: any): void;\nexport declare function gunzip(argsArray: any): void;\nexport declare function brotliCompress(argsArray: any): void;\nexport declare function brotliDecompress(argsArray: any): void;\nexport declare function createGzip(argsArray: any): any;\nexport declare function createGunzip(argsArray: any): any;\nexport declare function createDeflate(argsArray: any): any;\nexport declare function createInflate(argsArray: any): any;\nexport declare function createDeflateRaw(argsArray: any): any;\nexport declare function createInflateRaw(argsArray: any): any;\nexport declare function createBrotliCompress(argsArray: any): any;\nexport declare function createBrotliDecompress(argsArray: any): any;\n"
+            "export declare class Buffer { length: number; toString(encoding?: string): string; }\nexport declare function gzipSync(value: Json): Buffer;\nexport declare function gunzipSync(value: Json): Buffer;\nexport declare function deflateSync(value: Json): Buffer;\nexport declare function inflateSync(value: Json): Buffer;\nexport declare function unzipSync(value: Json): Buffer;\nexport declare function deflateRawSync(argsArray: any): any;\nexport declare function inflateRawSync(argsArray: any): any;\nexport declare function brotliCompressSync(value: Json, options?: any): Buffer;\nexport declare function brotliDecompressSync(value: Json, options?: any): Buffer;\nexport declare function gzip(argsArray: any): void;\nexport declare function gunzip(argsArray: any): void;\nexport declare function deflate(argsArray: any): void;\nexport declare function inflate(argsArray: any): void;\nexport declare function deflateRaw(argsArray: any): void;\nexport declare function inflateRaw(argsArray: any): void;\nexport declare function unzip(argsArray: any): void;\nexport declare function brotliCompress(argsArray: any): void;\nexport declare function brotliDecompress(argsArray: any): void;\nexport declare function createGzip(argsArray: any): any;\nexport declare function createGunzip(argsArray: any): any;\nexport declare function createDeflate(argsArray: any): any;\nexport declare function createInflate(argsArray: any): any;\nexport declare function createDeflateRaw(argsArray: any): any;\nexport declare function createInflateRaw(argsArray: any): any;\nexport declare function createBrotliCompress(argsArray: any): any;\nexport declare function createBrotliDecompress(argsArray: any): any;\n"
         }
         "worker_threads" => {
             "export declare const isMainThread: boolean;\nexport declare const threadId: number;\nexport declare const threadName: string;\nexport declare const workerData: any;\nexport declare const parentPort: any;\nexport declare class MessageChannel { constructor(); port1: JsValue; port2: JsValue; }\nexport declare const MessagePort: any;\nexport declare class Worker { constructor(filename: string, options?: any); on(event: string, listener: (...args: any[]) => void): Worker; once(event: string, listener: (...args: any[]) => void): Worker; terminate(): Promise<number>; }\nexport declare function receiveMessageOnPort(argsArray: any): any;\nexport declare function setEnvironmentData(argsArray: any): void;\nexport declare function getEnvironmentData(argsArray: any): any;\nexport declare function postMessageToThread(argsArray: any): Promise<void>;\n"
@@ -351,11 +399,13 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
                 _ => "",
             }
         ),
+        dts_path: None,
         native_lib: None,
         native_addon: None,
         native_dependencies: Vec::new(),
         platform_executable: None,
         bundle_js: Some(bundle_builtin_module(name)?),
+        runtime_env: BTreeMap::new(),
         version: None,
         dependency_versions: None,
     })

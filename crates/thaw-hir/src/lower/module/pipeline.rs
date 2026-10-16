@@ -25,6 +25,13 @@ thread_local! {
     /// leak into this one.
     static DECORATOR_CLASS_TOKENS: RefCell<HashMap<String, Symbol>> =
         RefCell::new(HashMap::new());
+    // Original private names map to physical slots; ordinary public fields
+    // with similar spelling must retain their public property semantics.
+    static PRIVATE_CLASS_SLOTS: RefCell<HashMap<Symbol, HashMap<Symbol, Symbol>>> =
+        RefCell::new(HashMap::new());
+    // Names of classes that carry decorators: their instances keep crossing
+    // dynamic boundaries as snapshots with a `constructor` token.
+    static DECORATED_CLASS_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 fn class_has_decorators(class: &swc_ecma_ast::Class) -> bool {
@@ -50,9 +57,11 @@ fn class_decorator_token_symbol(class_name: &str) -> Symbol {
 /// create a fresh native-callback wrapper with no shared identity, so
 /// `instanceof`/metadata lookups against it could never match.
 ///
-/// Deliberately excludes a `new Class()` callee (the class is being
-/// constructed, not used as a value) and a `class X extends Base` super
-/// reference (Thaw consumes the base's *layout*, not its value identity).
+/// Also includes a class that is ever constructed (`new Class`), because
+/// its instances can reach `Object.getPrototypeOf`, which resolves the
+/// class's real prototype through the same token. Still excludes a
+/// `class X extends Base` super reference (Thaw consumes the base's
+/// *layout*, not its value identity).
 fn class_names_referenced_as_values(
     module: &swc_ecma_ast::Module,
     classes: &[&ClassDecl],
@@ -62,6 +71,13 @@ fn class_names_referenced_as_values(
     struct Collector<'a> {
         classes: &'a HashSet<Symbol>,
         found: HashSet<Symbol>,
+        /// Classes ever constructed (`new C`). Only merged into `found` when
+        /// the module actually calls `Object.getPrototypeOf`/
+        /// `Reflect.getPrototypeOf`, so a program that never asks for a
+        /// prototype doesn't pay to materialize a class token (and pull in
+        /// QuickJS) for every class it instantiates.
+        constructed: HashSet<Symbol>,
+        reads_prototype: bool,
     }
     impl Visit for Collector<'_> {
         fn visit_expr(&mut self, expr: &swc_ecma_ast::Expr) {
@@ -73,11 +89,40 @@ fn class_names_referenced_as_values(
             expr.visit_children_with(self);
         }
 
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            if let swc_ecma_ast::Callee::Expr(callee) = &call.callee {
+                if let swc_ecma_ast::Expr::Member(member) = callee.as_ref() {
+                    if let swc_ecma_ast::Expr::Ident(namespace) = member.obj.as_ref() {
+                        let is_prototype_read = matches!(
+                            namespace.sym.as_ref(),
+                            "Object" | "Reflect"
+                        ) && matches!(
+                            &member.prop,
+                            swc_ecma_ast::MemberProp::Ident(property)
+                                if property.sym == *"getPrototypeOf"
+                        );
+                        if is_prototype_read {
+                            self.reads_prototype = true;
+                        }
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+
         fn visit_new_expr(&mut self, expression: &swc_ecma_ast::NewExpr) {
-            // Skip a bare callee identifier (the constructed class); still
-            // visit the arguments, which may reference a class as a value
-            // (`new Thing(User)`).
-            if matches!(expression.callee.as_ref(), swc_ecma_ast::Expr::Member(_)) {
+            // A constructed class may need a stable class token: its
+            // instances can be passed to `Object.getPrototypeOf` (and, in
+            // later prototype work, have their methods/prototype read),
+            // which resolves through that token. Recorded separately and
+            // merged only if the module reads a prototype (see
+            // `reads_prototype`). Still visit the arguments, which may
+            // reference a class as a value (`new Thing(User)`).
+            if let swc_ecma_ast::Expr::Ident(ident) = expression.callee.as_ref() {
+                if self.classes.contains(ident.sym.as_ref()) {
+                    self.constructed.insert(ident.sym.to_string());
+                }
+            } else {
                 expression.callee.visit_with(self);
             }
             if let Some(arguments) = &expression.args {
@@ -102,18 +147,29 @@ fn class_names_referenced_as_values(
     let mut collector = Collector {
         classes: &names,
         found: HashSet::new(),
+        constructed: HashSet::new(),
+        reads_prototype: false,
     };
     module.visit_with(&mut collector);
+    if collector.reads_prototype {
+        collector.found.extend(collector.constructed);
+    }
     collector.found
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
+    DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
+    PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
+    let normalized = normalize_constructor_functions(&normalized)?;
+    let normalized = normalize_default_parameter_closures(&normalized);
+    let normalized = normalize_implicit_returns(&normalized);
+    let normalized = normalize_uninitialized_globals(&normalized);
     let normalized = specialize_named_promise_rejection_callbacks(&normalized)?;
     let mut program = lower_normalized_module(&normalized)?;
     // `HirType::Bytes` is a lowering-time distinction only; nothing past
@@ -328,6 +384,23 @@ fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
     Ok(merged)
 }
 
+fn generic_receiver_pattern_from_annotation(
+    ty: &TsType,
+    substitutions: &HashMap<Symbol, GenericTypePattern>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces<'_>,
+) -> GenericReceiverPattern {
+    generic_type_pattern(
+        ty,
+        substitutions,
+        interfaces,
+        generic_interfaces,
+        &mut Vec::new(),
+    )
+    .map(GenericReceiverPattern::Pattern)
+    .unwrap_or(GenericReceiverPattern::LegacyUnmatched)
+}
+
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
     let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
@@ -514,22 +587,35 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
-                    params[0] = HirType::Str;
+                    // The rejection reason is a string; a leading rest parameter
+                    // receives it as a one-element array.
+                    params[0] = if matches!(func.params.first().map(|p| &p.pat), Some(Pat::Rest(_))) {
+                        HirType::Array(Box::new(HirType::Str))
+                    } else {
+                        HirType::Str
+                    };
                 }
+                let mut generic_this_pattern = None;
                 if let Some(this) = &func.this_param {
                     let annotation = this.type_ann.as_ref().ok_or_else(|| {
                         format!("function `{name}` needs a type annotation for `this`")
                     })?;
-                    params.insert(
-                        0,
-                        resolve_ts_type_with_substitution(
+                    let receiver_type = resolve_ts_type_with_substitution(
+                        &annotation.type_ann,
+                        &type_substitution,
+                        &interfaces,
+                        &generic_interfaces,
+                        &mut Vec::new(),
+                    )?;
+                    params.insert(0, receiver_type);
+                    if let Some(substitutions) = &generic_substitutions {
+                        generic_this_pattern = Some(generic_receiver_pattern_from_annotation(
                             &annotation.type_ann,
-                            &type_substitution,
+                            substitutions,
                             &interfaces,
                             &generic_interfaces,
-                            &mut Vec::new(),
-                        )?,
-                    );
+                        ));
+                    }
                 }
                 let assertion_function = matches!(
                     func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
@@ -630,6 +716,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: func.this_param.is_some(),
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
+                        accessor_owner: None,
                         generic_type_params,
                         generic_type_constraints,
                         generic_type_defaults,
@@ -641,6 +728,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
                             })
                             .collect(),
+                        generic_this_pattern,
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                         generic_return_pattern,
                         type_predicate,
@@ -652,14 +740,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .iter()
                         .map(|parameter| parameter.pat.clone())
                         .collect::<Vec<_>>();
+                    let receiver_count = usize::from(func.this_param.is_some());
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
                         for arity in default_start..patterns.len() {
+                            let total_arity = receiver_count + arity;
                             let mut wrapper = signatures[&name].clone();
-                            wrapper.params.truncate(arity);
-                            signatures.insert(default_arity_symbol(&name, arity), wrapper);
+                            wrapper.params.truncate(total_arity);
+                            signatures.insert(default_arity_symbol(&name, total_arity), wrapper);
                         }
                     }
-                    insert_omitted_parameter_signatures(&mut signatures, &name, &patterns, 0)?;
+                    insert_omitted_parameter_signatures(
+                        &mut signatures, &name, &patterns, receiver_count,
+                    )?;
                 }
                 if !is_extern {
                     fn_decls.push(fn_decl);
@@ -717,11 +809,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
+                        accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),
                         generic_type_defaults: Vec::new(),
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
+                        generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
                         type_predicate: None,
@@ -747,11 +841,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
+                        accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),
                         generic_type_defaults: Vec::new(),
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
+                        generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
                         type_predicate: None,
@@ -854,10 +950,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             .collect::<Result<Vec<_>, _>>()?,
                     );
                     let ret = if method.kind == MethodKind::Setter {
-                        params
-                            .last()
-                            .expect("a setter has one declared value parameter")
-                            .clone()
+                        HirType::Void
                     } else if method.function.is_generator {
                         lower_generator_return_type(
                             method.function.is_async,
@@ -935,11 +1028,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             uses_this: function_uses_this(&method.function),
                             is_extern: false,
                             source_range: (method.span.lo.0, method.span.hi.0),
+                            accessor_owner: matches!(method.kind, MethodKind::Getter | MethodKind::Setter).then(|| name.clone()),
                             generic_type_params: Vec::new(),
                             generic_type_constraints: Vec::new(),
                             generic_type_defaults: Vec::new(),
                             generic_param_patterns: Vec::new(),
                             generic_param_optional: Vec::new(),
+                            generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
                             type_predicate: None,
@@ -969,6 +1064,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             unbound.params.remove(0);
                         }
                         unbound.uses_this = false;
+                        unbound.generic_this_pattern = None;
                         signatures.insert(unbound_symbol.clone(), unbound);
                     }
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
@@ -1101,37 +1197,35 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     );
                 }
             }
-            if base_params.len() <= 16 {
-                for mask in 1usize..(1usize << base_params.len()) {
-                    let base_constructor = omitted_parameter_symbol(
-                        &class_constructor_symbol(base.sym.as_ref()),
-                        mask,
-                    );
-                    if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
-                        let mut derived_wrapper = base_wrapper;
-                        derived_wrapper.ret = interfaces[derived_name].clone();
-                        signatures.insert(
-                            omitted_parameter_symbol(&class_constructor_symbol(derived_name), mask),
-                            derived_wrapper,
-                        );
-                    }
-                    let initializer_mask = mask << 1;
-                    let base_initializer = omitted_parameter_symbol(
-                        &class_initializer_symbol(base.sym.as_ref()),
-                        initializer_mask,
-                    );
-                    if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
-                        let mut derived_wrapper = base_wrapper;
-                        derived_wrapper.params[0] = interfaces[derived_name].clone();
-                        derived_wrapper.ret = interfaces[derived_name].clone();
-                        signatures.insert(
-                            omitted_parameter_symbol(
-                                &class_initializer_symbol(derived_name),
-                                initializer_mask,
-                            ),
-                            derived_wrapper,
-                        );
-                    }
+            for mask in omitted_parameter_masks_in_signatures(&signatures, &base_symbol) {
+                let base_constructor = omitted_parameter_symbol(
+                    &base_symbol,
+                    &mask,
+                );
+                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
+                    let mut derived_wrapper = base_wrapper;
+                    derived_wrapper.ret = interfaces[derived_name].clone();
+                    changed |= signatures.insert(
+                        omitted_parameter_symbol(&class_constructor_symbol(derived_name), &mask),
+                        derived_wrapper,
+                    ).is_none();
+                }
+                let initializer_mask = mask.offset_by(1);
+                let base_initializer = omitted_parameter_symbol(
+                    &class_initializer_symbol(base.sym.as_ref()),
+                    &initializer_mask,
+                );
+                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
+                    let mut derived_wrapper = base_wrapper;
+                    derived_wrapper.params[0] = interfaces[derived_name].clone();
+                    derived_wrapper.ret = interfaces[derived_name].clone();
+                    changed |= signatures.insert(
+                        omitted_parameter_symbol(
+                            &class_initializer_symbol(derived_name),
+                            &initializer_mask,
+                        ),
+                        derived_wrapper,
+                    ).is_none();
                 }
             }
         }
@@ -1156,6 +1250,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         ))
     };
     let mut inherited_class_functions = Vec::new();
+    let mut inherited_static_globals = Vec::new();
     let mut inherited_virtual_class_decls = Vec::new();
     for derived in &class_decls {
         let derived_name = derived.ident.sym.to_string();
@@ -1241,6 +1336,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             unbound
                         });
                     unbound_signature.uses_this = false;
+                    unbound_signature.generic_this_pattern = None;
                     signatures.insert(derived_unbound, unbound_signature);
                 }
                 if !derived.class.is_abstract {
@@ -1275,8 +1371,8 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     }
                 }
                 for mask in omitted_parameter_masks(&patterns, receiver_count)? {
-                    let base_wrapper = omitted_parameter_symbol(&base_symbol, mask);
-                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, mask);
+                    let base_wrapper = omitted_parameter_symbol(&base_symbol, &mask);
+                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, &mask);
                     let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned() else {
                         continue;
                     };
@@ -1298,8 +1394,8 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         }
                     }
                     for mask in omitted_parameter_masks(&patterns, 0)? {
-                        let base_wrapper = omitted_parameter_symbol(&base_unbound, mask);
-                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, mask);
+                        let base_wrapper = omitted_parameter_symbol(&base_unbound, &mask);
+                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, &mask);
                         if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
                             signatures.insert(derived_wrapper, wrapper);
                         }
@@ -1420,6 +1516,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             DECORATOR_CLASS_TOKENS.with(|tokens| {
                 tokens.borrow_mut().insert(identity_marker, token_symbol);
             });
+            if class_has_decorators(&declaration.class) {
+                DECORATED_CLASS_NAMES.with(|names| {
+                    names.borrow_mut().insert(class_name.to_string());
+                });
+            }
         }
     }
 
@@ -1451,6 +1552,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     Expr::Ident(base) => Some(base.sym.to_string()),
                     _ => None,
                 });
+        let first_base = base_name.clone();
         while let Some(current_name) = base_name {
             // `Error`/`TypeError`/etc. are not real declared classes (see
             // `lower/module/classes.rs`'s synthetic base-layout branch) and
@@ -1491,22 +1593,62 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range,
+                        accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),
                         generic_type_defaults: Vec::new(),
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
+                        generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
                         type_predicate: None,
                     },
                 );
+                // A write through a derived class creates that class's own
+                // property (shadowing the base's); reads fall back to the
+                // parent until then. Readonly fields can never be written.
+                let own_storage = format!("__thaw_inherited_static_{derived_name}_{field}");
+                let own_flag = format!("__thaw_inherited_static_own_{derived_name}_{field}");
+                let parent_value = if first_base.as_deref() == Some(current_name.as_str()) {
+                    HirExpr::Var(storage.clone())
+                } else {
+                    let parent = first_base.as_deref().expect("inherited field has a parent");
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var(class_getter_symbol(parent, &field, true))),
+                        Vec::new(),
+                    )
+                };
+                let getter_body = if property.readonly {
+                    vec![HirStmt::Return(Some(HirExpr::Var(storage.clone())))]
+                } else {
+                    inherited_static_globals.push(crate::HirGlobal {
+                        name: own_storage.clone(),
+                        ty: ty.clone(),
+                        init: HirExpr::Var(storage.clone()),
+                        mutable: true,
+                    });
+                    inherited_static_globals.push(crate::HirGlobal {
+                        name: own_flag.clone(),
+                        ty: HirType::Bool,
+                        init: HirExpr::Lit(HirLit::Bool(false)),
+                        mutable: true,
+                    });
+                    vec![
+                        HirStmt::If(
+                            HirExpr::Var(own_flag.clone()),
+                            vec![HirStmt::Return(Some(HirExpr::Var(own_storage.clone())))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(parent_value)),
+                    ]
+                };
                 inherited_class_functions.push(HirFunction {
                     name: getter,
                     params: Vec::new(),
                     ret: ty.clone(),
                     is_async: false,
-                    body: vec![HirStmt::Return(Some(HirExpr::Var(storage.clone())))],
+                    body: getter_body,
                 });
                 if !property.readonly {
                     let setter = class_setter_symbol(derived_name, &field, true);
@@ -1523,11 +1665,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             uses_this: false,
                             is_extern: false,
                             source_range,
+                            accessor_owner: None,
                             generic_type_params: Vec::new(),
                             generic_type_constraints: Vec::new(),
                             generic_type_defaults: Vec::new(),
                             generic_param_patterns: Vec::new(),
                             generic_param_optional: Vec::new(),
+                            generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
                             type_predicate: None,
@@ -1544,8 +1688,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         is_async: false,
                         body: vec![
                             HirStmt::Expr(HirExpr::Assign(
-                                storage,
+                                own_storage,
                                 Box::new(HirExpr::Var(parameter.clone())),
+                            )),
+                            HirStmt::Expr(HirExpr::Assign(
+                                own_flag,
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
                             )),
                             HirStmt::Return(Some(HirExpr::Var(parameter))),
                         ],
@@ -1925,6 +2073,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         &enum_values,
         &enum_reverse_values,
     )?);
+    globals.extend(inherited_static_globals);
     globals.extend(lower_class_decorator_tokens(
         &class_decls,
         &signatures,
@@ -1989,11 +2138,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             .iter()
             .map(|parameter| parameter.pat.clone())
             .collect::<Vec<_>>();
+        let receiver_count = usize::from(fn_decl.function.this_param.is_some());
         specialized.extend(lower_callable_default_wrappers(
             &function.name,
             &function.params,
             &patterns,
-            0,
+            receiver_count,
             None,
             &function.ret,
             &signatures,
@@ -2008,7 +2158,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &function.name,
             &function.params,
             &patterns,
-            0,
+            receiver_count,
             None,
             &function.ret,
             &signatures,

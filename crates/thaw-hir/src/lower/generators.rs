@@ -18,6 +18,7 @@ struct GeneratorBlock {
 struct GeneratorHandler {
     binding: String,
     entry: usize,
+    parent: Option<Box<GeneratorHandler>>,
 }
 
 struct GeneratorStateMachine<'a> {
@@ -179,6 +180,17 @@ impl<'a> GeneratorStateMachine<'a> {
                 handler,
                 cancel_target,
             )),
+            HirStmt::Finally(body, suspended) => {
+                let mut active = handler.clone();
+                for _ in 0..*suspended {
+                    active = active.and_then(|item| item.parent.map(|parent| *parent));
+                    // `active` is restored by the caller after this sequence.
+                }
+                self.sequence(
+                    body, continuation, break_target, continue_target,
+                    active, cancel_target,
+                )
+            }
             HirStmt::Try(try_body, catch_name, catch_body, _) => {
                 self.locals.push(HirStmt::Let(
                     catch_name.clone(),
@@ -212,6 +224,7 @@ impl<'a> GeneratorStateMachine<'a> {
                     Some(GeneratorHandler {
                         binding: catch_name.clone(),
                         entry: catch_entry,
+                        parent: handler.map(Box::new),
                     }),
                     nested_cancel,
                 )
@@ -288,6 +301,7 @@ fn generator_statements_emit_value(statements: &[HirStmt], values: &str) -> bool
                     generator_statements_emit_value(try_body, values)
                         || generator_statements_emit_value(catch_body, values)
                 }
+                HirStmt::Finally(body, _) => generator_statements_emit_value(body, values),
                 _ => false,
             }
     })
@@ -322,6 +336,19 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
         ),
         HirType::Undefined => HirExpr::Lit(HirLit::Undefined),
         HirType::Null => HirExpr::Lit(HirLit::Null),
+        // An absent function value is the undefined (null) function pointer.
+        HirType::Function(..) | HirType::CallableFunction(..) => HirExpr::OptionalValue(
+            Box::new(HirExpr::OptionalNone(ty.clone())), ty.clone(),
+        ),
+        // A dynamic local is `undefined` until its declaration runs.
+        HirType::Json => HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new()),
+        HirType::Dictionary(element) => HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()),
+        // A caught-exception carrier member: an empty pending native slot is
+        // the inert initial value (it is only read after a throw publishes one).
+        HirType::NativeException => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_pending_exception_native".into())),
+            Vec::new(),
+        ),
         _ => return None,
     })
 }
@@ -462,19 +489,25 @@ fn lower_generator_state_machine(
         }
         if let Some(handler) = block.handler {
             let caught = format!("__thaw_generator_caught_{id}");
-            selected = vec![HirStmt::Try(
-                selected,
-                caught.clone(),
-                vec![
-                    HirStmt::Expr(HirExpr::Assign(
-                        handler.binding,
-                        Box::new(HirExpr::Var(caught.clone())),
-                    )),
-                    generator_set_state(state, handler.entry),
-                    HirStmt::Continue,
-                ],
-                Some(caught.clone()),
-            )];
+            // Catch into a real carrier (like a lexical catch) so the user's
+            // binding, itself a carrier, receives the active value and not a
+            // raw string slot.
+            selected = vec![
+                crate::caught_exception_carrier_prelude(caught.clone()),
+                HirStmt::Try(
+                    selected,
+                    caught.clone(),
+                    vec![
+                        HirStmt::Expr(HirExpr::Assign(
+                            handler.binding,
+                            Box::new(HirExpr::Var(caught.clone())),
+                        )),
+                        generator_set_state(state, handler.entry),
+                        HirStmt::Continue,
+                    ],
+                    None,
+                ),
+            ];
         }
         dispatch.push(HirStmt::If(
             HirExpr::BinOp(

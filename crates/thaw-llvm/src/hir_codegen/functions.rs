@@ -38,7 +38,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // Strings and arrays are both represented as a single opaque
             // pointer at the LLVM level; what they point to differs (a
             // C string vs. a [len][elements...] buffer).
-            HirType::Str | HirType::Symbol => {
+            HirType::Str | HirType::StrLiteral(_) | HirType::Symbol => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             HirType::Array(elem) => {
@@ -70,9 +70,9 @@ impl<'ctx> HirCompiler<'ctx> {
             // to an arena-allocated buffer of contiguous `f64` fields (see
             // `compile_object_lit`). Unlike arrays there's no length
             // header -- field count/order is static, part of the type.
-            // Every field is one word (8 bytes on this target) regardless
-            // of its own type: `f64`/`bool`/pointer values (Str/Array/
-            // Object/Json) are all word-sized, so a field can be any type
+            // Scalar and pointer fields use one word; nested tagged fields
+            // use the checked arena stride derived from their LLVM value
+            // size. A field can be any type
             // `basic_type` itself accepts -- including another `Object`,
             // recursively. This call validates each field is representable
             // at all (erroring on e.g. `Promise`); it doesn't need to
@@ -94,9 +94,12 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json | HirType::Dictionary(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            HirType::NativeException => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Null => Ok(self.context.bool_type().into()),
-            HirType::Function(_, _) | HirType::CallableFunction(..) => {
+            // A `this`-taking closure is the same closure pointer; the tagged
+            // receiver entry lives in its environment.
+            HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
@@ -173,12 +176,9 @@ impl<'ctx> HirCompiler<'ctx> {
         ret: &HirType,
         name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
-        let mut this_params = Vec::with_capacity(params.len() + 1);
-        this_params.push(HirType::I64);
-        this_params.extend_from_slice(params);
         let adapter = self.module.add_function(
             name,
-            self.function_type(&this_params, ret)?,
+            self.this_entry_function_type(params, ret)?,
             Some(Linkage::Internal),
         );
         let parent = self
@@ -313,12 +313,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         let symbol = Self::llvm_symbol_for(&func.name);
-        let linkage = if func.name == "__thaw_artifact_metadata" {
-            Linkage::External
-        } else {
-            Linkage::Internal
-        };
-        Ok(self.module.add_function(&symbol, fn_type, Some(linkage)))
+        Ok(self.module.add_function(&symbol, fn_type, Some(Linkage::Internal)))
     }
 
     /// Declares an ambient (`declare function`) signature as an `extern

@@ -1,4 +1,25 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn register_string_literal(&self, pointer: PointerValue<'ctx>, bytes: &[u8]) -> Result<BasicValueEnum<'ctx>, String> {
+        if !bytes.contains(&0) { return Ok(pointer.into()); }
+        self.builder.build_call(
+            self.module.get_function("thaw_string_register_literal").unwrap(),
+            &[pointer.into(), self.context.i64_type().const_int(bytes.len() as u64, false).into()],
+            "native_string_literal",
+        ).map_err(|error| error.to_string())?;
+        Ok(pointer.into())
+    }
+
+    fn compile_raw_string_literal(&self, bytes: &[u8]) -> Result<BasicValueEnum<'ctx>, String> {
+        let array = self.context.const_string(bytes, true);
+        let global = self.module.add_global(array.get_type(), None, "strlit_bytes");
+        global.set_initializer(&array);
+        global.set_constant(true);
+        let zero = self.context.i32_type().const_zero();
+        let pointer = unsafe {
+            self.builder.build_in_bounds_gep(array.get_type(), global.as_pointer_value(), &[zero, zero], "strlit_bytes_ptr")
+        }.map_err(|error| error.to_string())?;
+        self.register_string_literal(pointer, bytes)
+    }
     fn current_function(&self) -> FunctionValue<'ctx> {
         self.builder
             .get_insert_block()
@@ -13,7 +34,11 @@ impl<'ctx> HirCompiler<'ctx> {
     /// all see it exactly as they would a real `throw`. Terminates the
     /// current block -- the caller must not fall through afterward.
     fn compile_throw_type_error(&mut self, message: &str) -> Result<(), String> {
-        let tagged = format!("\u{1}TypeError\u{1}{message}");
+        self.compile_throw_builtin_error("TypeError", message)
+    }
+
+    fn compile_throw_builtin_error(&mut self, kind: &str, message: &str) -> Result<(), String> {
+        let tagged = format!("\u{1}{kind}\u{1}{message}");
         let value = self
             .builder
             .build_global_string_ptr(&tagged, "synthetic_type_error")
@@ -22,10 +47,44 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), value)
             .map_err(|error| error.to_string())?;
-        if let Some(catch_bb) = self.catch_stack.last().copied() {
-            self.builder
-                .build_unconditional_branch(catch_bb)
+        self.clear_pending_native_text()?;
+        self.builder
+            .build_store(self.pending_exception_native_text().as_pointer_value(), value)
+            .map_err(|error| error.to_string())?;
+        // A synthetic error has no typed thrown scalar or object. Clearing
+        // these shared channels prevents a previous catch from leaking into
+        // this TypeError's own catch or Promise rejection.
+        self.builder.build_store(
+            self.pending_exception_object().as_pointer_value(),
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        ).map_err(|error| error.to_string())?;
+        let zeros: [(&str, BasicValueEnum<'ctx>); 4] = [
+            (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().const_zero().into()),
+            (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
+            (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
+            (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
+        ];
+        for (symbol, zero) in zeros {
+            self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
                 .map_err(|error| error.to_string())?;
+        }
+        if let Some(catch) = self.catch_stack.last().cloned() {
+            self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
+            self.builder.build_unconditional_branch(catch.target)
+                .map_err(|error| error.to_string())?;
+        } else if let Some(completion) = self.active_async_completion {
+            self.reject_promise_with_pending_exception(completion, value, "reject_synthetic_error")?;
+            self.builder.build_store(
+                self.pending_exception().as_pointer_value(),
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            ).map_err(|error| error.to_string())?;
+            self.clear_pending_native_text()?;
+            self.emit_stack_promise_cleanup()?;
+            if self.current_function().get_type().get_return_type().is_some() {
+                self.builder.build_return(Some(&completion)).map_err(|error| error.to_string())?;
+            } else {
+                self.builder.build_return(None).map_err(|error| error.to_string())?;
+            }
         } else {
             self.build_default_return()?;
         }
@@ -46,11 +105,19 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::Lit(HirLit::Null) => Ok(self.context.bool_type().const_int(1, false).into()),
             HirExpr::Lit(HirLit::Str(s)) => {
+                if s.as_bytes().contains(&0) { return self.compile_raw_string_literal(s.as_bytes()); }
                 let global = self
                     .builder
                     .build_global_string_ptr(s, "strlit")
                     .map_err(|e| e.to_string())?;
-                Ok(global.as_pointer_value().into())
+                self.register_string_literal(global.as_pointer_value(), s.as_bytes())
+            }
+            HirExpr::Lit(HirLit::Wtf8(bytes)) => {
+                // WTF-8 bytes may be invalid UTF-8 (a lone surrogate), so
+                // `build_global_string_ptr(&str)` can't be used -- build the
+                // NUL-terminated `[N x i8]` global directly and GEP to its
+                // first byte.
+                self.compile_raw_string_literal(bytes)
             }
 
             HirExpr::Var(name) => {
@@ -64,14 +131,39 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::Assign(name, value) => {
-                let val = self.compile_expr(value)?;
                 let (ptr, _ty) = *self
                     .variables
                     .get(name)
                     .ok_or_else(|| format!("assignment to undeclared variable `{name}`"))?;
-                self.builder
-                    .build_store(ptr, val)
-                    .map_err(|e| e.to_string())?;
+                let hir_ty = self.variable_hir_types.get(name).cloned();
+                if let Some(ty @ HirType::Promise(_)) = hir_ty {
+                    if let Some(owner) = self.async_frame_slot_owners.get(&ptr).copied() {
+                        let val = self.compile_and_store_arena_promise_expression(owner, ptr, &ty, value)?;
+                        return Ok(val);
+                    } else if self.arena_variables.contains(name) {
+                        let val = self.compile_and_store_arena_promise_expression(ptr, ptr, &ty, value)?;
+                        return Ok(val);
+                    } else if self.stack_promise_slots.contains_key(&ptr) {
+                        let val = self.compile_and_store_stack_promise_expression(ptr, value)?;
+                        return Ok(val);
+                    }
+                }
+                let val = self.compile_expr(value)?;
+                // Compiling the value can promote the variable to an arena cell (a closure
+                // inside it captured the variable), so look the slot up again.
+                let ptr = self.variables.get(name).map(|(cell, _)| *cell).unwrap_or(ptr);
+                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                // A named binding now owns the produced Json value. Revoke
+                // its whole-statement discard candidate even when pure HIR
+                // wrappers (TypedClosure/EvalThen/Block) return this same SSA.
+                self.revoke_fresh_owned_json_result(val)?;
+                if let Some((catch_slot, _, _, valid_slot, _)) = self.catch_native_text.get(name) {
+                    if *catch_slot == ptr {
+                        self.builder.build_store(*valid_slot,
+                            self.context.bool_type().const_zero())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
                 Ok(val)
             }
             HirExpr::PostfixUpdate(name, op) => {
@@ -212,6 +304,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_conditional_value(test, consequent, alternate, ty)
             }
 
+            HirExpr::EvalThen(first, second) => {
+                if self.promise_expression_needs_discard(first) {
+                    self.compile_and_discard_promise_expression(first)?;
+                } else {
+                    self.compile_expr(first)?;
+                }
+                self.compile_expr(second)
+            }
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
             HirExpr::FunctionCallWithThis(callee, this_arg, args, params, ret) => {
                 self.compile_function_call_with_this(callee, this_arg, args, params, ret)
@@ -242,10 +342,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::RecursiveClosure(name, ty, closure) => {
                 self.compile_recursive_closure(name, ty, closure)
             }
-            HirExpr::TypedClosure(_, closure) => self.compile_expr(closure),
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => self.compile_expr(closure),
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
-            HirExpr::MethodRef(unbound, explicit, params, ret, is_static) => {
-                self.compile_method_ref(unbound, explicit, params, ret, *is_static)
+            HirExpr::MethodRef(unbound, explicit, params, ret, is_static, receiver_class) => {
+                self.compile_method_ref(unbound, explicit, params, ret, *is_static, receiver_class.as_deref())
             }
             HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args)?.ok_or_else(|| {
                 format!(
@@ -292,12 +392,18 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::IndexAssign(arr, idx, value) => {
                 let handle = self.compile_expr(arr)?.into_pointer_value();
+                if self.tracks_object_integrity {
+                    self.compile_guard_array_handle(
+                        handle,
+                        2,
+                        "Cannot assign to read only property of object '[object Array]'",
+                    )?;
+                }
                 let index = self.compile_expr(idx)?.into_float_value();
                 let val = self.compile_expr(value)?;
                 let width = match self.expr_hir_type(arr) {
-                    Some(HirType::Array(element)) => array_element_storage_bytes(&element),
-                    Some(HirType::Tuple(elements)) => elements.iter()
-                        .map(array_element_storage_bytes).max().unwrap_or(ARRAY_ELEM_BYTES),
+                    Some(HirType::Array(element)) => array_element_storage_bytes(&element)?,
+                    Some(HirType::Tuple(elements)) => tuple_element_storage_bytes(&elements)?,
                     _ => ARRAY_ELEM_BYTES,
                 };
                 let elem_ptr = self.builder.build_call(
@@ -328,6 +434,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_presence_mark",
                     )
                     .map_err(|e| e.to_string())?;
+                self.revoke_fresh_owned_json_result(val)?;
                 self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
                 self.builder.position_at_end(done);
                 Ok(val)
@@ -363,7 +470,32 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
             HirExpr::JsonAsNative(inner, ty) => {
                 let json = self.compile_expr(inner)?;
-                self.compile_json_to_native(json, ty)
+                // This is a second root for recursive Object/Array decoding.
+                // A Function field can register its original JS handle before
+                // a later sibling getter fails, so keep one failure scope
+                // around the complete conversion.
+                let function = self.current_function();
+                let failed = self.context.append_basic_block(function, "json_as_native_failed");
+                let done = self.context.append_basic_block(function, "json_as_native_done");
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
+                    &[], "begin_json_as_native_scope",
+                ).map_err(|error| error.to_string())?;
+                self.push_catch_target(failed);
+                let value = self.compile_json_to_native(json, ty);
+                self.pop_catch_target();
+                let value = value?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
+                    &[self.context.i8_type().const_int(2, false).into()], "merge_json_as_native_scope",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(failed);
+                self.compile_discard_typed_decode_scope()?;
+                self.branch_on_pending_exception()?;
+                self.builder.build_unreachable().map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                Ok(value)
             }
 
             // Real suspension points are extracted by the async frame plan.
@@ -374,10 +506,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_typed_blocking_await(inner, resolved)
             }
             HirExpr::PromiseNew(executor, resolved, assimilates, typed_rejection) => {
-                self.compile_promise_new(executor, resolved, *assimilates, *typed_rejection)
+                self.compile_promise_new(executor, resolved, *assimilates, *typed_rejection, None)
+            }
+            HirExpr::PromiseNewMixed(executor, resolved, resolver) => {
+                self.compile_promise_new(executor, resolved, false, false, Some(resolver))
             }
             HirExpr::PromiseThen(source, callback, input, output, on_rejected, flatten) => {
                 self.compile_promise_then(source, callback, input, output, *on_rejected, *flatten)
+            }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, input, output, flatten_fulfilled, flatten_rejected) => {
+                self.compile_promise_then_both(
+                    source, fulfilled.as_deref(), rejected, input, output,
+                    *flatten_fulfilled, *flatten_rejected,
+                )
             }
             HirExpr::PromiseFinally(source, callback, input, callback_return) => {
                 self.compile_promise_finally(source, callback, input, callback_return)
@@ -388,10 +529,37 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_json_object_lit(fields, element)
             }
             HirExpr::JsValueAsJson(inner) => {
-                let handle = self.compile_expr(inner)?;
-                self.compile_dynamic_value_placeholder_unchecked(handle)
+                // A live Host lease (primitives as scalars), not the
+                // `__thaw_js_handle_id__` placeholder object: every Json
+                // consumer (console.log, spread, property reads) reads it live.
+                self.uses_quickjs = true;
+                self.uses_quickjs_handles = true;
+                self.tracks_owned_json_roots = true;
+                let handle = self.compile_expr(inner)?.into_int_value();
+                let json = self.builder.build_call(
+                    self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                    &[handle.into()], "js_value_as_json",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("live JSON conversion returned no value")?;
+                let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(json)?;
+                Ok(json)
             }
-            HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type),
+            // A statement block lowered in expression position (e.g. `new Date(0)`): run the
+            // leading statements, then the trailing `return` is the block's value.
+            HirExpr::Block(statements) => {
+                let Some((HirStmt::Return(Some(tail)), head)) = statements.split_last() else {
+                    return Err("a block expression must end in a returned value".into());
+                };
+                for statement in head {
+                    if self.compile_stmt(statement)? {
+                        return Err("a block expression terminated before its value".into());
+                    }
+                }
+                self.compile_expr(tail)
+            }
+            HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type, false),
+            HirExpr::ClassAlloc(object_type) => self.compile_object_alloc(object_type, true),
             HirExpr::PropAccess(obj, object_ty, field) => {
                 let HirType::Object(fields) = object_ty else {
                     return Err(format!("property access requires an object, got {object_ty:?}"));
@@ -435,15 +603,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         })
                         .expect("hidden accessor field has a known prefix");
                     let property = self
-                        .builder
-                        .build_global_string_ptr(property, "object_accessor_property")
-                        .map_err(|error| error.to_string())?;
+                        .compile_raw_string_literal(property.as_bytes())?
+                        .into_pointer_value();
                     self.builder
                         .build_call(
                             self.module.get_function("thaw_object_set_accessor").unwrap(),
                             &[
                                 object.into(),
-                                property.as_pointer_value().into(),
+                                property.into(),
                                 val.into_pointer_value().into(),
                                 self.context
                                     .bool_type()
@@ -453,11 +620,19 @@ impl<'ctx> HirCompiler<'ctx> {
                             "update_object_accessor",
                         )
                         .map_err(|error| error.to_string())?;
+                    self.revoke_fresh_owned_json_result(val)?;
                     return Ok(val);
                 }
+                let marker = if field.starts_with("__thaw_class_identity_\u{1e}") {
+                    Some(self.compile_expr(&HirExpr::Lit(HirLit::Str(field.clone())))?.into_pointer_value())
+                } else {
+                    None
+                };
                 let setter = self.compile_object_accessor(object, field, true)?;
                 let function = self.current_function();
                 let call_setter = self.context.append_basic_block(function, "object_setter");
+                let check_marker = marker.map(|_| self.context.append_basic_block(function, "object_write_check_marker"));
+                let marker_blocked = marker.map(|_| self.context.append_basic_block(function, "object_write_marker_nonextensible"));
                 let check_frozen = self.context.append_basic_block(function, "object_write_check_frozen");
                 let frozen_blocked = self.context.append_basic_block(function, "object_write_frozen");
                 let store_field = self.context.append_basic_block(function, "object_data_write");
@@ -467,7 +642,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_is_not_null(setter, "object_has_setter")
                     .map_err(|error| error.to_string())?;
                 self.builder
-                    .build_conditional_branch(has_setter, call_setter, check_frozen)
+                    .build_conditional_branch(has_setter, call_setter, check_marker.unwrap_or(check_frozen))
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(call_setter);
@@ -482,26 +657,60 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_unconditional_branch(done)
                     .map_err(|error| error.to_string())?;
 
-                // `Object.freeze` blocks every plain data-field write (see
-                // `thaw_object_state`'s query 2, `thaw-runtime/src/
-                // runtime/native_values/objects.rs`); a dynamically
-                // registered setter (above) is left alone -- freezing a
-                // getter/setter pair isn't this probe's concern here.
-                self.builder.position_at_end(check_frozen);
-                let frozen = self
-                    .builder
-                    .build_call(
+                if let (Some(marker), Some(check_marker), Some(marker_blocked)) =
+                    (marker, check_marker, marker_blocked)
+                {
+                    self.builder.position_at_end(check_marker);
+                    let hidden = self.builder.build_call(
+                        self.module.get_function("thaw_object_marker_hidden").unwrap(),
+                        &[object.into(), marker.into()],
+                        "object_marker_was_hidden",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("marker query returned no value")?.into_int_value();
+                    let extensible = self.builder.build_call(
                         self.module.get_function("thaw_object_state").unwrap(),
-                        &[object.into(), self.context.i8_type().const_int(2, false).into()],
-                        "object_write_is_frozen",
-                    )
+                        &[object.into(), self.context.i8_type().const_zero().into()],
+                        "object_marker_is_extensible",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("object state returned no value")?.into_int_value();
+                    let not_extensible = self.builder.build_not(extensible, "object_marker_not_extensible")
+                        .map_err(|error| error.to_string())?;
+                    let blocked = self.builder.build_and(hidden, not_extensible, "object_marker_add_blocked")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_conditional_branch(blocked, marker_blocked, check_frozen)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(marker_blocked);
+                    self.compile_throw_type_error(&format!(
+                        "Cannot add property '{field}', object is not extensible"
+                    ))?;
+                }
+
+                // A plain data write observes both the object's integrity
+                // state and the descriptor attributes shared with live JS
+                // projections. The registered setter path above remains an
+                // accessor invocation even when Object.freeze was applied.
+                self.builder.position_at_end(check_frozen);
+                let property = self.compile_expr(&HirExpr::Lit(HirLit::Str(field.clone())))?
+                    .into_pointer_value();
+                let flags = self.builder.build_call(
+                    self.module.get_function("thaw_object_property_flags").unwrap(),
+                    &[object.into(), property.into()], "object_write_property_flags",
+                )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_object_state returned no value")?
+                    .ok_or("thaw_object_property_flags returned no value")?
                     .into_int_value();
+                let writable = self.builder.build_and(
+                    flags, self.context.i8_type().const_int(1, false),
+                    "object_write_writable_bit",
+                ).map_err(|error| error.to_string())?;
+                let readonly = self.builder.build_int_compare(
+                    IntPredicate::EQ, writable, self.context.i8_type().const_zero(),
+                    "object_write_is_readonly",
+                ).map_err(|error| error.to_string())?;
                 self.builder
-                    .build_conditional_branch(frozen, frozen_blocked, store_field)
+                    .build_conditional_branch(readonly, frozen_blocked, store_field)
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(frozen_blocked);
@@ -513,23 +722,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(field_ptr, val)
                     .map_err(|error| error.to_string())?;
+                if let Some(marker) = marker {
+                    self.builder.build_call(
+                        self.module.get_function("thaw_object_reveal_marker").unwrap(),
+                        &[object.into(), marker.into()],
+                        "reveal_written_object_marker",
+                    ).map_err(|error| error.to_string())?;
+                }
                 self.builder
                     .build_unconditional_branch(done)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(done);
+                self.revoke_fresh_owned_json_result(val)?;
                 Ok(val)
             }
 
             HirExpr::ThrowValue(error, fallback) => {
                 let value = self.compile_expr(error)?;
                 if let Some(completion) = self.active_async_completion {
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_promise_reject").unwrap(),
-                            &[completion.into(), value.into()],
-                            "reject_throw_value",
-                        )
-                        .map_err(|error| error.to_string())?;
+                    self.reject_caught_or_opaque_value(
+                        completion, value.into_pointer_value(), error, "reject_throw_value",
+                    )?;
                     let function = self.current_function();
                     if function.get_type().get_return_type().is_some() {
                         self.builder
@@ -549,9 +762,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
-                if let Some(catch_block) = self.catch_stack.last().copied() {
+                self.clear_pending_native_text()?;
+                if let Some(catch) = self.catch_stack.last().cloned() {
+                    self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
                     self.builder
-                        .build_unconditional_branch(catch_block)
+                        .build_unconditional_branch(catch.target)
                         .map_err(|error| error.to_string())?;
                 } else {
                     self.build_default_return()?;
@@ -629,7 +844,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let comparison = self
                 .builder
                 .build_call(
-                    self.module.get_function("strcmp").unwrap(),
+                    self.module.get_function("thaw_string_compare").unwrap(),
                     &[key.into(), expected.into()],
                     "dynamic_property_compare",
                 )
@@ -652,27 +867,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
 
             self.builder.position_at_end(matched);
-            let field_pointer = unsafe {
-                self.builder
-                    .build_in_bounds_gep(
-                        self.context.i8_type(),
-                        object,
-                        &[self
-                            .context
-                            .i64_type()
-                            .const_int(object_field_offset(fields, index), false)],
-                        "dynamic_property_field",
-                    )
-                    .map_err(|error| error.to_string())?
-            };
-            let value = self
-                .builder
-                .build_load(
-                    self.basic_type(source)?,
-                    field_pointer,
-                    "dynamic_property_value",
-                )
-                .map_err(|error| error.to_string())?;
+            let value = self.compile_accessor_aware_field_read(
+                object,
+                &HirType::Object(fields.to_vec()),
+                fields,
+                index,
+            )?;
             let some = match (source, result) {
                 (HirType::Optional(source_payload), HirType::Optional(result_payload))
                     if source_payload == result_payload =>

@@ -7,6 +7,19 @@ pub unsafe extern "C" fn napi_get_value_double(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        match qjs_query(handle, 0) {
+            Ok(kind) if kind == "number" => {},
+            Ok(_) => return record_status(env, NAPI_NUMBER_EXPECTED),
+            Err(error) => return qjs_error_status(env, error),
+        }
+        return match qjs_number_value(handle) {
+            Ok(number) => { *out = number; NAPI_OK },
+            Err(error) => qjs_error_status(env, error),
+        };
+    }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
             *out = *number;
@@ -25,9 +38,19 @@ pub unsafe extern "C" fn napi_get_value_int32(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let number = match qjs_actual_number(env, handle) {
+            Ok(number) => number,
+            Err(status) => return status,
+        };
+        *out = javascript_to_uint32(number) as i32;
+        return NAPI_OK;
+    }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
-            *out = *number as i32;
+            *out = javascript_to_uint32(*number) as i32;
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
@@ -44,18 +67,51 @@ pub unsafe extern "C" fn napi_get_value_uint32(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let number = match qjs_actual_number(env, handle) {
+            Ok(number) => number,
+            Err(status) => return status,
+        };
+        *out = javascript_to_uint32(number);
+        return NAPI_OK;
+    }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
-            *out = if !number.is_finite() || *number == 0.0 {
-                0
-            } else {
-                number.trunc().rem_euclid(4_294_967_296.0) as u32
-            };
+            *out = javascript_to_uint32(*number);
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
     };
     record_status(env, status)
+}
+
+fn javascript_to_uint32(number: f64) -> u32 {
+    if !number.is_finite() || number == 0.0 {
+        0
+    } else {
+        number.trunc().rem_euclid(4_294_967_296.0) as u32
+    }
+}
+
+#[cfg(test)]
+mod integer_conversion_tests {
+    use super::javascript_to_uint32;
+
+    #[test]
+    fn int32_and_uint32_use_wrapped_bits() {
+        for (input, expected) in [
+            (f64::NAN, 0),
+            (f64::INFINITY, 0),
+            (f64::NEG_INFINITY, 0),
+            (-1.5, -1),
+            (4_294_967_297.9, 1),
+            (2_147_483_648.0, i32::MIN),
+        ] {
+            assert_eq!(javascript_to_uint32(input) as i32, expected);
+        }
+    }
 }
 
 #[no_mangle]
@@ -66,6 +122,16 @@ pub unsafe extern "C" fn napi_get_value_int64(
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let number = match qjs_actual_number(env, handle) {
+            Ok(number) => number,
+            Err(status) => return status,
+        };
+        *out = number as i64;
+        return NAPI_OK;
     }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
@@ -85,6 +151,17 @@ pub unsafe extern "C" fn napi_coerce_to_bool(
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        return match qjs_query(handle, 1) {
+            Ok(answer) => {
+                let status = napi_get_boolean(env, answer == "1", out);
+                record_status(env, status)
+            }
+            Err(error) => qjs_error_status(env, error),
+        };
     }
     let boolean = match value_ref(value) {
         Ok(Value::Undefined | Value::Null) => false,
@@ -210,6 +287,127 @@ unsafe fn javascript_string(
     })
 }
 
+// Array ToString concatenates the exact string values of its elements.
+// A lossy Rust String cannot carry an unpaired UTF-16 surrogate through that
+// join, so keep code units until the final N-API string is allocated.
+unsafe fn javascript_string_utf16(
+    env: NapiEnv,
+    value: NapiValue,
+    arrays: &mut HashSet<usize>,
+    array_element: bool,
+) -> Result<Vec<u16>, NapiStatus> {
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        return qjs_abstract_string_units(env, handle, array_element);
+    }
+    match value_ref(value)? {
+        Value::String(text) => Ok(env.as_ref()
+            .and_then(|owner| owner.utf16_strings.get(&(value as usize)))
+            .cloned().unwrap_or_else(|| text.encode_utf16().collect())),
+        Value::Error(message) => {
+            let name_key = PropertyKey::String("name".into());
+            let name = find_property_value(env, value, &name_key)
+                .filter(|name| matches!(value_ref(*name), Ok(Value::String(_))));
+            let name = match name {
+                Some(name) => javascript_string_utf16(env, name, arrays, false)?,
+                None => "Error".encode_utf16().collect(),
+            };
+            let message = message.encode_utf16().collect::<Vec<_>>();
+            if name.is_empty() { return Ok(message); }
+            if message.is_empty() { return Ok(name); }
+            let mut joined = name;
+            joined.extend(": ".encode_utf16());
+            joined.extend(message);
+            Ok(joined)
+        }
+        Value::Array(values) => {
+            if !arrays.insert(value as usize) { return Ok(Vec::new()); }
+            let values = values.clone();
+            let result = (|| {
+                let mut joined = Vec::new();
+                for (index, item) in values.into_iter().enumerate() {
+                    if index != 0 { joined.push(b',' as u16); }
+                    if let Some(item) = item {
+                        if !matches!(value_ref(item), Ok(Value::Undefined | Value::Null)) {
+                            joined.extend(javascript_string_utf16(env, item, arrays, true)?);
+                        }
+                    }
+                }
+                Ok(joined)
+            })();
+            arrays.remove(&(value as usize));
+            result
+        }
+        #[cfg(feature = "quickjs")]
+        Value::Symbol { id, .. } if env.as_ref().is_some_and(|env| env.graph_owner_id != 0) => {
+            qjs_native_symbol_string_units(env, *id)
+        }
+        _ => Ok(javascript_string(env, value, arrays)
+            .map_err(|_| coercion_type_error(env, "a Symbol cannot be converted to a string"))?
+            .encode_utf16().collect()),
+    }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_abstract_string_units(env: NapiEnv, handle: u64, array_element: bool)
+    -> Result<Vec<u16>, NapiStatus> {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_abstract_to_string_units_result(
+        handle, u8::from(array_element));
+    qjs_string_units_from_result(env, result)
+}
+
+/// ToString of a native-graph Symbol through the engine's own Symbol, so the
+/// engine's real TypeError becomes the pending exception.
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_native_symbol_string_units(env: NapiEnv, id: u64)
+    -> Result<Vec<u16>, NapiStatus> {
+    let owner = env.as_ref().map_or(0, |env| env.graph_owner_id);
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_napi_symbol_abstract_to_string_units_result(owner, id);
+    qjs_string_units_from_result(env, result)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_string_units_from_result(
+    env: NapiEnv, result: thaw_quickjs::ThawStringCoercionResult,
+) -> Result<Vec<u16>, NapiStatus> {
+    if result.exception_handle != 0 {
+        let (exception, duplicate) = {
+            let Ok(owner) = env_mut(env) else {
+                thaw_quickjs::thaw_js_release_handle(result.exception_handle);
+                return Err(NAPI_INVALID_ARG);
+            };
+            if let Some(value) = owner.quickjs_live_values.get(&result.exception_handle).copied() {
+                (value, true)
+            } else {
+                let value = owner.alloc(Value::QuickJsHandle {
+                    handle: result.exception_handle,
+                    object_like: result.exception_object_like != 0,
+                });
+                owner.quickjs_live_values.insert(result.exception_handle, value);
+                (value, false)
+            }
+        };
+        if duplicate { thaw_quickjs::thaw_js_release_handle(result.exception_handle); }
+        let Ok(owner) = env_mut(env) else { return Err(NAPI_INVALID_ARG); };
+        owner.exception = Some(exception);
+        return Err(record_status(env, NAPI_PENDING_EXCEPTION));
+    }
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return Err(qjs_error_status(env, error));
+    }
+    if result.units.is_null() { return Err(record_status(env, NAPI_GENERIC_FAILURE)); }
+    let units = thaw_arena::NativeStr::from_ptr(result.units)
+        .to_string_lossy().into_owned();
+    thaw_arena::destroy_string(result.units);
+    serde_json::from_str::<Vec<u16>>(&units)
+        .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))
+}
+
 unsafe fn coercion_type_error(env: NapiEnv, message: &str) -> NapiStatus {
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -227,6 +425,17 @@ pub unsafe extern "C" fn napi_coerce_to_number(
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        return match qjs_number_value(handle) {
+            Ok(number) => {
+                let status = napi_create_double(env, number, out);
+                record_status(env, status)
+            }
+            Err(error) => qjs_error_status(env, error),
+        };
     }
     let number = match value_ref(value) {
         Ok(Value::Undefined) => f64::NAN,
@@ -258,14 +467,20 @@ pub unsafe extern "C" fn napi_coerce_to_string(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    let string = match javascript_string(env, value, &mut HashSet::new()) {
-        Ok(string) => string,
-        Err(()) => return coercion_type_error(env, "a Symbol cannot be converted to a string"),
+    if matches!(value_ref(value), Ok(Value::String(_))) {
+        return write_scoped_value(env, out, value);
+    }
+    let units = match javascript_string_utf16(env, value, &mut HashSet::new(), false) {
+        Ok(units) => units,
+        Err(status) => return status,
     };
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env.alloc(Value::String(string));
+    let decoded = String::from_utf16(&units);
+    let value = env.alloc(Value::String(decoded.as_ref().cloned()
+        .unwrap_or_else(|_| String::from_utf16_lossy(&units))));
+    if decoded.is_err() { env.utf16_strings.insert(value as usize, units); }
     write_value(out, value)
 }
 
@@ -279,7 +494,7 @@ pub unsafe extern "C" fn napi_coerce_to_object(
         return record_status(env, NAPI_INVALID_ARG);
     }
     if matches!(value_ref(value), Ok(value) if is_object_value(value)) {
-        return write_value(out, value);
+        return write_scoped_value(env, out, value);
     }
     if matches!(value_ref(value), Ok(Value::Undefined | Value::Null)) {
         return record_status(env, NAPI_INVALID_ARG);
@@ -298,6 +513,19 @@ pub unsafe extern "C" fn napi_get_value_bool(
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        match qjs_query(handle, 0) {
+            Ok(kind) if kind == "boolean" => {},
+            Ok(_) => return record_status(env, NAPI_BOOLEAN_EXPECTED),
+            Err(error) => return qjs_error_status(env, error),
+        }
+        return match qjs_query(handle, 1) {
+            Ok(answer) => { *out = answer == "1"; NAPI_OK },
+            Err(error) => qjs_error_status(env, error),
+        };
     }
     let status = match value_ref(value) {
         Ok(Value::Bool(boolean)) => {
@@ -319,6 +547,24 @@ pub unsafe extern "C" fn napi_get_value_string_utf8(
 ) -> NapiStatus {
     if !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let units = match qjs_actual_string_units(env, handle) {
+            Ok(units) => units,
+            Err(status) => return status,
+        };
+        let string = String::from_utf16_lossy(&units);
+        let mut count = string.len();
+        if !buffer.is_null() && size > 0 {
+            count = count.min(size - 1);
+            while !string.is_char_boundary(count) { count -= 1; }
+            ptr::copy_nonoverlapping(string.as_ptr(), buffer.cast(), count);
+            *buffer.add(count) = 0;
+        }
+        if !written.is_null() { *written = count; }
+        return NAPI_OK;
     }
     let string = match value_ref(value) {
         Ok(Value::String(string)) => string,
@@ -350,11 +596,30 @@ pub unsafe extern "C" fn napi_get_value_string_latin1(
     if !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let units = match qjs_actual_string_units(env, handle) {
+            Ok(units) => units,
+            Err(status) => return status,
+        };
+        let bytes = units.iter().map(|unit| *unit as u8).collect::<Vec<_>>();
+        let count = if buffer.is_null() || size == 0 { bytes.len() } else {
+            let count = bytes.len().min(size - 1);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), count);
+            *buffer.add(count) = 0;
+            count
+        };
+        if !written.is_null() { *written = count; }
+        return NAPI_OK;
+    }
     let string = match value_ref(value) {
         Ok(Value::String(string)) => string,
         _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
-    let encoded: Vec<u8> = string.encode_utf16().map(|unit| unit as u8).collect();
+    let encoded: Vec<u8> = env.as_ref().and_then(|owner| owner.utf16_strings.get(&(value as usize)))
+        .map(|units| units.iter().map(|unit| *unit as u8).collect())
+        .unwrap_or_else(|| string.encode_utf16().map(|unit| unit as u8).collect());
     let count = if buffer.is_null() || size == 0 {
         encoded.len()
     } else {
@@ -380,11 +645,28 @@ pub unsafe extern "C" fn napi_get_value_string_utf16(
     if !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let units = match qjs_actual_string_units(env, handle) {
+            Ok(units) => units,
+            Err(status) => return status,
+        };
+        let count = if buffer.is_null() || size == 0 { units.len() } else {
+            let count = units.len().min(size - 1);
+            ptr::copy_nonoverlapping(units.as_ptr(), buffer, count);
+            *buffer.add(count) = 0;
+            count
+        };
+        if !written.is_null() { *written = count; }
+        return NAPI_OK;
+    }
     let string = match value_ref(value) {
         Ok(Value::String(string)) => string,
         _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
-    let encoded: Vec<u16> = string.encode_utf16().collect();
+    let encoded: Vec<u16> = env.as_ref().and_then(|owner| owner.utf16_strings.get(&(value as usize)))
+        .cloned().unwrap_or_else(|| string.encode_utf16().collect());
     let count = if buffer.is_null() || size == 0 {
         encoded.len()
     } else {
@@ -475,24 +757,31 @@ pub unsafe extern "C" fn napi_get_and_clear_last_exception(
     env: NapiEnv,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
     if out.is_null() {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    let Ok(env) = env_mut(env) else {
+    let Ok(owner) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env
-        .exception
-        .take()
-        .unwrap_or_else(|| env.alloc(Value::Undefined));
-    write_value(out, value)
+    // The exception is the last native root in some callers. Acquire the
+    // recipient handle before clearing it; a weak JS Symbol may need its
+    // original target pinned during that transfer.
+    let value = owner.exception.unwrap_or_else(|| owner.alloc(Value::Undefined));
+    let status = write_scoped_value(env, out, value);
+    if status == NAPI_OK {
+        if let Ok(owner) = env_mut(env) {
+            if owner.exception == Some(value) { owner.exception = None; }
+        }
+    }
+    status
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_version(env: NapiEnv, out: *mut u32) -> NapiStatus {
     if env.is_null() || out.is_null() {
         record_status(env, NAPI_INVALID_ARG)
     } else {
-        *out = 10;
+        *out = napi_version::SUPPORTED_NAPI_VERSION;
         NAPI_OK
     }
 }
@@ -615,7 +904,13 @@ pub unsafe extern "C" fn napi_run_script(
     };
     let status = match evaluated {
         Ok(Some(json)) => match serde_json::from_str::<JsonValue>(&json) {
-            Ok(json) => write_value(result, value_from_json(env, &json)),
+            Ok(json) => match value_from_json(env, &json) {
+                Ok(value) => write_scoped_value(env_ptr, result, value),
+                Err(error) => {
+                    env.exception = Some(env.alloc(Value::Error(error)));
+                    NAPI_PENDING_EXCEPTION
+                }
+            },
             Err(error) => {
                 env.exception = Some(env.alloc(Value::Error(format!(
                     "failed to decode script result: {error}"

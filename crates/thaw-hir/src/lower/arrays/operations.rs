@@ -59,7 +59,8 @@ impl<'a> FnLowerer<'a> {
         };
         let initial_start = argument_names
             .first()
-            .map(|name| var(name))
+            .map(|name| self.coerce_primitive_to_number(var(name)))
+            .transpose()?
             .unwrap_or_else(|| number(0.0));
         let mut statements = vec![
             HirStmt::Let(
@@ -106,7 +107,7 @@ impl<'a> FnLowerer<'a> {
         let initial_delete = match argument_names.len() {
             0 => number(0.0),
             1 => sub(var(&length_name), var(&start_name)),
-            _ => var(&argument_names[1]),
+            _ => self.coerce_primitive_to_number(var(&argument_names[1]))?,
         };
         statements.extend([
             HirStmt::Let(delete_name.clone(), HirType::F64, initial_delete),
@@ -526,7 +527,9 @@ impl<'a> FnLowerer<'a> {
         self.scope
             .insert(element_name.clone(), callback_element_type.clone());
 
-        let HirType::Function(params, _) = &callback_type else {
+        let this_binding = self.bind_array_callback_this("predicate", &callback_type, &this_arg)?;
+        let (signature, call_this) = Self::array_callback_signature(&callback_type, &this_binding);
+        let HirType::Function(params, returned) = &signature else {
             unreachable!("array predicate was validated as a function")
         };
         let available = [
@@ -534,8 +537,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        let callback_call = self.lower_array_from_mapper_call(
+            &callback_name, params, returned, &available, call_this.as_deref(),
+        )?;
         let callback_truthy = self.array_callback_truthy(callback_call)?;
         let stop_condition = if matches!(
             mode,
@@ -687,13 +691,7 @@ impl<'a> FnLowerer<'a> {
             (receiver_name, array_type, receiver),
             (callback_name, callback_type, callback),
         ];
-        if let Some(this_arg) = this_arg {
-            let ty = self.infer_expr_type(&this_arg)?;
-            let name = format!("__thaw_predicate_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, this_arg));
-        }
+        bindings.extend(this_binding);
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
@@ -724,7 +722,9 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope
             .insert(element_name.clone(), callback_element_type.clone());
-        let HirType::Function(params, _) = &callback_type else {
+        let this_binding = self.bind_array_callback_this("for_each", &callback_type, &this_arg)?;
+        let (signature, call_this) = Self::array_callback_signature(&callback_type, &this_binding);
+        let HirType::Function(params, returned) = &signature else {
             unreachable!("array callback was validated as a function")
         };
         let available = [
@@ -732,8 +732,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        let callback_call = self.lower_array_from_mapper_call(
+            &callback_name, params, returned, &available, call_this.as_deref(),
+        )?;
         let raw_element = HirExpr::TypedIndex(
             Box::new(HirExpr::Var(receiver_name.clone())),
             Box::new(HirExpr::Var(index_name.clone())),
@@ -815,13 +816,7 @@ impl<'a> FnLowerer<'a> {
             (receiver_name, array_type, receiver),
             (callback_name, callback_type, callback),
         ];
-        if let Some(this_arg) = this_arg {
-            let ty = self.infer_expr_type(&this_arg)?;
-            let name = format!("__thaw_for_each_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, this_arg));
-        }
+        bindings.extend(this_binding);
         self.wrap_call_argument_bindings(body, &bindings)
     }
 }

@@ -85,6 +85,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             names.insert(name.clone());
         }
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
@@ -130,6 +131,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
         | HirExpr::PromiseNew(value, _, _, _)
+        | HirExpr::PromiseNewMixed(value, _, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -157,13 +159,20 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishIsNone(value, _)
         | HirExpr::NullishValue(value, _) => collect_referenced_bindings(value, names),
         HirExpr::RecursiveClosure(_, _, closure) => collect_referenced_bindings(closure, names),
-        HirExpr::TypedClosure(_, closure) => collect_referenced_bindings(closure, names),
+        HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => collect_referenced_bindings(closure, names),
         HirExpr::Lambda(captures, _, _, _) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
         }
         HirExpr::PromiseThen(source, callback, _, _, _, _) => {
             collect_referenced_bindings(source, names);
             collect_referenced_bindings(callback, names);
+        }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+            collect_referenced_bindings(source, names);
+            if let Some(fulfilled) = fulfilled {
+                collect_referenced_bindings(fulfilled, names);
+            }
+            collect_referenced_bindings(rejected, names);
         }
         HirExpr::PromiseFinally(source, callback, _, _) => {
             collect_referenced_bindings(source, names);
@@ -216,7 +225,9 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishUndefined(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
         | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
         | HirExpr::MethodRef(..) => {}
     }
 }
@@ -225,6 +236,7 @@ fn contains_await(expr: &HirExpr) -> bool {
     match expr {
         HirExpr::Await(_) | HirExpr::AwaitPromise(_, _) => true,
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
@@ -262,6 +274,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::PromiseAnyArray(value, _)
         | HirExpr::PromiseAllSettledArray(value, _)
         | HirExpr::PromiseNew(value, _, _, _)
+        | HirExpr::PromiseNewMixed(value, _, _)
         | HirExpr::Assign(_, value)
         | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)
@@ -291,6 +304,11 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::PromiseFinally(source, callback, _, _) => {
             contains_await(source) || contains_await(callback)
         }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+            contains_await(source)
+                || fulfilled.as_ref().is_some_and(|callback| contains_await(callback))
+                || contains_await(rejected)
+        }
         HirExpr::IndexAssign(array, index, value) => {
             contains_await(array) || contains_await(index) || contains_await(value)
         }
@@ -304,8 +322,10 @@ fn contains_await(expr: &HirExpr) -> bool {
         // function value is evaluated at this expression boundary.
         HirExpr::RecursiveClosure(..)
         | HirExpr::TypedClosure(..)
+        | HirExpr::NonArrowFunction(..)
         | HirExpr::Lambda(..)
         | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
         | HirExpr::MethodRef(..)
         | HirExpr::Lit(_)
         | HirExpr::OptionalNone(_)
@@ -315,6 +335,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::Var(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
         | HirExpr::PostfixUpdate(_, _) => false,
     }
 }
@@ -333,6 +354,7 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
         HirStmt::While(condition, body) => {
             contains_await(condition) || body.iter().any(stmt_contains_await)
         }
+        HirStmt::Finally(body, _) => body.iter().any(stmt_contains_await),
         HirStmt::Try(body, _, catch, _) => {
             body.iter().any(stmt_contains_await) || catch.iter().any(stmt_contains_await)
         }
@@ -362,9 +384,7 @@ fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
             }
             // Adopting a returned promise would move its rejection outside the
             // surrounding catch, so try/catch needs the general async frame path.
-            HirStmt::Try(body, _, catch, _) => {
-                !body.iter().any(stmt_contains_await) && !catch.iter().any(stmt_contains_await)
-            }
+            HirStmt::Try(..) | HirStmt::Finally(..) => false,
             other => !stmt_contains_await(other),
         })
     }
@@ -423,6 +443,9 @@ fn rewrite_async_arrow_returns(
                 condition,
                 rewrite_async_arrow_returns(body, resolve, resolved)?,
             )),
+            HirStmt::Finally(body, suspended) => rewritten.push(HirStmt::Finally(
+                rewrite_async_arrow_returns(body, resolve, resolved)?, suspended,
+            )),
             HirStmt::Try(body, binding, catch, hidden) => rewritten.push(HirStmt::Try(
                 rewrite_async_arrow_returns(body, resolve, resolved)?,
                 binding,
@@ -436,7 +459,7 @@ fn rewrite_async_arrow_returns(
 }
 
 fn collect_stmt_bindings(stmts: &[HirStmt], names: &mut BTreeSet<Symbol>) {
-    collect_stmt_bindings_with_bound(stmts, names, &BTreeSet::new());
+    collect_stmt_bindings_with_bound(stmts, names, &mut BTreeSet::new());
 }
 
 fn collect_expr_bindings_with_bound(
@@ -449,36 +472,45 @@ fn collect_expr_bindings_with_bound(
     names.extend(referenced.into_iter().filter(|name| !bound.contains(name)));
 }
 
+/// HIR locals are function-scoped: a `Let` nested in a `try`/`if`/`while`
+/// body stays visible to the statements that follow the block (the lowering
+/// relies on this for `__thaw_finally_*` captures), so `bound` is threaded
+/// through nested blocks instead of being cloned per block.
 fn collect_stmt_bindings_with_bound(
     stmts: &[HirStmt],
     names: &mut BTreeSet<Symbol>,
-    initial_bound: &BTreeSet<Symbol>,
+    bound: &mut BTreeSet<Symbol>,
 ) {
-    let mut bound = initial_bound.clone();
     for stmt in stmts {
         match stmt {
             HirStmt::Expr(expr) | HirStmt::Throw(expr) => {
-                collect_expr_bindings_with_bound(expr, names, &bound)
+                collect_expr_bindings_with_bound(expr, names, bound)
             }
             HirStmt::Let(name, _, expr) => {
-                collect_expr_bindings_with_bound(expr, names, &bound);
+                collect_expr_bindings_with_bound(expr, names, bound);
                 bound.insert(name.clone());
             }
-            HirStmt::Return(Some(expr)) => collect_expr_bindings_with_bound(expr, names, &bound),
+            HirStmt::Return(Some(expr)) => collect_expr_bindings_with_bound(expr, names, bound),
             HirStmt::If(cond, then_body, else_body) => {
-                collect_expr_bindings_with_bound(cond, names, &bound);
-                collect_stmt_bindings_with_bound(then_body, names, &bound);
-                collect_stmt_bindings_with_bound(else_body, names, &bound);
+                collect_expr_bindings_with_bound(cond, names, bound);
+                collect_stmt_bindings_with_bound(then_body, names, bound);
+                collect_stmt_bindings_with_bound(else_body, names, bound);
             }
             HirStmt::While(cond, body) => {
-                collect_expr_bindings_with_bound(cond, names, &bound);
-                collect_stmt_bindings_with_bound(body, names, &bound);
+                collect_expr_bindings_with_bound(cond, names, bound);
+                collect_stmt_bindings_with_bound(body, names, bound);
+            }
+            HirStmt::Finally(body, _) => {
+                collect_stmt_bindings_with_bound(body, names, bound);
             }
             HirStmt::Try(body, catch_name, catch_body, _) => {
-                collect_stmt_bindings_with_bound(body, names, &bound);
-                let mut catch_bound = bound.clone();
-                catch_bound.insert(catch_name.clone());
-                collect_stmt_bindings_with_bound(catch_body, names, &catch_bound);
+                collect_stmt_bindings_with_bound(body, names, bound);
+                let catch_was_bound = bound.contains(catch_name);
+                bound.insert(catch_name.clone());
+                collect_stmt_bindings_with_bound(catch_body, names, bound);
+                if !catch_was_bound {
+                    bound.remove(catch_name);
+                }
             }
             HirStmt::Return(None)
             | HirStmt::Break
@@ -499,62 +531,259 @@ fn collect_stmt_bindings_with_bound(
 /// `stmts`, so the innermost loop is outside the scope exactly when no loop
 /// has been entered yet, and a `BreakDepth(n)`/`ContinueDepth(n)` reaches
 /// outside when `n >= loop_depth`.
+impl<'a> FnLowerer<'a> {
 fn inject_finally_before_exits(
+    &mut self,
     stmts: Vec<HirStmt>,
     finalizer: &[HirStmt],
     inject_throws: bool,
-) -> Vec<HirStmt> {
-    inject_finally_before_exits_at(stmts, finalizer, inject_throws, 0)
+    skipped_handlers: usize,
+) -> Result<Vec<HirStmt>, String> {
+    self.inject_finally_before_exits_at(stmts, finalizer, inject_throws, 0, skipped_handlers)
 }
 
 fn inject_finally_before_exits_at(
+    &mut self,
     stmts: Vec<HirStmt>,
     finalizer: &[HirStmt],
     inject_throws: bool,
     loop_depth: usize,
-) -> Vec<HirStmt> {
+    skip_handlers: usize,
+) -> Result<Vec<HirStmt>, String> {
     let mut out = Vec::new();
+    // Block-scoped locals (loop items, `const`s) have left `self.scope` by the
+    // time the finally is injected, but a `return` inside the block may still
+    // read them: expose each `Let` seen so far to type inference.
+    let mut exposed = Vec::new();
+    let result = (|| {
     for stmt in stmts {
-        match stmt {
-            HirStmt::Return(_) => {
-                out.extend(finalizer.iter().cloned());
-                out.push(stmt);
+        if let HirStmt::Let(name, ty, _) = &stmt {
+            if !self.scope.contains_key(name) {
+                self.scope.insert(name.clone(), ty.clone());
+                exposed.push(name.clone());
             }
-            HirStmt::Throw(_) if inject_throws => {
-                out.extend(finalizer.iter().cloned());
-                out.push(stmt);
+        }
+        match stmt {
+            HirStmt::Return(Some(value)) => {
+                let ty = self.infer_expr_type_inner(&value)?;
+                let name = self.bind_local("__thaw_finally_return", ty.clone());
+                let capture = HirStmt::Let(name.clone(), ty, value);
+                out.extend(self.protect_finally_capture(vec![capture], finalizer, inject_throws, skip_handlers));
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
+                out.push(HirStmt::Return(Some(HirExpr::Var(name))));
+            }
+            HirStmt::Return(None) => {
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
+                out.push(HirStmt::Return(None));
+            }
+            HirStmt::Throw(value) if inject_throws => {
+                let (captured, value) = self.capture_finally_throw(value)?;
+                out.extend(self.protect_finally_capture(captured, finalizer, true, skip_handlers));
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
+                // An explicit rethrow from a source catch has already run the
+                // finalizer. Bypass its synthetic failure guard as well.
+                out.push(HirStmt::Finally(vec![HirStmt::Throw(value)], skip_handlers));
             }
             HirStmt::Break | HirStmt::Continue if loop_depth == 0 => {
-                out.extend(finalizer.iter().cloned());
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
                 out.push(stmt);
             }
             HirStmt::BreakDepth(depth) | HirStmt::ContinueDepth(depth) if depth >= loop_depth => {
-                out.extend(finalizer.iter().cloned());
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
                 out.push(stmt);
             }
             HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
                 cond,
-                inject_finally_before_exits_at(then_body, finalizer, inject_throws, loop_depth),
-                inject_finally_before_exits_at(else_body, finalizer, inject_throws, loop_depth),
+                self.inject_finally_before_exits_at(then_body, finalizer, inject_throws, loop_depth, skip_handlers)?,
+                self.inject_finally_before_exits_at(else_body, finalizer, inject_throws, loop_depth, skip_handlers)?,
             )),
             HirStmt::While(cond, body) => out.push(HirStmt::While(
                 cond,
-                inject_finally_before_exits_at(body, finalizer, inject_throws, loop_depth + 1),
+                self.inject_finally_before_exits_at(body, finalizer, inject_throws, loop_depth + 1, skip_handlers)?,
             )),
             HirStmt::Break
             | HirStmt::Continue
             | HirStmt::BreakDepth(_)
             | HirStmt::ContinueDepth(_) => out.push(stmt),
             HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
-                inject_finally_before_exits_at(body, finalizer, false, loop_depth),
+                self.inject_finally_before_exits_at(body, finalizer, false, loop_depth, skip_handlers + 1)?,
                 catch_name,
-                inject_finally_before_exits_at(catch_body, finalizer, inject_throws, loop_depth),
+                self.inject_finally_before_exits_at(catch_body, finalizer, inject_throws, loop_depth, skip_handlers)?,
                 hidden,
+            )),
+            HirStmt::Finally(body, suspended) => out.push(HirStmt::Finally(
+                self.inject_finally_before_exits_at(
+                    body, finalizer, inject_throws, loop_depth,
+                    skip_handlers.saturating_sub(suspended),
+                )?,
+                suspended,
             )),
             other => out.push(other),
         }
     }
-    out
+    Ok::<(), String>(())
+    })();
+    for name in exposed {
+        self.scope.remove(&name);
+    }
+    result?;
+    Ok(out)
+}
+
+fn protect_finally_capture(
+    &mut self,
+    captures: Vec<HirStmt>,
+    finalizer: &[HirStmt],
+    inject_throws: bool,
+    skip_handlers: usize,
+) -> Vec<HirStmt> {
+    if !inject_throws {
+        // The enclosing Try already catches a failing exit expression and
+        // runs this finalizer in its catch body.
+        return captures;
+    }
+    // A source catch body has no surrounding catch for its own exits. If
+    // evaluating the Return/Throw expression fails, still run `finally`;
+    // an abrupt finalizer then naturally overrides the evaluation error.
+    let catch_name = self.bind_local("__thaw_finally_capture_error", HirType::Str);
+    let mut catch_body = vec![HirStmt::Finally(finalizer.to_vec(), skip_handlers)];
+    catch_body.push(HirStmt::Finally(
+        vec![HirStmt::Throw(HirExpr::Var(catch_name.clone()))], skip_handlers,
+    ));
+    vec![HirStmt::Try(captures, catch_name.clone(), catch_body, Some(catch_name))]
+}
+
+fn capture_finally_throw(&mut self, value: HirExpr) -> Result<(Vec<HirStmt>, HirExpr), String> {
+    let mut captures = Vec::new();
+    let mut capture = |this: &mut Self, expr: HirExpr| -> Result<HirExpr, String> {
+        let ty = this.infer_expr_type_inner(&expr)?;
+        let name = this.bind_local("__thaw_finally_throw", ty.clone());
+        captures.push(HirStmt::Let(name.clone(), ty, expr));
+        Ok(HirExpr::Var(name))
+    };
+    if let HirExpr::Call(callee, args) = &value {
+        if let HirExpr::Var(marker) = callee.as_ref() {
+            if marker == "@@thaw_published_exception_text" && args.len() == 1 {
+                let captured = capture(self, args[0].clone())?;
+                // The published-tuple marker is emitted only after the
+                // source throw's clear-and-setter sequence. A nested handled
+                // throw in `finally` can clear those fresh channels, so
+                // snapshot the tuple with its display bytes and restore it
+                // after the finalizer.
+                let mut snapshot = vec![captured.clone(), captured.clone(), captured];
+                for field in ["aggregate", "tag", "f64", "i64", "bool", "object", "native"] {
+                    snapshot.push(capture(self, HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_pending_exception_{field}"))),
+                        Vec::new(),
+                    ))?);
+                }
+                return Ok((captures, HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_rethrow_pending_exception".into())),
+                    snapshot,
+                )));
+            }
+            if marker == "@@thaw_trusted_exception_text" && args.len() == 1 {
+                // This marker carries text only. In particular, a generated
+                // destructuring error captured before a finalizer must not
+                // adopt unrelated exception metadata left by that finalizer.
+                let captured = capture(self, args[0].clone())?;
+                return Ok((captures, HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+                    vec![captured],
+                )));
+            }
+            if marker == "@@thaw_rethrow_pending_exception" && args.len() == 10 {
+                let captured_args = args.iter().cloned()
+                    .map(|arg| capture(self, arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok((captures, HirExpr::Call(callee.clone(), captured_args)));
+            }
+        }
+    }
+    let original = if let HirExpr::Var(name) = &value { Some(name.clone()) } else { None };
+    let literal_text = matches!(&value, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_)));
+    let captured = capture(self, value)?;
+    let throw_value = if let Some(original) = original {
+        HirExpr::Call(Box::new(HirExpr::Var("@@thaw_snapshot_caught_exception".into())),
+            vec![captured, HirExpr::Lit(HirLit::Str(original))])
+    } else if literal_text {
+        HirExpr::Call(Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())), vec![captured])
+    } else { captured };
+    Ok((captures, throw_value))
+}
+}
+
+/// `for (...; ...; update) { try { continue; } catch ... }`: the loop epilogue
+/// (update, copy-back, do-while guard) is appended to the HIR body and is also
+/// injected before every `continue`, which puts it *inside* a `try` whose
+/// `catch` then wrongly handles an exception the epilogue throws. When a
+/// `continue` targeting this loop sits inside a `try`, the body is wrapped in a
+/// run-once inner loop instead: such a `continue` becomes a break out of that
+/// inner loop (so the `try` has already been left) and the epilogue runs after
+/// it. Every other break/continue that leaves the original loop is shifted one
+/// level out.
+fn lift_continue_out_of_try(body: Vec<HirStmt>) -> Vec<HirStmt> {
+    if !has_target_continue_in_try(&body, 0, false) {
+        return body;
+    }
+    let mut once = rewrite_for_once_loop(body, 0);
+    once.push(HirStmt::Break);
+    vec![HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), once)]
+}
+
+fn has_target_continue_in_try(stmts: &[HirStmt], nested_depth: usize, in_try: bool) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        HirStmt::Continue => in_try && nested_depth == 0,
+        HirStmt::ContinueDepth(depth) => in_try && *depth == nested_depth,
+        HirStmt::If(_, then_body, else_body) => {
+            has_target_continue_in_try(then_body, nested_depth, in_try)
+                || has_target_continue_in_try(else_body, nested_depth, in_try)
+        }
+        HirStmt::Finally(body, _) => has_target_continue_in_try(body, nested_depth, in_try),
+        // The `using` scope's own `Try` already runs its disposal before every exit
+        // (`inject_finally_before_exits`); only a user-written `try` needs lifting.
+        HirStmt::Try(body, catch_name, catch_body, _) => {
+            let user_try = !catch_name.starts_with("__thaw_using_finally");
+            has_target_continue_in_try(body, nested_depth, in_try || user_try)
+                || has_target_continue_in_try(catch_body, nested_depth, in_try)
+        }
+        HirStmt::While(_, body) => has_target_continue_in_try(body, nested_depth + 1, in_try),
+        _ => false,
+    })
+}
+
+fn rewrite_for_once_loop(stmts: Vec<HirStmt>, nested_depth: usize) -> Vec<HirStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            // The run-once loop is `nested_depth` loops out from here.
+            HirStmt::Continue if nested_depth == 0 => HirStmt::Break,
+            HirStmt::ContinueDepth(depth) if depth == nested_depth => HirStmt::BreakDepth(depth),
+            HirStmt::Break if nested_depth == 0 => HirStmt::BreakDepth(1),
+            HirStmt::BreakDepth(depth) if depth >= nested_depth => HirStmt::BreakDepth(depth + 1),
+            HirStmt::ContinueDepth(depth) if depth > nested_depth => {
+                HirStmt::ContinueDepth(depth + 1)
+            }
+            HirStmt::If(cond, then_body, else_body) => HirStmt::If(
+                cond,
+                rewrite_for_once_loop(then_body, nested_depth),
+                rewrite_for_once_loop(else_body, nested_depth),
+            ),
+            HirStmt::Finally(body, suspended) => {
+                HirStmt::Finally(rewrite_for_once_loop(body, nested_depth), suspended)
+            }
+            HirStmt::Try(body, catch_name, catch_body, hidden) => HirStmt::Try(
+                rewrite_for_once_loop(body, nested_depth),
+                catch_name,
+                rewrite_for_once_loop(catch_body, nested_depth),
+                hidden,
+            ),
+            HirStmt::While(cond, body) => {
+                HirStmt::While(cond, rewrite_for_once_loop(body, nested_depth + 1))
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// A classic `for (...; ...; update)` is represented as a HIR `while` with
@@ -563,33 +792,33 @@ fn inject_finally_before_exits_at(
 /// belonging to this loop, but stop at nested loops whose `continue`s target
 /// the nested loop instead.
 fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, &[HirStmt::Expr(update.clone())])
+    inject_before_target_continue(lift_continue_out_of_try(stmts), 0, &|_| vec![HirStmt::Expr(update.clone())])
 }
 
 fn inject_for_advance_before_continue(
     stmts: Vec<HirStmt>,
     advance: &[HirStmt],
 ) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, advance)
+    inject_before_target_continue(lift_continue_out_of_try(stmts), 0, &|_| advance.to_vec())
 }
 
 fn inject_before_target_continue(
     stmts: Vec<HirStmt>,
     nested_depth: usize,
-    injected: &[HirStmt],
+    injected: &impl Fn(usize) -> Vec<HirStmt>,
 ) -> Vec<HirStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
         match stmt {
             HirStmt::Continue => {
                 if nested_depth == 0 {
-                    out.extend_from_slice(injected);
+                    out.extend(injected(nested_depth));
                 }
                 out.push(HirStmt::Continue);
             }
             HirStmt::ContinueDepth(depth) => {
                 if depth == nested_depth {
-                    out.extend_from_slice(injected);
+                    out.extend(injected(nested_depth));
                 }
                 out.push(HirStmt::ContinueDepth(depth));
             }
@@ -597,6 +826,9 @@ fn inject_before_target_continue(
                 cond,
                 inject_before_target_continue(then_body, nested_depth, injected),
                 inject_before_target_continue(else_body, nested_depth, injected),
+            )),
+            HirStmt::Finally(body, suspended) => out.push(HirStmt::Finally(
+                inject_before_target_continue(body, nested_depth, injected), suspended,
             )),
             HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
                 inject_before_target_continue(body, nested_depth, injected),
@@ -617,54 +849,14 @@ fn inject_before_target_continue(
 /// A `do { body } while (condition)` is represented as an unconditional HIR
 /// loop with a condition guard at the tail. Source-level `continue` also has
 /// to execute that guard before starting the next iteration.
-fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, guard: &HirStmt) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, std::slice::from_ref(guard))
+fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, condition: &HirExpr) -> Vec<HirStmt> {
+    inject_before_target_continue(lift_continue_out_of_try(stmts), 0, &|depth| vec![HirStmt::If(
+        condition.clone(),
+        Vec::new(),
+        vec![HirStmt::BreakDepth(depth)],
+    )])
 }
 
-/// Rewrites breaks that target a source switch into an assignment selecting
-/// the synthetic exit state. Breaks inside nested loops retain their loop
-/// target; nested switches have already consumed their own breaks while
-/// lowering.
-fn rewrite_switch_case_stmts(
-    mut stmts: Vec<HirStmt>,
-    selected: &str,
-    case_index: usize,
-    exit: &HirStmt,
-) -> Vec<HirStmt> {
-    if stmts.is_empty() {
-        return Vec::new();
-    }
-    let first = stmts.remove(0);
-    let rewritten = match first {
-        HirStmt::Break => exit.clone(),
-        HirStmt::If(cond, then_body, else_body) => HirStmt::If(
-            cond,
-            rewrite_switch_case_stmts(then_body, selected, case_index, exit),
-            rewrite_switch_case_stmts(else_body, selected, case_index, exit),
-        ),
-        HirStmt::Try(body, catch_name, catch_body, hidden) => HirStmt::Try(
-            rewrite_switch_case_stmts(body, selected, case_index, exit),
-            catch_name,
-            rewrite_switch_case_stmts(catch_body, selected, case_index, exit),
-            hidden,
-        ),
-        other => other,
-    };
-    let mut out = vec![rewritten];
-    let rest = rewrite_switch_case_stmts(stmts, selected, case_index, exit);
-    if !rest.is_empty() {
-        out.push(HirStmt::If(
-            HirExpr::BinOp(
-                BinOp::EqEqEq,
-                Box::new(HirExpr::Var(selected.to_string())),
-                Box::new(HirExpr::Lit(HirLit::F64(case_index as f64))),
-            ),
-            rest,
-            Vec::new(),
-        ));
-    }
-    out
-}
 
 fn compound_op(op: AssignOp) -> Option<BinOp> {
     match op {
@@ -715,6 +907,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         HirType::Symbol => Some("symbol"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
+        HirType::FunctionWithThis(_, _) => Some("function"),
         HirType::CallableFunction(..) => Some("function"),
         HirType::Array(_)
         | HirType::Bytes
@@ -739,7 +932,8 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         | HirType::Nullish(_)
         | HirType::Void
         | HirType::Dynamic
-        | HirType::JsValue => None,
+        | HirType::JsValue
+        | HirType::NativeException => None,
     }
 }
 
@@ -747,4 +941,25 @@ fn equivalent_union_members(left: &[HirType], right: &[HirType]) -> bool {
     left.len() == right.len()
         && left.iter().all(|member| right.contains(member))
         && right.iter().all(|member| left.contains(member))
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_control_flow_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_function_ref_this_has_no_binding_or_await_facts() {
+        let callable = HirExpr::FunctionRefThis(
+            "callable_with_this".into(),
+            HirType::Bytes,
+            vec![HirType::Bytes],
+            HirType::Bytes,
+        );
+        let mut bindings = std::collections::BTreeSet::new();
+
+        collect_referenced_bindings(&callable, &mut bindings);
+
+        assert!(bindings.is_empty());
+        assert!(!contains_await(&callable));
+    }
 }

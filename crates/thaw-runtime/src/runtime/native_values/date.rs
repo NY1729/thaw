@@ -42,8 +42,15 @@ fn make_day(year: f64, month: f64, date: f64) -> f64 {
     let year = year.trunc();
     let month = month.trunc();
     let year_offset = (month / 12.0).floor();
-    let normalized_year = (year + year_offset) as i64;
-    let normalized_month = (month - year_offset * 12.0) as u32 + 1;
+    let normalized_year = year + year_offset;
+    let normalized_month = month - year_offset * 12.0;
+    if !(-1_000_000.0..=1_000_000.0).contains(&normalized_year)
+        || !(0.0..12.0).contains(&normalized_month)
+    {
+        return f64::NAN;
+    }
+    let normalized_year = normalized_year as i64;
+    let normalized_month = normalized_month as u32 + 1;
     let day_of_first = days_from_civil(normalized_year, normalized_month, 1);
     day_of_first as f64 + date.trunc() - 1.0
 }
@@ -147,7 +154,7 @@ fn local_civil_from_timestamp(timestamp: f64) -> Option<CivilDateTime> {
 
 fn time_clip(value: f64) -> f64 {
     if value.is_finite() && value.abs() <= 8_640_000_000_000_000.0 {
-        value.trunc()
+        if value == 0.0 || value.abs() < 1.0 { 0.0 } else { value.trunc() }
     } else {
         f64::NAN
     }
@@ -333,11 +340,11 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     if text.is_null() {
         return f64::NAN;
     }
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    let text = unsafe { thaw_arena::NativeStr::from_ptr(text) }.to_string_lossy();
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"^(\d{4}|[+-]\d{6})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{3}))?)?(Z|[+-]\d{2}:\d{2})?)?$",
+            r"^([0-9]{4}|[+-][0-9]{6})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]{3}))?)?(Z|[+-][0-9]{2}:[0-9]{2})?)?$",
         )
         .unwrap()
     });
@@ -349,7 +356,7 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     if year_text == "-000000" {
         return f64::NAN;
     }
-    let year = field(1).unwrap();
+    let Some(year) = field(1) else { return f64::NAN };
     let month = field(2).unwrap_or(1) as u32;
     let day = field(3).unwrap_or(1) as u32;
     let hours = field(4).unwrap_or(0);
@@ -1095,6 +1102,21 @@ mod date_native_tests {
             thaw_date_utc(70.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0),
             thaw_date_utc(1970.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn rejects_unicode_digits_and_embedded_nul() {
+        assert!(parse("٢٠٢٤-01-01").is_nan());
+        let bytes = b"2024-01-01\0invalid\0";
+        let pointer = bytes.as_ptr().cast();
+        unsafe { thaw_arena::thaw_string_register(pointer, bytes.len() - 1) };
+        assert!(unsafe { thaw_date_parse(pointer) }.is_nan());
+    }
+
+    #[test]
+    fn time_clip_normalizes_negative_zero_and_huge_year() {
+        assert_eq!(1.0 / thaw_date_time_clip(-0.5), f64::INFINITY);
+        assert!(thaw_date_utc(1e20, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0).is_nan());
     }
 
     #[test]

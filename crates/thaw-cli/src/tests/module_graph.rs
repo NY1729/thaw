@@ -42,6 +42,320 @@ fn create_require_literal_calls_are_external_dependencies() {
 }
 
 #[test]
+fn created_require_calls_preserve_live_results_and_binding_identity() {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Callee, Expr};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Calls {
+        helper: Vec<(String, String)>,
+        raw_r: usize,
+        resolve: usize,
+        side_effect: usize,
+        properties: std::collections::HashSet<String>,
+    }
+    impl Visit for Calls {
+        fn visit_member_expr(&mut self, member: &thaw_parser::ast::MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::Ident(ident) if ident.sym.as_ref() == "__thawmod0_r") {
+                if let thaw_parser::ast::MemberProp::Ident(property) = &member.prop {
+                    self.properties.insert(property.sym.to_string());
+                }
+            }
+            member.visit_children_with(self);
+        }
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                match callee.as_ref() {
+                    Expr::Ident(ident) if ident.sym.to_string().starts_with("__thawmod0_created_require_result") => {
+                        let callable = call.args.first().and_then(|arg| match arg.expr.as_ref() {
+                            Expr::Ident(ident) => Some(ident.sym.to_string()), _ => None,
+                        }).unwrap_or_default();
+                        let argument = call.args.get(1).map(|arg| match arg.expr.as_ref() {
+                            Expr::Call(inner) => match &inner.callee {
+                                Callee::Expr(callee) => match callee.as_ref() {
+                                    Expr::Ident(ident) => ident.sym.to_string(), _ => String::new(),
+                                }, _ => String::new(),
+                            }, _ => String::new(),
+                        }).unwrap_or_default();
+                        self.helper.push((callable, argument));
+                    }
+                    Expr::Ident(ident) if matches!(ident.sym.as_ref(), "r" | "__thawmod0_r") => self.raw_r += 1,
+                    Expr::Ident(ident) if ident.sym.to_string().ends_with("sideEffect") => self.side_effect += 1,
+                    Expr::Member(member) if matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(prop) if prop.sym == *"resolve") => self.resolve += 1,
+                    _ => {}
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("thaw-created-require-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"
+        import { createRequire as make } from 'node:module';
+        import * as moduleApi from 'node:module';
+        const r = make(import.meta.url);
+        const created_require_result = 1;
+        function callDynamicValueHandle(callable: unknown, args: unknown): string { return 'user binding'; }
+        function sideEffect(): string { console.log('argument'); return 'dynamic-only'; }
+        const dynamic = r(sideEffect());
+        const nodeTty = r('node:tty');
+        const bareTty = r('tty');
+        const resolved = r.resolve('node:tty');
+        const cache = r.cache;
+        const addon = r.addon;
+        const spreadArgs: [string] = ['tty'];
+        const spreadResult = r(...spreadArgs);
+        function shadow(r: (specifier: string) => string): string { return r('shadow'); }
+        function shadowImport(make: (url: string) => (specifier: string) => unknown): unknown {
+            const nested = make(import.meta.url);
+            return nested('shadowed-import');
+        }
+        function nestedImmutable(): unknown {
+            const nested = make(import.meta.url);
+            return nested('nested-immutable-only');
+        }
+        function nestedMutable(): unknown {
+            let nested = make(import.meta.url);
+            return nested('mutable-only');
+        }
+        function nestedNamespace(): unknown {
+            const local = moduleApi.createRequire(import.meta.url);
+            return local('nested-namespace-only');
+        }
+        if (true) { var blockVar = make(import.meta.url); }
+        blockVar('var-block-only');
+        for (var forVar = make(import.meta.url); false;) { }
+        forVar('var-for-only');
+        function varAcrossBlocks(): unknown {
+            { var siblingVar = make(import.meta.url); }
+            { return siblingVar('var-sibling-only'); }
+        }
+        const namedFunction = function make(url: string): any {
+            if (url === 'stop') return (specifier: string) => 'plain:' + specifier;
+            const localRequire = make('stop');
+            return localRequire('function-self-only');
+        };
+        const NamedClass = class make {
+            method(): any {
+                // @ts-ignore the named class self binding intentionally shadows the imported callable spelling.
+                const localRequire = make('stop');
+                return localRequire('class-self-only');
+            }
+        };
+        let mutable = make(import.meta.url);
+        mutable = make(import.meta.url);
+        const reassigned = mutable('reassigned');
+    "#;
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = HashMap::from([(
+        "node:module".to_string(),
+        HashMap::from([("createRequire".to_string(), "__node_module_createRequire".to_string())]),
+    )]);
+    let module = module_graph::bundle(
+        &entry, source, &external_exports, &Default::default(), &Default::default(), &Default::default(),
+    ).unwrap();
+    let mut calls = Calls::default();
+    module.visit_with(&mut calls);
+    assert_eq!(calls.helper.len(), 5, "named, namespace, and nested immutable created bindings use the live route");
+    assert_eq!(calls.raw_r, 2, "the shadowing parameter and spread calls remain ordinary");
+    assert_eq!(calls.resolve, 1, "property calls on the created require remain intact");
+    assert!(calls.properties.contains("resolve") && calls.properties.contains("cache") && calls.properties.contains("addon"),
+        "created-require property reads stay on the original function");
+    assert_eq!(calls.side_effect, 1, "the nonliteral argument is evaluated once");
+    assert!(calls.helper.iter().any(|(callable, argument)| callable == "__thawmod0_r" && argument == "__thawmod0_sideEffect"),
+        "the live helper receives the created callable before the original argument expression");
+    assert_eq!(calls.helper.iter().filter(|(callable, _)| callable == "nested").count(), 1,
+        "the nested immutable local resolves through its lexical binding; the sibling mutable local does not route live values");
+    assert!(module.body.iter().any(|item| format!("{item:?}").contains("__thawmod0_created_require_result_1")),
+        "the generated helper avoids a user binding with its default name");
+    assert!(module.body.iter().any(|item| format!("{item:?}").contains("callDynamicValueHandle")),
+        "the private helper uses the existing live-value intrinsic after source renaming");
+    assert!(module.body.iter().any(|item| format!("{item:?}").contains("__thawmod0_callDynamicValueHandle")),
+        "a user binding with the intrinsic's spelling is renamed and cannot capture the helper");
+
+    let static_specs = module_graph::external_static_specifiers(&entry, source).unwrap();
+    assert!(static_specs.contains("node:tty"));
+    assert!(static_specs.contains("tty"));
+    assert!(static_specs.contains("node:module"));
+    assert!(!static_specs.contains("dynamic-only"));
+    assert!(!static_specs.contains("shadow"));
+    assert!(!static_specs.contains("shadowed-import"), "a shadowed creator parameter must not create a false dependency");
+    assert!(static_specs.contains("reassigned"), "mutable created-require calls still contribute literal dependencies");
+    assert!(static_specs.contains("mutable-only"), "nested mutable aliases retain literal dependency discovery without live rewriting");
+    assert!(static_specs.contains("nested-immutable-only"));
+    assert!(static_specs.contains("nested-namespace-only"));
+    assert!(static_specs.contains("var-block-only"), "block-declared var aliases remain visible to outside calls");
+    assert!(static_specs.contains("var-for-only"), "for-initializer var aliases remain visible to outside calls");
+    assert!(static_specs.contains("var-sibling-only"), "function-owned var aliases are shared with sibling blocks for discovery");
+    assert!(!static_specs.contains("function-self-only"), "a named function expression's self binding shadows the imported creator");
+    assert!(!static_specs.contains("class-self-only"), "a named class expression's self binding shadows the imported creator");
+
+    let namespace_source = "import * as moduleApi from 'node:module'; const r = moduleApi.createRequire(import.meta.url); const loaded = r('tty');";
+    std::fs::write(&entry, namespace_source).unwrap();
+    let namespace_module = module_graph::bundle(
+        &entry, namespace_source, &external_exports, &Default::default(), &Default::default(), &Default::default(),
+    ).unwrap();
+    let mut namespace_calls = Calls::default();
+    namespace_module.visit_with(&mut namespace_calls);
+    assert_eq!(namespace_calls.helper.len(), 1, "namespace createRequire uses the same live route");
+
+    let body_scope_source = r#"
+        import { createRequire as make } from 'node:module';
+        const r = (specifier: string): string => specifier;
+        function functionConst(defaultArg: string = r('function-const-default-only')): unknown {
+            const r = make(import.meta.url);
+            return r('function-const-body-only');
+        }
+        const arrowConst = (defaultArg: string = r('arrow-const-default-only')): unknown => {
+            const r = make(import.meta.url);
+            return r('arrow-const-body-only');
+        };
+        function functionVar(defaultArg: string = r('function-var-default-only')): unknown {
+            var r = make(import.meta.url);
+            return r('function-var-body-only');
+        }
+        const arrowVar = (defaultArg: string = r('arrow-var-default-only')): unknown => {
+            var r = make(import.meta.url);
+            return r('arrow-var-body-only');
+        };
+    "#;
+    std::fs::write(&entry, body_scope_source).unwrap();
+    let body_scope_module = module_graph::bundle(
+        &entry, body_scope_source, &external_exports, &Default::default(), &Default::default(), &Default::default(),
+    ).unwrap();
+    let mut body_scope_calls = Calls::default();
+    body_scope_module.visit_with(&mut body_scope_calls);
+    assert_eq!(body_scope_calls.helper.len(), 2,
+        "only immutable body const aliases use the live route; mutable var aliases stay raw");
+    #[derive(Default)]
+    struct RawBodyCalls(Vec<String>);
+    impl Visit for RawBodyCalls {
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            let is_r = matches!(&call.callee, Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Ident(ident) if matches!(ident.sym.as_ref(), "r" | "__thawmod0_r")));
+            if is_r {
+                if let Some(Expr::Lit(thaw_parser::ast::Lit::Str(specifier))) =
+                    call.args.first().map(|argument| argument.expr.as_ref())
+                {
+                    self.0.push(specifier.value.to_string_lossy().into_owned());
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut raw_body_calls = RawBodyCalls::default();
+    body_scope_module.visit_with(&mut raw_body_calls);
+    let raw_var_body_calls = raw_body_calls.0.iter().filter(|specifier| {
+        matches!(specifier.as_str(), "function-var-body-only" | "arrow-var-body-only")
+    }).count();
+    assert_eq!(raw_var_body_calls, 2, "mutable function-body var calls remain ordinary calls");
+    let body_scope_specs = module_graph::external_static_specifiers(&entry, body_scope_source).unwrap();
+    for specifier in ["function-const-body-only", "arrow-const-body-only", "function-var-body-only", "arrow-var-body-only"] {
+        assert!(body_scope_specs.contains(specifier), "function-body alias should retain {specifier}");
+    }
+    for specifier in ["function-const-default-only", "arrow-const-default-only", "function-var-default-only", "arrow-var-default-only"] {
+        assert!(!body_scope_specs.contains(specifier), "parameter default must not be classified by body alias {specifier}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sourced_reexport_does_not_fall_back_to_a_same_named_local() {
+    let dir = std::env::temp_dir().join(format!("thaw-reexport-source-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("other.ts"), "export const unrelated: number = 1;").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "const value: number = 2; export { value } from './other';";
+    std::fs::write(&entry, source).unwrap();
+    let error = module_graph::bundle(&entry, source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap_err();
+    assert!(error.contains("cannot export unknown name `value`"), "{error}");
+    let local = "const value: number = 2; export { value };";
+    std::fs::write(&entry, local).unwrap();
+    assert!(module_graph::bundle(&entry, local, &Default::default(), &Default::default(), &Default::default(), &Default::default()).is_ok());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_imports_keep_interfaces_without_running_dependency_statements() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-only-module-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("types.ts"),
+        "export interface User { name: string; } export class Box { name: string = 'unused'; static { console.log('class static ran'); } } export enum Kind { One = 1 } console.log('type module ran');").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { User, Box, Kind } from './types'; function accept(box: Box, kind: Kind): void {} function main(): void { const user: User = { name: 'Ada' }; console.log(user.name); }";
+    std::fs::write(&entry, source).unwrap();
+    let module = module_graph::bundle(&entry, source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap();
+    thaw_hir::lower_module(&module).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "Ada\n");
+    let named_type_source = "import { type User } from './types'; function main(): void { const user: User = { name: 'Grace' }; console.log(user.name); }";
+    std::fs::write(&entry, named_type_source).unwrap();
+    let named_type_module = module_graph::bundle(&entry, named_type_source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap();
+    thaw_hir::lower_module(&named_type_module).unwrap();
+    let named_output = dir.join("named_app");
+    build(&entry, &named_output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let named_result = Command::new(&named_output).output().unwrap();
+    assert!(named_result.status.success());
+    assert_eq!(String::from_utf8_lossy(&named_result.stdout), "Grace\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_external_packages_are_resolved_without_runtime_loading() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-only-external-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("types.ts"), "import type { Hidden } from 'types-only'; export type Alias = Hidden;").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { Alias } from './types'; import { value } from 'runtime-package'; function main(): void { console.log(value); }";
+    std::fs::write(&entry, source).unwrap();
+    let all = module_graph::external_specifiers(&entry, source).unwrap();
+    assert!(all.iter().any(|(name, _)| name == "types-only"));
+    assert!(all.iter().any(|(name, _)| name == "runtime-package"));
+    let runtime = module_graph::external_runtime_specifiers(&entry, source).unwrap();
+    assert!(!runtime.contains("types-only"));
+    assert!(runtime.contains("runtime-package"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_module_keeps_link_features_for_retained_function_bodies() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-only-features-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("types.ts"),
+        "export interface Shape { value: number; } export function unused(): void { const locale = new Intl.Locale('en'); console.log(locale); }").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { Shape } from './types'; function main(): void { const shape: Shape = { value: 1 }; console.log(shape.value); }";
+    std::fs::write(&entry, source).unwrap();
+    assert!(module_graph::runtime_features(&entry, source).unwrap().contains("intl"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_registry_package_does_not_load_its_bundle() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-registry-{}", std::process::id()));
+    let registry = dir.join("registry");
+    let package = registry.join("types-only");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export interface Shape { value: number; }\nexport function f(): number;\nexport const value: number;\nexport class Client { read(): number; }\n").unwrap();
+    std::fs::write(package.join("bundle.js"), "throw new Error('type-only bundle ran');\n").unwrap();
+    std::fs::write(dir.join("types.ts"), "import { f, value } from 'types-only'; export interface LocalShape { value: number; } export function unused(): number { return f() + value; }").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, "import type { Shape, Client } from 'types-only'; import type { LocalShape } from './types'; function accept(value: Shape, client: Client, local: LocalShape): void {} function main(): void { console.log('ok'); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn preserves_interface_declarations_for_typescript_merging() {
     let dir = std::env::temp_dir().join(format!("thaw interface merge {}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -565,23 +879,9 @@ fn top_level_error_throw_reports_name_and_message() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// `await import("./literal-path")` used to fail to compile entirely
-/// ("unsupported callee (super/import calls not supported)") --
-/// thaw-hir rejected every `Callee::Import` outright, with no path at
-/// all for even the most common real-world shape (a literal string
-/// specifier naming a local project file). No runtime module loader
-/// exists in this ahead-of-time-compiled model to build a real
-/// namespace object when the call actually executes, but the target's
-/// exports are already fully known at compile time (the same
-/// information a static `import * as ns from "./other"` already
-/// resolves) -- so `module_graph.rs`'s AST-flattening pass now
-/// recognizes a literal-specifier `import(...)` as a real dependency
-/// edge and rewrites the call itself into the equivalent
-/// `Promise.resolve({ ...already-resolved exports })`, including a
-/// default export. A non-literal specifier (a plain variable, e.g.)
-/// isn't resolvable at compile time and correctly still hits the
-/// original rejection -- no runtime module loader was added, only
-/// this one compile-time-resolvable shape.
+/// Literal local imports resolve at build time while their module initializer
+/// runs only from the import Promise continuation. Computed specifiers remain
+/// unsupported by the ahead-of-time resolver.
 #[test]
 fn dynamic_import_of_a_literal_local_path_resolves_named_and_default_exports() {
     let dir = std::env::temp_dir().join(format!(
@@ -623,6 +923,191 @@ fn dynamic_import_of_a_literal_local_path_resolves_named_and_default_exports() {
         String::from_utf8_lossy(&result.stdout),
         "hi\nbye\ndefault export\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_initializes_once_and_reads_live_exports() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-local-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "console.log('loaded'); export let count: number = 1; export function increment(): void { count++; }").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); const first = await import('./later'); first.increment(); const second = await import('./later'); console.log(first === second, first.count, second.count); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\nloaded\ntrue 2 2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_caches_initialization_failure() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "console.log('attempt'); throw new Error('boom'); export const value: number = 1;").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { try { await import('./later'); } catch (error) { console.log('rejected'); } try { await import('./later'); } catch (error) { console.log('rejected'); } }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "attempt\nrejected\nrejected\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_failure_cache_survives_lambda_arena_reset() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-lambda-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "throw new Error('cached failure'); export const value: number = 1;").unwrap();
+    let entry = dir.join("handler.ts");
+    std::fs::write(&entry,
+        "async function handler(event: Json): Promise<Json> { try { await import('./later'); } catch (error) { console.log(error.message); } return event; }").unwrap();
+    let output = dir.join("bootstrap");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let (sender, receiver) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for index in 0..2 {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = connection.read(&mut request).unwrap();
+            let event = format!("{{\"invocation\":{index}}}");
+            connection.write_all(format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: lazy-{index}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{event}",
+                event.len(),
+            ).as_bytes()).unwrap();
+            drop(connection);
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut posted = Vec::new();
+            connection.read_to_end(&mut posted).unwrap();
+            sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
+            connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }
+    });
+    let mut child = Command::new(&output)
+        .env("AWS_LAMBDA_RUNTIME_API", address)
+        .stdout(Stdio::piped())
+        .spawn().unwrap();
+    for index in 0..2 {
+        let posted = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(posted.starts_with(&format!(
+            "POST /2018-06-01/runtime/invocation/lazy-{index}/response"
+        )), "{posted}");
+    }
+    server.join().unwrap();
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "cached failure\ncached failure\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_external_import_defers_package_script() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-package-{}", std::process::id()));
+    let package = dir.join("registry/later");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export function value(): number;").unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "globalThis.__later_count = (globalThis.__later_count || 0) + 1; module.exports.value = function() { return globalThis.__later_count; };").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); const first = await import('later'); const second = await import('later'); console.log(first === second, second.value()); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\ntrue 1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_initializes_static_dependencies_only_on_first_call() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-dependency-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("base.ts"), "console.log('base'); export const value: number = 7;").unwrap();
+    std::fs::write(dir.join("later.ts"), "import { value } from './base'; console.log('later'); export const result: number = value;").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); const first = await import('./later'); const second = await import('./later'); console.log(first.result, second.result); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\nbase\nlater\n7 7\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn side_effect_only_external_dynamic_import_is_deferred() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-side-effect-{}", std::process::id()));
+    let package = dir.join("registry/side-effect");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export interface Marker { value: number; }").unwrap();
+    std::fs::write(package.join("bundle.js"), "console.log('package loaded');").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); await import('side-effect'); await import('side-effect'); console.log('after'); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\npackage loaded\nafter\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_back_edge_to_a_static_dependency_keeps_one_initialization() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "import { base } from './main'; console.log('later'); export const result: number = base + 1;").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "export const base: number = 7; async function main(): Promise<void> { console.log('before'); const later = await import('./later'); console.log(later.result); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\nlater\n8\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn static_import_cycle_is_rejected_before_emitting_uninitialized_exports() {
+    let dir = std::env::temp_dir().join(format!("thaw-static-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("other.ts"), "import { left } from './main'; export const right: number = left + 1;").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import { right } from './other'; export const left: number = right + 1; function main(): void {}";
+    std::fs::write(&entry, source).unwrap();
+    let error = module_graph::bundle(&entry, source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap_err();
+    assert!(error.contains("cyclic static user-module import"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_cycle_keeps_both_interface_declarations_without_startup_effects() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("other.ts"),
+        "import type { Left } from './main'; export interface Right { value: number; } export function accept(left: Left): void {} console.log('other initialized');").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { Right } from './other'; export interface Left { value: number; } function accept(right: Right): void {} function main(): void { console.log('ready'); }";
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ready\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -784,7 +1269,7 @@ fn rejects_relative_typescript_import_cycles_with_the_full_chain() {
         &std::collections::HashMap::new(),
     )
     .unwrap_err();
-    assert!(error.contains("cyclic user-module import"));
+    assert!(error.contains("cyclic static user-module import"));
     assert!(error.contains("b.ts"));
     assert!(error.contains("c.ts"));
     let _ = std::fs::remove_dir_all(dir);
@@ -868,5 +1353,420 @@ fn builds_and_runs_a_multifile_async_json_lambda_handler() {
     let _ = child.wait();
     assert!(request.starts_with("POST /2018-06-01/runtime/invocation/module-request/response"));
     assert!(request.ends_with("{\"message\":\"module lambda\"}"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+#[test]
+fn block_and_catch_bindings_do_not_shadow_outer_module_references() {
+    let dir = std::env::temp_dir().join(format!("thaw lexical blocks {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(dir.join("helper.ts"), "export function getValue(): number { return 9; }").unwrap();
+    std::fs::write(&input, r#"
+        import { getValue } from './helper';
+        import * as lib from './helper';
+        const value: number = 7;
+        function main(): void {
+            if (true) { const value: number = 3; console.log(value); }
+            console.log(value);
+            for (let value: number = 0; value < 1; value++) { console.log(value); }
+            console.log(value);
+            const f = (): void => {
+                { const value: number = 5; console.log(value); }
+                console.log(value);
+            };
+            f();
+            try { throw "caught"; } catch (value) { console.log(value); }
+            console.log(value);
+            { const getValue = (): number => 3; console.log(getValue()); }
+            console.log(getValue());
+            { const lib = { getValue: (): number => 4 }; console.log(lib.getValue()); }
+            console.log(lib.getValue());
+        }
+    "#).unwrap();
+    build(&input, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n7\n0\n7\n5\n7\ncaught\n7\n3\n9\n4\n9\n");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn registry_transform_receives_each_module_path_for_source_maps() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let dir = std::env::temp_dir().join(format!("thaw-registry-transform-source-name-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let dependency = dir.join("dependency.ts");
+    let entry_source = "import { value } from './dependency'; console.log(value);";
+    let dependency_source = "export const value: number = 1;";
+    std::fs::write(&entry, entry_source).unwrap();
+    std::fs::write(&dependency, dependency_source).unwrap();
+    let observed = std::cell::RefCell::new(Vec::new());
+    let transform = |source: &str, path: &Path, is_override: bool| {
+        let name = if is_override && source != entry_source {
+            FileName::Custom(format!("{} (in-memory entry override)", path.display()))
+        } else {
+            FileName::Real(path.to_path_buf())
+        };
+        let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
+        assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
+        observed.borrow_mut().push((path.to_path_buf(), is_override, name));
+        Ok(if is_override { source.to_string() } else { source.replace("= 1", "= 2") })
+    };
+    module_graph::bundle_with_named_source_transform(
+        &entry, entry_source, &Default::default(), &Default::default(),
+        &Default::default(), &Default::default(), &Default::default(),
+        &Default::default(), &transform,
+    ).unwrap();
+    let seen = observed.borrow();
+    assert!(seen.contains(&(entry.clone(), true, FileName::Real(entry.clone()))));
+    assert!(seen.contains(&(dependency.clone(), false, FileName::Real(dependency.clone()))));
+    drop(seen);
+    let override_source = "import { value } from './dependency'; console.log(value + 1);";
+    let overrides = std::cell::RefCell::new(Vec::new());
+    let override_transform = |source: &str, path: &Path, is_override: bool| {
+        if is_override {
+            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()));
+            let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
+            assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
+            overrides.borrow_mut().push(name);
+        }
+        Ok(source.to_string())
+    };
+    module_graph::bundle_with_named_source_transform(
+        &entry, override_source, &Default::default(), &Default::default(),
+        &Default::default(), &Default::default(), &Default::default(),
+        &Default::default(), &override_transform,
+    ).unwrap();
+    assert_eq!(overrides.borrow().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn lambda_trace_header_reaches_warm_quickjs_string_and_json_handlers() {
+    for (name, source, expected_bodies) in [
+        (
+            "trace-string",
+            r#"function handler(event: string): string { loadScript("globalThis.lambdaTrace = () => Object.prototype.hasOwnProperty.call(process.env, '_X_AMZN_TRACE_ID') ? process.env._X_AMZN_TRACE_ID : null;"); return JSON.stringify(callDynamic("lambdaTrace", JSON.parse("[]"))); }"#,
+            ["\"Root=first\"", "\"Root=second\"", "null"],
+        ),
+        (
+            "trace-json",
+            r#"function handler(event: Json): Json { loadScript("globalThis.lambdaTrace = () => Object.prototype.hasOwnProperty.call(process.env, '_X_AMZN_TRACE_ID') ? process.env._X_AMZN_TRACE_ID : null;"); return callDynamic("lambdaTrace", JSON.parse("[]")); }"#,
+            ["\"Root=first\"", "\"Root=second\"", "null"],
+        ),
+        (
+            "trace-async-json",
+            r#"async function handler(event: Json): Promise<Json> { await sleep(1); loadScript("globalThis.lambdaTrace = () => Object.prototype.hasOwnProperty.call(process.env, '_X_AMZN_TRACE_ID') ? process.env._X_AMZN_TRACE_ID : null;"); return callDynamic("lambdaTrace", JSON.parse("[]")); }"#,
+            ["\"Root=first\"", "\"Root=second\"", "null"],
+        ),
+        (
+            "trace-native-only",
+            "function handler(event: string): string { return event; }",
+            ["first", "second", "third"],
+        ),
+    ] {
+        let dir = std::env::temp_dir().join(format!("thaw-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("handler.ts");
+        std::fs::write(&entry, source).unwrap();
+        let output = dir.join("bootstrap");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (sender, receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for (index, trace) in [Some("Root=first"), Some("Root=second"), None].into_iter().enumerate() {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                connection.read_to_end(&mut request).unwrap();
+                let event = if name == "trace-native-only" { ["first", "second", "third"][index] } else { "{}" };
+                let trace_header = trace.map(|value| format!("Lambda-Runtime-Trace-Id: {value}\r\n")).unwrap_or_default();
+                connection.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-{index}\r\n{trace_header}Content-Length: {}\r\nConnection: close\r\n\r\n{event}",
+                    event.len(),
+                ).as_bytes()).unwrap();
+                drop(connection);
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut posted = Vec::new();
+                connection.read_to_end(&mut posted).unwrap();
+                sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
+                connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+        });
+        let mut child = Command::new(&output)
+            .env("AWS_LAMBDA_RUNTIME_API", address)
+            .env("_X_AMZN_TRACE_ID", "stale-parent")
+            .spawn().unwrap();
+        for (index, expected) in expected_bodies.into_iter().enumerate() {
+            let posted = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(posted.starts_with(&format!(
+                "POST /2018-06-01/runtime/invocation/trace-{index}/response"
+            )), "{posted}");
+            assert!(posted.ends_with(expected), "{posted}");
+        }
+        server.join().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn lambda_runtime_gives_up_instead_of_spinning_when_the_runtime_api_is_unreachable() {
+    let dir = std::env::temp_dir().join(format!("thaw-api-down-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("handler.ts");
+    std::fs::write(&entry, "function handler(event: string): string { return event; }").unwrap();
+    let output = dir.join("bootstrap");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    // A port nothing listens on: bind, remember the address, close.
+    let address = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    let started = std::time::Instant::now();
+    let mut child = Command::new(&output)
+        .env("AWS_LAMBDA_RUNTIME_API", address)
+        .stderr(std::process::Stdio::piped())
+        .spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("the runtime kept retrying an unreachable Runtime API for 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let log = reader.join().unwrap();
+    assert!(!status.success(), "exit status {status:?}");
+    assert!(log.contains("giving up after"), "{log}");
+    assert!(log.lines().count() < 100, "the failure log must stay bounded: {} lines", log.lines().count());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn lambda_trace_sync_failure_posts_an_error_before_reentering_handler() {
+    let dir = std::env::temp_dir().join(format!("thaw-trace-sync-error-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("handler.ts");
+    std::fs::write(&entry, r#"function handler(event: string): string {
+        loadScript("if (!globalThis.traceLocked) { const original = process.env; process.env = new Proxy({}, { set() { process.env = original; throw new Error('blocked'); } }); globalThis.traceLocked = true; }");
+        return event;
+    }"#).unwrap();
+    let output = dir.join("bootstrap");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let (sender, receiver) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for (index, trace) in ["Root=first", "Root=second", "Root=third"].into_iter().enumerate() {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            connection.read_to_end(&mut request).unwrap();
+            connection.write_all(format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-fail-{index}\r\nLambda-Runtime-Trace-Id: {trace}\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            ).as_bytes()).unwrap();
+            drop(connection);
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut posted = Vec::new();
+            connection.read_to_end(&mut posted).unwrap();
+            sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
+            connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }
+    });
+    let mut child = Command::new(&output)
+        .env("AWS_LAMBDA_RUNTIME_API", address)
+        .spawn().unwrap();
+    let first = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(first.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-0/response"));
+    assert!(first.ends_with("\r\n\r\nx"));
+    let second = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(second.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-1/error"));
+    assert!(second.contains("failed to synchronize Lambda trace environment"));
+    let third = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(third.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-2/response"));
+    assert!(third.ends_with("\r\n\r\nx"));
+    server.join().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn renames_instanceof_value_rhs_and_preserves_external_class_identifiers() {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    let dir = std::env::temp_dir()
+        .join(format!("thaw-instanceof-value-rhs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("local.ts"), "export class LocalError {}\n").unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"
+        import assert, { ExternalError as ImportedError, Holder, key as importedKey, makeConstructor, ExternalError } from "assert-fixture";
+        import alias from "assert-fixture";
+        import * as namespace from "assert-fixture";
+        import { LocalError } from "./local";
+        class LocalDeclaredError {}
+        const value: any = {};
+        function references(): boolean {
+            value instanceof assert.AssertionError;
+            value instanceof alias.AssertionError;
+            value instanceof namespace.ExternalError;
+            value instanceof Holder.AssertionError;
+            value instanceof assert[importedKey];
+            value instanceof assert["AssertionError"];
+            value instanceof makeConstructor();
+            value instanceof LocalError;
+            value instanceof LocalDeclaredError;
+            value instanceof ImportedError;
+            value instanceof ExternalError;
+            function shadow(assert: any): boolean {
+                return value instanceof assert.AssertionError;
+            }
+            return true;
+        }
+    "#;
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = std::collections::HashMap::from([(
+        "assert-fixture".to_string(),
+        std::collections::HashMap::from([
+            ("default".to_string(), "__thaw_test_default_value".to_string()),
+            ("Holder".to_string(), "__thaw_test_holder".to_string()),
+            ("key".to_string(), "__thaw_test_key".to_string()),
+            (
+                "makeConstructor".to_string(),
+                "__thaw_test_make_constructor".to_string(),
+            ),
+            ("ExternalError".to_string(), "__thaw_test_external_error".to_string()),
+        ]),
+    )]);
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &external_exports,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+
+    struct InstanceofRhs(Vec<thaw_parser::ast::Expr>);
+    impl Visit for InstanceofRhs {
+        fn visit_bin_expr(&mut self, binary: &thaw_parser::ast::BinExpr) {
+            if binary.op == thaw_parser::ast::BinaryOp::InstanceOf {
+                self.0.push(*binary.right.clone());
+            }
+            binary.visit_children_with(self);
+        }
+    }
+    let mut rhs = InstanceofRhs(Vec::new());
+    module.visit_with(&mut rhs);
+
+    use thaw_parser::ast::{Callee, Expr, Lit, MemberProp};
+    fn ident(expression: &Expr, expected: &str) -> bool {
+        matches!(expression, Expr::Ident(value) if value.sym == expected)
+    }
+    fn dot_member(expression: &Expr, object: &str, property: &str) -> bool {
+        matches!(expression, Expr::Member(member)
+            if ident(&member.obj, object)
+                && matches!(&member.prop, MemberProp::Ident(name) if name.sym == property))
+    }
+    fn computed_member_ident(expression: &Expr, object: &str, key: &str) -> bool {
+        matches!(expression, Expr::Member(member)
+            if ident(&member.obj, object)
+                && matches!(&member.prop, MemberProp::Computed(computed)
+                    if ident(&computed.expr, key)))
+    }
+
+    assert_eq!(
+        rhs.0.len(),
+        12,
+        "expected every authored instanceof RHS in order: {:#?}",
+        rhs.0
+    );
+    assert!(
+        dot_member(&rhs.0[0], "__thaw_test_default_value", "AssertionError"),
+        "default import member target: {:#?}",
+        rhs.0[0]
+    );
+    assert!(
+        dot_member(&rhs.0[1], "__thaw_test_default_value", "AssertionError"),
+        "default alias member target: {:#?}",
+        rhs.0[1]
+    );
+    assert!(
+        ident(&rhs.0[2], "__thaw_test_external_error"),
+        "namespace export member target: {:#?}",
+        rhs.0[2]
+    );
+    assert!(
+        dot_member(&rhs.0[3], "__thaw_test_holder", "AssertionError"),
+        "named holder member target: {:#?}",
+        rhs.0[3]
+    );
+    assert!(
+        computed_member_ident(&rhs.0[4], "__thaw_test_default_value", "__thaw_test_key"),
+        "computed imported key target: {:#?}",
+        rhs.0[4]
+    );
+    assert!(matches!(&rhs.0[5], Expr::Member(member)
+        if ident(&member.obj, "__thaw_test_default_value")
+            && matches!(&member.prop, MemberProp::Computed(computed)
+                if matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(value)) if value.value.to_string_lossy() == "AssertionError"))), "computed string member target: {:#?}", rhs.0[5]);
+    assert!(matches!(&rhs.0[6], Expr::Call(call)
+        if matches!(&call.callee, Callee::Expr(callee) if ident(callee, "__thaw_test_make_constructor"))
+            && call.args.is_empty()), "RHS call target: {:#?}", rhs.0[6]);
+
+    struct ClassIds(Vec<String>);
+    impl Visit for ClassIds {
+        fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+            self.0.push(declaration.ident.sym.to_string());
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut classes = ClassIds(Vec::new());
+    module.visit_with(&mut classes);
+    let relative_class = classes.0.iter()
+        .find(|name| name.ends_with("LocalError") && !name.ends_with("LocalDeclaredError"))
+        .expect("bundled relative LocalError class declaration");
+    let same_module_class = classes.0.iter()
+        .find(|name| name.ends_with("LocalDeclaredError"))
+        .expect("bundled same-module LocalDeclaredError class declaration");
+    assert!(
+        ident(&rhs.0[7], relative_class),
+        "relative class RHS must target its bundled declaration {relative_class}: {:#?}",
+        rhs.0[7]
+    );
+    assert!(
+        ident(&rhs.0[8], same_module_class),
+        "same-module class RHS must target its bundled declaration {same_module_class}: {:#?}",
+        rhs.0[8]
+    );
+    assert!(
+        ident(&rhs.0[9], "ImportedError"),
+        "bare external alias must retain ImportedError: {:#?}",
+        rhs.0[9]
+    );
+    assert!(
+        ident(&rhs.0[10], "ExternalError"),
+        "bare external name must retain ExternalError: {:#?}",
+        rhs.0[10]
+    );
+    assert!(
+        dot_member(&rhs.0[11], "assert", "AssertionError"),
+        "shadowed parameter member must retain local assert: {:#?}",
+        rhs.0[11]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

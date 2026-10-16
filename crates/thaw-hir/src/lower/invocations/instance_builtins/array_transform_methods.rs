@@ -54,6 +54,15 @@ impl<'a> FnLowerer<'a> {
         let mut flattened = false;
         for _ in 0..depth {
             let HirType::Array(element) = &current_type else { unreachable!() };
+            if let HirType::Optional(payload) = element.as_ref() {
+                if let HirType::Array(inner) = payload.as_ref() {
+                    let inner = inner.as_ref().clone();
+                    result = self.lower_array_flat_optional(result, current_type, inner.clone())?;
+                    current_type = HirType::Array(Box::new(HirType::Optional(Box::new(inner))));
+                    flattened = true;
+                    continue;
+                }
+            }
             let HirType::Array(inner) = element.as_ref() else { break };
             let inner = inner.as_ref().clone();
             result = self.lower_array_flat_one(result, current_type, inner.clone())?;
@@ -191,7 +200,16 @@ impl<'a> FnLowerer<'a> {
                                     branches.push(branch);
                                 }
                                 let result = self.merge_union_array_method_branches(&receiver_name, members, branches)?;
-                                return self.wrap_call_argument_bindings(result, &[(receiver_name, receiver_type, receiver)]);
+                                let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                                if let Some(value) = comparator {
+                                    if self.infer_expr_type(&value)? == HirType::Undefined {
+                                        let argument_name = format!("__thaw_sort_argument_{}", self.next_binding);
+                                        self.next_binding += 1;
+                                        self.scope.insert(argument_name.clone(), HirType::Undefined);
+                                        bindings.push((argument_name, HirType::Undefined, value));
+                                    }
+                                }
+                                return self.wrap_call_argument_bindings(result, &bindings);
                             }
                         }
                     }
@@ -685,7 +703,7 @@ impl<'a> FnLowerer<'a> {
                                 for (member_index, member) in members.iter().enumerate() {
                                     let HirType::Array(element) = member else { unreachable!() };
                                     let coerced = arguments.iter().cloned().enumerate().map(|(index, value)| {
-                                        if index < 2 { self.coerce_primitive_to_number(value) }
+                                        if index < 2 { Ok(value) }
                                         else { self.coerce_array_insert_value(value, element) }
                                     }).collect::<Result<Vec<_>, _>>().map_err(|error| format!(
                                         "`.toSpliced()` value cannot be represented by union member {member:?}: {error}"
@@ -717,7 +735,7 @@ impl<'a> FnLowerer<'a> {
                         .enumerate()
                         .map(|(index, value)| {
                             if index < 2 {
-                                self.coerce_primitive_to_number(value)
+                                Ok(value)
                             } else {
                                 self.coerce_array_insert_value(value, &element_type)
                             }
@@ -1033,7 +1051,13 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.flat()` expects zero or one depth".into());
                     }
                     let depth = if let Some(argument) = arguments.first() {
-                        let value = argument.clone();
+                        // The argument was bound to a temporary; the depth literal is its source.
+                        let value = match argument {
+                            HirExpr::Var(name) => spread_bindings.iter()
+                                .find(|(binding, _, _)| binding == name)
+                                .map_or_else(|| argument.clone(), |(_, _, source)| source.clone()),
+                            _ => argument.clone(),
+                        };
                         self.expect_type(&HirType::F64, &value, "array flat depth")?;
                         let constant = match value {
                             HirExpr::Lit(HirLit::F64(value)) => Some(value),
@@ -1103,6 +1127,20 @@ impl<'a> FnLowerer<'a> {
                         let HirType::Array(element) = &current_type else {
                             unreachable!()
                         };
+                        if let HirType::Optional(payload) = element.as_ref() {
+                            if let HirType::Array(inner) = payload.as_ref() {
+                                let inner = inner.as_ref().clone();
+                                result = self.lower_array_flat_optional(
+                                    result,
+                                    current_type,
+                                    inner.clone(),
+                                )?;
+                                current_type =
+                                    HirType::Array(Box::new(HirType::Optional(Box::new(inner))));
+                                flattened = true;
+                                continue;
+                            }
+                        }
                         let HirType::Array(inner) = element.as_ref() else {
                             break;
                         };
@@ -1167,7 +1205,7 @@ impl<'a> FnLowerer<'a> {
                             for (index, element) in elements.iter().enumerate() {
                                 let HirType::Array(inner) = element else { unreachable!("checked above") };
                                 let member_callback_type = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
-                                let mapped = self.lower_array_map(
+                                let mapped = self.lower_array_flat_map(
                                     HirExpr::UnionValue(Box::new(bound.clone()), index, elements.clone()),
                                     element.clone(), inner.as_ref().clone(), member_callback_type,
                                     callback.clone(), this_arg.clone(),
@@ -1236,7 +1274,7 @@ impl<'a> FnLowerer<'a> {
                             None,
                             "array mapper",
                         )?;
-                        let mapped = self.lower_array_map(
+                        let mapped = self.lower_array_flat_map(
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
@@ -1264,7 +1302,7 @@ impl<'a> FnLowerer<'a> {
                         .get(1)
                         .map(|argument| self.lower_expr(&argument.expr))
                         .transpose()?;
-                    let mapped = self.lower_array_map(
+                    let mapped = self.lower_array_flat_map(
                         receiver,
                         array_type,
                         element_type,

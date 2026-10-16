@@ -1,3 +1,283 @@
+fn installed_artifact_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn collect(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.insert(path.strip_prefix(root).unwrap().to_path_buf(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    collect(root, root, &mut files);
+    files
+}
+
+#[test]
+fn failed_package_update_preserves_every_previous_artifact() {
+    let scratch = temp_registry("atomic-add-scratch");
+    let registry = temp_registry("atomic-add-registry");
+    let package = scratch.join("node_modules/atomic-kit");
+    fs::create_dir_all(package.join("feature")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"atomic-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/index.d.ts","require":"./feature/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const value: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.value = 1;").unwrap();
+    fs::write(package.join("feature/index.d.ts"), "export declare const feature: number;").unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = 1;").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "atomic-kit").unwrap();
+    let installed = registry.join("atomic-kit");
+    fs::write(installed.join("native.node"), b"old addon").unwrap();
+    fs::write(installed.join("native-addon.json"), b"old metadata").unwrap();
+    fs::write(installed.join("platform-executable"), b"old executable").unwrap();
+    fs::create_dir(installed.join("native-dependencies")).unwrap();
+    fs::write(installed.join("native-dependencies/old.so"), b"old dependency").unwrap();
+    fs::write(installed.join("lock.json"), b"old lock").unwrap();
+    let before = installed_artifact_snapshot(&installed);
+
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"atomic-kit","version":"2.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/missing.d.ts","require":"./feature/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const value: string;").unwrap();
+    fs::write(package.join("index.js"), "exports.value = 'new';").unwrap();
+    let error = add_installed(&registry, &scratch.join("node_modules"), "atomic-kit").unwrap_err();
+    assert!(error.contains("missing.d.ts"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), before);
+
+    fs::write(package.join("feature/missing.d.ts"), "export declare const feature: string;").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "atomic-kit").unwrap();
+    assert_eq!(fs::read_to_string(installed.join("version.txt")).unwrap(), "2.0.0");
+    assert!(fs::read_to_string(installed.join("package.d.ts")).unwrap().contains("value: string"));
+    for stale in ["native.node", "native-addon.json", "platform-executable", "native-dependencies", "lock.json"] {
+        assert!(!installed.join(stale).exists(), "stale {stale}");
+    }
+    assert!(installed.join("subpaths/feature/bundle.js.gz").is_file());
+    let feature_before = installed_artifact_snapshot(&installed.join("subpaths/feature"));
+    fs::remove_file(package.join("feature/missing.d.ts")).unwrap();
+    let error = add_installed_subpath(
+        &registry,
+        &scratch.join("node_modules"),
+        "atomic-kit/feature",
+    ).unwrap_err();
+    assert!(error.contains("missing.d.ts"), "{error}");
+    assert_eq!(
+        installed_artifact_snapshot(&installed.join("subpaths/feature")),
+        feature_before,
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn failed_first_lazy_subpath_leaves_root_directory_unchanged() {
+    let scratch = temp_registry("atomic-lazy-scratch");
+    let registry = temp_registry("atomic-lazy-registry");
+    let package = scratch.join("node_modules/lazy-kit");
+    fs::create_dir_all(package.join("feature")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"lazy-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/missing.d.ts","require":"./feature/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = 1;").unwrap();
+    add_installed_root(&registry, &scratch.join("node_modules"), "lazy-kit").unwrap();
+    let installed = registry.join("lazy-kit");
+    let before = installed_artifact_snapshot(&installed);
+    let error = add_installed_subpath(&registry, &scratch.join("node_modules"), "lazy-kit/feature").unwrap_err();
+    assert!(error.contains("missing.d.ts"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), before);
+    assert!(!installed.join("subpaths").exists());
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn lazy_parent_refresh_keeps_materialized_child_export() {
+    let scratch = temp_registry("atomic-nested-scratch");
+    let registry = temp_registry("atomic-nested-registry");
+    let package = scratch.join("node_modules/nested-kit");
+    fs::create_dir_all(package.join("foo/bar")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"nested-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./foo":{"types":"./foo/index.d.ts","require":"./foo/index.js"},"./foo/bar":{"types":"./foo/bar/index.d.ts","require":"./foo/bar/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+    fs::write(package.join("foo/index.d.ts"), "export declare const parent: number;").unwrap();
+    fs::write(package.join("foo/index.js"), "exports.parent = 1;").unwrap();
+    fs::write(package.join("foo/bar/index.d.ts"), "export declare const child: string;").unwrap();
+    fs::write(package.join("foo/bar/index.js"), "exports.child = 'old';").unwrap();
+    let modules = scratch.join("node_modules");
+    add_installed_root(&registry, &modules, "nested-kit").unwrap();
+    add_installed_subpath(&registry, &modules, "nested-kit/foo/bar").unwrap();
+    let installed = registry.join("nested-kit/subpaths/foo");
+    let child_before = installed_artifact_snapshot(&installed.join("bar"));
+    add_installed_subpath(&registry, &modules, "nested-kit/foo").unwrap();
+    assert_eq!(installed_artifact_snapshot(&installed.join("bar")), child_before);
+    fs::write(package.join("foo/index.d.ts"), "export declare const parent: boolean;").unwrap();
+    fs::write(package.join("foo/index.js"), "exports.parent = true;").unwrap();
+    add_installed_subpath(&registry, &modules, "nested-kit/foo").unwrap();
+    assert!(fs::read_to_string(installed.join("package.d.ts")).unwrap().contains("parent: boolean"));
+    assert_eq!(installed_artifact_snapshot(&installed.join("bar")), child_before);
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn lazy_subpath_versions_reproject_nested_instances_and_drop_replaced_dependencies() {
+    let scratch = temp_registry("lazy-versions-scratch");
+    let registry = temp_registry("lazy-versions-registry");
+    let modules = scratch.join("node_modules");
+    let package = modules.join("version-kit");
+    let top_shared = modules.join("shared");
+    let nested_shared = package.join("feature/node_modules/shared");
+    fs::create_dir_all(&nested_shared).unwrap();
+    fs::create_dir_all(&top_shared).unwrap();
+    fs::write(package.join("package.json"), r#"{"name":"version-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/index.d.ts","require":"./feature/index.js"}}}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = require('shared').value;").unwrap();
+    fs::write(package.join("feature/index.d.ts"), "export declare const feature: number;").unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = require('shared').value;").unwrap();
+    fs::write(top_shared.join("package.json"), r#"{"name":"shared","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(top_shared.join("index.js"), "exports.value = 1;").unwrap();
+    fs::write(nested_shared.join("package.json"), r#"{"name":"shared","version":"2.0.0","main":"index.js"}"#).unwrap();
+    fs::write(nested_shared.join("index.js"), "exports.value = 2;").unwrap();
+
+    add_installed_root(&registry, &modules, "version-kit").unwrap();
+    assert_eq!(resolve(&registry, "version-kit").unwrap().dependency_versions.unwrap().get("shared").map(String::as_str), Some("1.0.0"));
+    add_installed_subpath(&registry, &modules, "version-kit/feature").unwrap();
+    let root = resolve(&registry, "version-kit").unwrap().dependency_versions.unwrap();
+    assert_eq!(root.get("shared").map(String::as_str), Some("1.0.0"));
+    assert_eq!(root.get("version-kit/feature/node_modules/shared").map(String::as_str), Some("2.0.0"));
+    let subpath = resolve(&registry, "version-kit/feature").unwrap().dependency_versions.unwrap();
+    assert_eq!(subpath.get("shared").map(String::as_str), Some("2.0.0"));
+
+    fs::write(package.join("feature/index.js"), "exports.feature = 3;").unwrap();
+    add_installed_subpath(&registry, &modules, "version-kit/feature").unwrap();
+    let root = resolve(&registry, "version-kit").unwrap().dependency_versions.unwrap();
+    assert_eq!(root.get("shared").map(String::as_str), Some("1.0.0"));
+    assert!(!root.contains_key("version-kit/feature/node_modules/shared"));
+    assert!(resolve(&registry, "version-kit/feature").unwrap().dependency_versions.is_none());
+    let before_conflict = installed_artifact_snapshot(&registry.join("version-kit"));
+    fs::remove_dir_all(&nested_shared).unwrap();
+    fs::write(top_shared.join("package.json"), r#"{"name":"shared","version":"9.0.0","main":"index.js"}"#).unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = require('shared').value;").unwrap();
+    let error = add_installed_subpath(&registry, &modules, "version-kit/feature").unwrap_err();
+    assert!(error.contains("changed between registered bundles"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&registry.join("version-kit")), before_conflict);
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn lazy_subpath_refuses_legacy_index_and_existing_writer_without_mutation() {
+    let scratch = temp_registry("lazy-index-scratch");
+    let registry = temp_registry("lazy-index-registry");
+    let modules = scratch.join("node_modules");
+    let package = modules.join("index-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), r#"{"name":"index-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./index.d.ts","require":"./index.js"}}}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const value: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.value = 1;").unwrap();
+    add_installed_root(&registry, &modules, "index-kit").unwrap();
+    let installed = registry.join("index-kit");
+    let before = installed_artifact_snapshot(&installed);
+    let guard = PackageWriterGuard::acquire(&installed).unwrap();
+    let error = add_installed_subpath(&registry, &modules, "index-kit/feature").unwrap_err();
+    assert!(error.contains("writer"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), before);
+    drop(guard);
+    fs::remove_file(installed.join("instances.json")).unwrap();
+    let legacy = installed_artifact_snapshot(&installed);
+    let error = add_installed_subpath(&registry, &modules, "index-kit/feature").unwrap_err();
+    assert!(error.contains("re-register"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), legacy);
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn indexed_exports_named_instances_json_and_lock_json_work_in_both_orders() {
+    for mode in ["eager", "parent-first", "children-first"] {
+        let scratch = temp_registry(&format!("indexed-name-scratch-{mode}"));
+        let registry = temp_registry(&format!("indexed-name-registry-{mode}"));
+        let modules = scratch.join("node_modules");
+        let package = modules.join("name-kit");
+        let shared = modules.join("shared");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"name-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./foo":{"types":"./foo.d.ts","require":"./foo.js"},"./foo/instances.json":{"types":"./instances.d.ts","require":"./instances.js"},"./foo/lock.json":{"types":"./lock.d.ts","require":"./lock.js"}}}"#).unwrap();
+        fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+        fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+        fs::write(package.join("foo.d.ts"), "export declare const foo: number;").unwrap();
+        fs::write(package.join("foo.js"), "exports.foo = 1;").unwrap();
+        fs::write(package.join("instances.d.ts"), "export declare const instances: number;").unwrap();
+        fs::write(package.join("instances.js"), "exports.instances = require('shared').value;").unwrap();
+        fs::write(package.join("lock.d.ts"), "export declare const lock: number;").unwrap();
+        fs::write(package.join("lock.js"), "exports.lock = require('shared').value;").unwrap();
+        fs::write(shared.join("package.json"), r#"{"name":"shared","version":"2.0.0","main":"index.js"}"#).unwrap();
+        fs::write(shared.join("index.js"), "exports.value = 2;").unwrap();
+
+        if mode == "eager" {
+            add_installed(&registry, &modules, "name-kit").unwrap();
+        } else {
+            add_installed_root(&registry, &modules, "name-kit").unwrap();
+            let order = if mode == "parent-first" {
+                ["name-kit/foo", "name-kit/foo/instances.json", "name-kit/foo/lock.json"]
+            } else {
+                ["name-kit/foo/lock.json", "name-kit/foo/instances.json", "name-kit/foo"]
+            };
+            for specifier in order {
+                add_installed_subpath(&registry, &modules, specifier).unwrap();
+            }
+        }
+        let installed = registry.join("name-kit");
+        assert!(installed.join("instances.json").is_file());
+        assert!(installed.join("subpaths/foo/instances.json").is_dir());
+        assert!(installed.join("subpaths/foo/lock.json").is_dir());
+        assert!(resolve(&registry, "name-kit/foo").unwrap().bundle_js.is_some());
+        for specifier in ["name-kit/foo/instances.json", "name-kit/foo/lock.json"] {
+            let resolved = resolve(&registry, specifier).unwrap();
+            assert_eq!(resolved.dependency_versions.unwrap().get("shared").map(String::as_str), Some("2.0.0"));
+        }
+        assert_eq!(resolve(&registry, "name-kit").unwrap().dependency_versions.unwrap().get("shared").map(String::as_str), Some("2.0.0"));
+        let _ = fs::remove_dir_all(scratch);
+        let _ = fs::remove_dir_all(registry);
+    }
+}
+
+#[test]
+fn legacy_subpath_lock_remains_readable_without_private_index() {
+    let registry = temp_registry("legacy-subpath-lock");
+    let subpath = registry.join("legacy-kit/subpaths/feature");
+    fs::create_dir_all(&subpath).unwrap();
+    fs::write(subpath.join("package.d.ts"), "export declare const value: number;").unwrap();
+    fs::write(subpath.join("bundle.js"), "exports.value = 1;").unwrap();
+    fs::write(subpath.join("lock.json"), r#"{"legacy-kit":"1.0.0","shared":"2.0.0"}"#).unwrap();
+    assert_eq!(resolve(&registry, "legacy-kit/feature").unwrap().dependency_versions.unwrap().get("shared").map(String::as_str), Some("2.0.0"));
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn publication_failure_restores_the_previous_directory() {
+    let registry = temp_registry("atomic-add-rollback");
+    let destination = registry.join("package");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("version.txt"), "1.0.0").unwrap();
+    let staged = registry.join("missing-stage");
+    let backup = registry.join("previous");
+    let error = publish_staged_package(&staged, &destination, &backup).unwrap_err();
+    assert!(error.contains("failed to install"), "{error}");
+    assert_eq!(fs::read_to_string(destination.join("version.txt")).unwrap(), "1.0.0");
+    assert!(!backup.exists());
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn selects_package_exports_conditions_for_runtime_and_types() {
     let manifest: serde_json::Value = serde_json::from_str(
@@ -103,6 +383,37 @@ fn expands_wildcard_package_exports_from_type_files() {
         ]
     );
     let _ = fs::remove_dir_all(package_dir);
+}
+
+#[test]
+fn null_export_exclusion_blocks_wildcard_enumeration_and_lazy_registration() {
+    let modules = temp_registry("null-export-modules");
+    let registry = temp_registry("null-export-registry");
+    let package = modules.join("pkg");
+    fs::create_dir_all(package.join("dist/features/private")).unwrap();
+    for name in ["public", "private/secret", "private/open", "default-first", "conditional", "array-blocked", "array-fallback"] {
+        fs::write(package.join(format!("dist/features/{name}.d.ts")), "export declare const value: number;").unwrap();
+        fs::write(package.join(format!("dist/features/{name}.cjs")), "exports.value = 1;").unwrap();
+    }
+    let source = r#"{"exports":{"./features/*":{"types":"./dist/features/*.d.ts","require":"./dist/features/*.cjs"},"./features/private/*":null,"./features/private/open":{"types":"./dist/features/private/open.d.ts","require":"./dist/features/private/open.cjs"},"./features/conditional":{"require":null,"default":"./dist/features/conditional.cjs","types":"./dist/features/conditional.d.ts"},"./features/default-first":{"default":"./dist/features/default-first.cjs","require":null,"types":"./dist/features/default-first.d.ts"},"./features/array-blocked":{"require":[null],"default":"./dist/features/array-blocked.cjs","types":"./dist/features/array-blocked.d.ts"},"./features/array-fallback":{"require":[null,{"require":"./dist/features/array-fallback.cjs"}],"types":"./dist/features/array-fallback.d.ts"}}}"#;
+    fs::write(package.join("package.json"), source).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(source).unwrap();
+    let names = package_subpath_exports(&manifest, &package).unwrap()
+        .into_iter().map(|export| export.subpath).collect::<Vec<_>>();
+    assert_eq!(names, vec!["features/array-fallback".to_string(), "features/default-first".to_string(), "features/private/open".to_string(), "features/public".to_string()]);
+    assert_eq!(
+        runtime_export_specifiers("pkg", &package).unwrap(),
+        vec!["pkg/features/array-fallback".to_string(), "pkg/features/default-first".to_string(), "pkg/features/private/open".to_string(), "pkg/features/public".to_string()],
+    );
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/private/secret", &["require", "node", "default"]), None);
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/conditional", &["require", "node", "default"]), None);
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/array-blocked", &["require", "node", "default"]), None);
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/array-fallback", &["require", "node", "default"]), Some("./dist/features/array-fallback.cjs".to_string()));
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/default-first", &["require", "node", "default"]), Some("./dist/features/default-first.cjs".to_string()));
+    assert!(add_installed_subpath(&registry, &modules, "pkg/features/private/secret")
+        .unwrap_err().contains("no export named"));
+    let _ = fs::remove_dir_all(modules);
+    let _ = fs::remove_dir_all(registry);
 }
 
 #[test]
@@ -707,7 +1018,7 @@ fn installed_package_resolves_a_namespace_hoisted_export_import_alias() {
     );
     assert!(
         declarations.contains("declare namespace transports {")
-            && declarations.contains("ConsoleTransportInstance as Console"),
+            && declarations.contains("export const Console: __thaw_support_"),
         "{declarations}"
     );
     let _ = fs::remove_dir_all(scratch);
@@ -849,6 +1160,49 @@ fn installed_package_inlines_a_default_class_reexport() {
 
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn anonymous_default_declarations_survive_named_reexports() {
+    // Unrun regression: both declarations lack an identifier in their own
+    // files, but the entry exposes each under an ordinary public name.
+    let root = temp_registry("anonymous-default-reexports");
+    let entry = root.join("index.d.ts");
+    fs::write(&entry,
+        "export { default as make } from './make';\n\
+         export { default as Widget } from './widget';\n\
+         export { default as named } from './named';\n\
+         export { default as null } from './make';\n",
+    ).unwrap();
+    fs::write(root.join("make.d.ts"),
+        "export /* default boundary */ default\nfunction(value: string): number;",
+    ).unwrap();
+    fs::write(root.join("widget.d.ts"),
+        "declare class Base { inherited(): number; }\n\
+         export default /* class boundary */ class<T> extends Base { method(value: T): T; }",
+    ).unwrap();
+    fs::write(root.join("named.d.ts"),
+        "export /* named boundary */ default\nfunction original(value: string): string;",
+    ).unwrap();
+
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("function make(value: string): number"), "{flattened}");
+    assert!(flattened.contains("class __thaw_default_class_"), "{flattened}");
+    assert!(flattened.contains("as Widget"), "{flattened}");
+    assert!(flattened.contains("<T> extends Base"), "{flattened}");
+    assert!(flattened.contains("method(value: T): T"), "{flattened}");
+    assert!(flattened.contains("inherited(): number"), "{flattened}");
+    assert!(flattened.contains("function named(value: string): string"), "{flattened}");
+    assert!(flattened.contains("as null"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let async_normalized = reexported_default_declaration(
+        "async /* retained */ function(value: string): Promise<string>;",
+        "function", &entry, None, true, false,
+    ).unwrap();
+    assert!(async_normalized.contains("/* retained */ function __thaw_default_function_"), "{async_normalized}");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1061,6 +1415,283 @@ fn installed_package_inlines_types_through_wildcard_barrels() {
 }
 
 #[test]
+fn installed_type_reexports_keep_class_shape_without_value_export() {
+    // Unrun regression: a type-only wildcard and a named type alias must
+    // retain the instance declaration, while only the explicit value alias
+    // remains constructible at runtime.
+    let scratch = temp_registry("installed-dts-type-class-scratch");
+    let registry = temp_registry("installed-dts-type-class-registry");
+    let package = scratch.join("node_modules/type-class");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-class","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export type * from './client';\nexport type { Client as TypeClient } from './client';\nexport { Client as LiveClient } from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { constructor(name: string); getName(): string; static create(): Client; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { LiveClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-class").unwrap();
+    let declarations = resolve(&registry, "type-class").unwrap().dts_source;
+    assert!(declarations.contains("export type { Client }"), "{declarations}");
+    assert!(declarations.contains("export type { Client as TypeClient }"), "{declarations}");
+    assert!(declarations.contains("export { Client as LiveClient }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_type_reexports_follow_named_type_imports_and_barrels() {
+    // Unrun regression: import type and export type must resolve through
+    // the same source graph without creating a runtime class value.
+    let scratch = temp_registry("installed-dts-type-import-scratch");
+    let registry = temp_registry("installed-dts-type-import-registry");
+    let package = scratch.join("node_modules/type-import");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-import","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export type * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"),
+        "import type { Client as Local } from './client';\nexport type { Local as PublicClient };\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-import").unwrap();
+    let declarations = resolve(&registry, "type-import").unwrap().dts_source;
+    assert!(declarations.contains("request(): string"), "{declarations}");
+    assert!(declarations.contains("export type { Client as PublicClient }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn imported_type_reexport_without_type_modifier_stays_type_only() {
+    // Unrun regression: the import's type-only provenance must survive a
+    // plain `export { Local }`, while the parallel value import remains live.
+    let scratch = temp_registry("installed-dts-import-type-provenance-scratch");
+    let registry = temp_registry("installed-dts-import-type-provenance-registry");
+    let package = scratch.join("node_modules/import-type-provenance");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"import-type-provenance","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export * from './types';\nexport { TypeClient as Alias } from './types';\nexport * from './values';\n").unwrap();
+    fs::write(package.join("types.d.ts"),
+        "import type { Client as Local } from './client';\nexport { Local };\nexport { Local as TypeClient };\n").unwrap();
+    fs::write(package.join("values.d.ts"),
+        "import { Client as Local } from './client';\nexport { Local as LiveClient };\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { method(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { LiveClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "import-type-provenance").unwrap();
+    let declarations = resolve(&registry, "import-type-provenance").unwrap().dts_source;
+    assert!(declarations.contains("export type { Client as Local }"), "{declarations}");
+    assert!(declarations.contains("export type { Client as TypeClient }"), "{declarations}");
+    assert!(declarations.contains("export type { Client as Alias }"), "{declarations}");
+    assert!(declarations.contains("export { Client as LiveClient }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_wildcard_follows_ordinary_named_class_barrel() {
+    // Unrun regression for exact named edge inside a wildcard barrel.
+    let scratch = temp_registry("installed-dts-named-class-barrel-scratch");
+    let registry = temp_registry("installed-dts-named-class-barrel-registry");
+    let package = scratch.join("node_modules/named-class-barrel");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"named-class-barrel","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"), "export { Client as PublicClient } from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { PublicClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "named-class-barrel").unwrap();
+    let declarations = resolve(&registry, "named-class-barrel").unwrap().dts_source;
+    assert!(declarations.contains("export { Client as PublicClient }"), "{declarations}");
+    assert!(declarations.contains("request(): string"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_wildcard_keeps_imported_class_aliases_at_each_barrel() {
+    // Unrun regression: the declaration is named Client, but a plain
+    // export of an imported Local must expose Local, then PublicClient.
+    let scratch = temp_registry("installed-dts-imported-class-alias-scratch");
+    let registry = temp_registry("installed-dts-imported-class-alias-registry");
+    let package = scratch.join("node_modules/imported-class-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"imported-class-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"),
+        "import { Client as Local } from './client';\nexport { Local };\nexport { Local as PublicClient };\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { Local: class {}, PublicClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "imported-class-alias").unwrap();
+    let declarations = resolve(&registry, "imported-class-alias").unwrap().dts_source;
+    assert!(declarations.contains("export { Client as Local }"), "{declarations}");
+    assert!(declarations.contains("export { Client as PublicClient }"), "{declarations}");
+    assert!(declarations.contains("request(): string"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn named_class_alias_keeps_imported_superclass_name() {
+    // Unrun regression: Base is supporting type information, not another
+    // declaration of the public Derived alias.
+    let scratch = temp_registry("installed-dts-derived-alias-scratch");
+    let registry = temp_registry("installed-dts-derived-alias-registry");
+    let package = scratch.join("node_modules/derived-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"derived-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { Derived as PublicDerived, Derived as OtherDerived } from './derived';\nexport type { Derived as TypeDerived } from './derived';\n").unwrap();
+    fs::write(package.join("derived.d.ts"),
+        "import { Base as Parent } from './base';\nexport declare class Derived extends Parent { self(): Derived; }\n").unwrap();
+    fs::write(package.join("base.d.ts"),
+        "import { Grand as Super } from './grand';\nexport declare class Base extends Super { base(): string; self(): Base; key(): Base.Key; generic<Base>(value: Base): Base; }\nexport declare namespace Base { type Key = string; type Own = Base; type Wrap<Base> = Base; type Mapped = { [Base in keyof Base]: Base }; type Inferred = Base extends infer Base ? Base : Base; }\n").unwrap();
+    fs::write(package.join("grand.d.ts"),
+        "export declare class Grand { grand(): number; self(): Grand; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { PublicDerived: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "derived-alias").unwrap();
+    let declarations = resolve(&registry, "derived-alias").unwrap().dts_source;
+    assert!(declarations.contains("class Parent"), "{declarations}");
+    assert!(declarations.contains("export type { Parent };"), "{declarations}");
+    assert!(!declarations.contains("export declare class Parent"), "{declarations}");
+    assert!(declarations.contains("namespace Parent"), "{declarations}");
+    assert!(declarations.contains("self(): Parent"), "{declarations}");
+    assert!(declarations.contains("key(): Parent.Key"), "{declarations}");
+    assert!(declarations.contains("generic<Base>(value: Base): Base"), "{declarations}");
+    assert!(declarations.contains("type Own = Parent"), "{declarations}");
+    assert!(declarations.contains("type Wrap<Base> = Base"), "{declarations}");
+    assert!(declarations.contains("[Base in keyof Parent]: Base"), "{declarations}");
+    assert!(declarations.contains("Parent extends infer Base ? Base : Parent"), "{declarations}");
+    assert!(declarations.contains("extends Parent"), "{declarations}");
+    assert!(declarations.contains("class Parent extends Super"), "{declarations}");
+    assert!(declarations.contains("class Super"), "{declarations}");
+    assert!(declarations.contains("self(): Super"), "{declarations}");
+    assert!(declarations.contains("self(): Derived"), "{declarations}");
+    assert!(declarations.contains("class Derived"), "{declarations}");
+    assert!(declarations.contains("export { Derived as PublicDerived }"), "{declarations}");
+    assert!(declarations.contains("export { Derived as OtherDerived }"), "{declarations}");
+    assert!(declarations.contains("export type { Derived as TypeDerived }"), "{declarations}");
+    assert_eq!(declarations.matches("class Parent").count(), 1, "{declarations}");
+    assert_eq!(declarations.matches("class Derived").count(), 1, "{declarations}");
+    assert!(!declarations.contains("class Base"), "{declarations}");
+    assert!(!declarations.contains("class PublicDerived { base()"), "{declarations}");
+    assert!(!declarations.contains("class TypeDerived { base()"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn materialized_base_import_retains_other_specifiers() {
+    // Unrun regression: materializing Core removes its import binding,
+    // while the unrelated type and value imports keep their syntax.
+    let source = "import Core, { type Shape, Value as Other } from './core';\nexport class Child extends Core { method(x: Shape): Other; }";
+    let locals = std::collections::BTreeSet::from(["Core".to_string()]);
+    let flattened = without_materialized_class_imports(source, &locals).unwrap();
+    assert!(flattened.contains("import { type Shape, Value as Other } from './core'"), "{flattened}");
+    assert!(!flattened.contains("import Core"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let source = "import type { Base as Parent, Shape } from './core';";
+    let locals = std::collections::BTreeSet::from(["Parent".to_string()]);
+    let retained = without_materialized_class_imports(source, &locals).unwrap();
+    assert!(retained.contains("import type { Shape } from './core'"), "{retained}");
+    assert!(thaw_parser::parse_declarations(&retained).is_ok(), "{retained}");
+}
+
+#[test]
+fn generated_declaration_labels_are_custom_and_keep_parse_fallbacks() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let origin = Path::new("/logical/package/index.d.ts");
+    let source_name = FileName::Custom(
+        format!("{} (unwrapped declaration entry)", origin.display()),
+    );
+    let source = "import Core, { type Shape } from './core';\nexport class Child extends Core {}";
+    let (module, source_map) =
+        thaw_parser::parse_declarations_with_source_map_named(source, source_name.clone()).unwrap();
+    assert_eq!(
+        source_map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(),
+        &source_name
+    );
+    let locals = std::collections::BTreeSet::from(["Core".to_string()]);
+    let retained = without_materialized_class_imports_named(source, &locals, source_name).unwrap();
+    assert!(retained.contains("import { type Shape } from './core'"), "{retained}");
+    assert!(without_materialized_class_imports_named(
+        "import {", &locals, FileName::Custom("generated malformed declaration".into()),
+    ).is_err());
+
+    let builtin = FileName::Custom("node:stream (generated builtin declarations)".into());
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        "export declare class Readable {}", builtin.clone(),
+    ).unwrap();
+    assert_eq!(
+        source_map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(),
+        &builtin
+    );
+}
+
+#[test]
+fn type_wildcard_converts_inlined_class_value_alias() {
+    // Unrun regression: a later type-only wildcard must not retain the
+    // generated value export of an earlier class alias.
+    let scratch = temp_registry("installed-dts-type-over-value-alias-scratch");
+    let registry = temp_registry("installed-dts-type-over-value-alias-registry");
+    let package = scratch.join("node_modules/type-over-value-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-over-value-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export type * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"), "export { Client as PublicClient } from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"), "export declare class Client { self(): Client; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-over-value-alias").unwrap();
+    let declarations = resolve(&registry, "type-over-value-alias").unwrap().dts_source;
+    assert!(declarations.contains("export type { Client as PublicClient }"), "{declarations}");
+    assert!(!declarations.contains("export { Client as PublicClient }"), "{declarations}");
+    assert!(declarations.contains("self(): Client"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_type_namespace_reexport_preserves_qualified_class_shape() {
+    // Unrun regression for `export type * as NS` through a second barrel.
+    let scratch = temp_registry("installed-dts-type-namespace-scratch");
+    let registry = temp_registry("installed-dts-type-namespace-registry");
+    let package = scratch.join("node_modules/type-namespace");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-namespace","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export type * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"), "export type * as Types from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-namespace").unwrap();
+    let declarations = resolve(&registry, "type-namespace").unwrap().dts_source;
+    assert!(declarations.contains("declare namespace Types"), "{declarations}");
+    assert!(declarations.contains("export type { Types }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserved_word_alias() {
     // `declare function _enum(...)` (no `export` prefix at all) followed
     // by a separate, *same-file* `export { _enum as enum };` -- real-
@@ -1070,10 +1701,8 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
     // `import_equals_targets` nor `named_import_targets` lookup covers
     // this: `_enum` isn't bound via any import at all, just declared
     // directly in the same file. Also covers the reserved-word alias
-    // itself (`null`) that must be *skipped*, not emitted as invalid
-    // syntax (`declare function null(...)` is a parse error, not just
-    // an unusual name) -- confirmed it doesn't poison the rest of the
-    // file's declarations.
+    // itself (`null`) that must retain a valid internal declaration and
+    // an export alias, since `declare function null(...)` is invalid.
     let scratch = temp_registry("installed-dts-local-bare-reexport-scratch");
     let registry = temp_registry("installed-dts-local-bare-reexport-registry");
     let package = scratch.join("node_modules/case-kit");
@@ -1116,8 +1745,10 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
     );
     assert!(
         !declarations.contains("function null("),
-        "reserved-word alias should be skipped, not emitted as invalid syntax: {declarations}"
+        "reserved-word alias must not become an invalid declaration: {declarations}"
     );
+    assert!(declarations.contains("export { __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains(" as null };"), "{declarations}");
     assert!(
         declarations.contains("function string(): string"),
         "{declarations}"
@@ -1155,6 +1786,32 @@ fn installed_package_inlines_same_file_function_aliases() {
         declarations.contains("declare function connect(url: string): string"),
         "{declarations}"
     );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn declaration_alias_uses_ast_identifier_after_comments_and_newlines() {
+    // Unrun regression: keyword text in comments and whitespace before a
+    // binding cannot select the rename range.
+    let scratch = temp_registry("installed-dts-ast-alias-scratch");
+    let registry = temp_registry("installed-dts-ast-alias-registry");
+    let package = scratch.join("node_modules/ast-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"ast-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { original as renamed, tabbed as newTabbed } from './impl';\n").unwrap();
+    fs::write(package.join("impl.d.ts"),
+        "export declare function /* class Wrong */\noriginal(value: string): string;\n\
+         export declare function\ttabbed(value: number): number;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "ast-alias").unwrap();
+    let declarations = resolve(&registry, "ast-alias").unwrap().dts_source;
+    assert!(declarations.contains("renamed(value: string): string"), "{declarations}");
+    assert!(declarations.contains("newTabbed(value: number): number"), "{declarations}");
+    assert!(!declarations.contains("Wrong(value:"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
@@ -1199,13 +1856,8 @@ fn installed_package_flattens_a_nested_namespace_reexport() {
     // one file below the entry point's own (transitively, through a
     // plain `export * from "./external";`) -- the shape
     // `collect_namespace_reexports` recurses through. Each of `coerce`'s
-    // own functions gets flattened under a synthesized, collision-free
-    // top-level name (here `string`/`number` collide with the package's
-    // own top-level `string`/`number` functions, exactly like zod's real
-    // `coerce.number` vs. top-level `number`), plus a `declare namespace
-    // coerce { export { ... }; }` block recording the mapping back --
-    // see `thaw_bridge::nested_namespace_members`, which parses this
-    // exact shape back out.
+    // own functions stays inside `coerce`, separate from the package's
+    // top-level `string`/`number` functions.
     let scratch = temp_registry("installed-dts-nested-namespace-scratch");
     let registry = temp_registry("installed-dts-nested-namespace-registry");
     let package = scratch.join("node_modules/case-kit5");
@@ -1253,26 +1905,57 @@ fn installed_package_flattens_a_nested_namespace_reexport() {
         declarations.contains("declare namespace coerce {"),
         "{declarations}"
     );
-    // The namespace's members are synthesized, collision-free names --
-    // not bare `string`/`number` (those are already taken by the
-    // package's own top-level functions above) -- re-exported back to
-    // their real member name via `export { synthetic as member }`.
-    assert!(
-        declarations.contains("function __thaw_ns_coerce_string(): string"),
-        "{declarations}"
-    );
-    assert!(
-        declarations.contains("function __thaw_ns_coerce_number(): number"),
-        "{declarations}"
-    );
-    assert!(
-        declarations.contains("__thaw_ns_coerce_string as string"),
-        "{declarations}"
-    );
-    assert!(
-        declarations.contains("__thaw_ns_coerce_number as number"),
-        "{declarations}"
-    );
+    let coerce = declarations.split("declare namespace coerce {").nth(1).unwrap();
+    assert!(coerce.contains("export function string(): string"), "{declarations}");
+    assert!(coerce.contains("export function number(): number"), "{declarations}");
+    assert!(!declarations.contains("__thaw_ns_coerce_"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_value_namespace_reexports_keep_classes_types_and_local_function_types() {
+    // Unrun regression: same bare member names in two value namespaces must
+    // retain separate type and constructor identities. Type-only and class-
+    // only namespaces must not disappear when the function set is empty.
+    let scratch = temp_registry("installed-value-namespace-shapes-scratch");
+    let registry = temp_registry("installed-value-namespace-shapes-registry");
+    let package = scratch.join("node_modules/shape-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"shape-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export * as left from './left';\nexport * as right from './right';\nexport * as types from './types';\nexport * as classes from './classes';\nexport * as aliased from './aliases';\n").unwrap();
+    fs::write(package.join("left.d.ts"),
+        "export interface Options { label: string; }\nexport declare class Client { constructor(options: Options); label(): string; }\nexport declare function make(options: Options): Client;\nexport interface Callable { (options: Options): Client; }\nexport declare const create: Callable;\n").unwrap();
+    fs::write(package.join("right.d.ts"),
+        "export interface Options { count: number; }\nexport declare class Client { constructor(options: Options); count(): number; }\nexport declare function make(options: Options): Client;\nexport interface Callable { (options: Options): Client; }\nexport declare const create: Callable;\n").unwrap();
+    fs::write(package.join("types.d.ts"), "export interface Options { flag: boolean; }\n").unwrap();
+    fs::write(package.join("classes.d.ts"), "export declare class Client { constructor(); }\n").unwrap();
+    fs::write(package.join("aliases.d.ts"), "export { Hidden as PublicClient } from './aliased';\n").unwrap();
+    fs::write(package.join("aliased.d.ts"), "export declare class Hidden { constructor(); }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "shape-kit").unwrap();
+    let declarations = resolve(&registry, "shape-kit").unwrap().dts_source;
+    for alias in ["left", "right", "types", "classes", "aliased"] {
+        assert!(declarations.contains(&format!("declare namespace {alias} {{")), "{declarations}");
+    }
+    for alias in ["left", "right"] {
+        let body = declarations.split(&format!("declare namespace {alias} {{")).nth(1)
+            .unwrap().split("\n}\n").next().unwrap();
+        assert!(body.contains("export interface Options"), "{declarations}");
+        assert!(body.contains("export class Client"), "{declarations}");
+        assert!(body.contains("export function make(options: Options): Client"), "{declarations}");
+        assert!(body.contains("export const create: Callable"), "{declarations}");
+        assert_eq!(body.matches("export interface Callable").count(), 1, "{declarations}");
+    }
+    assert!(!declarations.contains("__thaw_ns_"), "{declarations}");
+    let aliased = declarations.split("declare namespace aliased {").nth(1).unwrap();
+    assert!(aliased.contains("class Hidden"), "{declarations}");
+    assert!(aliased.contains("export { Hidden as PublicClient }"), "{declarations}");
+    assert!(!aliased.contains("export class Hidden"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
@@ -1413,13 +2096,15 @@ fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() 
          export declare class Thing extends CoreThing {\n\
          \x20\x20extra(): string;\n\
          }\n\
+         export declare class Sibling extends CoreThing { sibling(): boolean; }\n\
          export default Thing;\n",
     )
     .unwrap();
     fs::write(
         package.join("core.d.ts"),
-        "export default class Thing {\n\
+         "export default class Thing {\n\
          \x20\x20base(): string;\n\
+         \x20\x20self(): Thing;\n\
          }\n",
     )
     .unwrap();
@@ -1442,6 +2127,12 @@ fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() 
         declarations.contains("class CoreThing") && declarations.contains("base(): string;"),
         "{declarations}"
     );
+    assert!(declarations.contains("self(): CoreThing"), "{declarations}");
+    assert!(declarations.contains("class Sibling extends CoreThing"), "{declarations}");
+    assert_eq!(declarations.matches("class CoreThing").count(), 1, "{declarations}");
+    assert!(declarations.contains("export type { CoreThing };"), "{declarations}");
+    assert!(!declarations.contains("export declare class CoreThing"), "{declarations}");
+    assert!(!declarations.contains("class Thing {"), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
@@ -1776,18 +2467,26 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
     .unwrap();
     fs::write(
         package.join("index.d.ts"),
-        "/// <reference path=\"./common/array.d.ts\" />\n\
+        "// Copyright holder\n\
+         /* License notice\n\
+            continues here. */\n\
+         /// <reference path=\"./common/array.d.ts\" />\n\
          export = _;\n\
          export as namespace _;\n\
          declare const _: _.StatStatic;\n\
          declare namespace _ {\n\
-             interface StatStatic {}\n\
+             interface StatStatic { options(value: Options): Tag; }\n\
          }\n",
     )
     .unwrap();
     fs::write(
         package.join("common/array.d.ts"),
-        "declare module \"../index\" {\n\
+        "// Referenced file notice\n\
+         /// <reference path=\"./deep.d.ts\" />\n\
+         interface Options { enabled: boolean; }\n\
+         type Tag = string;\n\
+         declare namespace Extras { interface Nested { ready: boolean; } }\n\
+         declare module \"../index\" {\n\
              interface StatStatic {\n\
                  sum(values: number[]): number;\n\
              }\n\
@@ -1797,6 +2496,13 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
          }\n",
     )
     .unwrap();
+    fs::write(
+        package.join("common/deep.d.ts"),
+        "interface DeepOption { depth: number; }\n\
+         declare module '../index' {\n\
+             interface StatStatic { deep(value: DeepOption): string; }\n\
+         }\n",
+    ).unwrap();
     fs::write(
         package.join("index.js"),
         "module.exports = { sum: function(values) { return values.reduce(function(a, b) { return a + b; }, 0); } };\n",
@@ -1813,6 +2519,11 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
         declarations.contains("sum(values: number[]): number"),
         "{declarations}"
     );
+    for required in ["interface Options", "type Tag", "namespace Extras",
+        "interface DeepOption", "deep(value: DeepOption): string"] {
+        assert!(declarations.contains(required), "missing {required}: {declarations}");
+    }
+    assert!(!declarations.contains("declare module '../index'"), "{declarations}");
     assert!(
         declarations.contains("declare module \"unrelated-package\""),
         "{declarations}"
@@ -2021,7 +2732,7 @@ fn selects_the_current_targets_bundled_node_prebuild() {
         fs::write(target.join(opposite), b"wrong libc").unwrap();
     }
 
-    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    let selected = select_prebuilt_addon_with(&package, &mut Vec::new(), |_| Ok(true)).unwrap().unwrap();
     assert_eq!(selected.path, target.join(filename));
     assert_eq!(selected.platform, platform);
     assert_eq!(selected.arch, arch);
@@ -2050,7 +2761,7 @@ fn selects_a_flat_bundled_node_prebuild() {
     let file = package.join("prebuilds").join(&filename);
     fs::write(&file, b"native bytes").unwrap();
 
-    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    let selected = select_prebuilt_addon_with(&package, &mut Vec::new(), |_| Ok(true)).unwrap().unwrap();
     assert_eq!(selected.path, file);
     assert_eq!(selected.platform, platform);
     assert_eq!(selected.arch, arch);
@@ -2067,8 +2778,189 @@ fn prefers_node_over_electron_prebuilds() {
     fs::write(target.join("electron.napi.node"), b"electron").unwrap();
     fs::write(target.join("node.napi.node"), b"node").unwrap();
 
-    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    let selected = select_prebuilt_addon_with(&package, &mut Vec::new(), |_| Ok(true)).unwrap().unwrap();
     assert_eq!(selected.path, target.join("node.napi.node"));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn skips_node_abi_prebuild_before_napi_prebuild() {
+    let package = temp_registry("skip_node_abi_prebuild");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.abi108.node"), b"node ABI").unwrap();
+    fs::write(target.join("node.napi.node"), b"Node-API").unwrap();
+    assert!(!usable_napi_prebuild(&target.join("node.abi108.node")).unwrap());
+    let mut diagnostics = Vec::new();
+    let selected = select_prebuilt_addon_with(&package, &mut diagnostics, |path| {
+        Ok(path.file_name().unwrap() != "node.abi108.node")
+    }).unwrap().unwrap();
+    assert_eq!(selected.path, target.join("node.napi.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("node.abi108.node")));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn incompatible_flat_prebuild_does_not_hide_compatible_target_prebuild() {
+    let package = temp_registry("flat_native_candidate_fallback");
+    let (platform, arch, libc) = target_prebuild_components();
+    let prebuilds = package.join("prebuilds");
+    let flat = prebuilds.join(flat_prebuild_file_name(platform, arch, libc));
+    let target = prebuilds.join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(&flat, b"node ABI").unwrap();
+    fs::write(target.join("node.napi.node"), b"Node-API").unwrap();
+    let mut diagnostics = Vec::new();
+    let selected = select_prebuilt_addon_with(&package, &mut diagnostics, |path| {
+        Ok(path != flat.as_path())
+    }).unwrap().unwrap();
+    assert_eq!(selected.path, target.join("node.napi.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("not a supported N-API")));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn native_symbol_gate_requires_napi_entry_without_node_internals() {
+    assert!(napi_symbol_suitability("00000000 T napi_register_module_v1\n U napi_get_version"));
+    let registered = if cfg!(target_os = "macos") {
+        " U _napi_module_register\n U _napi_create_object"
+    } else {
+        " U napi_module_register\n U napi_create_object"
+    };
+    assert!(napi_symbol_suitability(registered));
+    let node_internal = if cfg!(target_os = "macos") {
+        "00000000 T _napi_register_module_v1\n U __ZN2v8Something"
+    } else {
+        "00000000 T napi_register_module_v1\n U _ZN2v8Something"
+    };
+    assert!(!napi_symbol_suitability(node_internal));
+    assert!(!napi_symbol_suitability("00000000 T napi_register_module_v1\n U node_module_register"));
+    if !cfg!(target_os = "macos") {
+        assert!(!napi_symbol_suitability("00000000 T _napi_register_module_v1"));
+    }
+    assert!(!napi_symbol_suitability("00000000 V napi_register_module_v1"));
+    assert!(!napi_symbol_suitability("00000000 T unrelated_entry"));
+}
+
+#[test]
+fn incompatible_bundled_prebuild_falls_back_to_platform_optional_addon() {
+    let node_modules = temp_registry("native_candidate_fallback");
+    let package = node_modules.join("example");
+    let (platform, arch, libc) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.abi108.node"), b"node ABI").unwrap();
+    let dependency = if platform == "linux" {
+        format!("@example/addon-{platform}-{arch}-{libc}")
+    } else {
+        format!("@example/addon-{platform}-{arch}")
+    };
+    let dependency_dir = node_modules.join(&dependency);
+    fs::create_dir_all(&dependency_dir).unwrap();
+    fs::write(dependency_dir.join("package.json"), r#"{"main":"binding.node"}"#).unwrap();
+    fs::write(dependency_dir.join("binding.node"), b"Node-API").unwrap();
+    let manifest = serde_json::json!({"optionalDependencies": {dependency.clone(): "1.0.0"}});
+    let mut diagnostics = Vec::new();
+    let selected = select_installed_addon_with(
+        &package, &node_modules, &manifest, Some("module.exports = {};"), &mut diagnostics,
+        |path| Ok(path.file_name().unwrap() == "binding.node"),
+    ).unwrap().unwrap();
+    assert_eq!(selected.path, dependency_dir.join("binding.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("node.abi108.node")));
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn incompatible_optional_main_uses_compatible_sibling() {
+    let node_modules = temp_registry("optional_main_abi_sibling_napi");
+    let (platform, arch, libc) = target_prebuild_components();
+    let dependency = if platform == "linux" {
+        format!("@example/addon-{platform}-{arch}-{libc}")
+    } else {
+        format!("@example/addon-{platform}-{arch}")
+    };
+    let root = node_modules.join(&dependency);
+    fs::create_dir_all(root.join("lib")).unwrap();
+    fs::write(root.join("package.json"), r#"{"main":"node.abi108.node"}"#).unwrap();
+    fs::write(root.join("node.abi108.node"), b"node ABI").unwrap();
+    fs::write(root.join("lib/binding.napi.node"), b"Node-API").unwrap();
+    let manifest = serde_json::json!({"optionalDependencies": {dependency.clone(): "1.0.0"}});
+    let mut diagnostics = Vec::new();
+    let selected = select_optional_dependency_addon_with(
+        &node_modules, &manifest, &mut diagnostics,
+        |path| Ok(path.file_name().unwrap() == "binding.napi.node"),
+    ).unwrap().unwrap();
+    assert_eq!(selected.path, root.join("lib/binding.napi.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("node.abi108.node")));
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn generated_napi_addon_is_found_before_prebuild_download_decision() {
+    let node_modules = temp_registry("generated_before_download");
+    let package = node_modules.join("example");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.abi108.node"), b"node ABI").unwrap();
+    let generated = node_modules.join(".generated/client/addon.node");
+    fs::create_dir_all(generated.parent().unwrap()).unwrap();
+    fs::write(&generated, b"Node-API").unwrap();
+    let manifest = serde_json::json!({"binary": {"napi_versions": [10]}});
+    let mut diagnostics = Vec::new();
+    let selected = select_installed_addon_with(
+        &package, &node_modules, &manifest,
+        Some("module.exports = require('.generated/client')"), &mut diagnostics,
+        |path| Ok(path == generated.as_path()),
+    ).unwrap().unwrap();
+    assert_eq!(selected.path, generated);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn missing_native_main_can_be_supplied_after_predownload_probe() {
+    let node_modules = temp_registry("downloaded_native_main");
+    let package = node_modules.join("example");
+    let (platform, arch, _) = target_prebuild_components();
+    let main = format!("prebuilds/{platform}-{arch}/binding.node");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), format!(r#"{{"name":"example","main":"{main}"}}"#)).unwrap();
+    let early_bundle = bundle_commonjs_package_cached(
+        &node_modules, "example", &package, &main, &mut SourceCache::default(),
+    );
+    assert!(early_bundle.is_err());
+    let mut diagnostics = Vec::new();
+    assert!(select_installed_addon_with(
+        &package, &node_modules, &serde_json::json!({}), None, &mut diagnostics,
+        |_| Ok(true),
+    ).unwrap().is_none());
+    let addon = package.join(&main);
+    fs::create_dir_all(addon.parent().unwrap()).unwrap();
+    fs::write(&addon, b"downloaded Node-API addon").unwrap();
+    let (source, _, _, _) = bundle_commonjs_package_cached(
+        &node_modules, "example", &package, &main, &mut SourceCache::default(),
+    ).unwrap();
+    assert!(select_installed_addon_with(
+        &package, &node_modules, &serde_json::json!({}), Some(source.as_str()), &mut diagnostics,
+        |_| Ok(true),
+    ).unwrap().is_some());
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn native_candidate_inspection_failure_does_not_become_fallback() {
+    let package = temp_registry("native_candidate_inspection_error");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.napi.node"), b"candidate").unwrap();
+    let mut diagnostics = Vec::new();
+    let error = select_prebuilt_addon_with(&package, &mut diagnostics, |_| {
+        Err("permission denied during inspection".to_string())
+    }).unwrap_err();
+    assert!(error.contains("permission denied"));
+    assert!(diagnostics.is_empty());
     let _ = fs::remove_dir_all(package);
 }
 
@@ -2103,15 +2995,148 @@ fn builds_prebuild_install_github_asset_for_the_current_target() {
 }
 
 #[test]
+fn selects_highest_supported_napi_prebuild_and_rejects_future_only_versions() {
+    // Unrun regression: installer and host must agree on the Node-API ceiling.
+    let mut manifest = serde_json::json!({
+        "name": "binding",
+        "version": "1.2.3",
+        "repository": "https://github.com/example/binding",
+        "binary": { "napi_versions": [3, 8, 9, 10, 11, 99] }
+    });
+    let (_, asset, _, _) = prebuild_install_asset(&manifest).unwrap();
+    assert!(asset.contains("-napi-v10-"));
+    manifest["binary"]["napi_versions"] = serde_json::json!([9, 11, 99]);
+    let (_, asset, _, _) = prebuild_install_asset(&manifest).unwrap();
+    assert!(asset.contains("-napi-v9-"));
+    manifest["binary"]["napi_versions"] = serde_json::json!([11, 99]);
+    assert!(prebuild_install_asset(&manifest).is_none());
+}
+
+#[test]
 fn reports_available_targets_when_no_prebuild_matches() {
     let package = temp_registry("mismatched_native_prebuild");
     let target = package.join("prebuilds/imaginary-other");
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("binding.node"), b"native bytes").unwrap();
-    let diagnostic = select_prebuilt_addon(&package).unwrap_err();
+    let mut diagnostics = Vec::new();
+    assert!(select_prebuilt_addon_with(&package, &mut diagnostics, |_| Ok(true))
+        .unwrap().is_none());
+    let diagnostic = diagnostics.join("; ");
     assert!(diagnostic.contains("no bundled native addon matches"));
     assert!(diagnostic.contains("imaginary-other"));
     let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn optional_dependency_target_matches_complete_architecture_and_libc_suffixes() {
+    assert!(optional_dependency_matches_target("@esbuild/linux-arm", "linux-arm"));
+    assert!(optional_dependency_matches_target("@example/addon-linux-arm", "linux-arm"));
+    assert!(!optional_dependency_matches_target("@esbuild/linux-arm64", "linux-arm"));
+    assert!(!optional_dependency_matches_target("@example/addon-linux-arm64", "linux-arm"));
+    assert!(optional_dependency_matches_target("@example/addon-linux-x64", "linux-x64"));
+    assert!(optional_dependency_matches_target("@example/addon-linux-x64-glibc", "linux-x64-glibc"));
+    assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64"));
+    assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64-glibc"));
+}
+
+// The "platform package ships the executable" rule is shape-driven: any package that lists
+// platform-specific optional dependencies qualifies, whatever its name.
+#[test]
+fn optional_dependency_executable_is_selected_for_any_package_with_platform_packages() {
+    let (platform, arch, _) = target_prebuild_components();
+    let node_modules = std::env::temp_dir().join(format!("thaw-optional-exe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&node_modules);
+    // (main package, platform package, declared `bin` of the platform package, executable path)
+    let cases = [
+        ("esbuild", format!("@esbuild/{platform}-{arch}"), Some(serde_json::json!("bin/esbuild")), "bin/esbuild"),
+        ("@acme/tool", format!("@acme/tool-{platform}-{arch}"), Some(serde_json::json!({ "acme-tool": "dist/acme-tool" })), "dist/acme-tool"),
+        // No declared `bin`: the conventional `bin/<package leaf>` is used.
+        ("plain", format!("plain-{platform}-{arch}"), None, "bin/plain"),
+    ];
+    for (main, platform_package, bin, executable) in cases {
+        let root = node_modules.join(&platform_package);
+        fs::create_dir_all(root.join(executable).parent().unwrap()).unwrap();
+        fs::write(root.join(executable), b"#!/bin/sh\n").unwrap();
+        let mut manifest = serde_json::json!({ "name": platform_package });
+        if let Some(bin) = bin { manifest["bin"] = bin; }
+        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+        let parent = serde_json::json!({ "name": main, "optionalDependencies": { platform_package.clone(): "1.0.0" } });
+        let selected = select_optional_dependency_executable(&node_modules, &parent).unwrap();
+        assert_eq!(selected, Some(root.join(executable)), "package `{main}`");
+    }
+    // A package without platform-specific optional dependencies has no platform executable.
+    let none = serde_json::json!({ "name": "esbuild" });
+    assert_eq!(select_optional_dependency_executable(&node_modules, &none).unwrap(), None);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn package_runtime_env_merges_curated_defaults_with_the_packages_own_declaration() {
+    let curated = package_runtime_env(&serde_json::json!({ "name": "@prisma/client" }));
+    assert_eq!(curated.get("PRISMA_QUERY_ENGINE_LIBRARY").map(String::as_str), Some("$self"));
+    let declared = package_runtime_env(&serde_json::json!({
+        "name": "some-native-pkg",
+        "thaw": { "runtimeEnv": { "SOME_LIBRARY": "$self", "IGNORED": 3 } }
+    }));
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared.get("SOME_LIBRARY").map(String::as_str), Some("$self"));
+    // The package's own declaration wins over the curated table.
+    let overridden = package_runtime_env(&serde_json::json!({
+        "name": "@prisma/client",
+        "thaw": { "runtimeEnv": { "PRISMA_QUERY_ENGINE_LIBRARY": "/custom" } }
+    }));
+    assert_eq!(overridden.get("PRISMA_QUERY_ENGINE_LIBRARY").map(String::as_str), Some("/custom"));
+    assert!(package_runtime_env(&serde_json::json!({ "name": "left-pad" })).is_empty());
+}
+
+#[test]
+fn resolved_package_applies_runtime_env_defaults_without_overriding_the_process_environment() {
+    use std::ffi::CString;
+    let registry = temp_registry("runtime_env_defaults");
+    let package = registry.join("env-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.d.ts"), "export declare function f(): void;\n").unwrap();
+    fs::write(package.join("bundle.js"), "globalThis.__env_pkg_loaded = true;\n").unwrap();
+    fs::write(
+        package.join("runtime-env.json"),
+        r#"{ "LIBRARY_PATH_VAR": "$self", "NESTED_VAR": "$self/lib", "USER_SET_VAR": "$self" }"#,
+    )
+    .unwrap();
+    let resolved = resolve(&registry, "env-pkg").unwrap();
+    assert_eq!(resolved.runtime_env.len(), 3);
+    let source = resolved.bundle_js.unwrap();
+    assert!(source.ends_with("globalThis.__env_pkg_loaded = true;\n"));
+    let setup = "globalThis.__saved_process = globalThis.process; globalThis.process = { env: { USER_SET_VAR: 'mine' }, execPath: '/opt/app' };";
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(source).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::eval_json("process.env.LIBRARY_PATH_VAR"), Ok(Some("\"/opt/app\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process.env.NESTED_VAR"), Ok(Some("\"/opt/app/lib\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process.env.USER_SET_VAR"), Ok(Some("\"mine\"".into())));
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__saved_process;").unwrap().as_ptr()), 1);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn glibc_shared_library_collection_skips_musl_optional_dependency() {
+    let (platform, arch, libc) = target_prebuild_components();
+    if platform != "linux" || libc != "glibc" {
+        return;
+    }
+    let node_modules = temp_registry("glibc-shared-libraries");
+    let glibc_name = format!("@example/addon-linux-{arch}-glibc");
+    let musl_name = format!("@example/addon-linux-{arch}-musl");
+    let glibc_root = node_modules.join(&glibc_name);
+    let musl_root = node_modules.join(&musl_name);
+    fs::create_dir_all(&glibc_root).unwrap();
+    fs::create_dir_all(&musl_root).unwrap();
+    let glibc_library = glibc_root.join("libtarget.so");
+    fs::write(&glibc_library, b"glibc").unwrap();
+    fs::write(musl_root.join("libtarget.so"), b"musl").unwrap();
+    let manifest = serde_json::json!({
+        "optionalDependencies": {glibc_name.clone(): "1.0.0", musl_name.clone(): "1.0.0"}
+    });
+    assert_eq!(platform_shared_libraries(&node_modules, &manifest).unwrap(), vec![glibc_library]);
+    let _ = fs::remove_dir_all(node_modules);
 }
 
 #[test]
@@ -2134,7 +3159,7 @@ fn selects_a_platform_optional_dependency_node_addon() {
     let manifest = serde_json::json!({
         "optionalDependencies": { dependency.clone(): "1.0.0" }
     });
-    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+    let selected = select_optional_dependency_addon_with(&node_modules, &manifest, &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .unwrap();
     assert_eq!(selected.path, dependency_dir.join("binding.node"));
@@ -2164,7 +3189,7 @@ fn selects_a_gnu_named_linux_optional_dependency_node_addon() {
     let manifest = serde_json::json!({
         "optionalDependencies": { dependency.clone(): "1.0.0" }
     });
-    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+    let selected = select_optional_dependency_addon_with(&node_modules, &manifest, &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .unwrap();
     assert_eq!(selected.path, dependency_dir.join("binding.node"));
@@ -2193,7 +3218,7 @@ fn selects_a_node_addon_behind_a_platform_dependency_js_entry() {
         "optionalDependencies": { dependency.clone(): "1.0.0" }
     });
 
-    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+    let selected = select_optional_dependency_addon_with(&node_modules, &manifest, &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .unwrap();
     assert_eq!(selected.path, dependency_dir.join("lib/addon.node"));
@@ -2356,6 +3381,49 @@ fn resolves_main_field_missing_its_extension() {
 }
 
 #[test]
+fn same_named_file_precedes_directory_package_main() {
+    let dir = temp_registry("file_before_directory_main");
+    let directory = dir.join("foo");
+    fs::create_dir(&directory).unwrap();
+    fs::write(dir.join("foo.js"), "module.exports = 'file';").unwrap();
+    fs::write(directory.join("package.json"), r#"{"main":"./inner.js"}"#).unwrap();
+    fs::write(directory.join("inner.js"), "module.exports = 'directory';").unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, "./foo").unwrap();
+    assert_eq!(relative, "./foo.js");
+    assert_eq!(absolute, dir.join("foo.js"));
+    for directory_request in ["./foo/", "./foo/."] {
+        let (relative, absolute) = resolve_module_path(&dir, directory_request).unwrap();
+        assert_eq!(relative, "foo/inner.js");
+        assert_eq!(absolute, directory.join("inner.js"));
+    }
+    fs::remove_file(dir.join("foo.js")).unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, "./foo").unwrap();
+    assert_eq!(relative, "foo/inner.js");
+    assert_eq!(absolute, directory.join("inner.js"));
+    fs::write(dir.join(".js"), "module.exports = 'sibling';").unwrap();
+    fs::write(dir.join("package.json"), r#"{"main":"./entry.js"}"#).unwrap();
+    fs::write(dir.join("entry.js"), "module.exports = 'root';").unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "entry.js");
+    assert_eq!(absolute, dir.join("entry.js"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bundled_trailing_slash_require_keeps_directory_intent() {
+    let package = temp_registry("bundle_directory_intent");
+    fs::create_dir(package.join("foo")).unwrap();
+    fs::write(package.join("index.js"), "module.exports = require('./foo/');").unwrap();
+    fs::write(package.join("foo.js"), "module.exports = 'file-only-value';").unwrap();
+    fs::write(package.join("foo/package.json"), r#"{"main":"./inner.js"}"#).unwrap();
+    fs::write(package.join("foo/inner.js"), "module.exports = 'directory-only-value';").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&package, "pkg", &package, "index.js").unwrap();
+    assert!(bundle.contains("directory-only-value"));
+    assert!(!bundle.contains("file-only-value"));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
 fn resolves_main_field_pointing_at_a_directory() {
     let dir = temp_registry("main_directory");
     fs::create_dir_all(dir.join("lib")).unwrap();
@@ -2380,6 +3448,48 @@ fn resolves_a_required_directory_through_its_own_package_manifest() {
     let (relative, absolute) = resolve_module_path(&dir, "./feature").unwrap();
     assert_eq!(relative, "feature/dist/index.cjs");
     assert_eq!(absolute, feature.join("dist/index.cjs"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn directory_main_self_cycle_uses_index_fallback() {
+    let dir = temp_registry("module_main_self_cycle");
+    fs::write(dir.join("package.json"), r#"{"main":"."}"#).unwrap();
+    fs::write(dir.join("index.js"), "module.exports = 1;").unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "index.js");
+    assert_eq!(absolute.canonicalize().unwrap(), dir.join("index.js").canonicalize().unwrap());
+    fs::write(dir.join("package.json"), r#"{"main":"./."}"#).unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "index.js");
+    assert_eq!(absolute.canonicalize().unwrap(), dir.join("index.js").canonicalize().unwrap());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mutually_recursive_directory_entries_return_a_cycle_diagnostic() {
+    let dir = temp_registry("module_main_mutual_cycle");
+    for (name, main) in [("a", "../b"), ("b", "../a")] {
+        let directory = dir.join(name);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("package.json"), format!(r#"{{"main":"{main}"}}"#)).unwrap();
+    }
+    let error = resolve_module_path(&dir, "./a").unwrap_err();
+    assert!(error.contains("circular directory module entry"), "{error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_directory_entry_cycle_uses_index_fallback() {
+    use std::os::unix::fs::symlink;
+    let dir = temp_registry("module_main_symlink_cycle");
+    fs::write(dir.join("package.json"), r#"{"main":"./alias"}"#).unwrap();
+    fs::write(dir.join("index.js"), "module.exports = 1;").unwrap();
+    symlink(".", dir.join("alias")).unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "alias/index.js");
+    assert_eq!(absolute.canonicalize().unwrap(), dir.join("index.js").canonicalize().unwrap());
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -2434,7 +3544,7 @@ fn parser_collects_esm_reexports_and_dynamic_imports_without_false_positives() {
                 import main from './main.js';
                 export { value } from "./value.js";
                 export * from './all.js';
-                const package = import(`external-package`);
+                const externalPackage = import(`external-package`);
                 const feature = import(("external-" + "feature"));
                 const later = import('./later.js');
                 const text = "require('./not-real.js')";
@@ -2496,7 +3606,10 @@ fn parser_identifies_commonjs_export_assignments() {
 fn rewrites_literal_dynamic_import_to_an_async_bundle_require() {
     let rewritten =
         rewrite_esm_to_commonjs("function load() { return import('./feature.js'); }").unwrap();
-    assert!(rewritten.contains("requireAsync(String('./feature.js'))"));
+    // The specifier is stringified inside `requireAsync` itself (a failing
+    // `toString` becomes a rejected promise), so the rewrite no longer wraps
+    // the argument in `String(...)`.
+    assert!(rewritten.contains("requireAsync('./feature.js')"));
     assert!(!rewritten.contains("import("));
 }
 
@@ -2661,6 +3774,191 @@ fn declaration_reexport_path_is_canonicalized_for_cycle_detection() {
 }
 
 #[test]
+fn relative_declaration_directory_prefers_manifest_types_over_index() {
+    // Unrun regression: a relative directory can have both a fallback index
+    // and an explicit package type entry. An adjacent file still wins first.
+    let root = temp_registry("relative-manifest-types");
+    let entry = root.join("entry.d.ts");
+    let feature = root.join("feature");
+    fs::create_dir_all(feature.join("types")).unwrap();
+    fs::write(&entry, "export * from './feature';").unwrap();
+    fs::write(feature.join("package.json"), r#"{"types":"./types/public.d.ts"}"#).unwrap();
+    fs::write(feature.join("types/public.d.ts"), "export function chosen(): string;").unwrap();
+    fs::write(feature.join("index.d.ts"), "export function fallback(): number;").unwrap();
+    assert_eq!(
+        declaration_reexport_path(&entry, "./feature"),
+        Some(feature.join("types/public.d.ts").canonicalize().unwrap())
+    );
+    fs::write(root.join("feature.d.ts"), "export function adjacent(): boolean;").unwrap();
+    assert_eq!(
+        declaration_reexport_path(&entry, "./feature"),
+        Some(root.join("feature.d.ts").canonicalize().unwrap())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bare_type_reexports_use_nearest_package_subpath_exports() {
+    // Unrun regression: the nested version wins over a hoisted version;
+    // an exports map is authoritative even if a physical fallback exists.
+    let root = temp_registry("bare-type-subpath-resolution");
+    let app = root.join("node_modules/app");
+    let nested = app.join("node_modules/dependency");
+    let hoisted = root.join("node_modules/dependency");
+    let scoped = root.join("node_modules/@scope/client");
+    fs::create_dir_all(app.join("types")).unwrap();
+    fs::create_dir_all(nested.join("types")).unwrap();
+    fs::create_dir_all(hoisted.join("types")).unwrap();
+    fs::create_dir_all(scoped.join("types")).unwrap();
+    let entry = app.join("types/index.d.ts");
+    fs::write(&entry, "export * from 'dependency/feature';").unwrap();
+    fs::write(nested.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/nested.d.ts"},"./wild/*":{"types":"./types/*.d.ts"}}}"#,
+    ).unwrap();
+    fs::write(nested.join("types/nested.d.ts"), "export function nested(): number;").unwrap();
+    fs::write(nested.join("types/card.d.ts"), "export function card(): string;").unwrap();
+    fs::write(hoisted.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/hoisted.d.ts"}}}"#,
+    ).unwrap();
+    fs::write(hoisted.join("types/hoisted.d.ts"), "export function hoisted(): boolean;").unwrap();
+    fs::write(scoped.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/scoped.d.ts"}}}"#,
+    ).unwrap();
+    fs::write(scoped.join("types/scoped.d.ts"), "export function scoped(): string;").unwrap();
+
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"),
+        Some(nested.join("types/nested.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "dependency/wild/card"),
+        Some(nested.join("types/card.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "@scope/client/feature"),
+        Some(scoped.join("types/scoped.d.ts").canonicalize().unwrap()));
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("function nested(): number"), "{flattened}");
+    assert!(!flattened.contains("function hoisted()"), "{flattened}");
+
+    fs::remove_dir_all(&nested).unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"),
+        Some(hoisted.join("types/hoisted.d.ts").canonicalize().unwrap()));
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("package.json"), r#"{"exports":{"./other":{"types":"./other.d.ts"}}}"#).unwrap();
+    fs::write(nested.join("feature.d.ts"), "export function shadow(): void;").unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"), None);
+    fs::write(nested.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/missing.d.ts"}}}"#,
+    ).unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"), None);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bare_type_reexports_keep_nearest_manifestless_declarations() {
+    // Unrun regression: declarations can be installed without a package.json.
+    // A nearer type file wins over an ancestor package with a valid manifest.
+    let root = temp_registry("bare-manifestless-types");
+    let app = root.join("node_modules/app");
+    let nested_modules = app.join("node_modules");
+    let hoisted = root.join("node_modules/dependency");
+    let hoisted_scoped = root.join("node_modules/@scope/client");
+    fs::create_dir_all(app.join("types")).unwrap();
+    fs::create_dir_all(nested_modules.join("dependency")).unwrap();
+    fs::create_dir_all(nested_modules.join("@scope/client")).unwrap();
+    fs::create_dir_all(&hoisted).unwrap();
+    fs::create_dir_all(&hoisted_scoped).unwrap();
+    let entry = app.join("types/index.d.ts");
+    fs::write(&entry, "export * from 'dependency';").unwrap();
+    fs::write(hoisted.join("package.json"), r#"{"types":"./index.d.ts","exports":{"./feature":{"types":"./feature.d.ts"}}}"#).unwrap();
+    fs::write(hoisted.join("index.d.ts"), "export function hoisted(): void;").unwrap();
+    fs::write(hoisted.join("feature.d.ts"), "export function hoistedFeature(): void;").unwrap();
+    fs::write(hoisted_scoped.join("package.json"), r#"{"types":"./index.d.ts"}"#).unwrap();
+    fs::write(hoisted_scoped.join("index.d.ts"), "export function hoistedScoped(): void;").unwrap();
+
+    let nested = nested_modules.join("dependency");
+    fs::write(nested.join("index.d.ts"), "export function local(): void;").unwrap();
+    fs::write(nested.join("feature.d.ts"), "export function localFeature(): void;").unwrap();
+    let scoped = nested_modules.join("@scope/client");
+    fs::write(scoped.join("index.d.ts"), "export function localScoped(): void;").unwrap();
+    fs::write(scoped.join("feature.d.ts"), "export function localScopedFeature(): void;").unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency"),
+        Some(nested.join("index.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"),
+        Some(nested.join("feature.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "@scope/client"),
+        Some(scoped.join("index.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "@scope/client/feature"),
+        Some(scoped.join("feature.d.ts").canonicalize().unwrap()));
+    fs::remove_file(nested.join("feature.d.ts")).unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"), None);
+
+    fs::remove_dir_all(&nested).unwrap();
+    fs::write(nested_modules.join("dependency.d.ts"), "export function sibling(): void;").unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency"),
+        Some(nested_modules.join("dependency.d.ts").canonicalize().unwrap()));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn named_declaration_hop_follows_wildcard_function_and_superclass() {
+    // Unrun regression: the named source is a barrel rather than the final
+    // declaration file. `Base` is supporting type information, not an alias
+    // of the selected `Derived` declaration.
+    let root = temp_registry("named-hop-wildcard");
+    let entry = root.join("entry.d.ts");
+    let barrel = root.join("barrel.d.ts");
+    fs::write(&entry, "export { parse } from './barrel';\nexport { Derived as PublicDerived } from './barrel';\n").unwrap();
+    fs::write(&barrel, "export * from './functions';\nexport * from './derived';\n").unwrap();
+    fs::write(root.join("functions.d.ts"), "export declare function parse(value: string): number;").unwrap();
+    fs::write(root.join("derived.d.ts"), "import { Base } from './base';\nexport declare class Derived extends Base { own(): string; }").unwrap();
+    fs::write(root.join("base.d.ts"), "export declare class Base { inherited(): number; }").unwrap();
+    let mut visited = std::collections::BTreeSet::new();
+    let functions = reexported_function_declarations(&entry, "parse", &mut visited).unwrap();
+    assert_eq!(functions.len(), 1, "{functions:?}");
+    assert!(functions[0].contains("function parse(value: string): number"), "{functions:?}");
+    let classes = reexported_class_or_interface_declarations(&entry, "PublicDerived").unwrap();
+    assert!(classes.iter().any(|item| item.contains("class Derived extends Base")), "{classes:?}");
+    assert!(classes.iter().any(|item| item.contains("class Base") && item.contains("inherited")), "{classes:?}");
+    let aliased = reexported_declarations_as(classes, "PublicDerived", &entry, false).join("\n");
+    assert!(aliased.contains("Derived as PublicDerived"), "{aliased}");
+    assert!(aliased.contains("class Base") && !aliased.contains("Base as PublicDerived"), "{aliased}");
+    let flattened = dts_source_with_reexported_functions(&entry, &fs::read_to_string(&entry).unwrap()).unwrap();
+    assert!(flattened.contains("function parse(value: string): number"), "{flattened}");
+    assert!(flattened.contains("Derived as PublicDerived"), "{flattened}");
+    assert!(flattened.contains("class Base") && !flattened.contains("Base as PublicDerived"), "{flattened}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn reexported_child_keeps_same_file_superclass_chain() {
+    // Unrun regression: the selected class is re-exported, while its Base
+    // and GrandBase are declared in the target file without any imports.
+    let root = temp_registry("same-file-superclasses");
+    let entry = root.join("entry.d.ts");
+    fs::write(&entry, "export { Child as PublicChild } from './child';").unwrap();
+    fs::write(
+        root.join("child.d.ts"),
+        "declare class GrandBase { grand(): boolean; }\n\
+         declare class Base extends GrandBase { inherited(): number; }\n\
+         export declare class Child extends Base { own(): string; }",
+    ).unwrap();
+
+    let classes = reexported_class_or_interface_declarations(&entry, "PublicChild").unwrap();
+    assert_eq!(classes.len(), 3, "{classes:?}");
+    assert!(classes[0].contains("class Child extends Base"), "{classes:?}");
+    assert!(classes[1].contains("class Base extends GrandBase"), "{classes:?}");
+    assert!(classes[2].contains("class GrandBase"), "{classes:?}");
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("Child as PublicChild"), "{flattened}");
+    assert!(flattened.contains("inherited(): number"), "{flattened}");
+    assert!(flattened.contains("grand(): boolean"), "{flattened}");
+    assert!(!flattened.contains("Base as PublicChild"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn selects_a_single_addon_from_a_hidden_generated_package() {
     let node_modules = temp_registry("generated_native_addon");
     let addon = node_modules.join(".generated/client/engine.so.node");
@@ -2669,13 +3967,13 @@ fn selects_a_single_addon_from_a_hidden_generated_package() {
     fs::write(&addon, b"addon").unwrap();
 
     assert_eq!(
-        select_generated_addon(&node_modules, "require('.generated/client')")
+        select_generated_addon_with(&node_modules, "require('.generated/client')", &mut Vec::new(), |_| Ok(true))
             .unwrap()
             .unwrap()
             .path,
         addon
     );
-    assert!(select_generated_addon(&node_modules, "module.exports = {}")
+    assert!(select_generated_addon_with(&node_modules, "module.exports = {}", &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .is_none());
 
@@ -2793,6 +4091,12 @@ fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let test_reporters = resolve_builtin("node:test/reporters").unwrap().dts_source;
     assert!(test_reporters.contains("class Reporter"));
     assert!(test_reporters.contains("dot(source: Json): Reporter"));
+
+    for specifier in ["node:path", "node:path/posix", "node:path/win32"] {
+        let declarations = resolve_builtin(specifier).unwrap().dts_source;
+        assert!(declarations.contains("export declare const posix: any;"), "{specifier}: {declarations}");
+        assert!(declarations.contains("export declare const win32: any;"), "{specifier}: {declarations}");
+    }
 }
 
 /// `resolve_bare_require` used to resolve every bare specifier against
@@ -2964,4 +4268,1551 @@ fn installed_package_follows_a_dcts_esm_default_delegation() {
     );
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_declarations_resolve_multihop_function_aliases_and_explicit_module_extensions() {
+    // Unrun regression: each re-export hop must rename the signature, and
+    // .mjs/.cjs specifiers must find their .d.mts/.d.cts declarations.
+    let scratch = temp_registry("installed-dts-multihop-alias-scratch");
+    let registry = temp_registry("installed-dts-multihop-alias-registry");
+    let package = scratch.join("node_modules/alias-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"alias-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { public as api } from './middle.mjs';\n\
+         export { original as null } from './functions.cjs';\n").unwrap();
+    fs::write(package.join("middle.d.mts"),
+        "export { local as public } from './functions.cjs';\n").unwrap();
+    fs::write(package.join("functions.d.cts"),
+        "declare function local(value: string): string;\n\
+         export { local };\n\
+         export declare function original(value: number): number;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "alias-kit").unwrap();
+    let declarations = resolve(&registry, "alias-kit").unwrap().dts_source;
+    assert!(declarations.contains("declare function api(value: string): string"), "{declarations}");
+    // `null` is not a legal function name, so the declaration carries a
+    // private public-alias name and is exported as `null` below.
+    assert!(declarations.contains("function __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains("(value: number): number;"), "{declarations}");
+    assert!(declarations.contains("export { __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains(" as null };"), "{declarations}");
+    assert!(!declarations.contains("function null("), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn reserved_aliases_from_distinct_modules_keep_distinct_internal_signatures() {
+    // Unrun regression: both modules use internal `f`, but their public
+    // reserved names and parameter types must not be merged.
+    let scratch = temp_registry("installed-dts-reserved-collision-scratch");
+    let registry = temp_registry("installed-dts-reserved-collision-registry");
+    let package = scratch.join("node_modules/collision-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"collision-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export * from './a.js';\nexport * from './b.js';\n").unwrap();
+    fs::write(package.join("a.d.ts"),
+        "export declare function f(value: string): string;\nexport { f as null };\n").unwrap();
+    fs::write(package.join("b.d.ts"),
+        "declare function f(value: number): number;\nexport { f as void };\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "collision-kit").unwrap();
+    let declarations = resolve(&registry, "collision-kit").unwrap().dts_source;
+    let public_binding = |alias: &str| {
+        declarations.lines().find_map(|line| {
+            line.trim().strip_prefix("export { ")
+                .and_then(|line| line.strip_suffix(&format!(" as {alias} }};")))
+        }).unwrap().to_string()
+    };
+    let null_binding = public_binding("null");
+    let void_binding = public_binding("void");
+    assert!(null_binding.starts_with("__thaw_public_6e756c6c_"), "{declarations}");
+    assert!(void_binding.starts_with("__thaw_public_766f6964_"), "{declarations}");
+    assert_ne!(null_binding, void_binding);
+    assert!(declarations.contains(&format!("function {null_binding}(value: string): string")), "{declarations}");
+    assert!(declarations.contains(&format!("function {void_binding}(value: number): number")), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn non_callable_value_alias_extracts_only_the_selected_declarator() {
+    // Unrun regression: the public names must inherit the second value's
+    // string type without renaming the unrelated first declarator.
+    let scratch = temp_registry("installed-dts-value-multidecl-scratch");
+    let registry = temp_registry("installed-dts-value-multidecl-registry");
+    let package = scratch.join("node_modules/value-multidecl-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"value-multidecl-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { second as chosen, lb as selectedLet, vb as selectedVar } from './impl.js';\n").unwrap();
+    fs::write(package.join("impl.d.ts"),
+        "export declare const first: number, second: string;\n\
+         export declare let la: number, lb: string;\n\
+         export declare var va: number, vb: string;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "value-multidecl-kit").unwrap();
+    let declarations = resolve(&registry, "value-multidecl-kit").unwrap().dts_source;
+    assert!(declarations.contains("const chosen: string;"), "{declarations}");
+    assert!(declarations.contains("let selectedLet: string;"), "{declarations}");
+    assert!(declarations.contains("var selectedVar: string;"), "{declarations}");
+    assert!(!declarations.contains("const chosen: number"), "{declarations}");
+    assert!(!declarations.contains("const first: number, chosen"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn callable_const_alias_extracts_only_its_own_declarator() {
+    // Unrun regression: selecting `b` must not rename the first `a` in the
+    // same statement or borrow `a`'s number-returning signature.
+    let scratch = temp_registry("installed-dts-multidecl-scratch");
+    let registry = temp_registry("installed-dts-multidecl-registry");
+    let package = scratch.join("node_modules/multidecl-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"multidecl-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { b as c, ib as ic, lb as lc, lb as void, vb as vc, vb as null } from './impl.js';\n").unwrap();
+    fs::write(package.join("impl.d.ts"),
+        "export interface NumberCall { (): number; }\n\
+         export interface StringCall { (): string; }\n\
+         export declare const a: () => number, b: () => string;\n\
+         export declare const ia: NumberCall, ib: StringCall;\n\
+         export declare let la: () => number, lb: () => string;\n\
+         export declare var va: NumberCall, vb: StringCall;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "multidecl-kit").unwrap();
+    let declarations = resolve(&registry, "multidecl-kit").unwrap().dts_source;
+    assert!(declarations.contains("const c: () => string;"), "{declarations}");
+    // `StringCall` is private to `impl.d.ts`, so the declarator's reference is
+    // spelled through that file's support namespace.
+    assert!(declarations.contains("const ic: __thaw_support_"), "{declarations}");
+    assert!(declarations.contains(".StringCall;"), "{declarations}");
+    assert!(declarations.contains("let lc: () => string;"), "{declarations}");
+    assert!(declarations.contains("var vc: __thaw_support_"), "{declarations}");
+    assert!(!declarations.contains("NumberCall"), "{declarations}");
+    assert!(declarations.contains("let __thaw_public_766f6964_"), "{declarations}");
+    assert!(declarations.contains(" as void };"), "{declarations}");
+    assert!(declarations.contains("var __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains(" as null };"), "{declarations}");
+    assert!(!declarations.contains("const a: () => number, c:"), "{declarations}");
+    assert!(!declarations.contains("const ia: NumberCall, ic:"), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn reexported_type_records_preserve_terminal_origin_without_changing_output() {
+    // Unrun precursor regression: wildcard and type namespace formatting
+    // retain the source-owned children for the later private closure pass.
+    let dir = temp_registry("owned-type-reexports");
+    fs::write(dir.join("leaf.d.ts"),
+        "export interface Model { id: Id; }\nexport type Id = string;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"),
+        "export * from './leaf.js';\nexport type * as Types from './leaf.js';\n").unwrap();
+    let entry = dir.join("entry.d.ts");
+    let mut owned_visited = std::collections::BTreeSet::new();
+    let owned = all_reexported_type_declarations_owned(&entry, &mut owned_visited).unwrap();
+    assert!(thaw_parser::parse_declarations(&owned.iter().map(|declaration|
+        declaration.snippet.as_str()).collect::<Vec<_>>().join("\n")).is_ok());
+    let leaf = dir.join("leaf.d.ts").canonicalize().unwrap();
+    assert!(owned.iter().any(|declaration| declaration.origin == leaf
+        && declaration.local_name.as_deref() == Some("Model")));
+    let namespace = owned.iter().find(|declaration| declaration.local_name.as_deref() == Some("Types")).unwrap();
+    assert!(namespace.children.iter().any(|child| child.origin == leaf
+        && child.local_name.as_deref() == Some("Model")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn named_reexport_records_keep_original_owner_and_selected_alias_order() {
+    // Unrun precursor regression: the selected class and imported Base
+    // retain separate owners even though the returned text is unchanged.
+    let dir = temp_registry("owned-named-reexports");
+    fs::write(dir.join("base.d.ts"),
+        "export declare class Base { inherited(): string; }\n").unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "import { Base as LocalBase } from './base.js';\nexport declare class Model extends LocalBase {}\n").unwrap();
+    let leaf = dir.join("leaf.d.ts");
+    let owned = reexported_class_or_interface_declarations_owned(&leaf, "Model").unwrap();
+    assert!(owned.first().unwrap().snippet.contains("class Model extends LocalBase"));
+    assert_eq!(owned.first().and_then(|declaration| declaration.local_name.as_deref()), Some("Model"));
+    assert_eq!(owned.first().unwrap().origin, leaf.canonicalize().unwrap());
+    assert!(owned.iter().skip(1).any(|declaration| declaration.origin == dir.join("base.d.ts").canonicalize().unwrap()
+        && declaration.local_name.as_deref() == Some("Base")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn function_reexport_records_keep_leaf_owner_through_named_and_namespace_paths() {
+    // Unrun precursor regression: public alias spelling does not replace
+    // the leaf identity needed to resolve private signature types.
+    let dir = temp_registry("owned-function-reexports");
+    fs::write(dir.join("leaf.d.ts"),
+        "export interface Options { value: string; }\n\
+         export declare function make(options: Options): string;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"),
+        "export { make as create } from './leaf.js';\n\
+         export * as api from './leaf.js';\n").unwrap();
+    let leaf = dir.join("leaf.d.ts").canonicalize().unwrap();
+    let mut visited = std::collections::BTreeSet::new();
+    let named = all_reexported_function_declarations_owned(&dir.join("entry.d.ts"), &mut visited).unwrap();
+    let (public, selected) = named.iter().find(|(public, _)| public == "create").unwrap();
+    assert_eq!(public, "create");
+    assert_eq!(selected.origin, leaf);
+    assert_eq!(selected.local_name.as_deref(), Some("make"));
+    assert!(selected.snippet.contains("function create(options: Options): string"));
+    let mut visited = std::collections::BTreeSet::new();
+    let namespaced = all_reexported_function_declarations_owned(&dir.join("leaf.d.ts"), &mut visited).unwrap();
+    assert!(namespaced.iter().any(|(name, declaration)| name == "make"
+        && declaration.origin == leaf && declaration.local_name.as_deref() == Some("make")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn namespace_renderer_keeps_function_and_type_member_sources() {
+    // Unrun precursor regression: exercise the same owner-aware renderer
+    // used by an ordinary `export * as api` entry, not just its collector.
+    let dir = temp_registry("owned-namespace-renderer");
+    fs::write(dir.join("leaf.d.ts"),
+        "export interface Options { value: string; }\n\
+         export declare function make(options: Options): string;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"), "export * as api from './leaf.js';\n").unwrap();
+    let entry = dir.join("entry.d.ts");
+    let leaf = dir.join("leaf.d.ts").canonicalize().unwrap();
+    let flattened = dts_source_with_reexported_functions(&entry,
+        &fs::read_to_string(&entry).unwrap()).unwrap();
+    assert!(flattened.contains("declare namespace api {"), "{flattened}");
+    assert!(flattened.contains("export interface Options"), "{flattened}");
+    assert!(flattened.contains("export function make(options: Options): string"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let mut visited = std::collections::BTreeSet::new();
+    let functions = all_reexported_function_declarations_owned(&leaf, &mut visited).unwrap();
+    let rendered = namespace_member_declarations_owned(functions.into_iter().next().unwrap().1).unwrap();
+    assert!(rendered.iter().any(|member| member.origin == leaf
+        && member.local_name.as_deref() == Some("make")
+        && member.snippet.contains("function make(options: Options): string")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn import_equals_export_assignment_records_keep_terminal_owner() {
+    // Unrun precursor regression: `export =` function/class targets keep
+    // the target file, while the barrel retains its public alias.
+    let dir = temp_registry("owned-import-equals");
+    fs::write(dir.join("function.d.ts"),
+        "declare function make(value: string): string;\nexport = make;\n").unwrap();
+    fs::write(dir.join("class.d.ts"),
+        "declare class Client { read(): string; }\nexport = Client;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"),
+        "import Maker = require('./function.js');\n\
+         import Client = require('./class.js');\n\
+         export { Maker as create, Client };\n").unwrap();
+    let entry = dir.join("entry.d.ts");
+    let flattened = dts_source_with_reexported_functions(&entry,
+        &fs::read_to_string(&entry).unwrap()).unwrap();
+    assert!(flattened.contains("function create(value: string): string"), "{flattened}");
+    assert!(flattened.contains("class Client"), "{flattened}");
+    let function = export_assignment_function_declarations_owned(&dir.join("function.d.ts")).unwrap();
+    assert_eq!(function[0].origin, dir.join("function.d.ts").canonicalize().unwrap());
+    assert_eq!(function[0].local_name.as_deref(), Some("make"));
+    let class = export_assignment_class_or_interface_declarations_owned(&dir.join("class.d.ts")).unwrap();
+    assert_eq!(class[0].origin, dir.join("class.d.ts").canonicalize().unwrap());
+    assert_eq!(class[0].local_name.as_deref(), Some("Client"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_public_alias_separates_export_name_from_structural_binding() {
+    // Unrun closure regression: an alias marker selects the source Model,
+    // but Renamed is the exported spelling and Model is the local type name.
+    let origin = Path::new("/tmp/owned-alias-source.d.ts");
+    let structural = OwnedDeclaration::new(origin, "declare class Model { id: string; }".into());
+    let marker = structural.clone().with_snippet("export { Model as Renamed };".into());
+    assert_eq!(namespace_member_public_names(&marker), vec!["Renamed"]);
+    let record = EmittedOwnedDeclaration {
+        declaration: marker,
+        scope: Some("api".into()),
+        public_names: vec!["Renamed".into()],
+        start: 0,
+        end: 0,
+        metadata_only: false,
+    };
+    let occurrences = public_type_occurrences(&[record]);
+    let selected = &occurrences[&(origin.to_path_buf(), Vec::new(), "Model".into())][0];
+    assert_eq!(selected.scope.as_deref(), Some("api"));
+    assert_eq!(selected.structural_name, "Model");
+    assert_eq!(selected.public_name, "Renamed");
+    assert!(selected.value_export);
+    assert_eq!(selected.type_reference_from(Some("api")), "Model");
+    assert_eq!(selected.type_reference_from(Some("other")), "api.Renamed");
+    assert_eq!(selected.type_reference_from(None), "api.Renamed");
+}
+
+#[test]
+fn owned_source_namespace_keys_keep_same_named_private_members_distinct() {
+    // Unrun metadata regression: same-file namespace-local names must not
+    // collapse into one support origin key after flattening.
+    let origin = Path::new("/tmp/owned-scopes-source.d.ts");
+    let outer = OwnedDeclaration::new(origin,
+        "export declare namespace Outer { export interface Id { outer: string; } export { Id as PublicId }; export namespace Inner { export interface Id { inner: number; } } }".into());
+    let first = outer.children.iter().find(|child| child.local_name.as_deref() == Some("Id")).unwrap();
+    let nested = outer.children.iter().find(|child| child.local_name.as_deref() == Some("Inner")).unwrap();
+    let second = nested.children.iter().find(|child| child.local_name.as_deref() == Some("Id")).unwrap();
+    assert_eq!(first.source_scope, vec!["Outer"]);
+    assert_eq!(second.source_scope, vec!["Outer", "Inner"]);
+    let alias = outer.children.iter().find(|child| child.snippet.contains("Id as PublicId")).unwrap();
+    assert_eq!(alias.source_scope, vec!["Outer"]);
+    assert_eq!(alias.local_name.as_deref(), Some("Id"));
+    assert_eq!(namespace_member_public_names(alias), vec!["PublicId"]);
+    assert_ne!(
+        (first.origin.clone(), first.source_scope.clone(), first.local_name.clone()),
+        (second.origin.clone(), second.source_scope.clone(), second.local_name.clone()),
+    );
+}
+
+#[test]
+fn source_type_lookup_prefers_nearest_lexical_namespace() {
+    // Unrun resolver regression: Inner.Id must not silently bind Outer.Id.
+    let dir = temp_registry("owned-private-lexical-lookup");
+    let path = dir.join("types.d.ts");
+    fs::write(&path,
+        "declare namespace Outer { interface Id { outer: string; } namespace Inner { interface Id { inner: number; } interface Model { id: Id; } } }",
+    ).unwrap();
+    let table = source_type_bindings(&path).unwrap();
+    let outer = resolve_lexical_source_type(&table, &path, &["Outer".into()], "Id").unwrap();
+    let inner = resolve_lexical_source_type(&table, &path, &["Outer".into(), "Inner".into()], "Id").unwrap();
+    assert_eq!(outer[0].source_scope, vec!["Outer"]);
+    assert_eq!(inner[0].source_scope, vec!["Outer", "Inner"]);
+    assert_ne!(outer[0].snippet, inner[0].snippet);
+    assert!(resolve_lexical_source_type(&table, &path, &["Other".into()], "Id").is_none());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn source_type_lookup_keeps_merged_interface_fragments() {
+    // Unrun resolver regression: a lexical key can have multiple declarations.
+    let dir = temp_registry("owned-private-merged-interface");
+    let path = dir.join("types.d.ts");
+    fs::write(&path,
+        "declare namespace Outer { interface Id { first: string; } interface Id { second: number; } }",
+    ).unwrap();
+    let table = source_type_bindings(&path).unwrap();
+    let fragments = resolve_lexical_source_type(&table, &path, &["Outer".into()], "Id").unwrap();
+    assert_eq!(fragments.len(), 2);
+    assert!(fragments[0].snippet.contains("first"));
+    assert!(fragments[1].snippet.contains("second"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn imported_private_type_lookup_keeps_terminal_owner_separate_from_superclass() {
+    // Unrun graph regression: the dependency is followed as its own node.
+    let dir = temp_registry("owned-private-relative-import");
+    let helper = dir.join("helper.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&helper,
+        "declare class Base { inherited(): string; }\nexport declare class Key extends Base { value: number; }\n",
+    ).unwrap();
+    fs::write(&entry,
+        "import type { Key as Id } from './helper';\nexport interface Model { id: Id; }\n",
+    ).unwrap();
+    let requested = resolve_owned_source_type_reference(&entry, &[], "Id").unwrap();
+    assert!(!requested.is_empty());
+    assert!(requested.iter().all(|declaration| declaration.local_name.as_deref() == Some("Key")));
+    assert!(requested.iter().all(|declaration| declaration.origin == helper.canonicalize().unwrap()));
+    assert!(!requested.iter().any(|declaration| declaration.snippet.contains("class Base")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_type_reference_ranges_ignore_identifiers_and_type_parameter_shadows() {
+    // Unrun span regression for the shared imported-alias and closure visitor.
+    let origin = std::path::Path::new("types.d.ts");
+    let snippet = "export interface Model extends Base { id: Id; Id: string; method<Id>(value: Id): Base; }";
+    let base = type_reference_ranges(snippet, "Base", origin).unwrap();
+    let id = type_reference_ranges(snippet, "Id", origin).unwrap();
+    assert_eq!(base.len(), 2);
+    assert_eq!(id.len(), 1);
+    assert_eq!(&snippet[id[0].0..id[0].1], "Id");
+    let shadowed = "export interface Box<Id> { id: Id; }";
+    assert!(type_reference_ranges(shadowed, "Id", origin).unwrap().is_empty());
+}
+
+#[test]
+fn type_query_value_shadows_are_distinct_from_generic_type_shadows() {
+    // Unrun visitor regression: a generic type parameter Foo hides the type
+    // use, while `typeof Foo` still names the outer value declaration.
+    let origin = std::path::Path::new("types.d.ts");
+    let generic = "declare const Foo: number; export interface Holder<Foo> { ctor: typeof Foo; item: Foo; }";
+    let sites = type_reference_sites(generic, "Foo", origin).unwrap();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].kind, TypeReferenceKind::ValueQuery);
+    assert_eq!(&generic[sites[0].full.0..sites[0].full.1], "Foo");
+    let parameter = "export declare function use(config: number): typeof config;";
+    assert!(type_reference_sites(parameter, "config", origin).unwrap().is_empty());
+}
+
+#[test]
+fn explicit_external_value_export_does_not_fall_back_to_local_binding() {
+    // Unrun owner regression: a source-qualified export has no local
+    // fallback even when the file declares an identically named helper.
+    let dir = temp_registry("owned-external-value-export");
+    let path = dir.join("index.d.ts");
+    fs::write(&path,
+        "declare function make(): string;\nexport { make } from 'external-package';\n",
+    ).unwrap();
+    let found = exported_owned_value_declarations(
+        &path, "make", &mut std::collections::BTreeSet::new(),
+    ).unwrap();
+    assert!(found.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_type_reference_edges_keep_import_alias_and_terminal_origin() {
+    // Unrun closure-graph regression: local spelling is not the owner key.
+    let dir = temp_registry("owned-private-reference-edges");
+    let helper = dir.join("helper.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&helper, "export interface Key { id: string; }\n").unwrap();
+    let model = "export interface Model { id: Id; }";
+    fs::write(&entry, format!("import type {{ Key as Id }} from './helper';\n{model}\n")).unwrap();
+    let owned = OwnedDeclaration::new(&entry, model.to_string());
+    let edges = owned_type_reference_edges(&owned).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].local_spelling, "Id");
+    assert_eq!(&model[edges[0].range.0..edges[0].range.1], "Id");
+    assert_eq!(edges[0].terminal.0, helper.canonicalize().unwrap());
+    assert_eq!(edges[0].terminal.2, "Key");
+    assert_eq!(edges[0].fragments.len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_type_reference_edges_resolve_qualified_namespace_member_only() {
+    // Unrun graph regression: `Types.Id` is one member, not the whole namespace.
+    let dir = temp_registry("owned-private-qualified-edges");
+    let helper = dir.join("helper.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&helper,
+        "export declare namespace Types { export interface Id { value: string; } export interface Unused { other: number; } }\n",
+    ).unwrap();
+    let model = "export interface Model { id: Remote.Types.Id; }";
+    fs::write(&entry, format!("import * as Remote from './helper';\n{model}\n")).unwrap();
+    let owned = OwnedDeclaration::new(&entry, model.to_string());
+    let edges = owned_type_reference_edges(&owned).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].local_spelling, "Remote");
+    assert_eq!(&model[edges[0].full_range.0..edges[0].full_range.1], "Remote.Types.Id");
+    assert_eq!(edges[0].terminal.0, helper.canonicalize().unwrap());
+    assert_eq!(edges[0].terminal.1, vec!["Types"]);
+    assert_eq!(edges[0].terminal.2, "Id");
+    assert_eq!(edges[0].fragments.len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn qualified_type_lookup_does_not_escape_a_shadowing_inner_namespace() {
+    // Unrun lexical regression: Inner.A exists, so A.Id cannot bind outer A.Id.
+    let dir = temp_registry("owned-private-qualified-shadow");
+    let path = dir.join("types.d.ts");
+    fs::write(&path,
+        "declare namespace A { interface Id { outer: string; } namespace Inner { namespace A { interface Other { inner: number; } } interface Model { id: A.Id; } } }",
+    ).unwrap();
+    let unresolved = resolve_owned_qualified_source_type_reference(
+        &path, &["A".into(), "Inner".into()], &["A".into(), "Id".into()],
+    ).unwrap();
+    assert!(unresolved.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn qualified_type_lookup_follows_type_namespace_barrel_to_terminal_owner() {
+    // Unrun barrel regression: import * then export type * as Types retains
+    // the leaf identity, rather than treating a barrel as its owner.
+    let dir = temp_registry("owned-qualified-type-barrel");
+    let leaf = dir.join("leaf.d.ts");
+    let barrel = dir.join("barrel.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&leaf, "export interface Id { leaf: string; }\n").unwrap();
+    fs::write(&barrel, "export type * as Types from './leaf';\n").unwrap();
+    fs::write(&entry,
+        "import type * as Remote from './barrel';\nexport interface Model { id: Remote.Types.Id; }\n",
+    ).unwrap();
+    let found = resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Types".into(), "Id".into()],
+    ).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].origin, leaf.canonicalize().unwrap());
+    assert_eq!(found[0].local_name.as_deref(), Some("Id"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn qualified_value_query_follows_namespace_barrel_to_terminal_owner() {
+    // Unrun value-kind barrel regression for typeof Remote.Api.make.
+    let dir = temp_registry("owned-qualified-value-barrel");
+    let leaf = dir.join("leaf.d.ts");
+    let barrel = dir.join("barrel.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&leaf, "export declare function make(): string;\n").unwrap();
+    fs::write(&barrel, "export * as Api from './leaf';\n").unwrap();
+    fs::write(&entry,
+        "import * as Remote from './barrel';\nexport interface Model { maker: typeof Remote.Api.make; }\n",
+    ).unwrap();
+    let found = resolve_owned_qualified_source_value_reference(
+        &entry, &[], &["Remote".into(), "Api".into(), "make".into()],
+    ).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].origin, leaf.canonicalize().unwrap());
+    assert_eq!(found[0].local_name.as_deref(), Some("make"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn qualified_import_uses_local_namespace_behind_public_alias() {
+    // Unrun source regression: public Api is stored under source scope Hidden.
+    let dir = temp_registry("owned-qualified-local-namespace-alias");
+    let leaf = dir.join("leaf.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&leaf, "declare namespace Hidden { export interface Id { key: string; } export declare function make(): Id; interface Private {} }\nexport { Hidden as Api };\n").unwrap();
+    fs::write(&entry, "import * as Remote from './leaf';\nexport interface Model { id: Remote.Api.Id; make: typeof Remote.Api.make; }\n").unwrap();
+    let id = resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Api".into(), "Id".into()],
+    ).unwrap();
+    assert_eq!(id.len(), 1);
+    assert_eq!(id[0].origin, leaf.canonicalize().unwrap());
+    assert_eq!(id[0].source_scope, vec!["Hidden"]);
+    let make = resolve_owned_qualified_source_value_reference(
+        &entry, &[], &["Remote".into(), "Api".into(), "make".into()],
+    ).unwrap();
+    assert_eq!(make.len(), 1);
+    assert_eq!(make[0].source_scope, vec!["Hidden"]);
+    fs::write(&entry, "import { Api as Remote } from './leaf';\nexport interface Model { id: Remote.Id; make: typeof Remote.make; }\n").unwrap();
+    let named_id = resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Id".into()],
+    ).unwrap();
+    assert_eq!(named_id.len(), 1);
+    assert_eq!(named_id[0].source_scope, vec!["Hidden"]);
+    let named_make = resolve_owned_qualified_source_value_reference(
+        &entry, &[], &["Remote".into(), "make".into()],
+    ).unwrap();
+    assert_eq!(named_make.len(), 1);
+    assert_eq!(named_make[0].source_scope, vec!["Hidden"]);
+    assert!(resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Private".into()],
+    ).unwrap().is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn qualified_import_does_not_treat_an_exported_function_as_namespace() {
+    // Unrun regression: a same-name exported function does not expose a
+    // private namespace member through a coincidental lookup key.
+    let dir = temp_registry("owned-qualified-function-root");
+    let leaf = dir.join("leaf.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&leaf, "declare function make(): void;\nexport { make as Api };\ninterface Id {}\n").unwrap();
+    fs::write(&entry, "import * as Remote from './leaf';\nexport interface Model { id: Remote.Api.Id; }\n").unwrap();
+    assert!(resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Api".into(), "Id".into()],
+    ).unwrap().is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_namespace_alias_does_not_resolve_a_value_query() {
+    // Unrun regression: `export type` permits Remote.Api.Id but cannot
+    // expose `typeof Remote.Api.make` as a runtime value binding.
+    let dir = temp_registry("owned-qualified-type-only-namespace");
+    let leaf = dir.join("leaf.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&leaf, "declare namespace Hidden { export interface Id {} export declare function make(): void; }\nexport type { Hidden as Api };\n").unwrap();
+    fs::write(&entry, "import type * as Remote from './leaf';\nexport interface Model { id: Remote.Api.Id; }\n").unwrap();
+    assert_eq!(resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Api".into(), "Id".into()],
+    ).unwrap().len(), 1);
+    assert!(resolve_owned_qualified_source_value_reference(
+        &entry, &[], &["Remote".into(), "Api".into(), "make".into()],
+    ).unwrap().is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn named_namespace_barrel_follows_renamed_terminal_scope() {
+    // Unrun regression: source-qualified `Hidden as Api` keeps Hidden as
+    // the terminal lexical scope across another named import alias.
+    let dir = temp_registry("owned-named-namespace-barrel-alias");
+    let leaf = dir.join("leaf.d.ts");
+    let barrel = dir.join("barrel.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&leaf, "export declare namespace Hidden { export interface Id {} export declare function make(): Id; }\n").unwrap();
+    fs::write(&barrel, "export { Hidden as Api } from './leaf';\n").unwrap();
+    fs::write(&entry, "import { Api as Remote } from './barrel';\nexport interface Model { id: Remote.Id; make: typeof Remote.make; }\n").unwrap();
+    let id = resolve_owned_qualified_source_type_reference(
+        &entry, &[], &["Remote".into(), "Id".into()],
+    ).unwrap();
+    assert_eq!(id.len(), 1);
+    assert_eq!(id[0].source_scope, vec!["Hidden"]);
+    let make = resolve_owned_qualified_source_value_reference(
+        &entry, &[], &["Remote".into(), "make".into()],
+    ).unwrap();
+    assert_eq!(make.len(), 1);
+    assert_eq!(make[0].source_scope, vec!["Hidden"]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn private_type_closure_keeps_only_referenced_source_owned_fragments() {
+    // Unrun closure regression: colliding Id names stay keyed by origin.
+    let dir = temp_registry("owned-private-reference-closure");
+    let mut emitted = Vec::new();
+    for (file, model, payload) in [("a.d.ts", "ModelA", "string"), ("b.d.ts", "ModelB", "number")] {
+        let path = dir.join(file);
+        let selected = format!("export interface {model} {{ id: Id; }}");
+        fs::write(&path, format!(
+            "interface Id {{ value: {payload}; }}\ninterface Unused {{ ignored: boolean; }}\n{selected}\n",
+        )).unwrap();
+        emitted.push(EmittedOwnedDeclaration {
+            declaration: OwnedDeclaration::new(&path, selected.clone()), scope: None,
+            public_names: vec![model.to_string()], start: 0, end: selected.len(),
+            metadata_only: false,
+        });
+    }
+    let public = public_type_occurrences(&emitted);
+    let support = referenced_private_type_closure(&emitted, &public).unwrap();
+    assert_eq!(support.types.len(), 2);
+    assert!(support.values.is_empty());
+    assert!(support.types.keys().all(|(_, _, name)| name == "Id"));
+    assert_ne!(support.types.keys().next().unwrap().0, support.types.keys().next_back().unwrap().0);
+    assert!(support.types.values().all(|fragments| fragments.len() == 1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn flattened_wildcard_types_rewrite_colliding_private_references_into_support_namespaces() {
+    // Unrun output regression: two private Id bindings remain distinct.
+    let dir = temp_registry("owned-private-flat-output");
+    let entry = dir.join("index.d.ts");
+    let source = "export * from './a';\nexport * from './b';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("a.d.ts"),
+        "interface Id { value: string; }\nexport interface ModelA { id: Id; }\n",
+    ).unwrap();
+    fs::write(dir.join("b.d.ts"),
+        "interface Id { value: number; }\nexport interface ModelB { id: Id; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 2, "{output}");
+    assert!(output.contains("export interface ModelA { id: __thaw_support_"), "{output}");
+    assert!(output.contains("export interface ModelB { id: __thaw_support_"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn flattened_public_import_alias_rewrites_without_private_support() {
+    // Unrun output regression: a selected public target needs remapping even
+    // when the reference closure contains no private declaration.
+    let dir = temp_registry("owned-public-alias-only");
+    let entry = dir.join("index.d.ts");
+    let source = "export { Model as Renamed } from './model';\nexport { Wrapper } from './wrapper';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("model.d.ts"), "export interface Model { value: string; }\n").unwrap();
+    fs::write(dir.join("wrapper.d.ts"),
+        "import type { Model as Local } from './model';\nexport interface Wrapper { item: Local; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("item: Model"), "{output}");
+    assert!(!output.contains("item: Local"), "{output}");
+    assert!(!output.contains("__thaw_private_support_marker__"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn retained_entry_and_appended_types_rewrite_after_import_removal() {
+    // Unrun interval regression: a materialized class import shortens the
+    // retained entry prefix while appended declarations move with it.
+    let dir = temp_registry("owned-entry-intervals");
+    let entry = dir.join("index.d.ts");
+    let source = "import Base from './base';\ninterface EntryId { value: string; }\nexport class EntryModel extends Base { id: EntryId; }\nexport { LeafModel } from './leaf';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("base.d.ts"), "export default class Base { ready(): boolean; }\n").unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "interface LeafId { value: number; }\nexport interface LeafModel { id: LeafId; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    // The removed default import is materialized under its local binding (as
+    // in the default-import-extends and named-class-alias tests), so only the
+    // two private id types move to support namespaces.
+    assert!(output.contains("class EntryModel extends Base { id: __thaw_support_"), "{output}");
+    assert!(output.contains("declare class Base { ready(): boolean; }"), "{output}");
+    assert!(output.contains("export type { Base };"), "{output}");
+    assert!(output.contains("interface LeafModel { id: __thaw_support_"), "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 2, "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn value_namespace_members_rewrite_distinct_private_type_owners() {
+    // Unrun namespace-renderer regression: child intervals must be rewritten
+    // inside each wrapper while the wrappers remain public value namespaces.
+    let dir = temp_registry("owned-private-namespace-output");
+    let entry = dir.join("index.d.ts");
+    let source = "export * as left from './left';\nexport * as right from './right';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("left.d.ts"),
+        "interface Id { left: string; }\nexport interface Model { id: Id; }\n",
+    ).unwrap();
+    fs::write(dir.join("right.d.ts"),
+        "interface Id { right: number; }\nexport interface Model { id: Id; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    for name in ["left", "right"] {
+        let body = output.split(&format!("declare namespace {name} {{")).nth(1)
+            .unwrap().split("\n}").next().unwrap();
+        assert!(body.contains("export interface Model { id: __thaw_support_"), "{output}");
+    }
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 2, "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn public_namespace_class_alias_reuses_selected_type_spelling() {
+    // Unrun alias-marker regression: a bare source class followed by an
+    // export marker is still a selected public type occurrence.
+    let dir = temp_registry("owned-public-namespace-class-alias");
+    let entry = dir.join("index.d.ts");
+    let source = "export * as api from './barrel';\nexport { Model } from './model';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("barrel.d.ts"),
+        "export { Hidden as PublicClient } from './client';\n",
+    ).unwrap();
+    fs::write(dir.join("client.d.ts"), "export class Hidden { ping(): string; }\n").unwrap();
+    fs::write(dir.join("model.d.ts"),
+        "import { Hidden as Local } from './client';\nexport interface Model { client: Local; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("client: api.PublicClient"), "{output}");
+    assert!(!output.contains("client: Local"), "{output}");
+    assert!(!output.contains("__thaw_private_support_marker__"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn private_type_query_value_and_signature_type_share_owned_support_namespace() {
+    // Unrun value-kind closure regression: typeof names a value, whose
+    // signature in turn pulls only its referenced private type.
+    let dir = temp_registry("owned-private-type-query");
+    let entry = dir.join("index.d.ts");
+    let source = "export { Model } from './leaf';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "interface Id { value: string; }\ndeclare function make(): Id;\nexport interface Model { maker: typeof make; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("maker: typeof __thaw_support_"), "{output}");
+    assert!(output.contains("export function make(): __thaw_support_"), "{output}");
+    assert!(output.contains("export interface Id { value: string; }"), "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 1, "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn private_type_query_copies_only_selected_variable_declarator() {
+    // Unrun multi-var regression: an unrelated declarator is never pulled
+    // into the private support surface by `typeof config`.
+    let dir = temp_registry("owned-private-type-query-var");
+    let entry = dir.join("index.d.ts");
+    let source = "export { Model } from './leaf';\n";
+    fs::write(&entry, source).unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "interface Id { value: string; }\ndeclare const config: Id, unused: boolean;\nexport interface Model { setting: typeof config; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("setting: typeof __thaw_support_"), "{output}");
+    assert!(output.contains("export const config: __thaw_support_"), "{output}");
+    assert!(!output.contains("unused: boolean"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn imported_equals_inlined_type_keeps_its_private_helper_owner() {
+    // Unrun generated-output regression: both the retained entry and the
+    // directly appended sibling body must be rewritten from known spans.
+    let dir = temp_registry("owned-import-equals-inline-helper");
+    let entry = dir.join("entry.d.ts");
+    let sibling = dir.join("mail.d.ts");
+    fs::write(&entry,
+        "import Mail = require('./mail');\nexport interface Model { mail: Mail; }\n",
+    ).unwrap();
+    fs::write(&sibling,
+        "interface Id { value: string; }\ndeclare class Mail { id: Id; }\nexport = Mail;\n",
+    ).unwrap();
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("export interface Model { mail: __thaw_support_"), "{flattened}");
+    assert!(flattened.contains("export class Mail { id: __thaw_support_"), "{flattened}");
+    assert!(flattened.contains("export interface Id { value: string; }"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn builtin_transform_materialization_carries_referenced_option_types() {
+    // Unrun synthetic-source regression: requested builtin classes have no
+    // file owner, but their same-source constructor types must survive.
+    let source = resolve_builtin("stream").unwrap().dts_source;
+    let snippets = builtin_class_and_ancestor_declarations(
+        &source, "stream", "Transform", &mut std::collections::BTreeSet::new(),
+    ).unwrap();
+    assert!(snippets.iter().any(|snippet| snippet.contains("class Transform extends Duplex")));
+    assert!(snippets.iter().any(|snippet| snippet.contains("interface TransformOptions")));
+    assert!(snippets.iter().any(|snippet| snippet.contains("interface TransformFlushOptions")));
+    assert!(snippets.iter().any(|snippet| snippet.contains("interface DuplexOptions")));
+    let flattened = snippets.join("\n");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+}
+
+#[test]
+fn builtin_sibling_types_are_materialized_once_per_builtin_origin() {
+    // Unrun same-source dedup regression: two derived classes share
+    // Transform, Duplex, and their option types.
+    let dir = temp_registry("owned-builtin-sibling-dedup");
+    let entry = dir.join("index.d.ts");
+    let source = "import * as stream from 'node:stream';\nexport declare class First extends stream.Transform {}\nexport declare class Second extends stream.PassThrough {}\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert_eq!(output.matches("interface TransformOptions").count(), 1, "{output}");
+    assert_eq!(output.matches("interface DuplexOptions").count(), 1, "{output}");
+    assert_eq!(output.matches("class Transform extends Duplex").count(), 1, "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn builtin_signature_siblings_include_generic_and_property_types() {
+    // Unrun non-stream regressions: a generic result and a sibling class
+    // property are both ordinary same-source type references.
+    let reporters = resolve_builtin("test/reporters").unwrap().dts_source;
+    let reporter = builtin_class_and_ancestor_declarations(
+        &reporters, "test/reporters", "Reporter", &mut std::collections::BTreeSet::new(),
+    ).unwrap();
+    assert!(reporter.iter().any(|snippet| snippet.contains("interface ReporterResult")));
+    let url = resolve_builtin("url").unwrap().dts_source;
+    let url_class = builtin_class_and_ancestor_declarations(
+        &url, "url", "URL", &mut std::collections::BTreeSet::new(),
+    ).unwrap();
+    assert!(url_class.iter().any(|snippet| snippet.contains("class URLSearchParams")));
+}
+
+#[test]
+fn retained_multivariable_second_binding_keeps_public_value_identity() {
+    // Unrun same-statement metadata regression: b is a public value even
+    // though declaration_identity of the full var statement returns a.
+    let dir = temp_registry("owned-retained-multivar-public");
+    let entry = dir.join("index.d.ts");
+    let source = "interface Id { value: string; }\nexport declare const a: number, b: Id;\nexport interface Model { selected: typeof b; }\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("selected: typeof b"), "{output}");
+    assert!(output.contains("b: __thaw_support_"), "{output}");
+    assert!(!output.contains("selected: typeof __thaw_support_"), "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 1, "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn default_class_owner_matches_the_materialized_import_equals_spelling() {
+    // Unrun provenance regression: `inline_import_equals_value_type`
+    // changes export-default syntax, but the owner stays the source class.
+    let dir = temp_registry("owned-default-class-materialization");
+    let leaf = dir.join("mime.d.ts");
+    fs::write(&leaf, "interface Id {}\nexport default class Mime { id: Id; }\n").unwrap();
+    let owner = leaf.canonicalize().unwrap();
+    let table = source_type_bindings(&leaf).unwrap();
+    let mime = table.get(&(owner.clone(), Vec::new(), "Mime".to_string())).unwrap();
+    assert_eq!(mime.len(), 1);
+    assert!(mime[0].snippet.contains("declare class Mime"));
+    assert_eq!(mime[0].origin, owner);
+    let appended = "export default class Mime { id: Id; }";
+    let mut records = Vec::new();
+    record_owned_entry_declarations(&mut records, &leaf, appended, 11).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].declaration.local_name.as_deref(), Some("Mime"));
+    assert_eq!(records[0].public_names, vec!["default"]);
+    assert_eq!((records[0].start, records[0].end), (11, 11 + appended.len()));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn triple_slash_direct_append_retains_referenced_file_type_owner() {
+    // Unrun appended-origin regression: the referenced source owns both
+    // its public model and private Id, even after entry-prefix replacement.
+    let dir = temp_registry("owned-triple-slash-direct-append");
+    let entry = dir.join("index.d.ts");
+    fs::write(&entry, "/// <reference path=\"./leaf.d.ts\" />\n").unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "interface Id { value: string; }\nexport interface Model { id: Id; }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(output.contains("export interface Model { id: __thaw_support_"), "{output}");
+    assert!(output.contains("export interface Id { value: string; }"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn hoisted_export_equals_member_keeps_original_namespace_owner() {
+    // Unrun hoist regression: the flat public member came from Api, so
+    // its private Id still resolves in that source namespace.
+    let dir = temp_registry("owned-hoisted-export-equals-helper");
+    let entry = dir.join("index.d.ts");
+    let source = "declare namespace Api { interface Id { value: string; } export interface Model { id: Id; } }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("export interface Model { id: __thaw_support_"), "{output}");
+    assert!(output.contains("export namespace Api {"), "{output}");
+    assert!(output.contains("export interface Id { value: string; }"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn resolved_hoisted_import_equals_keeps_terminal_function_owner() {
+    // Unrun resolved-hoist regression: a renamed import-equals member
+    // carries the leaf function's signature and private helper owner.
+    let dir = temp_registry("owned-hoisted-import-equals-helper");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("leaf.d.ts"),
+        "interface Id { value: string; }\nexport declare function make(id: Id): Id;\n",
+    ).unwrap();
+    let source = "import { make as Local } from './leaf';\ndeclare namespace Api { export import create = Local; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("function create(id: __thaw_support_"), "{output}");
+    assert!(output.contains("export interface Id { value: string; }"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn unwrapped_self_ambient_module_uses_transformed_source_owner() {
+    // Unrun ambient-view regression: the disk file stores a string-module
+    // wrapper, while the emitted public declaration is top level.
+    let dir = temp_registry("owned-self-ambient-view");
+    let entry = dir.join("index.d.ts");
+    let source = "declare module './index' { interface Hidden { self: string; } export interface Public { value: Hidden; } }\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("export interface Public { value: __thaw_support_"), "{output}");
+    assert!(output.contains("export interface Hidden { self: string; }"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn self_targeted_triple_slash_augmentation_keeps_target_scope_private_type() {
+    // Unrun exact-projection regression: a top-level Hidden in the target
+    // cannot replace the augmentation's same-named Hidden.
+    let dir = temp_registry("owned-augmentation-projected-view");
+    let entry = dir.join("index.d.ts");
+    fs::write(&entry,
+        "/// <reference path=\"./leaf.d.ts\" />\nexport as namespace Api;\n",
+    ).unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "interface Hidden { wrong: number; }\ndeclare module './index' { interface Hidden { right: string; } export interface Public { value: Hidden; } }\n",
+    ).unwrap();
+    let output = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(output.contains("export interface Public { value: __thaw_support_"), "{output}");
+    assert!(output.contains("right: string"), "{output}");
+    assert!(!output.contains("export interface Hidden { wrong: number; }"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn unwrapped_global_namespace_retains_private_lexical_member() {
+    // Unrun ambient-global regression: the source view includes the
+    // unwrapped namespace before its members are hoisted for export =.
+    let dir = temp_registry("owned-global-ambient-view");
+    let entry = dir.join("index.d.ts");
+    let source = "declare global { namespace Api { interface Hidden { fromGlobal: string; } export interface Public { value: Hidden; } } }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("export interface Public { value: __thaw_support_"), "{output}");
+    assert!(output.contains("export namespace Api {"), "{output}");
+    assert!(output.contains("fromGlobal: string"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_export_followers_prefer_explicit_and_reject_ambiguous_stars() {
+    // Unrun export-order regression: an explicit binding wins even if its
+    // star appears first; distinct star owners conflict, a diamond does not.
+    let dir = temp_registry("owned-export-star-precedence");
+    let left = dir.join("left.d.ts");
+    let right = dir.join("right.d.ts");
+    let chosen = dir.join("chosen.d.ts");
+    let ambiguous = dir.join("ambiguous.d.ts");
+    let selected_over_malformed = dir.join("selected-over-malformed.d.ts");
+    let unresolved_explicit = dir.join("unresolved-explicit.d.ts");
+    let a = dir.join("a.d.ts");
+    let b = dir.join("b.d.ts");
+    let diamond = dir.join("diamond.d.ts");
+    fs::write(&left, "export interface Id { left: string; }\nexport declare function make(): string;\n").unwrap();
+    fs::write(&right, "export interface Id { right: number; }\nexport declare function make(): number;\n").unwrap();
+    fs::write(&chosen, "export * from './left';\nexport { Id, make } from './right';\n").unwrap();
+    fs::write(&ambiguous, "export * from './left';\nexport * from './right';\n").unwrap();
+    fs::write(dir.join("bad.d.ts"), "export interface Incomplete {\n").unwrap();
+    fs::write(&selected_over_malformed,
+        "export * from './bad';\nexport { Id, make } from './right';\n",
+    ).unwrap();
+    fs::write(&unresolved_explicit,
+        "export * from './left';\nexport { Id, make } from 'external-missing-package';\n",
+    ).unwrap();
+    fs::write(&a, "export * from './left';\n").unwrap();
+    fs::write(&b, "export * from './left';\n").unwrap();
+    fs::write(&diamond, "export * from './a';\nexport * from './b';\n").unwrap();
+    let views = OwnedSourceViews::default();
+    assert_eq!(exported_owned_type_declarations(&chosen, "Id", &views).unwrap()[0].origin,
+        right.canonicalize().unwrap());
+    assert_eq!(exported_owned_value_declarations(&chosen, "make",
+        &mut std::collections::BTreeSet::new()).unwrap()[0].origin,
+        right.canonicalize().unwrap());
+    assert_eq!(exported_owned_type_declarations(&selected_over_malformed, "Id", &views)
+        .unwrap()[0].origin, right.canonicalize().unwrap());
+    assert_eq!(exported_owned_value_declarations(&selected_over_malformed, "make",
+        &mut std::collections::BTreeSet::new()).unwrap()[0].origin,
+        right.canonicalize().unwrap());
+    assert!(exported_owned_type_declarations(&ambiguous, "Id", &views).unwrap().is_empty());
+    assert!(exported_owned_value_declarations(&ambiguous, "make",
+        &mut std::collections::BTreeSet::new()).unwrap().is_empty());
+    assert!(exported_owned_type_declarations(&unresolved_explicit, "Id", &views)
+        .unwrap().is_empty());
+    assert!(exported_owned_value_declarations(&unresolved_explicit, "make",
+        &mut std::collections::BTreeSet::new()).unwrap().is_empty());
+    assert_eq!(exported_owned_type_declarations(&diamond, "Id", &views).unwrap().len(), 1);
+    assert_eq!(exported_owned_value_declarations(&diamond, "make",
+        &mut std::collections::BTreeSet::new()).unwrap().len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_imports_do_not_revive_uncached_ambiguous_or_unresolved_barrel_exports() {
+    // Unrun: a fresh source view must preserve the selected follower's empty
+    // result. The old class follower returned the first star instead.
+    let dir = temp_registry("owned-uncached-barrel-selection");
+    fs::write(dir.join("left.d.ts"),
+        "export interface Id { left: string; }\nexport declare function make(): string;\n",
+    ).unwrap();
+    fs::write(dir.join("right.d.ts"),
+        "export interface Id { right: number; }\nexport declare function make(): number;\n",
+    ).unwrap();
+    fs::write(dir.join("ambiguous.d.ts"),
+        "export * from './left';\nexport * from './right';\n",
+    ).unwrap();
+    fs::write(dir.join("unresolved.d.ts"),
+        "export * from './left';\nexport { Id, make } from 'missing-external';\n",
+    ).unwrap();
+    for barrel in ["ambiguous", "unresolved"] {
+        let entry = dir.join(format!("{barrel}-entry.d.ts"));
+        fs::write(&entry, format!(
+            "import {{ Id, make }} from './{barrel}';\nexport interface Public {{ id: Id; create: typeof make; }}\n",
+        )).unwrap();
+        let views = OwnedSourceViews::default();
+        assert!(resolve_owned_source_type_reference_with_views(&entry, &[], "Id", &views)
+            .unwrap().is_empty());
+        assert!(resolve_owned_source_value_reference_with_views(&entry, &[], "make", &views)
+            .unwrap().is_empty());
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_import_equals_follows_export_assignment_terminal_in_type_and_value_roles() {
+    // Unrun: Alias is only the import spelling. The owner is Actual, and its
+    // private Hidden field must remain reachable from type and typeof sites.
+    let dir = temp_registry("owned-import-equals-terminal");
+    let target = dir.join("target.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&target,
+        "interface Hidden { secret: string; }\ndeclare class Actual { value: Hidden; static ready(): boolean; }\nexport = Actual;\n",
+    ).unwrap();
+    let source = "import Alias = require('./target');\nexport interface Model { instance: Alias; factory: typeof Alias; }\n";
+    fs::write(&entry, source).unwrap();
+    let views = OwnedSourceViews::default();
+    for resolved in [
+        resolve_owned_source_type_reference_with_views(&entry, &[], "Alias", &views).unwrap(),
+        resolve_owned_source_value_reference_with_views(&entry, &[], "Alias", &views).unwrap(),
+    ] {
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].origin, target.canonicalize().unwrap());
+        assert_eq!(resolved[0].local_name.as_deref(), Some("Actual"));
+    }
+    let flattened = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(flattened.contains("instance: __thaw_support_"), "{flattened}");
+    assert!(flattened.contains("factory: typeof __thaw_support_"), "{flattened}");
+    assert!(flattened.contains("secret: string"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let barrel = dir.join("barrel.d.ts");
+    fs::write(&barrel,
+        "import Alias = require('./target');\nexport { Alias as Public };\n",
+    ).unwrap();
+    let selected_type = exported_owned_type_declarations(&barrel, "Public", &views).unwrap();
+    let selected_value = exported_owned_value_declarations(&barrel, "Public",
+        &mut std::collections::BTreeSet::new()).unwrap();
+    assert_eq!(selected_type[0].local_name.as_deref(), Some("Actual"));
+    assert_eq!(selected_value[0].local_name.as_deref(), Some("Actual"));
+    fs::write(dir.join("function.d.ts"),
+        "declare function ActualFunction(): string;\nexport = ActualFunction;\n",
+    ).unwrap();
+    let function_entry = dir.join("function-entry.d.ts");
+    fs::write(&function_entry, "import Alias = require('./function');\nexport interface Holder { fn: typeof Alias; }\n").unwrap();
+    assert!(resolve_owned_source_type_reference_with_views(
+        &function_entry, &[], "Alias", &views,
+    ).unwrap().is_empty());
+    let function_value = resolve_owned_source_value_reference_with_views(
+        &function_entry, &[], "Alias", &views,
+    ).unwrap();
+    assert_eq!(function_value[0].local_name.as_deref(), Some("ActualFunction"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_export_assignment_barrel_cycles_stop_in_type_and_value_roles() {
+    // Unrun: crossing export = must retain the active named-export visit.
+    // Otherwise A.Public -> B export = Actual -> A.Public recurses forever.
+    let dir = temp_registry("owned-export-assignment-cycle");
+    let a = dir.join("a.d.ts");
+    let b = dir.join("b.d.ts");
+    fs::write(&a,
+        "import Alias = require('./b');\nexport { Alias as Public };\n",
+    ).unwrap();
+    fs::write(&b,
+        "import { Public as Actual } from './a';\nexport = Actual;\n",
+    ).unwrap();
+    let views = OwnedSourceViews::default();
+    assert!(exported_owned_type_declarations(&a, "Public", &views)
+        .unwrap().is_empty());
+    assert!(exported_owned_value_declarations(&a, "Public",
+        &mut std::collections::BTreeSet::new()).unwrap().is_empty());
+
+    // A noncyclic named import through the same export-assignment boundary
+    // still reaches the original type/value owner.
+    let c = dir.join("c.d.ts");
+    fs::write(&c,
+        "export declare class Actual { id: number; }\n",
+    ).unwrap();
+    fs::write(&b,
+        "import { Actual as Chosen } from './c';\nexport = Chosen;\n",
+    ).unwrap();
+    for selected in [
+        exported_owned_type_declarations(&a, "Public", &views).unwrap(),
+        exported_owned_value_declarations(&a, "Public",
+            &mut std::collections::BTreeSet::new()).unwrap(),
+    ] {
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].origin, c.canonicalize().unwrap());
+        assert_eq!(selected[0].local_name.as_deref(), Some("Actual"));
+    }
+    // Sibling edges in one export walk may select the same export-assignment
+    // origin. Its active marker must be cleared after each completed edge.
+    for kind in [TypeReferenceKind::Type, TypeReferenceKind::ValueQuery] {
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..2 {
+            let selected = selected_export_assignment_declarations_with_visited(
+                &b, kind, &views, &mut visited,
+            ).unwrap();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].origin, c.canonicalize().unwrap());
+            assert!(visited.is_empty(), "{visited:?}");
+        }
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_import_equals_qualified_members_use_the_export_assignment_namespace() {
+    // Unrun: Alias.Id and typeof Alias.config refer to Actual's children,
+    // not direct exports named Id/config from the target module.
+    let dir = temp_registry("owned-import-equals-qualified-terminal");
+    let target = dir.join("target.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&target,
+        "declare namespace Actual { export interface Id { value: string; } export const config: Id; }\nexport = Actual;\n",
+    ).unwrap();
+    fs::write(&entry,
+        "import Alias = require('./target');\nexport interface Model { id: Alias.Id; setting: typeof Alias.config; }\n",
+    ).unwrap();
+    let views = OwnedSourceViews::default();
+    let id = resolve_owned_qualified_source_type_reference_with_views(
+        &entry, &[], &["Alias".into(), "Id".into()], &views,
+    ).unwrap();
+    let config = resolve_owned_qualified_source_value_reference_with_views(
+        &entry, &[], &["Alias".into(), "config".into()], &views,
+    ).unwrap();
+    assert_eq!(id[0].origin, target.canonicalize().unwrap());
+    assert_eq!(id[0].source_scope, vec!["Actual"]);
+    assert_eq!(id[0].local_name.as_deref(), Some("Id"));
+    assert_eq!(config[0].source_scope, vec!["Actual"]);
+    assert_eq!(config[0].local_name.as_deref(), Some("config"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn owned_import_equals_object_property_query_keeps_its_original_type_owner() {
+    // Unrun: `export = Actual` can be an object-valued const instead of a
+    // namespace. Its property is selected from the source annotation.
+    let dir = temp_registry("owned-import-equals-object-property");
+    let target = dir.join("target.d.ts");
+    let entry = dir.join("entry.d.ts");
+    fs::write(&target,
+        "interface Hidden { secret: string; }\ninterface Members { config: Hidden; }\ndeclare const Actual: Members;\nexport = Actual;\n",
+    ).unwrap();
+    fs::write(&entry,
+        "import Alias = require('./target');\nexport interface Model { setting: typeof Alias.config; }\n",
+    ).unwrap();
+    let selected = resolve_owned_qualified_source_value_reference_with_views(
+        &entry, &[], &["Alias".into(), "config".into()], &OwnedSourceViews::default(),
+    ).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].origin, target.canonicalize().unwrap());
+    assert_eq!(selected[0].local_name.as_deref(), Some("config"));
+    assert!(selected[0].snippet.contains("config: Hidden"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn wildcard_export_does_not_forward_default_type_or_value() {
+    // Unrun negative rule: export * excludes default; a named explicit
+    // default alias reaches the same source class in both namespaces.
+    let dir = temp_registry("owned-default-wildcard-exclusion");
+    let leaf = dir.join("leaf.d.ts");
+    let star = dir.join("star.d.ts");
+    let named = dir.join("named.d.ts");
+    fs::write(&leaf, "export default class Hidden { value: string; }\n").unwrap();
+    fs::write(&star, "export * from './leaf';\n").unwrap();
+    fs::write(&named, "export { default as Public } from './leaf';\n").unwrap();
+    let views = OwnedSourceViews::default();
+    assert!(exported_owned_type_declarations(&star, "default", &views).unwrap().is_empty());
+    assert!(exported_owned_value_declarations(&star, "default",
+        &mut std::collections::BTreeSet::new()).unwrap().is_empty());
+    assert_eq!(exported_owned_type_declarations(&named, "Public", &views).unwrap().len(), 1);
+    assert_eq!(exported_owned_value_declarations(&named, "Public",
+        &mut std::collections::BTreeSet::new()).unwrap().len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn default_identifier_expression_preserves_class_type_owner() {
+    // Unrun selected-default regression: the default expression names a
+    // local class rather than an inline ExportDefaultDecl.
+    let dir = temp_registry("owned-default-identifier-type");
+    let leaf = dir.join("leaf.d.ts");
+    fs::write(&leaf, "declare class C { value: string; }\nexport default C;\n").unwrap();
+    let views = OwnedSourceViews::default();
+    let selected = exported_owned_type_declarations(&leaf, "default", &views).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].local_name.as_deref(), Some("C"));
+    assert_eq!(selected[0].origin, leaf.canonicalize().unwrap());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn composite_export_import_preserves_terminal_owner_and_public_alias() {
+    // Unrun: `types.Console` is generated from a target export-assignment
+    // property. Its declaration and private dependency still belong to the
+    // target, even when the entry has a same-named local declaration.
+    let dir = temp_registry("owned-composite-export-import");
+    let entry = dir.join("index.d.ts");
+    let target = dir.join("transports.d.ts");
+    fs::write(&target,
+        "declare namespace TransportNs {\n  interface Secret { token: string; }\n  interface ConsoleTransportInstance { secret: Secret; }\n  interface ConsoleTransportInstance { extra: string; }\n  interface Transports { Console: ConsoleTransportInstance; }\n}\ndeclare const TransportNs: TransportNs.Transports;\nexport = TransportNs;\n",
+    ).unwrap();
+    let source = "import * as Types from './transports';\ndeclare namespace Kit {\n  export import types = Types;\n  export interface Public { selected: types.Console; }\n}\ninterface ConsoleTransportInstance { wrong: number; }\nexport = Kit;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("export const Console: __thaw_support_"), "{output}");
+    assert!(output.contains("selected: types.Console"), "{output}");
+    assert!(!output.contains("export const Console: ConsoleTransportInstance"), "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 1, "{output}");
+    assert!(output.contains("secret: __thaw_support_"), "{output}");
+    assert!(output.contains("extra: string"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn composite_export_assignment_preserves_generic_property_instantiation() {
+    // Unrun: a merged generic interface member must project through the
+    // instantiated object type. Copying its bare `T` would be invalid.
+    let dir = temp_registry("owned-composite-generic-property");
+    let entry = dir.join("index.d.ts");
+    let target = dir.join("members.d.ts");
+    fs::write(&target,
+        "declare namespace Source {\n  export class C { constructor(name: string); }\n  export interface Constructor<U> { new (value: U): C; }\n  export interface Members<T> { item: T; instance: C; }\n  export interface Members<T> { ctor: typeof C; factory: Constructor<T>; }\n}\ndeclare const X: Source.Members<string>;\nexport = X;\n",
+    ).unwrap();
+    let source = "import * as Parts from './members';\ndeclare namespace Api { export import parts = Parts; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("Members<string>[\"item\"]"), "{output}");
+    assert!(output.contains("Members<string>[\"instance\"]"), "{output}");
+    assert!(output.contains("Members<string>[\"ctor\"]"), "{output}");
+    assert!(output.contains("Members<string>[\"factory\"]"), "{output}");
+    assert!(!output.contains("const item: T"), "{output}");
+    assert_eq!(output.matches("export const ctor:").count(), 1, "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn composite_export_assignment_follows_alias_chain_and_intersection() {
+    // Unrun: property names come from the referenced alias graph, while
+    // indexed access on the instantiated root preserves each generic type.
+    let dir = temp_registry("owned-composite-alias-intersection");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("members.d.ts"),
+        "interface Base<T> { item: T; }\n\
+         type Combined<U> = Base<U> & { extra: U; };\n\
+         type Outer<V> = Combined<V>;\n\
+         declare const X: Outer<string>;\n\
+         export = X;\n",
+    ).unwrap();
+    let source = "import * as Parts from './members';\ndeclare namespace Api { export import parts = Parts; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("Outer<string>[\"item\"]"), "{output}");
+    assert!(output.contains("Outer<string>[\"extra\"]"), "{output}");
+    assert!(!output.contains("const item: T"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn composite_export_assignment_follows_inherited_and_quoted_object_properties() {
+    // Unrun: inherited generic properties must be projected through the
+    // instantiated root. A quoted static identifier remains an export;
+    // a non-identifier key cannot be spliced into `export const NAME`.
+    let dir = temp_registry("owned-composite-inherited-quoted");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("members.d.ts"),
+        "interface Base<T> { \"inherited\": T; \"not-valid-name\": T; }\n\
+         interface Members<U> extends Base<U> { own: U; }\n\
+         declare const X: Members<string>;\n\
+         export = X;\n",
+    ).unwrap();
+    let source = "import * as Parts from './members';\ndeclare namespace Api { export import parts = Parts; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("Members<string>[\"inherited\"]"), "{output}");
+    assert!(output.contains("Members<string>[\"own\"]"), "{output}");
+    assert!(output.contains("export const inherited:"), "{output}");
+    assert!(!output.contains("export const not-valid-name"), "{output}");
+    assert!(!output.contains("const inherited: T"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn composite_export_assignment_inherited_same_name_uses_one_root_projection() {
+    // Unrun: a direct property and its inherited declaration can have the
+    // same type, or the direct property can narrow the inherited type.
+    // Neither should conflict with the root indexed-access projection.
+    let dir = temp_registry("owned-composite-inherited-override");
+    let entry = dir.join("index.d.ts");
+    let source = "import * as Parts from './members';\ndeclare namespace Api { export import parts = Parts; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    for inherited in ["number", "number | string"] {
+        fs::write(dir.join("members.d.ts"), format!(
+            "interface Base {{ id: {inherited}; }}\ninterface Members extends Base {{ id: number; own: string; }}\ndeclare const X: Members;\nexport = X;\n",
+        )).unwrap();
+        let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+        assert!(output.contains("Members[\"id\"]"), "{output}");
+        assert!(output.contains("Members[\"own\"]"), "{output}");
+        assert_eq!(output.matches("export const id:").count(), 1, "{output}");
+        assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bare_namespace_alias_keeps_named_export_owners_and_type_roles() {
+    // Unrun HOLD regression for the remaining namespace-shaped target:
+    // two different source files use the same structural class spelling.
+    // The public paths must retain distinct instance shapes, while an
+    // interface exported with `export type` must not gain a runtime value.
+    let dir = temp_registry("owned-bare-namespace-selection");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("first.d.ts"),
+        "interface Hidden { first: string; }\nexport declare class Client { value: Hidden; next(): Client; }\n",
+    ).unwrap();
+    fs::write(dir.join("second.d.ts"),
+        "interface Hidden { second: number; }\nexport declare class Client { value: Hidden; }\nexport interface Model<T extends Hidden = Hidden> { id: number; data: T; }\n",
+    ).unwrap();
+    fs::write(dir.join("parts.d.ts"),
+        "export { Client as First } from './first';\nexport { Client as Second } from './second';\nexport type { Model as Shape } from './second';\n",
+    ).unwrap();
+    let source = "import * as Parts from './parts';\ndeclare namespace Api { export import parts = Parts; export interface Uses { first: parts.First; second: parts.Second; shape: parts.Shape; } }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("parts.First"), "{output}");
+    assert!(output.contains("parts.Second"), "{output}");
+    assert!(output.contains("parts.Shape"), "{output}");
+    assert!(output.contains("first: string"), "{output}");
+    assert!(output.contains("second: number"), "{output}");
+    assert_eq!(output.matches("class Client").count(), 2, "{output}");
+    assert!(output.contains("export type Shape<T extends __thaw_support_"), "{output}");
+    assert!(output.contains("= __thaw_owned_"), "{output}");
+    assert!(!output.contains("export const Shape:"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bare_namespace_alias_respects_explicit_over_wildcard_selection() {
+    // Unrun: flattened star records are candidates, not authoritative
+    // exports. A later explicit Client shadows the earlier star Client.
+    let dir = temp_registry("owned-bare-namespace-export-order");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("star.d.ts"),
+        "export declare class Client { wrong: number; }\n").unwrap();
+    fs::write(dir.join("selected.d.ts"),
+        "export declare class Client { selected: string; }\n").unwrap();
+    fs::write(dir.join("parts.d.ts"),
+        "export * from './star';\nexport { Client } from './selected';\n").unwrap();
+    let source = "import * as Parts from './parts';\ndeclare namespace Api { export import parts = Parts; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("selected: string"), "{output}");
+    assert!(!output.contains("wrong: number"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    fs::write(dir.join("parts.d.ts"),
+        "export * from './star';\nexport { Client } from './missing';\n").unwrap();
+    let unresolved = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(!unresolved.contains("wrong: number"), "{unresolved}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bare_namespace_alias_preserves_type_only_namespace_children() {
+    // Unrun HOLD control: a type-only namespace export is a container
+    // of declarations, not a type alias to a namespace value.
+    let dir = temp_registry("owned-bare-type-namespace");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("models.d.ts"),
+        "interface Hidden { token: string; }\nexport interface Model { hidden: Hidden; }\nexport declare class ShapeClass { hidden: Hidden; }\n",
+    ).unwrap();
+    fs::write(dir.join("parts.d.ts"),
+        "export type * as Shapes from './models';\n",
+    ).unwrap();
+    let source = "import * as Parts from './parts';\ndeclare namespace Api { export import parts = Parts; export interface Use { model: parts.Shapes.Model; } }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("namespace Shapes"), "{output}");
+    assert!(output.contains("Model"), "{output}");
+    assert!(output.contains("ShapeClass"), "{output}");
+    assert!(!output.contains("export type Shapes ="), "{output}");
+    assert!(output.contains("export namespace Shapes")
+        && output.contains("type __thaw_type_only_namespace_marker_"), "{output}");
+    assert!(!output.contains("export type { Shapes };"), "{output}");
+    assert!(output.contains("__thaw_support_"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bare_namespace_alias_preserves_nested_value_namespace_reexport() {
+    // Unrun: `export * as tools` is represented by scoped child records in
+    // the target flattening, without a top-level tools record.
+    let dir = temp_registry("owned-bare-nested-namespace");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("tools.d.ts"),
+        "export declare function make(value: string): string;\nexport declare class Shape { id: string; }\n",
+    ).unwrap();
+    fs::write(dir.join("parts.d.ts"),
+        "export * as tools from './tools';\n").unwrap();
+    let source = "import * as Parts from './parts';\ndeclare namespace Api { export import parts = Parts; }\nexport = Api;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("namespace tools")
+        && output.contains("make(value: string): string")
+        && output.contains("class Shape"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    fs::write(dir.join("left.d.ts"), "export * as tools from './tools';\n").unwrap();
+    fs::write(dir.join("right.d.ts"), "export * as tools from './tools';\n").unwrap();
+    fs::write(dir.join("parts.d.ts"),
+        "export * from './left';\nexport * from './right';\n").unwrap();
+    let diamond = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert_eq!(diamond.matches("export import tools =").count(), 1, "{diamond}");
+    assert!(thaw_parser::parse_declarations(&diamond).is_ok(), "{diamond}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn qualified_hoisted_export_import_uses_ambient_source_view() {
+    // Unrun: the selected function lives in a self ambient wrapper. The
+    // qualified hoist must resolve the same transformed view as closure.
+    let dir = temp_registry("owned-qualified-hoist-ambient");
+    let entry = dir.join("index.d.ts");
+    let target = dir.join("target.d.ts");
+    fs::write(&target,
+        "declare module './target' { export function create(): string; }\n",
+    ).unwrap();
+    let source = "import * as Imported from './target';\ndeclare namespace Kit { export import make = Imported.create; }\nexport = Kit;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("function make(): string"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn recursive_composite_export_import_keeps_leaf_owner_and_nested_path() {
+    // Unrun: each emitted owner remains distinct across two bare namespace
+    // alias levels; the public path is an actual nested declaration.
+    let dir = temp_registry("owned-recursive-composite");
+    let entry = dir.join("index.d.ts");
+    fs::write(dir.join("leaf.d.ts"),
+        "declare namespace Leaf { interface Secret { code: string; } interface Item { hidden: Secret; } interface Members { Item: Item; } }\ndeclare const Leaf: Leaf.Members;\nexport = Leaf;\n",
+    ).unwrap();
+    fs::write(dir.join("mid.d.ts"),
+        "import * as LeafModule from './leaf';\ndeclare namespace Mid { export import items = LeafModule; }\nexport = Mid;\n",
+    ).unwrap();
+    let source = "import * as MidModule from './mid';\ndeclare namespace Top { export import bundle = MidModule; export interface Public { item: bundle.items.Item; } }\nexport = Top;\n";
+    fs::write(&entry, source).unwrap();
+    let output = dts_source_with_reexported_functions(&entry, source).unwrap();
+    assert!(output.contains("declare namespace bundle {"), "{output}");
+    assert!(output.contains("export namespace items {"), "{output}");
+    assert!(output.contains("export const Item: __thaw_support_"), "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 1, "{output}");
+    assert!(output.contains("hidden: __thaw_support_"), "{output}");
+    assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
+    let _ = fs::remove_dir_all(dir);
 }

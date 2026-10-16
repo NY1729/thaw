@@ -23,6 +23,7 @@ fn main() {
         "Cargo.lock",
         "Cargo.toml",
         "crates/thaw-arena",
+        "crates/thaw-icu-data",
         "crates/thaw-runtime",
         "crates/thaw-std",
         "crates/thaw-jit",

@@ -20,12 +20,25 @@ fn build(
     )
 }
 
+fn path_builtin_name(name: &str) -> Option<&'static str> {
+    match name {
+        "path" | "node:path" => Some("node:path"),
+        "path/posix" | "node:path/posix" => Some("node:path/posix"),
+        "path/win32" | "node:path/win32" => Some("node:path/win32"),
+        _ => None,
+    }
+}
+
 fn registry_import_meta_resolutions(
     registry_dir: &Path,
     packages: &[String],
 ) -> std::collections::HashMap<String, String> {
     let mut resolutions = std::collections::HashMap::new();
     for specifier in packages {
+        if let Some(builtin) = path_builtin_name(specifier) {
+            resolutions.insert(specifier.clone(), builtin.to_string());
+            continue;
+        }
         if specifier.starts_with("node:") {
             resolutions.insert(specifier.clone(), specifier.clone());
             continue;
@@ -167,7 +180,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
     }
 
     let mut source = String::from(
-        "function thawAssetPath(path: string): string {\nreturn path.split(\"?\")[0].split(\"#\")[0];\n}\nfunction thawHasAsset(path: string): boolean {\npath = thawAssetPath(path);\n",
+        "function thawAssetPath(path: string): string {\nconst raw = path.split(\"?\")[0].split(\"#\")[0];\ntry { return decodeURIComponent(raw); } catch { return \"\"; }\n}\nfunction thawHasAssetDecoded(path: string): boolean {\n",
     );
     for (path, _, _, _) in &routes {
         source.push_str(&format!(
@@ -175,7 +188,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(path).unwrap()
         ));
     }
-    source.push_str("return false;\n}\nfunction thawAsset(path: string): string {\npath = thawAssetPath(path);\n");
+    source.push_str("return false;\n}\nfunction thawHasAsset(path: string): boolean { return thawHasAssetDecoded(thawAssetPath(path)); }\nfunction thawAssetDecoded(path: string): string {\n");
     for (path, content, _, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -183,7 +196,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(content).unwrap()
         ));
     }
-    source.push_str("return \"\";\n}\nfunction thawAssetContentType(path: string): string {\npath = thawAssetPath(path);\n");
+    source.push_str("return \"\";\n}\nfunction thawAsset(path: string): string { return thawAssetDecoded(thawAssetPath(path)); }\nfunction thawAssetContentTypeDecoded(path: string): string {\n");
     for (path, _, content_type, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -191,7 +204,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(content_type).unwrap()
         ));
     }
-    source.push_str("return \"application/octet-stream\";\n}\nfunction thawAssetEncoding(path: string): string {\npath = thawAssetPath(path);\n");
+    source.push_str("return \"application/octet-stream\";\n}\nfunction thawAssetContentType(path: string): string { return thawAssetContentTypeDecoded(thawAssetPath(path)); }\nfunction thawAssetEncodingDecoded(path: string): string {\n");
     for (path, _, _, encoding) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -199,9 +212,9 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(encoding).unwrap()
         ));
     }
-    source.push_str("return \"utf8\";\n}\n");
+    source.push_str("return \"utf8\";\n}\nfunction thawAssetEncoding(path: string): string { return thawAssetEncodingDecoded(thawAssetPath(path)); }\n");
     source.push_str(
-        "function thawAssetRoute(path: string): string {\npath = thawAssetPath(path);\nif (thawHasAsset(path)) { return path; }\nif (path.indexOf(\".\") < 0 && thawHasAsset(\"/\")) { return \"/\"; }\nreturn path;\n}\nfunction thawServeAsset(response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }, path: string): boolean {\npath = thawAssetRoute(path);\nif (!thawHasAsset(path)) { return false; }\nresponse.setHeader(\"Content-Type\", thawAssetContentType(path));\nreturn response.endEncoded(thawAsset(path), thawAssetEncoding(path));\n}\n",
+        "function thawAssetRouteDecoded(path: string): string {\nif (thawHasAssetDecoded(path)) { return path; }\nif (path !== \"\" && path.indexOf(\".\") < 0 && thawHasAssetDecoded(\"/\")) { return \"/\"; }\nreturn path;\n}\nfunction thawAssetRoute(path: string): string { return thawAssetRouteDecoded(thawAssetPath(path)); }\nfunction thawServeAsset(response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }, path: string): boolean {\npath = thawAssetRouteDecoded(thawAssetPath(path));\nif (!thawHasAssetDecoded(path)) { return false; }\nresponse.setHeader(\"Content-Type\", thawAssetContentTypeDecoded(path));\nreturn response.endEncoded(thawAssetDecoded(path), thawAssetEncodingDecoded(path));\n}\n",
     );
     Ok(source)
 }
@@ -304,13 +317,23 @@ fn build_with_native_mode(
     }
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
+    let scratch = BuildScratch::new(output)?;
     let external_native_dirs = (!embed_native_addons)
-        .then(|| external_native_directories(output))
+        .then(|| external_native_directories(output, &scratch))
         .transpose()?;
     let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
+    let mut runtime_packages = module_graph::external_runtime_specifiers(input, &user_source)?;
+    let mut static_packages = module_graph::external_static_specifiers(input, &user_source)?;
+    let dynamic_packages = module_graph::external_dynamic_specifiers(input, &user_source)?;
     let mut resolved_packages = use_packages.to_vec();
+    runtime_packages.extend(use_packages.iter().cloned());
+    static_packages.extend(use_packages.iter().cloned());
     for (specifier, location) in &external_specifiers {
-        let package = if specifier.starts_with("node:") {
+        let package = if let Some(builtin) = path_builtin_name(specifier) {
+            thaw_registry::resolve_builtin(builtin)
+                .map_err(|error| format!("{location}: {error}"))?;
+            specifier.clone()
+        } else if specifier.starts_with("node:") {
             thaw_registry::resolve_builtin(specifier)
                 .map_err(|error| format!("{location}: {error}"))?;
             specifier.clone()
@@ -397,11 +420,17 @@ fn build_with_native_mode(
         external_namespace_aliases,
         external_nested_namespaces,
         external_export_assignments,
+        external_module_indices,
         jit_fallback_reasons,
+        mut runtime_features,
     ) = generate_registry_shims(
         registry_dir,
         &resolved_packages,
+        &runtime_packages,
+        &static_packages,
+        &dynamic_packages,
         &user_source,
+        &thaw_parser::common::FileName::Real(input.to_path_buf()),
         embed_native_addons,
         output,
         external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
@@ -409,6 +438,8 @@ fn build_with_native_mode(
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     let mut native_addons = resolved_packages
         .iter()
+        .filter(|package| runtime_packages.contains(*package))
+        .filter(|package| path_builtin_name(package).is_none())
         .filter_map(|package| thaw_registry::resolve(registry_dir, package).ok()?.native_addon)
         .collect::<Vec<_>>();
     native_addons.sort();
@@ -418,6 +449,7 @@ fn build_with_native_mode(
     // package-qualified alias `generate_registry_shims` actually
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
+    let registry_shim_len = registry_shim.len();
     let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
     if let Some(directory) = assets {
         shim_source.push_str(&generate_asset_shim(directory)?);
@@ -431,7 +463,9 @@ fn build_with_native_mode(
                 .into(),
         );
     }
-    let quickjs_reasons = quickjs_fallback_reasons(
+    let created_require_live_result =
+        module_graph::uses_created_require_live_result(input, &user_source)?;
+    let mut quickjs_reasons = quickjs_fallback_reasons(
         input,
         &user_source,
         &shim_source,
@@ -439,6 +473,14 @@ fn build_with_native_mode(
         &external_exports,
         &jit_fallback_reasons,
     );
+    if created_require_live_result {
+        quickjs_reasons.push(serde_json::json!({
+            "kind": "dynamic-operation",
+            "operation": "createRequire result handle",
+            "detail": "created-require calls preserve native JavaScript result identity",
+            "source": input.display().to_string(),
+        }));
+    }
     let manifest = serde_json::json!({
         "packages": resolved_packages,
         // Registry fallback wrappers contain `callDynamic(...)` even when a
@@ -447,6 +489,7 @@ fn build_with_native_mode(
         // QuickJS typed symbols are checked separately below.
         "quickjs": shim_source.contains("loadScript(")
             || source_uses_quickjs(&user_source)
+            || created_require_live_result
             || shim_source.contains("__thaw_typed_js_"),
         "quickjs_reasons": quickjs_reasons,
         "napi": shim_source.contains("loadNativeAddonEmbedded(")
@@ -454,23 +497,31 @@ fn build_with_native_mode(
             || shim_source.contains("embedExecutable("),
     });
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
-    let marker_literal = serde_json::to_string(&marker)
-        .map_err(|error| format!("failed to encode artifact metadata: {error}"))?;
-    shim_source.push_str(&format!(
-        "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
-    ));
-    let transform = |source: &str| {
+    let constructor_package_qualifiers =
+        package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
+    let transform = |source: &str, module_path: &Path, is_override: bool| {
+        let input_name = if is_override && source != user_source.as_str() {
+            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()))
+        } else {
+            thaw_parser::common::FileName::Real(module_path.to_path_buf())
+        };
         let imported_overload_aliases = fallback_function_overload_rewrites
             .iter()
             .map(|rewrite| rewrite.0.clone())
             .collect();
-        let source = rewrite_qualified_calls(
+        let qualified = rewrite_qualified_calls_named(
             source,
             &qualified_call_rewrites,
             &imported_overload_aliases,
+            &input_name,
         )?;
-        let source = rewrite_external_class_methods_with_static(
-            &source,
+        let qualified_name = if qualified != source {
+            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)"))
+        } else {
+            input_name
+        };
+        let methods = rewrite_external_class_methods_with_static_qualified_named(
+            &qualified,
             &class_constructor_rewrites,
             &class_method_rewrites,
             &callback_instance_rewrites,
@@ -481,10 +532,22 @@ fn build_with_native_mode(
             &static_class_setter_rewrites,
             &factory_class_rewrites,
             &fallback_function_overload_rewrites,
+            &constructor_package_qualifiers,
+            &qualified_name,
         )?;
-        rewrite_external_class_constructors(&source, &class_constructor_rewrites)
+        let methods_name = if methods != qualified {
+            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)"))
+        } else {
+            qualified_name
+        };
+        rewrite_external_class_constructors_named(
+            &methods,
+            &class_constructor_rewrites,
+            &constructor_package_qualifiers,
+            &methods_name,
+        )
     };
-    let mut module = module_graph::bundle_with_source_transform(
+    let mut module = module_graph::bundle_with_named_source_transform(
         input,
         &user_source,
         &external_exports,
@@ -492,10 +555,32 @@ fn build_with_native_mode(
         &external_nested_namespaces,
         &external_resolutions,
         &external_export_assignments,
+        &external_module_indices,
         &transform,
     )?;
     if !shim_source.is_empty() {
-        let mut shim = thaw_parser::parse_typescript(&shim_source)?;
+        let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map_named(
+            &shim_source,
+            thaw_parser::common::FileName::Custom("generated registry and bridge shims.ts".into()),
+        )?;
+        for item in &mut shim.body {
+            let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) = item else {
+                continue;
+            };
+            if shim_source_map.lookup_byte_offset(statement.span.lo).pos.0 as usize >= registry_shim_len {
+                continue;
+            }
+            let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) = statement.expr.as_ref() else {
+                continue;
+            };
+            if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1"))
+                || value.value.as_str().is_some_and(|text| text.starts_with("__thaw_internal_module:")) {
+                // Only compiler-produced registry shim statements receive
+                // the sentinel span recognized by HIR; user source and
+                // later bridge shims cannot switch initializer execution.
+                statement.span = Default::default();
+            }
+        }
         shim.body.extend(module.body);
         module.body = shim.body;
     }
@@ -535,10 +620,11 @@ fn build_with_native_mode(
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.compile_program(&program)?;
+    compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
 
-    let obj_path = output.with_extension("o");
+    let obj_path = scratch.path.join("input.o");
     compiler.write_object_file(&obj_path)?;
 
     // Always link the runtime support crates: thaw-arena backs array/object allocation
@@ -551,36 +637,16 @@ fn build_with_native_mode(
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
     let jit_lib = build_staticlib("thaw-jit")?;
-    let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
-    let uses_tls = source_uses_tls(&shim_source) || source_uses_tls(&user_source);
-    let uses_brotli = source_uses_brotli(&shim_source) || source_uses_brotli(&user_source);
-    let uses_intl = source_uses_intl(&shim_source) || source_uses_intl(&user_source);
+    runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
+    runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
+    if icu4c { runtime_features.extend(["intl", "icu4c"]); }
     // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
     // dependency objects. Linking a second standalone QuickJS archive would
     // define every host symbol twice.
     let quickjs_lib = (uses_quickjs && !uses_napi)
         .then(|| {
-            let mut features = Vec::new();
-            if uses_brotli {
-                features.push("brotli");
-            }
-            if uses_tls {
-                features.push("tls");
-            }
-            if uses_wasm {
-                features.push("wasm");
-            }
-            if uses_intl {
-                features.push("intl");
-            }
-            if icu4c {
-                features.push("icu4c");
-            }
-            if features.len() == 3 {
-                build_staticlib("thaw-quickjs")
-            } else {
-                build_staticlib_with_features("thaw-quickjs", &features)
-            }
+            let features = runtime_features.iter().copied().collect::<Vec<_>>();
+            build_staticlib_with_features("thaw-quickjs", &features)
         })
         .transpose()?;
     let napi_lib = uses_napi
@@ -588,16 +654,8 @@ fn build_with_native_mode(
             if !uses_quickjs {
                 return build_staticlib_without_default_features("thaw-napi");
             }
-            let mut features = vec!["quickjs"];
-            if uses_brotli {
-                features.push("quickjs-brotli");
-            }
-            if uses_tls {
-                features.push("quickjs-tls");
-            }
-            if uses_wasm {
-                features.push("quickjs-wasm");
-            }
+            let features = napi_runtime_features(&runtime_features);
+            let features = features.iter().map(String::as_str).collect::<Vec<_>>();
             build_staticlib_with_features("thaw-napi", &features)
         })
         .transpose()?;
@@ -660,6 +718,7 @@ fn build_with_native_mode(
         // especially important for the optional QuickJS/N-API hosts, whose
         // unrelated feature implementations otherwise survive the link.
         .arg("-Wl,--gc-sections")
+        .arg("-Wl,--undefined=__thaw_artifact_metadata")
         .args(&registry_native_libs)
         .args(extra_links);
     if !static_link {
@@ -678,16 +737,11 @@ fn build_with_native_mode(
     let link_output = linker
         .arg("-Wl,--strip-all")
         .arg("-o")
-        .arg(output)
+        .arg(scratch.path.join("program"))
         .output()
         .map_err(|e| format!("failed to invoke system `cc` linker: {e}"))?;
 
-    let _ = std::fs::remove_file(&obj_path);
-
     if !link_output.status.success() {
-        if let Some((staging, _)) = &external_native_dirs {
-            let _ = std::fs::remove_dir_all(staging);
-        }
         let stderr = String::from_utf8_lossy(&link_output.stderr);
         let hint = if static_link {
             "\nstatic linking requires the target's static libc/libm/libdl archives (on Fedora, install glibc-static; alternatively use a musl toolchain)"
@@ -697,68 +751,169 @@ fn build_with_native_mode(
         return Err(format!("linking failed:\n{stderr}{hint}"));
     }
 
-    if let Some((staging, destination)) = external_native_dirs {
-        promote_external_native_directory(&staging, &destination)?;
+    let linked = scratch.path.join("program");
+    let linked_bytes = std::fs::read(&linked)
+        .map_err(|error| format!("failed to inspect linked artifact `{}`: {error}", linked.display()))?;
+    let linked_manifest = artifact_manifest_from_bytes(&linked_bytes)?;
+    if linked_manifest != manifest {
+        return Err("linked artifact metadata differs from the build manifest".into());
     }
-    if static_link && elf_has_program_interpreter(output)? {
+
+    if static_link && elf_has_program_interpreter(&linked)? {
         return Err(format!(
             "static link produced `{}` with a dynamic ELF interpreter",
             output.display()
         ));
     }
 
+    publish_build_artifacts(&scratch, output, external_native_dirs.as_ref())?;
+
     println!("built `{}`", output.display());
     Ok(())
 }
 
-fn external_native_directories(output: &Path) -> Result<(PathBuf, PathBuf), String> {
+struct BuildScratch {
+    path: PathBuf,
+    preserve: std::cell::Cell<bool>,
+}
+
+impl BuildScratch {
+    fn new(output: &Path) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let parent = output.parent().filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for _ in 0..100 {
+            let path = parent.join(format!(
+                ".thaw-build-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path, preserve: std::cell::Cell::new(false) }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("failed to create build directory `{}`: {error}", path.display())),
+            }
+        }
+        Err(format!("failed to reserve a build directory beside `{}`", output.display()))
+    }
+}
+
+impl Drop for BuildScratch {
+    fn drop(&mut self) {
+        if !self.preserve.get() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn external_native_directories(output: &Path, scratch: &BuildScratch) -> Result<(PathBuf, PathBuf), String> {
     let name = output
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("output path has no valid file name")?;
     let destination = output.with_file_name(format!("{name}.native"));
-    let staging = output.with_file_name(format!(".{name}.native.{}.tmp", std::process::id()));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)
-            .map_err(|error| format!("failed to clear `{}`: {error}", staging.display()))?;
-    }
-    std::fs::create_dir_all(&staging)
+    let staging = scratch.path.join("native");
+    std::fs::create_dir(&staging)
         .map_err(|error| format!("failed to create `{}`: {error}", staging.display()))?;
     Ok((staging, destination))
 }
 
-fn promote_external_native_directory(staging: &Path, destination: &Path) -> Result<(), String> {
-    if std::fs::read_dir(staging)
-        .map_err(|error| format!("failed to read `{}`: {error}", staging.display()))?
-        .next()
-        .is_none()
-    {
-        std::fs::remove_dir(staging)
-            .map_err(|error| format!("failed to remove `{}`: {error}", staging.display()))?;
-        if destination.exists() {
-            std::fs::remove_dir_all(destination)
-                .map_err(|error| format!("failed to remove `{}`: {error}", destination.display()))?;
+fn publish_build_artifacts(
+    scratch: &BuildScratch,
+    output: &Path,
+    external_native_dirs: Option<&(PathBuf, PathBuf)>,
+) -> Result<(), String> {
+    let staged_output = scratch.path.join("program");
+    let old_output = scratch.path.join("old-program");
+    let old_native = scratch.path.join("old-native");
+    if output.is_dir() {
+        return Err(format!("output `{}` is a directory", output.display()));
+    }
+    let has_native = if let Some((staging, destination)) = external_native_dirs {
+        if destination.symlink_metadata().is_ok() && !destination.is_dir() {
+            return Err(format!("native output `{}` is not a directory", destination.display()));
         }
-        return Ok(());
+        std::fs::read_dir(staging)
+            .map_err(|error| format!("failed to read `{}`: {error}", staging.display()))?
+            .next().transpose()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", staging.display()))?
+            .is_some()
+    } else {
+        false
+    };
+    let had_output = output.symlink_metadata().is_ok();
+    if had_output {
+        std::fs::rename(output, &old_output)
+            .map_err(|error| format!("failed to save `{}`: {error}", output.display()))?;
     }
-    let backup = destination.with_extension(format!("native.{}.old", std::process::id()));
-    if destination.exists() {
-        std::fs::rename(destination, &backup).map_err(|error| {
-            format!("failed to replace `{}`: {error}", destination.display())
-        })?;
+    let mut installed_native = false;
+    let mut had_native = false;
+    if let Some((staging, destination)) = external_native_dirs {
+        had_native = destination.symlink_metadata().is_ok();
+        if had_native {
+            if let Err(error) = std::fs::rename(destination, &old_native) {
+                return Err(rollback_publish_failure(
+                    scratch, format!("failed to save `{}`: {error}", destination.display()),
+                    output, &old_output, had_output, None, &old_native, false, false,
+                ));
+            }
+        }
+        if has_native {
+            if let Err(error) = std::fs::rename(staging, destination) {
+                return Err(rollback_publish_failure(
+                    scratch, format!("failed to install `{}`: {error}", destination.display()),
+                    output, &old_output, had_output, Some(destination), &old_native, had_native, false,
+                ));
+            }
+            installed_native = true;
+        }
     }
-    if let Err(error) = std::fs::rename(staging, destination) {
-        let _ = std::fs::rename(&backup, destination);
-        return Err(format!(
-            "failed to install `{}`: {error}",
-            destination.display()
+    if let Err(error) = std::fs::rename(&staged_output, output) {
+        return Err(rollback_publish_failure(
+            scratch, format!("failed to install `{}`: {error}", output.display()),
+            output, &old_output, had_output,
+            external_native_dirs.map(|(_, destination)| destination.as_path()),
+            &old_native, had_native, installed_native,
         ));
     }
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup)
-            .map_err(|error| format!("failed to remove `{}`: {error}", backup.display()))?;
-    }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_publish_failure(
+    scratch: &BuildScratch,
+    cause: String,
+    output: &Path,
+    old_output: &Path,
+    had_output: bool,
+    native_destination: Option<&Path>,
+    old_native: &Path,
+    had_native: bool,
+    installed_native: bool,
+) -> String {
+    let mut failures = Vec::new();
+    if let Some(destination) = native_destination {
+        if installed_native {
+            if let Err(error) = std::fs::remove_dir_all(destination) {
+                failures.push(format!("remove new `{}`: {error}", destination.display()));
+            }
+        }
+        if had_native {
+            if let Err(error) = std::fs::rename(old_native, destination) {
+                failures.push(format!("restore `{}`: {error}", destination.display()));
+            }
+        }
+    }
+    if had_output {
+        if let Err(error) = std::fs::rename(old_output, output) {
+            failures.push(format!("restore `{}`: {error}", output.display()));
+        }
+    }
+    if failures.is_empty() {
+        cause
+    } else {
+        scratch.preserve.set(true);
+        format!("{cause}; rollback failed ({}); saved artifacts remain in `{}`", failures.join("; "), scratch.path.display())
+    }
 }
 
 fn nm_symbols(path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
@@ -927,6 +1082,8 @@ fn source_uses_quickjs(source: &str) -> bool {
     [
         "loadScript(",
         "callDynamic(",
+        "eval(",
+        "new Function(",
         "getDynamicValue(",
         "callDynamicValue(",
         "callDynamicValueHandle(",
@@ -1045,45 +1202,41 @@ fn source_line_column(source: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+#[cfg(test)]
 fn source_uses_wasm(source: &str) -> bool {
-    ["WebAssembly", "node:wasi", "require('wasi')", "require(\"wasi\")"]
-        .iter()
-        .any(|marker| source.contains(marker))
+    thaw_bridge::required_runtime_features(source).contains("wasm")
 }
 
+#[cfg(test)]
 fn source_uses_tls(source: &str) -> bool {
-    source.contains("__thaw_tls_")
+    thaw_bridge::required_runtime_features(source).contains("tls")
 }
 
+#[cfg(test)]
 fn source_uses_brotli(source: &str) -> bool {
-    source.contains("brotli") || source.contains("Brotli")
+    thaw_bridge::required_runtime_features(source).contains("brotli")
 }
 
+#[cfg(test)]
 fn source_uses_intl(source: &str) -> bool {
-    // Deliberately narrower than "any `Intl.*` use": `DateTimeFormat`/
-    // `NumberFormat`/`ListFormat` still have a pure-JS, English-only
-    // fast path in `intl.js` that needs no icu4x data at all (and, once
-    // M4/M6/M7 land real per-locale rendering for those three, will
-    // still fall back to that same fast path when this feature is off
-    // -- see docs/design/intl-polyfill.md). Only the genuinely new
-    // capabilities that have no non-icu4x implementation at all should
-    // pull in thaw-icu-data by default.
-    //
-    // `String.prototype.localeCompare` is a separate, always-linked
-    // thaw-runtime primitive (crates/thaw-runtime/src/runtime/
-    // native_values/strings.rs), not part of thaw-quickjs's `intl`
-    // feature at all.
-    [
-        "Intl.Locale",
-        "Intl.PluralRules",
-        "Intl.Collator",
-        "Intl.Segmenter",
-        "Intl.RelativeTimeFormat",
-        "Intl.NumberFormat",
-        "Intl.DateTimeFormat",
-    ]
-    .iter()
-    .any(|marker| source.contains(marker))
+    thaw_bridge::required_runtime_features(source).contains("intl")
+}
+
+fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<String> {
+    std::iter::once("quickjs".to_string())
+        .chain(features.iter().map(|feature| format!("quickjs-{feature}")))
+        .collect()
+}
+
+#[test]
+fn runtime_feature_selection_preserves_exact_requirements() {
+    let features = thaw_bridge::required_runtime_features(
+        "__thaw_tls_ brotli Intl.NumberFormat"
+    );
+    assert_eq!(features.iter().copied().collect::<Vec<_>>(), ["brotli", "intl", "tls"]);
+    assert_eq!(napi_runtime_features(&features), ["quickjs", "quickjs-brotli", "quickjs-intl", "quickjs-tls"]);
+    let features = ["icu4c", "intl"].into_iter().collect();
+    assert_eq!(napi_runtime_features(&features), ["quickjs", "quickjs-icu4c", "quickjs-intl"]);
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
@@ -1111,28 +1264,27 @@ fn ensure_static_system_libraries() -> Result<(), String> {
 fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
-    if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" {
-        return Err(format!("`{}` is not an ELF executable", path.display()));
+    let endian = elf_endian(&bytes)
+        .map_err(|error| format!("`{}`: {error}", path.display()))?;
+    let header = &bytes[..64];
+    let offset = endian.u64(&header[32..])?;
+    let entry_size = u64::from(endian.u16(&header[54..])?);
+    let count = u64::from(endian.u16(&header[56..])?);
+    if count == 0 {
+        return Ok(false);
     }
-    if bytes[4] != 2 || bytes[5] != 1 {
-        return Err("static output verification currently requires little-endian ELF64".into());
+    if entry_size < 56 {
+        return Err(format!("`{}` has an invalid ELF program table", path.display()));
     }
-    let read_u16 = |offset: usize| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-    let read_u64 =
-        |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    let program_offset = read_u64(32) as usize;
-    let entry_size = read_u16(54) as usize;
-    let entry_count = read_u16(56) as usize;
-    for index in 0..entry_count {
-        let offset = program_offset + index * entry_size;
-        if offset + 4 > bytes.len() {
-            return Err(format!(
-                "`{}` has a truncated ELF program table",
-                path.display()
-            ));
-        }
-        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        if kind == 3 {
+    let table_size = count.checked_mul(entry_size).ok_or("ELF program table overflows")?;
+    elf_range(&bytes, offset, table_size)
+        .map_err(|error| format!("`{}` has an invalid ELF program table: {error}", path.display()))?;
+    for index in 0..count {
+        let entry_offset = index.checked_mul(entry_size)
+            .and_then(|step| offset.checked_add(step))
+            .ok_or("ELF program header offset overflows")?;
+        let entry = elf_range(&bytes, entry_offset, 4)?;
+        if endian.u32(entry)? == 3 {
             return Ok(true);
         }
     }
@@ -1194,21 +1346,32 @@ fn build_staticlib_with_options(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let target_name = pkg.replace('-', "_");
-    for line in stdout.lines() {
-        if !line.contains(&format!("\"name\":\"{target_name}\"")) {
-            continue;
-        }
-        if let Some(idx) = line.find("\"filenames\":[\"") {
-            let rest = &line[idx + "\"filenames\":[\"".len()..];
-            if let Some(end) = rest.find(".a\"") {
-                return Ok(PathBuf::from(&rest[..end + 2]));
-            }
-        }
-    }
-    Err(format!(
+    staticlib_artifact_path(&stdout, pkg).ok_or_else(|| format!(
         "could not find a staticlib for `{pkg}` in `cargo build` output"
     ))
+}
+
+fn staticlib_artifact_path(stdout: &str, pkg: &str) -> Option<PathBuf> {
+    let target_name = pkg.replace('-', "_");
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact")
+            || message.pointer("/target/name").and_then(serde_json::Value::as_str) != Some(target_name.as_str())
+        {
+            continue;
+        }
+        if let Some(path) = message.get("filenames").and_then(serde_json::Value::as_array)
+            .into_iter().flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .find(|path| path.extension().is_some_and(|extension| extension == "a"))
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn run_prepare(args: &[String]) -> Result<(), String> {

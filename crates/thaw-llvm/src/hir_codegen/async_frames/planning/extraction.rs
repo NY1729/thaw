@@ -37,8 +37,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                         HirType::Str
                     }
-                    HirExpr::PromiseNew(_, resolved, _, _) => resolved.clone(),
+                    HirExpr::PromiseNew(_, resolved, _, _)
+                    | HirExpr::PromiseNewMixed(_, resolved, _) => resolved.clone(),
                     HirExpr::PromiseThen(_, _, _, output, _, _) => output.clone(),
+                    HirExpr::PromiseThenBoth(_, _, _, _, output, _, _) => output.clone(),
                     HirExpr::PromiseFinally(_, _, input, _) => input.clone(),
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
                         HirType::Array(Box::new(element.clone()))
@@ -58,16 +60,25 @@ impl<'ctx> HirCompiler<'ctx> {
                             ("reason".into(), HirType::Str),
                         ])))
                     }
+                    // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
+                    HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), _)) =>
+                    {
+                        let HirExpr::Lambda(_, _, HirType::Promise(resolved), _) = callee.as_ref() else {
+                            unreachable!()
+                        };
+                        resolved.as_ref().clone()
+                    }
                     HirExpr::Call(callee, _) => {
                         let HirExpr::Var(name) = callee.as_ref() else {
-                            unreachable!()
+                            return Err(format!("unsupported frame await call target {callee:?}"));
                         };
                         self.frame_async_functions
                             .get(name)
                             .cloned()
                             .ok_or_else(|| format!("missing async result type for `{name}`"))?
                     }
-                    _ => unreachable!(),
+                    other => return Err(format!("unsupported frame await source {other:?}")),
                 };
                 *expr = HirExpr::Var(temporary.to_string());
                 return Ok(Some((awaited, ty)));
@@ -76,6 +87,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         match expr {
             HirExpr::BinOp(_, left, right)
+            | HirExpr::EvalThen(left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _) => {

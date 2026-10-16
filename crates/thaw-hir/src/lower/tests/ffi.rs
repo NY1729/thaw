@@ -239,3 +239,132 @@ fn coerces_arguments_of_a_generic_ambient_call_to_the_substituted_type() {
         )]
     );
 }
+
+
+#[test]
+fn marks_fresh_json_arguments_for_ordinary_quickjs_returns_only() {
+    let program = lower(
+        r#"
+        declare function __thaw_typed_wrapper_js_66(value: Json): JsValue;
+        declare function __thaw_typed_js_6563686f(value: Json): JsValue;
+        declare function __thaw_typed_js_67656e65726963<T>(value: Json, key: T): JsValue;
+        declare function __thaw_typed_js_69735265616479(value: Json): boolean;
+        declare function __thaw_typed_js_766f6964(value: Json): void;
+        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_wrapper_js_user_store(value: Json): Json;
+        declare function consume_json(value: Json): void;
+        function main(live: JsValue): void {
+            __thaw_typed_js_6563686f(live);
+        }
+        function generated_wrapper(live: JsValue): void {
+            __thaw_typed_wrapper_js_66(live);
+        }
+        function generic(live: JsValue): void {
+            __thaw_typed_js_67656e65726963<string>(live, "key");
+        }
+        function boolean_result(live: JsValue): void {
+            __thaw_typed_js_69735265616479(live);
+        }
+        function void_result(live: JsValue): void {
+            __thaw_typed_js_766f6964(live);
+        }
+        function nested_unproven_store(live: JsValue, key: JsValue): void {
+            __thaw_typed_js_70616972(__thaw_typed_wrapper_js_user_store(live), key);
+        }
+        function borrowed(value: Json): void {
+            __thaw_typed_js_6563686f(value);
+            consume_json(value);
+        }
+        "#,
+    );
+    let function_body = |name: &str| {
+        format!(
+            "{:?}",
+            program.functions.iter().find(|function| function.name == name).unwrap().body
+        )
+    };
+    for name in ["main", "generated_wrapper", "generic", "boolean_result", "void_result"] {
+        let body = function_body(name);
+        assert!(
+            body.contains("__thaw_mark_typed_wrapper_json_argument"),
+            "{name}: {body}"
+        );
+    }
+    {
+        let name = "borrowed";
+        let body = function_body(name);
+        assert!(
+            !body.contains("__thaw_mark_typed_wrapper_json_argument"),
+            "{name}: {body}"
+        );
+    }
+    assert!(function_body("borrowed").contains("consume_json"));
+    let nested = function_body("nested_unproven_store");
+    assert!(nested.contains("backend: QuickJs"), "{nested}");
+    assert!(nested.contains("symbol: \"pair\""), "{nested}");
+    assert!(nested.contains("ret: JsValue"), "{nested}");
+    assert!(nested.contains("__thaw_mark_typed_wrapper_json_argument"), "{nested}");
+    assert!(nested.contains("Str(\"wrapper\")"), "{nested}");
+    assert!(nested.contains("__thaw_typed_wrapper_js_user_store"), "{nested}");
+}
+
+#[test]
+fn marks_only_live_json_coercions_to_napi_constructors() {
+    let program = lower(
+        r#"
+        declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(
+            value: Json, key: JsValue,
+        ): JsValue;
+        declare function __thaw_typed_napi_246e6577244f757465722e47656e6572696324617269747932<T extends Json>(
+            value: Json, key: JsValue,
+        ): JsValue;
+        declare function __thaw_typed_napi_666f6f(value: Json, key: JsValue): JsValue;
+        function direct(live: JsValue): void {
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(live, "key");
+        }
+        function generic(live: JsValue): void {
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e47656e6572696324617269747932<Json>(live, live);
+        }
+        function non_constructor(live: JsValue): void {
+            const ignored: JsValue = __thaw_typed_napi_666f6f(live, "key");
+        }
+        function borrowed(value: Json): void {
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(value, "key");
+        }
+        function shadowed(live: JsValue): void {
+            const __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932 =
+                (value: Json, key: JsValue): JsValue => live;
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(live, "key");
+        }
+        "#,
+    );
+    let body = |name: &str| {
+        format!(
+            "{:?}",
+            program.functions.iter().find(|function| function.name == name).unwrap().body,
+        )
+    };
+    for (name, symbol) in [
+        ("direct", "$new$Outer.Client$arity2"),
+        ("generic", "$new$Outer.Generic$arity2"),
+    ] {
+        let body = body(name);
+        assert!(body.contains("Str(\"napi-constructor\")"), "{name}: {body}");
+        assert!(body.contains(&format!("Str(\"{symbol}\")")), "{name}: {body}");
+        assert!(body.contains("JsValueAsJson"), "{name}: {body}");
+    }
+    for name in ["non_constructor", "borrowed", "shadowed"] {
+        let body = body(name);
+        assert!(!body.contains("__thaw_mark_typed_wrapper_json_argument"), "{name}: {body}");
+    }
+}
+
+#[test]
+fn source_cannot_forge_typed_wrapper_json_ownership_marker() {
+    let module = thaw_parser::parse_typescript(
+        r#"declare function __thaw_mark_typed_wrapper_json_argument(ownerKind: string, ownerKey: string, value: Json): Json;
+           function main(value: Json): void { __thaw_mark_typed_wrapper_json_argument("direct-quickjs", "echo", value); }"#,
+    ).unwrap();
+    let error = crate::lower_module(&module).unwrap_err();
+    assert!(error.contains("compiler-private"), "{error}");
+}

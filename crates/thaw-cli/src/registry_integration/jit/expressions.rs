@@ -901,10 +901,9 @@ macro_rules! jit_expressions {
                 }
             }
             Expr::New(new_expr) if is_untyped_map_constructor(new_expr) => {
-                // `new Map()`, when not a declaration initializer whose
-                // value kind was inferred, defaults to a string-valued
-                // dictionary.
-                output.push("dsempty".into());
+                // A string-keyed dictionary cannot preserve Map key kinds.
+                // Decline this callable so the ordinary JS fallback owns it.
+                return None;
             }
             Expr::New(new_expr)
                 if set_constructor(new_expr, parameters, locals, context.helpers).is_some() =>
@@ -1019,7 +1018,7 @@ macro_rules! jit_expressions {
                     encode_string(&key, &mut encoded_key)?;
                     let encoded_key = encoded_key.pop()?.strip_prefix('t')?.to_owned();
                     output.extend(value);
-                    output.push(format!("{prefix}put{encoded_key}"));
+                    output.push(format!("{prefix}init{encoded_key}"));
                 }
             }
             Expr::Member(member) => {
@@ -1461,7 +1460,7 @@ macro_rules! jit_expressions {
                     MemberProp::Ident(key) => encode_string(key.sym.as_ref(), output)?,
                     _ => return None,
                 }
-                output.push("ddelete".into());
+                output.push("dstrictdelete".into());
             }
             Expr::Unary(unary)
                 if matches!(
@@ -1626,18 +1625,13 @@ macro_rules! jit_expressions {
                     return None;
                 };
                 if matches!(kind, JitKind::Array | JitKind::Dictionary) {
-                    // Arrays and dictionaries are unconditionally truthy in JavaScript
-                    // (even when empty), so the runtime value never needs checking:
-                    // `a || b` always yields `a` and `a && b` always yields `b`. Both
-                    // sides were already validated as encodable above; only the
-                    // statically-selected side's tokens need to survive into the
-                    // output, and the other side's evaluation (side effects
-                    // included) is correctly never observed at runtime either way.
-                    output.extend(if binary.op == BinaryOp::LogicalAnd {
-                        right
-                    } else {
-                        left
-                    });
+                    // Arrays and dictionaries are truthy. `&&` still evaluates
+                    // the left side before selecting the right side's value.
+                    output.extend(left);
+                    if binary.op == BinaryOp::LogicalAnd {
+                        output.push("drop".into());
+                        output.extend(right);
+                    }
                     return Some(());
                 }
                 output.extend(left);
@@ -1662,13 +1656,18 @@ macro_rules! jit_expressions {
                 let mut operands = Vec::new();
                 flatten_nullish(expression, &mut operands);
                 let mut selected = Vec::new();
+                let last = operands.pop()?;
                 encode_expression(
-                    operands.pop()?,
+                    last,
                     parameters,
                     locals,
                     context,
                     &mut selected,
                 )?;
+                // A boolean fallback literal is a numeric constant until marked.
+                if boolean_literal(last) {
+                    selected.push("asbool".into());
+                }
                 while let Some(operand) = operands.pop() {
                     let fallback = selected;
                     if let Some((presence, value)) = optional_tokens(operand, parameters) {
@@ -1687,10 +1686,28 @@ macro_rules! jit_expressions {
                         if let Some(presence) = optional.receiver_presence {
                             selected = presence;
                             selected.extend(["asbool".into(), "if".into()]);
-                            selected.extend(optional.receiver.clone());
-                            selected.extend(optional.continuation);
-                            if jit_operation_may_be_absent(&optional.receiver) {
+                            let mut receiver = optional.receiver.clone();
+                            let receiver_may_be_absent = jit_operation_may_be_absent(&receiver);
+                            if receiver_may_be_absent {
+                                mark_dictionary_get_presence(&mut receiver);
+                            }
+                            selected.extend(receiver);
+                            let mut continuation = optional.continuation;
+                            let continuation_may_be_absent = jit_operation_may_be_absent(&continuation);
+                            if receiver_may_be_absent {
                                 selected.push("ifpresent".into());
+                            }
+                            if continuation_may_be_absent {
+                                mark_dictionary_get_presence(&mut continuation);
+                            }
+                            selected.extend(continuation);
+                            if continuation_may_be_absent {
+                                selected.push("ifpresent".into());
+                                selected.push("else".into());
+                                selected.extend(fallback.clone());
+                                selected.push("end".into());
+                            }
+                            if receiver_may_be_absent {
                                 selected.push("else".into());
                                 selected.extend(fallback.clone());
                                 selected.push("end".into());
@@ -1700,8 +1717,11 @@ macro_rules! jit_expressions {
                             selected.push("end".into());
                         } else {
                             selected = optional.receiver;
+                            mark_dictionary_get_presence(&mut selected);
                             selected.push("ifpresent".into());
-                            selected.extend(optional.continuation.clone());
+                            let mut continuation = optional.continuation.clone();
+                            mark_dictionary_get_presence(&mut continuation);
+                            selected.extend(continuation);
                             if jit_operation_may_be_absent(&optional.continuation) {
                                 selected.push("ifpresent".into());
                                 selected.push("else".into());
@@ -1723,6 +1743,7 @@ macro_rules! jit_expressions {
                         )?;
                         if jit_operation_may_be_absent(&operation) {
                             selected = operation;
+                            mark_dictionary_get_presence(&mut selected);
                             selected.push("ifpresent".into());
                             selected.push("else".into());
                             selected.extend(fallback);
@@ -1745,7 +1766,9 @@ macro_rules! jit_expressions {
                     output.push("if".into());
                     output.extend(operation);
                 } else {
-                    output.extend(optional.receiver);
+                    let mut receiver = optional.receiver;
+                    mark_dictionary_get_presence(&mut receiver);
+                    output.extend(receiver);
                     output.push("ifpresent".into());
                     output.extend(optional.continuation);
                 }
@@ -1980,7 +2003,7 @@ macro_rules! jit_expressions {
                         encode_string(&key, &mut encoded_key)?;
                         let encoded_key = encoded_key.pop()?.strip_prefix('t')?.to_owned();
                         output.extend(value);
-                        output.push(format!("{prefix}put{encoded_key}"));
+                        output.push(format!("{prefix}init{encoded_key}"));
                     }
                     Some(output)
                 }
@@ -2342,6 +2365,13 @@ macro_rules! jit_expressions {
                     })
                     .flatten()
                     .filter(|_| !call.args.is_empty());
+                if matches!(method, "push" | "unshift")
+                    && call.args.len() > 1
+                    && local_insert.is_none()
+                    && !jit_single_pure_value(&encoded_receiver)
+                {
+                    return None;
+                }
                 if local_insert.is_none() {
                     output.extend(encoded);
                 }
@@ -2689,7 +2719,10 @@ macro_rules! jit_expressions {
                             context,
                             &mut encoded_value,
                         )?;
-                        if jit_expression_kind(&encoded_value)?.0 != expected {
+                        if jit_expression_kind(&encoded_value)?.0 != expected
+                            || (method == "unshift" && arguments.len() > 1
+                                && !jit_single_pure_value(&encoded_value))
+                        {
                             return None;
                         }
                         output.extend(encoded_value);

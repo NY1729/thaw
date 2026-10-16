@@ -1,4 +1,59 @@
+fn collect_return_values<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Return(Some(value)) => out.push(value),
+            HirStmt::Return(None) => *bare = true,
+            HirStmt::If(_, then_body, else_body) => {
+                collect_return_values(then_body, out, bare);
+                collect_return_values(else_body, out, bare);
+            }
+            HirStmt::While(_, body) => collect_return_values(body, out, bare),
+            HirStmt::Finally(body, _) => collect_return_values(body, out, bare),
+            HirStmt::Try(body, _, catch_body, _) => {
+                collect_return_values(body, out, bare);
+                collect_return_values(catch_body, out, bare);
+            }
+            _ => {}
+        }
+    }
+}
+
+
 impl<'a> FnLowerer<'a> {
+    fn save_narrowings(&self) -> NarrowingSnapshot {
+        NarrowingSnapshot {
+            optional: self.narrowings.clone(),
+            nullable: self.nullable_narrowings.clone(),
+            nullish: self.nullish_narrowings.clone(),
+            partial_nullable: self.partial_nullable_narrowings.clone(),
+            write_versions: self.narrowing_write_versions.clone(),
+        }
+    }
+
+    fn restore_narrowings_for_sibling(&mut self, saved: &NarrowingSnapshot) {
+        self.narrowings = saved.optional.clone();
+        self.nullable_narrowings = saved.nullable.clone();
+        self.nullish_narrowings = saved.nullish.clone();
+        self.partial_nullable_narrowings = saved.partial_nullable.clone();
+    }
+
+    fn restore_narrowings(&mut self, saved: NarrowingSnapshot) {
+        let versions = &self.narrowing_write_versions;
+        let unchanged = |name: &Symbol| versions.get(name) == saved.write_versions.get(name);
+        self.narrowings = saved.optional.into_iter().filter(|(name, _)| unchanged(name)).collect();
+        self.nullable_narrowings = saved.nullable.into_iter().filter(|(name, _)| unchanged(name)).collect();
+        self.nullish_narrowings = saved.nullish.into_iter().filter(|(name, _)| unchanged(name)).collect();
+        self.partial_nullable_narrowings = saved.partial_nullable.into_iter().filter(|(name, _)| unchanged(name)).collect();
+    }
+
+    fn record_binding_write(&mut self, name: &str) {
+        self.narrowings.remove(name);
+        self.nullable_narrowings.remove(name);
+        self.nullish_narrowings.remove(name);
+        self.partial_nullable_narrowings.remove(name);
+        *self.narrowing_write_versions.entry(name.to_string()).or_default() += 1;
+    }
+
     fn bind_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
         let hir_name = if self.scope.contains_key(source_name)
             || self.signatures.contains_key(source_name)
@@ -26,32 +81,149 @@ impl<'a> FnLowerer<'a> {
         hir_name
     }
 
+    fn bind_decl_local(&mut self, source_name: &str, ty: HirType, immutable: bool) -> Symbol {
+        let hir_name = self.bind_local(source_name, ty);
+        if immutable {
+            self.immutable_bindings.insert(hir_name.clone());
+        }
+        hir_name
+    }
+
+    // The name marks a binding whose cell must be replaced on every for-loop
+    // iteration, including when an async function resumes in a new frame call.
+    fn bind_for_iteration_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
+        let outer_name = self.resolve_binding(source_name);
+        let immutable = self.immutable_bindings.contains(&outer_name);
+        let hir_name = format!("@@thaw_for_iteration_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(hir_name.clone(), ty);
+        self.used_hir_bindings.insert(hir_name.clone());
+        self.bindings
+            .entry(source_name.to_string())
+            .or_default()
+            .push(hir_name.clone());
+        if immutable {
+            self.immutable_bindings.insert(hir_name.clone());
+        }
+        hir_name
+    }
+
     fn lower_scoped_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let saved = self.bindings.clone();
-        let saved_narrowings = self.narrowings.clone();
-        let saved_nullable_narrowings = self.nullable_narrowings.clone();
-        let saved_nullish_narrowings = self.nullish_narrowings.clone();
+        let saved_narrowings = self.save_narrowings();
         let saved_json_narrowings = self.json_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
+        let saved_generic_non_arrow_names = self.generic_non_arrow_names.clone();
+        let saved_generic_non_arrow_receivers = self.generic_non_arrow_receivers.clone();
+        let saved_generic_non_arrow_receiver_templates =
+            self.generic_non_arrow_receiver_templates.clone();
         let saved_generic_arrow_self_names = self.generic_arrow_self_names.clone();
         let saved_generic_named_templates = self.generic_named_templates.clone();
         let saved_native_method_values = self.native_method_values.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
-        self.narrowings = saved_narrowings;
-        self.nullable_narrowings = saved_nullable_narrowings;
-        self.nullish_narrowings = saved_nullish_narrowings;
+        self.restore_narrowings(saved_narrowings);
         self.json_narrowings = saved_json_narrowings;
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
+        self.generic_non_arrow_names = saved_generic_non_arrow_names;
+        self.generic_non_arrow_receivers = saved_generic_non_arrow_receivers;
+        self.generic_non_arrow_receiver_templates = saved_generic_non_arrow_receiver_templates;
         self.generic_arrow_self_names = saved_generic_arrow_self_names;
         self.generic_named_templates = saved_generic_named_templates;
         self.native_method_values = saved_native_method_values;
         lowered
     }
 
+    /// JavaScript hoists a block's function declarations to its start. A
+    /// declaration is moved up only when it names no `let`/`const`/`class`/
+    /// `var` of the same block (those cells do not exist yet), and
+    /// declarations are ordered so each one follows the siblings it calls.
+    fn hoist_function_declarations(stmts: &[Stmt]) -> std::borrow::Cow<'_, [Stmt]> {
+        use swc_ecma_visit::{Visit, VisitWith};
+        #[derive(Default)]
+        struct Names(HashSet<String>);
+        impl Visit for Names {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.0.insert(ident.sym.to_string());
+            }
+        }
+        let function_count = stmts
+            .iter()
+            .filter(|stmt| matches!(stmt, Stmt::Decl(Decl::Fn(_))))
+            .count();
+        if function_count == 0 {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        let mut block_cells = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Decl(Decl::Var(var)) => {
+                    for declarator in &var.decls {
+                        Self::collect_pattern_bindings(&declarator.name, &mut block_cells);
+                    }
+                }
+                Stmt::Decl(Decl::Using(using)) => {
+                    for declarator in &using.decls {
+                        Self::collect_pattern_bindings(&declarator.name, &mut block_cells);
+                    }
+                }
+                Stmt::Decl(Decl::Class(class)) => block_cells.push(class.ident.sym.to_string()),
+                _ => {}
+            }
+        }
+        let mut functions: Vec<(usize, String, HashSet<String>)> = Vec::new();
+        for (index, stmt) in stmts.iter().enumerate() {
+            let Stmt::Decl(Decl::Fn(function)) = stmt else { continue };
+            let mut names = Names::default();
+            function.function.visit_with(&mut names);
+            if block_cells.iter().any(|cell| names.0.contains(cell)) {
+                continue;
+            }
+            functions.push((index, function.ident.sym.to_string(), names.0));
+        }
+        if functions.is_empty() {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        // Dependencies first; a cycle keeps source order for the rest.
+        let sibling_names: HashSet<String> =
+            functions.iter().map(|(_, name, _)| name.clone()).collect();
+        let mut ordered: Vec<usize> = Vec::new();
+        let mut placed: HashSet<String> = HashSet::new();
+        let mut remaining: Vec<usize> = (0..functions.len()).collect();
+        while !remaining.is_empty() {
+            let ready = remaining.iter().position(|&candidate| {
+                let (_, name, references) = &functions[candidate];
+                references.iter().all(|reference| {
+                    reference == name
+                        || !sibling_names.contains(reference)
+                        || placed.contains(reference)
+                })
+            });
+            let next = ready.unwrap_or(0);
+            let candidate = remaining.remove(next);
+            placed.insert(functions[candidate].1.clone());
+            ordered.push(candidate);
+        }
+        let hoisted: HashSet<usize> = functions.iter().map(|(index, _, _)| *index).collect();
+        let mut result: Vec<Stmt> = ordered
+            .into_iter()
+            .map(|candidate| stmts[functions[candidate].0].clone())
+            .collect();
+        result.extend(
+            stmts
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !hoisted.contains(index))
+                .map(|(_, stmt)| stmt.clone()),
+        );
+        std::borrow::Cow::Owned(result)
+    }
+
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
+        let hoisted = Self::hoist_function_declarations(stmts);
+        let stmts: &[Stmt] = &hoisted;
         #[derive(Default)]
         struct BindingConsumers {
             members: HashSet<Symbol>,
@@ -81,18 +253,32 @@ impl<'a> FnLowerer<'a> {
 
         let mut out = Vec::new();
         let mut using_disposals: Vec<HirStmt> = Vec::new();
+        let mut using_flags = Vec::new();
+        // `out` index from which each resource is live.
+        let mut using_starts: Vec<usize> = Vec::new();
         for stmt in stmts {
-            out.extend(self.lower_stmt_seq(stmt)?);
             if let Stmt::Decl(Decl::Using(using_decl)) = stmt {
+                // Register each successful acquisition before the next initializer.
                 for declarator in &using_decl.decls {
+                    let mut single = using_decl.clone();
+                    single.decls = vec![declarator.clone()];
+                    out.extend(self.lower_using_decl(&single)?);
                     if let Pat::Ident(binding) = &declarator.name {
+                        let flag = self.bind_local("__thaw_using_acquired", HirType::Bool);
+                        using_flags.push(HirStmt::Let(flag.clone(), HirType::Bool,
+                            HirExpr::Lit(HirLit::Bool(false))));
+                        out.push(HirStmt::Expr(HirExpr::Assign(flag.clone(),
+                            Box::new(HirExpr::Lit(HirLit::Bool(true))))));
+                        using_starts.push(out.len());
                         let disposal = self.lower_using_disposal(
                             binding.id.sym.as_ref(),
                             using_decl.is_await,
                         )?;
-                        using_disposals.push(disposal);
+                        using_disposals.push(Self::guard_using_disposal(flag, disposal));
                     }
                 }
+            } else {
+                out.extend(self.lower_stmt_seq(stmt)?);
             }
             if let Stmt::Expr(expression) = stmt {
                 if let Some(targets) = self.assertion_union_narrowing(&expression.expr) {
@@ -103,9 +289,10 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             if let Stmt::If(if_stmt) = stmt {
+                let condition_narrowing = self.last_if_condition_narrowing.take();
                 if if_stmt.alt.is_none() && Self::stmt_definitely_exits(&if_stmt.cons) {
                     if let Some((name, payload, present_when_true, absence_kind)) =
-                        self.optional_undefined_narrowing(&if_stmt.test)
+                        condition_narrowing
                     {
                         if !present_when_true {
                             match absence_kind {
@@ -117,6 +304,9 @@ impl<'a> FnLowerer<'a> {
                                 }
                                 2 => {
                                     self.nullish_narrowings.insert(name, payload);
+                                }
+                                3 => {
+                                    self.partial_nullable_narrowings.insert(name, payload);
                                 }
                                 _ => unreachable!(),
                             }
@@ -148,90 +338,145 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        self.lower_using_scope(out, using_disposals)
+        self.lower_using_scope(out, using_disposals, using_flags, using_starts)
     }
 
     fn lower_using_scope(
         &mut self,
         out: Vec<HirStmt>,
         mut using_disposals: Vec<HirStmt>,
+        mut using_flags: Vec<HirStmt>,
+        using_starts: Vec<usize>,
     ) -> Result<Vec<HirStmt>, String> {
         if using_disposals.is_empty() {
             return Ok(out);
         }
+        let declared_order = using_disposals.clone();
         using_disposals.reverse();
-        // A return expression is evaluated before the enclosing resources
-        // are disposed. Hoist it once so injecting the finalizer before the
-        // actual Return cannot observe mutations performed by a disposer.
-        let out = self.hoist_using_return_values(out)?;
         let mut name = "__thaw_using_finally".to_string();
         while self.scope.contains_key(&name) {
             name.push('_');
         }
-        let catch_name = self.bind_local(&name, HirType::Str);
-        let normal_disposal = self.lower_using_disposal_sequence(&using_disposals, None);
+        let catch_name = self.bind_local(&name, crate::caught_exception_carrier_type());
+        let normal_disposal = self.lower_using_disposal_sequence(&using_disposals, None)?;
         let exceptional_disposal = self.lower_using_disposal_sequence(
             &using_disposals,
             Some(HirExpr::Var(catch_name.clone())),
-        );
+        )?;
         self.generator_finalizers
             .insert(catch_name.clone(), normal_disposal.clone());
-        let body = inject_finally_before_exits(out, &normal_disposal, false);
-        let mut lowered = vec![HirStmt::Try(
+        // An exit only disposes the resources already acquired before it: a
+        // later resource's binding does not exist yet at an earlier `return`.
+        let mut body = Vec::new();
+        let mut exposed = Vec::new();
+        let mut rest = out;
+        let mut consumed = 0;
+        let mut boundaries = using_starts.clone();
+        boundaries.push(consumed + rest.len());
+        for (live, end) in boundaries.into_iter().enumerate() {
+            let segment: Vec<HirStmt> = rest.drain(..end - consumed).collect();
+            consumed = end;
+            let segment = if live == 0 {
+                segment
+            } else {
+                let live_disposals: Vec<HirStmt> =
+                    declared_order[..live].iter().rev().cloned().collect();
+                let disposal = self.lower_using_disposal_sequence(&live_disposals, None)?;
+                self.inject_finally_before_exits(segment, &disposal, false, 1)?
+            };
+            for stmt in &segment {
+                if let HirStmt::Let(name, ty, _) = stmt {
+                    if !self.scope.contains_key(name) {
+                        self.scope.insert(name.clone(), ty.clone());
+                        exposed.push(name.clone());
+                    }
+                }
+            }
+            body.extend(segment);
+        }
+        for name in exposed {
+            self.scope.remove(&name);
+        }
+        // Every flag is initialized before any fallible acquisition in the Try.
+        using_flags.push(crate::caught_exception_carrier_prelude(catch_name.clone()));
+        using_flags.push(HirStmt::Try(
             body,
             catch_name.clone(),
             exceptional_disposal,
-            Some(catch_name),
-        )];
-        lowered.extend(normal_disposal);
-        Ok(lowered)
+            None,
+        ));
+        using_flags.extend(normal_disposal);
+        Ok(using_flags)
     }
 
-    fn hoist_using_return_values(
-        &mut self,
-        statements: Vec<HirStmt>,
-    ) -> Result<Vec<HirStmt>, String> {
-        let mut lowered = Vec::new();
-        for statement in statements {
-            match statement {
-                HirStmt::Return(Some(value)) => {
-                    let ty = self.infer_expr_type(&value)?;
-                    let name = self.bind_local("__thaw_using_return", ty.clone());
-                    lowered.push(HirStmt::Let(name.clone(), ty, value));
-                    lowered.push(HirStmt::Return(Some(HirExpr::Var(name))));
-                }
-                HirStmt::If(condition, then_body, else_body) => lowered.push(HirStmt::If(
-                    condition,
-                    self.hoist_using_return_values(then_body)?,
-                    self.hoist_using_return_values(else_body)?,
-                )),
-                HirStmt::While(condition, body) => lowered.push(HirStmt::While(
-                    condition,
-                    self.hoist_using_return_values(body)?,
-                )),
-                HirStmt::Try(body, catch, catch_body, hidden) => lowered.push(HirStmt::Try(
-                    self.hoist_using_return_values(body)?,
-                    catch,
-                    self.hoist_using_return_values(catch_body)?,
-                    hidden,
-                )),
-                other => lowered.push(other),
-            }
-        }
-        Ok(lowered)
+    fn guard_using_disposal(flag: Symbol, disposal: HirStmt) -> HirStmt {
+        HirStmt::If(HirExpr::Var(flag.clone()), vec![
+            // Consume before calling user code: a throwing disposer must not
+            // be attempted again by the enclosing exceptional cleanup.
+            HirStmt::Expr(HirExpr::Assign(flag,
+                Box::new(HirExpr::Lit(HirLit::Bool(false))))),
+            disposal,
+        ], Vec::new())
     }
 
     /// A nesting-safe `SuppressedError` combining a new `error` with the
     /// pending error, matching `new SuppressedError(error, suppressed)`.
-    fn suppressed_error_expr(&self, error: HirExpr, suppressed: HirExpr) -> HirExpr {
-        let message = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_message".to_string())),
-            vec![error.clone()],
+    fn suppressed_error_expr(
+        &mut self, error: HirExpr, suppressed: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let carrier = crate::caught_exception_carrier_type();
+        let HirType::Union(members) = carrier else { unreachable!() };
+        let record = self.lower_trusted_error_fields(vec![
+            ("__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error".into(),
+                HirExpr::Lit(HirLit::Bool(true))),
+            ("message".into(), HirExpr::Lit(HirLit::Str(
+                "An error was suppressed during disposal".into(),
+            ))),
+            ("name".into(), HirExpr::Lit(HirLit::Str("SuppressedError".into()))),
+            ("error".into(), error),
+            ("suppressed".into(), suppressed),
+        ], HirExpr::Lit(HirLit::Bool(false)), None)?;
+        let record_type = self.infer_expr_type(&record)?;
+        let HirType::Object(_) = &record_type else {
+            return Err("trusted SuppressedError record must have a fixed object layout".into());
+        };
+        let owner = self.bind_local("__thaw_suppressed_error_owner", record_type.clone());
+        let property = |name: &str| HirExpr::PropAccess(
+            Box::new(HirExpr::Var(owner.clone())), record_type.clone(), name.into(),
         );
-        HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_suppress".to_string())),
-            vec![error, suppressed, message],
-        )
+        let message = self.coerce_to_declared(&HirType::Json, property("message"))?;
+        let name = self.coerce_to_declared(&HirType::Json, property("name"))?;
+        let error = self.caught_carrier_as_json(property("error"))?;
+        let suppressed = self.caught_carrier_as_json(property("suppressed"))?;
+        let snapshot = HirExpr::JsonObjectLit(vec![
+            ("message".into(), message),
+            ("name".into(), name),
+            ("error".into(), error),
+            ("suppressed".into(), suppressed),
+        ], HirType::Json);
+        let describer = HirExpr::Lambda(
+            vec![HirParam { name: owner.clone(), ty: record_type.clone() }],
+            Vec::new(), HirType::Json, Box::new(snapshot),
+        );
+        let layout = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_object_layout".into())),
+            vec![
+                HirExpr::Var(owner.clone()),
+                HirExpr::Lit(HirLit::Bool(false)),
+            ],
+        );
+        let register_describer = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_exception_describer".into())),
+            vec![HirExpr::Var(owner.clone()), describer],
+        );
+        let carrier = HirExpr::UnionInject(Box::new(HirExpr::TypedClosure(
+            HirType::Object(Vec::new()), Box::new(HirExpr::Var(owner.clone())),
+        )), 6, members);
+        let result = HirExpr::EvalThen(
+            Box::new(HirExpr::EvalThen(Box::new(layout), Box::new(register_describer))),
+            Box::new(carrier),
+        );
+        self.wrap_call_argument_bindings(result, &[(owner, record_type, record)])
     }
 
     /// Dispose every resource even if an earlier disposer throws. When an
@@ -242,15 +487,19 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         disposals: &[HirStmt],
         pending: Option<HirExpr>,
-    ) -> Vec<HirStmt> {
+    ) -> Result<Vec<HirStmt>, String> {
         let has_pending = pending.is_some();
-        let pending_name = self.bind_local("__thaw_using_pending", HirType::Str);
+        let carrier = crate::caught_exception_carrier_type();
+        let HirType::Union(members) = &carrier else { unreachable!() };
+        let pending_name = self.bind_local("__thaw_using_pending", carrier.clone());
         let has_pending_name = self.bind_local("__thaw_using_has_pending", HirType::Bool);
         let mut statements = vec![
             HirStmt::Let(
                 pending_name.clone(),
-                HirType::Str,
-                pending.unwrap_or_else(|| HirExpr::Lit(HirLit::Str(String::new()))),
+                carrier.clone(),
+                pending.unwrap_or_else(|| HirExpr::UnionInject(
+                    Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members.clone(),
+                )),
             ),
             HirStmt::Let(
                 has_pending_name.clone(),
@@ -259,7 +508,11 @@ impl<'a> FnLowerer<'a> {
             ),
         ];
         for disposal in disposals {
-            let error_name = self.bind_local("__thaw_using_dispose_error", HirType::Str);
+            let error_name = self.bind_local("__thaw_using_dispose_error", carrier.clone());
+            let combined = self.suppressed_error_expr(
+                HirExpr::Var(error_name.clone()), HirExpr::Var(pending_name.clone()),
+            )?;
+            statements.push(crate::caught_exception_carrier_prelude(error_name.clone()));
             statements.push(HirStmt::Try(
                 vec![disposal.clone()],
                 error_name.clone(),
@@ -268,10 +521,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Var(has_pending_name.clone()),
                         vec![HirStmt::Expr(HirExpr::Assign(
                             pending_name.clone(),
-                            Box::new(self.suppressed_error_expr(
-                                HirExpr::Var(error_name.clone()),
-                                HirExpr::Var(pending_name.clone()),
-                            )),
+                            Box::new(combined),
                         ))],
                         vec![HirStmt::Expr(HirExpr::Assign(
                             pending_name.clone(),
@@ -283,19 +533,24 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::Bool(true))),
                     )),
                 ],
-                Some(error_name),
+                None,
             ));
         }
         if has_pending {
-            statements.push(HirStmt::Throw(HirExpr::Var(pending_name)));
+            statements.extend(self.lower_throw_value_statements(
+                HirExpr::Var(pending_name), carrier,
+            )?);
         } else {
+            let rethrow = self.lower_throw_value_statements(
+                HirExpr::Var(pending_name), carrier,
+            )?;
             statements.push(HirStmt::If(
                 HirExpr::Var(has_pending_name),
-                vec![HirStmt::Throw(HirExpr::Var(pending_name))],
+                rethrow,
                 Vec::new(),
             ));
         }
-        statements
+        Ok(statements)
     }
 
     fn stmt_definitely_exits(stmt: &Stmt) -> bool {
@@ -327,28 +582,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn infer_return_type(&self, body: &[HirStmt]) -> Result<HirType, String> {
-        fn collect<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
-            for stmt in stmts {
-                match stmt {
-                    HirStmt::Return(Some(value)) => out.push(value),
-                    HirStmt::Return(None) => *bare = true,
-                    HirStmt::If(_, then_body, else_body) => {
-                        collect(then_body, out, bare);
-                        collect(else_body, out, bare);
-                    }
-                    HirStmt::While(_, body) => collect(body, out, bare),
-                    HirStmt::Try(body, _, catch_body, _) => {
-                        collect(body, out, bare);
-                        collect(catch_body, out, bare);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
         let mut values = Vec::new();
         let mut bare = false;
-        collect(body, &mut values, &mut bare);
+        collect_return_values(body, &mut values, &mut bare);
         if values.is_empty() {
             return Ok(HirType::Void);
         }
@@ -409,6 +645,9 @@ impl<'a> FnLowerer<'a> {
                     HirStmt::While(_, loop_body) => {
                         collect(loop_body, yields, returns, yielded, returned)
                     }
+                    HirStmt::Finally(body, _) => {
+                        collect(body, yields, returns, yielded, returned);
+                    }
                     HirStmt::Try(try_body, _, catch_body, _) => {
                         collect(try_body, yields, returns, yielded, returned);
                         collect(catch_body, yields, returns, yielded, returned);
@@ -458,7 +697,11 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_loop_body(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         self.loop_depth += 1;
+        self.source_break_depths.push(self.loop_depth);
+        self.source_continue_depths.push(self.loop_depth);
         let result = self.lower_body(stmt);
+        self.source_continue_depths.pop();
+        self.source_break_depths.pop();
         self.loop_depth -= 1;
         result
     }
@@ -468,9 +711,7 @@ impl<'a> FnLowerer<'a> {
         stmt: &Stmt,
         narrowing: Option<&(Symbol, HirType, u8)>,
     ) -> Result<Vec<HirStmt>, String> {
-        let saved = self.narrowings.clone();
-        let saved_nullable = self.nullable_narrowings.clone();
-        let saved_nullish = self.nullish_narrowings.clone();
+        let saved_narrowings = self.save_narrowings();
         if let Some((name, payload, absence_kind)) = narrowing {
             match absence_kind {
                 0 => {
@@ -484,13 +725,15 @@ impl<'a> FnLowerer<'a> {
                     self.nullish_narrowings
                         .insert(name.clone(), payload.clone());
                 }
+                3 => {
+                    self.partial_nullable_narrowings
+                        .insert(name.clone(), payload.clone());
+                }
                 _ => unreachable!(),
             }
         }
         let lowered = self.lower_body(stmt);
-        self.narrowings = saved;
-        self.nullable_narrowings = saved_nullable;
-        self.nullish_narrowings = saved_nullish;
+        self.restore_narrowings(saved_narrowings);
         lowered
     }
 
@@ -499,9 +742,7 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         narrowing: Option<&(Symbol, HirType, u8)>,
     ) -> Result<HirExpr, String> {
-        let saved = self.narrowings.clone();
-        let saved_nullable = self.nullable_narrowings.clone();
-        let saved_nullish = self.nullish_narrowings.clone();
+        let saved_narrowings = self.save_narrowings();
         if let Some((name, payload, absence_kind)) = narrowing {
             match absence_kind {
                 0 => {
@@ -515,13 +756,15 @@ impl<'a> FnLowerer<'a> {
                     self.nullish_narrowings
                         .insert(name.clone(), payload.clone());
                 }
+                3 => {
+                    self.partial_nullable_narrowings
+                        .insert(name.clone(), payload.clone());
+                }
                 _ => unreachable!(),
             }
         }
         let lowered = self.lower_expr(expr);
-        self.narrowings = saved;
-        self.nullable_narrowings = saved_nullable;
-        self.nullish_narrowings = saved_nullish;
+        self.restore_narrowings(saved_narrowings);
         lowered
     }
 
@@ -545,8 +788,9 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
-    /// Returns the optional binding tested by an undefined comparison and
-    /// whether its payload is present in the true branch.
+    /// Returns the optional binding tested by an absence check and the branch
+    /// where narrowing applies. Kind 3 keeps null after excluding undefined
+    /// from a Nullish payload.
     fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool, u8)> {
         if let Some((name, predicate)) = self.predicate_call_target(expr) {
             if matches!(self.scope.get(&name), Some(HirType::Optional(payload)) if payload.as_ref() == &predicate)
@@ -624,15 +868,18 @@ impl<'a> FnLowerer<'a> {
                 HirType::Nullish(payload) => (payload.as_ref().clone(), 2),
                 _ => return None,
             };
-            // `typeof x === "undefined"` -- x is *absent* when the test
-            // holds (only meaningful for the `undefined`-carrying kinds).
+            // Excluding undefined from Nullish<T> leaves T | null. Keep
+            // the null tag until a later guard excludes it too.
             if type_lit.value == *"undefined" && absence_kind != 1 {
-                return Some((name, payload, present_when_true, absence_kind));
+                return Some((name, payload, present_when_true,
+                    if absence_kind == 2 { 3 } else { absence_kind }));
             }
-            // `typeof x === "<payload's own type>"` -- x is *present*
-            // when the test holds (inverting `present_when_true`, which
-            // was computed for the `=== undefined` sense).
             if native_typeof_name(&payload).is_some_and(|kind| type_lit.value == *kind) {
+                // JavaScript reports null as "object", so that test cannot
+                // extract an object payload from Nullable/Nullish.
+                if type_lit.value == *"object" && absence_kind != 0 {
+                    return (absence_kind == 2).then_some((name, payload, !present_when_true, 3));
+                }
                 return Some((name, payload, !present_when_true, absence_kind));
             }
             return None;
@@ -656,7 +903,8 @@ impl<'a> FnLowerer<'a> {
             (HirType::Optional(payload), false) => (payload, 0),
             (HirType::Nullable(payload), true) => (payload, 1),
             (HirType::Nullish(payload), _)
-                if matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq) =>
+                if matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq)
+                    || (self.partial_nullable_narrowings.contains_key(&name) && nullable) =>
             {
                 (payload, 2)
             }
@@ -792,7 +1040,7 @@ impl<'a> FnLowerer<'a> {
         let literal_value = |value: &Expr| match value {
             Expr::Lit(Lit::Num(value)) => Some(HirLit::F64(value.value)),
             Expr::Lit(Lit::Str(value)) => {
-                Some(HirLit::Str(value.value.to_string_lossy().into_owned()))
+                Some(hir_string_literal_from_wtf8(value.value.as_wtf8().as_bytes()))
             }
             Expr::Lit(Lit::Bool(value)) => Some(HirLit::Bool(value.value)),
             _ => None,
@@ -1014,6 +1262,17 @@ impl<'a> FnLowerer<'a> {
             .copied()
             .filter(|index| class_type_has_identity(&elements[*index], class.sym.as_ref()))
             .collect::<Vec<_>>();
+        // Same-layout ordinary objects can fail the runtime identity check, so
+        // the matching members stay possible in the false branch only when
+        // another allowed member shares their physical layout (identity marker
+        // aside); with distinct layouts the false branch is exactly the rest.
+        let layout = |index: usize| match &elements[index] {
+            HirType::Object(fields) => HirType::Object(fields.iter().skip(1).cloned().collect()),
+            other => other.clone(),
+        };
+        let layouts_collide = allowed.iter().filter(|index| !matching.contains(index)).any(|other| {
+            matching.iter().any(|matched| layout(*matched) == layout(*other))
+        });
         (!matching.is_empty()).then(|| {
             (
                 vec![UnionNarrowingTarget {
@@ -1023,7 +1282,7 @@ impl<'a> FnLowerer<'a> {
                     elements: elements.clone(),
                 }],
                 true,
-                true,
+                !layouts_collide,
             )
         })
     }
@@ -1339,6 +1598,178 @@ impl<'a> FnLowerer<'a> {
         self.json_narrowings = saved_json;
         self.exception_object_narrowings = saved_exceptions;
         lowered
+    }
+
+}
+
+#[cfg(test)]
+mod thaw_binding_helper_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_binding_helper_declaration_flags_follow_resolved_symbols() {
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        let mut lowerer = FnLowerer::new(
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            HirType::Void,
+            None,
+        );
+
+        let outer_const = lowerer.bind_decl_local("value", HirType::F64, true);
+        assert_eq!(lowerer.resolve_binding("value"), outer_const);
+        assert!(lowerer.immutable_bindings.contains(&outer_const));
+
+        let mutable_shadow = lowerer.bind_decl_local("value", HirType::F64, false);
+        assert_ne!(mutable_shadow, outer_const);
+        assert_eq!(lowerer.resolve_binding("value"), mutable_shadow);
+        assert!(lowerer.immutable_bindings.contains(&outer_const));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow));
+
+        let const_shadow = lowerer.bind_decl_local("value", HirType::F64, true);
+        assert_ne!(const_shadow, mutable_shadow);
+        assert_eq!(lowerer.resolve_binding("value"), const_shadow);
+        assert!(lowerer.immutable_bindings.contains(&outer_const));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow));
+        assert!(lowerer.immutable_bindings.contains(&const_shadow));
+
+        // `using` is intentionally routed through a synthetic `const` declaration.
+        let using_binding = lowerer.bind_decl_local("resource", HirType::Json, true);
+        assert!(lowerer.immutable_bindings.contains(&using_binding));
+
+        let temporary = lowerer.bind_local("temporary", HirType::Bool);
+        assert_eq!(lowerer.resolve_binding("temporary"), temporary);
+        assert!(!lowerer.immutable_bindings.contains(&temporary));
+    }
+
+    #[test]
+    fn thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability() {
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        let mut lowerer = FnLowerer::new(
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            HirType::Void,
+            None,
+        );
+
+        let const_outer = lowerer.bind_decl_local("const_index", HirType::F64, true);
+        let const_inner = lowerer.bind_for_iteration_local("const_index", HirType::F64);
+        assert_ne!(const_inner, const_outer);
+        assert!(const_inner.starts_with("@@thaw_for_iteration_"));
+        assert_eq!(lowerer.resolve_binding("const_index"), const_inner);
+        assert!(lowerer.immutable_bindings.contains(&const_outer));
+        assert!(lowerer.immutable_bindings.contains(&const_inner));
+
+        let shadowed_const = lowerer.bind_decl_local("shadowed_index", HirType::F64, true);
+        let current_mutable_shadow =
+            lowerer.bind_decl_local("shadowed_index", HirType::F64, false);
+        assert_ne!(shadowed_const, current_mutable_shadow);
+        let mutable_shadow_inner =
+            lowerer.bind_for_iteration_local("shadowed_index", HirType::F64);
+        assert_eq!(lowerer.resolve_binding("shadowed_index"), mutable_shadow_inner);
+        assert!(lowerer.immutable_bindings.contains(&shadowed_const));
+        assert!(!lowerer.immutable_bindings.contains(&current_mutable_shadow));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow_inner));
+
+        let mutable_source =
+            lowerer.bind_decl_local("renamed_const_index", HirType::F64, false);
+        let renamed_const =
+            lowerer.bind_decl_local("renamed_const_index", HirType::F64, true);
+        assert_ne!(renamed_const, "renamed_const_index");
+        assert_ne!(renamed_const, mutable_source);
+        let renamed_const_inner =
+            lowerer.bind_for_iteration_local("renamed_const_index", HirType::F64);
+        assert_eq!(lowerer.resolve_binding("renamed_const_index"), renamed_const_inner);
+        assert!(lowerer.immutable_bindings.contains(&renamed_const));
+        assert!(lowerer.immutable_bindings.contains(&renamed_const_inner));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_source));
+
+        let let_outer = lowerer.bind_decl_local("let_index", HirType::F64, false);
+        let let_inner = lowerer.bind_for_iteration_local("let_index", HirType::F64);
+        assert_ne!(let_inner, let_outer);
+        assert_eq!(lowerer.resolve_binding("let_index"), let_inner);
+        assert!(!lowerer.immutable_bindings.contains(&let_outer));
+        assert!(!lowerer.immutable_bindings.contains(&let_inner));
+    }
+
+    #[test]
+    fn thaw_source_target_stacks_restore_after_nested_lowering_errors() {
+        fn first_statement(source: &str) -> Stmt {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let swc_ecma_ast::ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0]
+            else { panic!("expected a function declaration"); };
+            function.function.body.as_ref().unwrap().stmts[0].clone()
+        }
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        let mut lowerer = FnLowerer::new(
+            &signatures, &interfaces, &generic_interfaces, &enum_values,
+            &enum_reverse_values, HirType::Void, None,
+        );
+        lowerer.loop_depth = 5;
+        lowerer.source_break_depths.push(5);
+        lowerer.source_continue_depths.push(5);
+        lowerer.labels.push(("seed".into(), 5, true));
+        let bindings = lowerer.bindings.clone();
+        let scope = lowerer.scope.clone();
+        let mut loop_error = first_statement(
+            "function main() { known: while (true) { continue known; } }",
+        );
+        let Stmt::Labeled(label) = &mut loop_error else { panic!("expected label"); };
+        let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+        let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+        let Stmt::Continue(continue_stmt) = &mut body.stmts[0] else { panic!("expected continue"); };
+        continue_stmt.label.as_mut().unwrap().sym = "missing".into();
+
+        let mut switch_error = first_statement(
+            "function main() { known: while (true) { switch (1) { default: break known; } } }",
+        );
+        let Stmt::Labeled(label) = &mut switch_error else { panic!("expected label"); };
+        let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+        let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+        let Stmt::Switch(switch_stmt) = &mut body.stmts[0] else { panic!("expected switch"); };
+        let Stmt::Break(break_stmt) = &mut switch_stmt.cases[0].cons[0] else { panic!("expected break"); };
+        break_stmt.label.as_mut().unwrap().sym = "missing".into();
+
+        let mut label_error = first_statement(
+            "function main() { while (true) { label: while (true) { continue label; } } }",
+        );
+        let Stmt::While(outer_loop) = &mut label_error else { panic!("expected outer loop"); };
+        let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+        let Stmt::Labeled(label) = &mut outer_body.stmts[0] else { panic!("expected label"); };
+        let Stmt::While(label_loop) = label.body.as_ref() else { panic!("expected labeled loop"); };
+        label.body = label_loop.body.clone();
+
+        for (stmt, expected) in [
+            (&loop_error, "unknown continue label `missing`"),
+            (&switch_error, "unknown break label `missing`"),
+            (&label_error, "continue label `label` does not name a loop"),
+        ] {
+            assert!(lowerer.lower_stmt_seq(stmt).unwrap_err().contains(expected));
+            assert_eq!(lowerer.loop_depth, 5);
+            assert_eq!(lowerer.source_break_depths, [5]);
+            assert_eq!(lowerer.source_continue_depths, [5]);
+            assert_eq!(lowerer.labels, [("seed".into(), 5, true)]);
+            assert_eq!(lowerer.bindings, bindings);
+            assert_eq!(lowerer.scope, scope);
+        }
     }
 
 }

@@ -22,6 +22,84 @@ fn compiles_native_null_literals() {
     );
 }
 
+#[test]
+fn dynamic_method_argument_consumes_fresh_object_projection() {
+    let source = r#"
+        function boom(): boolean { throw "later argument"; }
+        function main(): void {
+            const values: JsValue = [];
+            values.push({ok: true});
+            console.log(values[0].ok);
+            values[0].extra = 2;
+            console.log(values[0].extra);
+            loadScript("globalThis.borrowedLive = {ok: true};");
+            const borrowed: JsValue = getDynamicValue("borrowedLive");
+            values.push(borrowed);
+            borrowed.ok = false;
+            console.log(values[1].ok);
+            try {
+                values.push({bad: true}, boom());
+            } catch (error) {
+                console.log(values.length);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_method_owned_json_argument"), "true\n2\nfalse\n2\n");
+}
+
+#[test]
+fn dynamic_method_argument_host_alias_survives_await() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const values: JsValue = [];
+            values.push({ok: true});
+            const alias: JsValue = values[0];
+            await sleep(1);
+            alias.ok = false;
+            console.log(values[0].ok);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_method_host_alias_after_await"), "false\n");
+}
+
+#[test]
+fn dynamic_method_owned_json_argument_ir_clones_then_destroys() {
+    let source = r#"
+        function main(): void {
+            const values: JsValue = [];
+            values.push({ok: true});
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    assert!(format!("{program:#?}").contains("__thaw_json_argument_array"));
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "owned_dynamic_argument_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let ir = ir.to_string();
+    assert!(ir.contains("owned_dynamic_argument_array_failed"));
+    let lines: Vec<_> = ir.lines().collect();
+    let array = lines.iter().position(|line| line.contains("owned_dynamic_argument_array = call"))
+        .expect("owned argument sink missing");
+    let producer = lines.iter().enumerate().skip(array)
+        .find(|(_, line)| line.contains("consumed_dynamic_json = call"))
+        .map(|(index, _)| index)
+        .expect("owned host Box producer missing");
+    let release = lines.iter().enumerate().skip(producer)
+        .find(|(_, line)| line.contains("@thaw_js_release_handle"))
+        .map(|(index, _)| index).expect("projection handle release missing");
+    let push = lines.iter().enumerate().skip(release)
+        .find(|(_, line)| line.contains("@thaw_json_array_push_json") && line.contains("%consumed_dynamic_json"))
+        .map(|(index, _)| index).expect("owned argument clone push missing");
+    let destroy = lines.iter().enumerate().skip(push)
+        .find(|(_, line)| line.contains("call void @thaw_json_destroy") && line.contains("%consumed_dynamic_json"))
+        .map(|(index, _)| index).expect("owned argument Box destroy missing");
+    assert!(producer < release && release < push && push < destroy,
+        "projection handle release, graph clone, and owned Box destruction must occur in order");
+    assert!(push < destroy, "owned Json Box must be destroyed after cloning into the argument graph");
+}
+
 /// `String`/`Number`/`Boolean` referenced *bare* (not called) used to
 /// fail to compile ("unknown variable `String`") -- only their
 /// call-position coercion form (`String(x)`) was recognized at all.
@@ -363,9 +441,10 @@ fn deletes_runtime_keyed_dictionary_properties() {
             console.log(JSON.stringify(parsed));
         }
     "#;
+    // Node 22: reading a deleted/missing Record key prints `undefined`, not NaN.
     assert_eq!(
         compile_and_run(source, "delete_dictionary_properties"),
-        "9\n5\ntrue\ntrue\nNaN\ntrue\nkey\ntrue\nNaN\nobject\ntrue\ntrue\n{}\n"
+        "9\n5\ntrue\ntrue\nundefined\ntrue\nkey\ntrue\nundefined\nobject\ntrue\ntrue\n{}\n"
     );
 }
 
@@ -912,14 +991,20 @@ fn compiles_nested_dynamic_value_assignment() {
             deep.p.q.r *= 3;
             console.log(JSON.stringify(deep));
 
+            // Node (v22): assigning through a missing intermediate throws a
+            // TypeError and leaves the object untouched -- no auto-vivification.
             const fresh: any = {};
-            fresh.a.b = 5;
+            try {
+                fresh.a.b = 5;
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
             console.log(JSON.stringify(fresh));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "nested_dynamic_value_assignment"),
-        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\n{\"a\":{\"b\":5}}\n"
+        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\ntrue\n{}\n"
     );
 }
 
@@ -1050,6 +1135,116 @@ fn compiles_dynamic_value_strict_equality() {
 }
 
 #[test]
+fn strict_equality_keeps_dynamic_value_kinds_and_live_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.eqText = '1'; globalThis.eqNumber = 1; globalThis.eqBool = true; globalThis.eqBig = 1n; globalThis.eqObject = {}; globalThis.eqOther = {};");
+            const text: JsValue = getDynamicValue("eqText");
+            const number: JsValue = getDynamicValue("eqNumber");
+            const boolean: JsValue = getDynamicValue("eqBool");
+            const bigint: JsValue = getDynamicValue("eqBig");
+            const object: JsValue = getDynamicValue("eqObject");
+            const same: JsValue = getDynamicValue("eqObject");
+            const other: JsValue = getDynamicValue("eqOther");
+            const boxed: any = object;
+            const jsonText: any = "1";
+            console.log(1 === text, 1 !== text, 1 === number, 1 === boolean);
+            console.log(jsonText === 1, jsonText !== 1, jsonText === "1");
+            console.log(object === same, object === other, object === boxed);
+            console.log(1n === bigint, 1n === text, 1n === number);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_dynamic_kinds_identity"),
+        "false true true false\nfalse true true\ntrue false true\ntrue false false\n"
+    );
+}
+
+#[test]
+fn strict_equality_distinguishes_host_primitives_brands_and_number_edges() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.eqZero = 0; globalThis.eqMinusZero = -0; globalThis.eqNaN = NaN; globalThis.eqNul = String.fromCharCode(0); globalThis.eqObject = {};");
+            const plus: JsValue = getDynamicValue("eqZero");
+            const minus: JsValue = getDynamicValue("eqMinusZero");
+            const nan: JsValue = getDynamicValue("eqNaN");
+            const nul: JsValue = getDynamicValue("eqNul");
+            const object: JsValue = getDynamicValue("eqObject");
+            const boxedPlus: any = plus;
+            const boxedObject: any = object;
+            const parsedZero: any = JSON.parse("0");
+            const parsedNul: any = JSON.parse("\"\\u0000\"");
+            const fake: any = JSON.parse("{\"__thaw_js_handle_id__\":1}");
+            console.log(plus === minus, nan === nan, boxedPlus === minus, parsedZero === plus);
+            console.log(boxedObject === object, fake === object, parsedNul === nul);
+            console.log(JSON.parse("1") === 1, JSON.parse("\"1\"") === 1);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_host_primitives_brands_edges"),
+        "true false true true\ntrue false true\ntrue false\n"
+    );
+}
+
+#[test]
+fn strict_sparse_index_evaluates_both_operands_in_source_order() {
+    let source = r#"
+        function values(): number[] {
+            console.log("array");
+            return [];
+        }
+        function missing(): undefined {
+            console.log("undefined");
+            return undefined;
+        }
+        function main(): void {
+            console.log(values()[0] === missing());
+            console.log(missing() === values()[0]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_sparse_source_order"),
+        "array\nundefined\ntrue\nundefined\narray\ntrue\n"
+    );
+}
+
+#[test]
+fn strict_sparse_index_snapshots_before_rhs_mutation() {
+    let source = r#"
+        const items: number[] = [];
+        items.length = 1;
+        function fill(): undefined {
+            items[0] = 1;
+            return undefined;
+        }
+        function main(): void {
+            console.log(items[0] === fill());
+            delete items[0];
+            console.log(fill() === items[0]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_sparse_rhs_mutation"),
+        "true\nfalse\n"
+    );
+}
+
+#[test]
+fn strict_equal_literal_typed_strings_compare_content() {
+    let source = r#"
+        function sameKey<T, K extends keyof T>(value: T, first: K, second: K): boolean {
+            return first === second;
+        }
+        function main(): void {
+            const value = { name: "thaw" };
+            console.log(sameKey(value, "name", "name"));
+            console.log(sameKey(value, "name", "name") === false);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "strict_literal_string_values"), "true\nfalse\n");
+}
+
+#[test]
 fn compares_present_optional_strings_by_value() {
     let source = r#"
         function main(): void {
@@ -1063,6 +1258,83 @@ fn compares_present_optional_strings_by_value() {
     assert_eq!(
         compile_and_run(source, "optional_string_strict_equality"),
         "true\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn strict_optional_json_map_values_preserve_presence_and_native_identity() {
+    let source = r#"
+        interface Owner { value: number; }
+        let trace = "";
+        function readKey(): string { trace += "K"; return "owner"; }
+        function asDynamic(owner: Owner): any { return owner; }
+        function replaceAndReturn(map: Map<any, any>, owner: Owner, replacement: Owner): Owner {
+            trace += "R";
+            map.set("owner", replacement);
+            return owner;
+        }
+        function main(): void {
+            const owner: Owner = { value: 7 };
+            const sameContent: Owner = { value: 7 };
+            const map = new Map<any, any>();
+            map.set("owner", owner);
+
+            const snapshot = map.get(readKey()) === replaceAndReturn(map, owner, sameContent);
+            console.log(snapshot, trace);
+            console.log(map.get("owner") === sameContent);
+            console.log(map.get("owner") === owner, owner === map.get("owner"));
+            console.log(map.get("owner") !== owner);
+            const dynamicOwner: any = asDynamic(owner);
+            console.log(dynamicOwner === owner, owner === dynamicOwner);
+
+            const missing = map.get("missing");
+            console.log(missing === undefined, undefined === missing);
+            map.set("undefined", undefined);
+            const storedUndefined = map.get("undefined");
+            console.log(storedUndefined === undefined, undefined === storedUndefined);
+            map.set("null", null);
+            console.log(map.get("null") === null, map.get("null") === undefined);
+            console.log(null === map.get("null"), undefined === map.get("null"), null === missing);
+            console.log(storedUndefined === null, null === storedUndefined);
+            console.log(map.get("missing") === map.get("null"));
+
+            const loaded = loadScript("globalThis.strictOptionalLive = { value: 11 };");
+            if (!loaded) throw new Error("loadScript failed");
+            const live: JsValue = getDynamicValue("strictOptionalLive");
+            if (typeof live !== "object" || live === null) throw new Error("live object missing");
+            map.set("live", live);
+            console.log(map.get("live") === live, live === map.get("live"));
+            console.log(map.get("live") === getDynamicValue("strictOptionalLive"));
+
+            trace = "";
+            console.log(replaceAndReturn(map, sameContent, sameContent) === map.get(readKey()), trace);
+            const otherMap = new Map<any, any>();
+            otherMap.set("owner", owner);
+            console.log(map.get("owner") === map.get("owner"), map.get("owner") === otherMap.get("owner"));
+
+            const undefinedLoaded = loadScript("globalThis.strictOptionalUndefined = undefined;");
+            if (!undefinedLoaded) throw new Error("loadScript undefined failed");
+            const liveUndefined: JsValue = getDynamicValue("strictOptionalUndefined");
+            if (typeof liveUndefined !== "undefined") throw new Error("live undefined missing");
+            console.log(missing === liveUndefined, liveUndefined === missing,
+                storedUndefined === liveUndefined, liveUndefined === storedUndefined,
+                map.get("null") === liveUndefined);
+
+            const getterCalls: number[] = [0];
+            const getterOwner = {
+                value: 99,
+                get probe(): number { getterCalls[0]++; return 99; }
+            };
+            const getterMap = new Map<any, any>();
+            getterMap.set("g", getterOwner);
+            console.log(getterMap.get("g") === getterOwner,
+                getterOwner === getterMap.get("g"), getterCalls[0]);
+            console.log(getterOwner.probe, getterCalls[0]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_optional_json_map_identity"),
+        "true KR\ntrue\nfalse false\ntrue\ntrue true\ntrue true\ntrue true\ntrue false\ntrue false false\nfalse false\nfalse\ntrue true\ntrue\ntrue RK\ntrue false\ntrue true true true false\ntrue true 0\n99 1\n"
     );
 }
 
@@ -1151,7 +1423,8 @@ fn compiles_dynamic_object_introspection_used_inline_in_console_log() {
     "#;
     assert_eq!(
         compile_and_run(source, "dynamic_object_introspection_inline_console_log"),
-        "[\"a\",\"b\"]\n[1,2]\n[[\"a\",1],[\"b\",2]]\n"
+        // Verified against `node -e` (util.inspect formatting).
+        "[ 'a', 'b' ]\n[ 1, 2 ]\n[ [ 'a', 1 ], [ 'b', 2 ] ]\n"
     );
 }
 
@@ -1428,6 +1701,29 @@ fn compiles_dynamic_nullish_coalescing() {
     );
 }
 
+#[test]
+fn json_assignment_nullish_put_value_runs_rhs_before_type_error() {
+    let source = r#"
+        let order = "";
+        function key(): string { order += "k"; return "value"; }
+        function rhs(): number { order += "v"; return 7; }
+        function main(): void {
+            const absent: any = null;
+            try { absent[key()] = rhs(); }
+            catch (error) { console.log(error instanceof TypeError, order); }
+            order = "";
+            try { absent[0] = rhs(); }
+            catch (error) { console.log(error instanceof TypeError, order); }
+            order = "";
+            const present: any = {};
+            present[key()] = rhs();
+            console.log(present.value, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "json_assignment_nullish_put_value"),
+        "true kv\ntrue v\n7 kv\n");
+}
+
 /// `x ??= y` on a dynamic (`any`-typed) variable/property target used to
 /// silently never assign, even when `x` was really `null`/`undefined`
 /// (same root cause as plain `??` above: only `Optional`/`Nullable`/
@@ -1569,3 +1865,840 @@ fn compiles_dynamic_uniform_tagged_object_reads_without_nested_tags() {
 }
 
 
+
+#[test]
+fn json_stringify_non_arrow_replacer_mutates_live_holder() {
+    let source = r#"function main(): void {
+        const value: Json = JSON.parse('{"keep":2,"other":3}');
+        console.log(JSON.stringify(value, function(key: string, current: Json): Json {
+            if (key === "keep") this["other"] = 9;
+            return current;
+        }));
+    }"#;
+    assert_eq!(compile_and_run(source, "json_stringify_non_arrow_holder"),
+        "{\"keep\":2,\"other\":9}\n");
+}
+
+#[test]
+fn non_arrow_function_expression_boxes_scalar_this_arguments() {
+    let source = r#"function main(): void {
+        const kind = function(): string { return typeof this; };
+        console.log(kind.call(undefined));
+        console.log(kind.call(null));
+        console.log(kind.call(true));
+        console.log(kind.call(3.5));
+        console.log(kind.call("hello"));
+        const echo = function(): Json { return this; };
+        console.log(typeof echo.call("retained"));
+    }"#;
+    assert_eq!(compile_and_run(source, "non_arrow_scalar_this"),
+        "undefined\nobject\nboolean\nnumber\nstring\nstring\n");
+}
+
+#[test]
+fn decodes_typed_js_tuple_union_values_without_overwriting_next_slot() {
+    let source = r#"
+        declare function __thaw_typed_js_7475706c654e756d626572(): [number | string, number];
+        declare function __thaw_typed_js_7475706c65537472696e67(): [number | string, number];
+        function main(): void {
+            loadScript("globalThis.tupleNumber = () => [7, 99]; globalThis.tupleString = () => ['x', 88];");
+            const numeric = __thaw_typed_js_7475706c654e756d626572();
+            const numberOrText = numeric[0];
+            if (typeof numberOrText === "number") console.log(numberOrText + 1);
+            console.log(numeric[1]);
+            const textual = __thaw_typed_js_7475706c65537472696e67();
+            const textOrNumber = textual[0];
+            if (typeof textOrNumber === "string") console.log(textOrNumber + "!");
+            console.log(textual[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_tuple_scalar_union"), "8\n99\nx!\n88\n");
+}
+
+#[test]
+fn decodes_object_and_array_union_members_in_typed_js_tuple() {
+    let source = r#"
+        declare function __thaw_typed_js_7475706c654f626a656374(): [{ value: number } | number[], number];
+        declare function __thaw_typed_js_7475706c654172726179(): [{ value: number } | number[], number];
+        function main(): void {
+            loadScript("globalThis.tupleObject = () => [{value:4}, 17]; globalThis.tupleArray = () => [[1,2], 18];");
+            const object = __thaw_typed_js_7475706c654f626a656374();
+            console.log(JSON.stringify(object[0]), object[1]);
+            const array = __thaw_typed_js_7475706c654172726179();
+            console.log(JSON.stringify(array[0]), array[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_tuple_aggregate_union"),
+        "{\"value\":4} 17\n[1,2] 18\n");
+}
+
+#[test]
+fn typed_js_array_length_getter_errors_reach_native_catch() {
+    let source = r#"
+        declare function __thaw_typed_js_6e756d4172726179(): number[];
+        declare function __thaw_typed_js_627974654172726179(): Uint8Array;
+        function main(): void {
+            loadScript("globalThis.numArray = () => new Proxy([1, 2], { get(target, key, receiver) { if (key === 'length') throw new Error('length failed'); return Reflect.get(target, key, receiver); } }); globalThis.byteArray = () => ({type: 'Buffer', data: new Proxy([1, 2], { get(target, key, receiver) { if (key === 'length') throw new Error('bytes length failed'); return Reflect.get(target, key, receiver); } })});");
+            try {
+                const values = __thaw_typed_js_6e756d4172726179();
+                console.log(values.length);
+            } catch (error) {
+                console.log(error.message);
+            }
+            try {
+                const values = __thaw_typed_js_627974654172726179();
+                console.log(values.length);
+            } catch (error) {
+                console.log(error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_js_array_length_getter_error"),
+        "length failed\nbytes length failed\n"
+    );
+}
+
+#[test]
+fn typed_js_bytes_decode_live_buffer_and_plain_data_wrapper() {
+    let source = r#"
+        declare function __thaw_typed_js_627974654172726179(): Uint8Array;
+        declare function __thaw_typed_js_6279746557726170706572(): Uint8Array;
+        function main(): void {
+            loadScript("globalThis.byteArray = () => Buffer.from('hello'); globalThis.byteWrapper = () => ({type: 'Buffer', data: [104,101,108,108,111]});");
+            const live = __thaw_typed_js_627974654172726179();
+            const wrapped = __thaw_typed_js_6279746557726170706572();
+            console.log(live.length, live[0], live[4]);
+            console.log(wrapped.length, wrapped[0], wrapped[4]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_js_bytes_live_buffer_and_plain_wrapper"),
+        "5 104 111\n5 104 111\n"
+    );
+}
+
+
+#[test]
+fn tuple_union_promise_scalar_cleanup_does_not_double_destroy_json() {
+    let source = r#"
+        declare function __thaw_typed_js_7475706c6550726f6d6973654e756d626572(): [string | Promise<number>, number];
+        declare function __thaw_typed_js_7475706c6550726f6d69736554657874(): [string | Promise<number>, number];
+        function main(): void {
+            loadScript("globalThis.tuplePromiseNumber = () => [4, 19]; globalThis.tuplePromiseText = () => ['ok', 23];");
+            const numeric = __thaw_typed_js_7475706c6550726f6d6973654e756d626572();
+            const textual = __thaw_typed_js_7475706c6550726f6d69736554657874();
+            console.log(numeric[1], textual[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_tuple_union_promise_cleanup"), "19 23\n");
+}
+
+#[test]
+fn object_and_array_union_children_remain_live_after_json_wrapper_cleanup() {
+    let source = r#"
+        declare function __thaw_typed_js_6f626a656374556e696f6e(): { choice: number | string };
+        declare function __thaw_typed_js_6172726179556e696f6e(): (number | string)[];
+        function main(): void {
+            loadScript("globalThis.objectUnion = () => ({choice:'kept'}); globalThis.arrayUnion = () => [9, 'live'];");
+            const object = __thaw_typed_js_6f626a656374556e696f6e();
+            const array = __thaw_typed_js_6172726179556e696f6e();
+            console.log(JSON.stringify(object), JSON.stringify(array));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_nested_union_json_cleanup"), "{\"choice\":\"kept\"} [9,\"live\"]\n");
+}
+
+#[test]
+fn borrowed_union_callback_argument_keeps_its_json_owner_until_adapter_cleanup() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65556e696f6e(
+            callback: (value: string | Promise<number>) => number,
+        ): number;
+        function main(): void {
+            loadScript("globalThis.invokeUnion = callback => callback(7);");
+            console.log(__thaw_typed_js_696e766f6b65556e696f6e(
+                (value: string | Promise<number>): number => 42,
+            ));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "borrowed_union_callback_json"), "42\n");
+}
+
+#[test]
+fn nested_typed_json_absence_chain_tracks_inner_nullable_state() {
+    let nested = HirType::Optional(Box::new(HirType::Nullable(Box::new(HirType::Json))));
+    let reverse = HirType::Nullable(Box::new(HirType::Optional(Box::new(HirType::Json))));
+    let optional_only = HirType::Optional(Box::new(HirType::Optional(Box::new(HirType::Json))));
+    for ty in [&nested, &reverse, &optional_only] {
+        assert!(HirCompiler::<'static>::typed_result_embeds_input_json(ty));
+    }
+    assert!(HirCompiler::<'static>::typed_result_null_is_absent(&nested));
+    assert!(HirCompiler::<'static>::typed_result_null_is_absent(&reverse));
+    assert!(!HirCompiler::<'static>::typed_result_null_is_absent(&optional_only));
+}
+
+#[test]
+fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
+    fn ir(source: &str) -> String {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "union_json_ownership");
+        compiler.compile_program(&program).unwrap();
+        compiler.print_to_string()
+    }
+    // LLVM void calls have no result name. Match each owned JSON producer's
+    // SSA value to the actual thaw_json_destroy argument instead.
+    fn owned_result_ids(ir: &str, callee: &str) -> Vec<String> {
+        ir.lines()
+            .filter(|line| line.contains(" = call ") && line.contains(callee))
+            .filter_map(|line| line.split_once(" = call ").map(|(name, _)| name.trim().to_string()))
+            .collect()
+    }
+    fn typed_result_decode_ids(ir: &str, callee: &str) -> Vec<String> {
+        owned_result_ids(ir, callee)
+            .into_iter()
+            .filter(|decoded| {
+                let tracked = tracked_root_id(ir, decoded);
+                ir.lines().any(|line| {
+                    line.contains("@thaw_json_typed_decode_scope_own(")
+                        && line.contains(&format!("@thaw_json_typed_decode_scope_own(ptr {tracked})"))
+                })
+            })
+            .collect()
+    }
+    fn tuple_slot_ids(ir: &str) -> Vec<String> {
+        ir.lines()
+            .filter(|line| line.contains(" = getelementptr") && line.contains("json_tuple_slot"))
+            .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim().to_string()))
+            .collect()
+    }
+    fn destroy_sites(ir: &str, owned: &str) -> Vec<(usize, String)> {
+        let mut block = String::new();
+        let mut sites = Vec::new();
+        for (index, line) in ir.lines().enumerate() {
+            if !line.chars().next().is_some_and(char::is_whitespace) {
+                if let Some((label, _)) = line.split_once(':') {
+                    block = label.to_string();
+                }
+            }
+            if let Some((_, args)) = line.split_once("call void @thaw_json_destroy(") {
+                if args.split(')').next().and_then(|args| args.split_whitespace().last()) == Some(owned) {
+                    sites.push((index, block.clone()));
+                }
+            }
+        }
+        sites
+    }
+    fn block_has_call(ir: &str, block_prefix: &str, call: &str) -> bool {
+        let mut block = String::new();
+        ir.lines().any(|line| {
+            if !line.chars().next().is_some_and(char::is_whitespace) {
+                if let Some((label, _)) = line.split_once(':') {
+                    block = label.to_string();
+                }
+            }
+            block.starts_with(block_prefix) && line.contains(call)
+        })
+    }
+    fn tracked_root_id(ir: &str, owned: &str) -> String {
+        let argument = format!("@thaw_json_track_arena_owned_root(ptr {owned})");
+        let roots: Vec<_> = ir
+            .lines()
+            .filter(|line| line.contains(" = call ") && line.contains(&argument))
+            .filter_map(|line| line.split_once(" = call ").map(|(name, _)| name.trim().to_string()))
+            .collect();
+        assert_eq!(roots.len(), 1, "owner {owned}: {ir}");
+        roots[0].clone()
+    }
+    fn assert_one_normal_destroy(ir: &str, owned: &str, failure: &str, after: usize) {
+        let sites = destroy_sites(ir, owned);
+        // The host-error/invalid-graph edge and the normal edge are
+        // mutually exclusive: each owns precisely one destruction.
+        assert_eq!(sites.len(), 2, "owner {owned}: {ir}");
+        assert_eq!(sites.iter().filter(|(_, block)| block.starts_with(failure)).count(), 1,
+            "owner {owned}: {ir}");
+        let normal = sites.iter().find(|(_, block)| !block.starts_with(failure)).unwrap();
+        assert!(normal.0 > after, "owner {owned}: {ir}");
+    }
+    fn assert_transferred_root_destroy(
+        ir: &str,
+        owned: &str,
+        failure: &str,
+        after: usize,
+        has_host_error_cleanup: bool,
+    ) {
+        let decoded = destroy_sites(ir, owned);
+        assert_eq!(decoded.len(), 1, "decoded owner {owned}: {ir}");
+        assert!(decoded[0].1.starts_with(failure), "decoded owner {owned}: {ir}");
+        let tracked = tracked_root_id(ir, owned);
+        let transferred = destroy_sites(ir, &tracked);
+        assert_eq!(transferred.len(), 1, "tracked owner {tracked}: {ir}");
+        assert!(!transferred[0].1.starts_with(failure), "tracked owner {tracked}: {ir}");
+        assert!(transferred[0].0 > after, "tracked owner {tracked}: {ir}");
+        if has_host_error_cleanup {
+            let owns_tracked_root = ir.lines().any(|line| {
+                line.contains("@thaw_json_typed_decode_scope_own(")
+                    && line.contains(&format!("@thaw_json_typed_decode_scope_own(ptr {tracked})"))
+            });
+            assert!(owns_tracked_root, "tracked owner {tracked}: {ir}");
+            assert!(
+                block_has_call(ir, "typed_decode_failed", "@thaw_json_typed_decode_scope_end(i8 1)"),
+                "tracked owner {tracked}: {ir}"
+            );
+        }
+    }
+    fn tuple_store_line(ir: &str, slot: &str) -> usize {
+        ir.lines().position(|line| line.trim_start().starts_with("store ")
+            && line.contains(&format!("ptr {slot}"))).expect(ir)
+    }
+    // A two-position tuple owns one wrapper per indexed position; the
+    // Union's wrapper and its adjacent number each have one destroy.
+    let plain = ir(r#"
+        declare function __thaw_typed_js_7475706c654e756d626572(): [number | string, number];
+        function main(): void { const value = __thaw_typed_js_7475706c654e756d626572(); console.log(value[1]); }
+    "#);
+    let plain_children = owned_result_ids(&plain, "@thaw_json_index(");
+    let plain_slots = tuple_slot_ids(&plain);
+    assert_eq!(plain_children.len(), 2, "{plain}");
+    assert_eq!(plain_slots.len(), 2, "{plain}");
+    for (child, slot) in plain_children.iter().zip(&plain_slots) {
+        assert_one_normal_destroy(&plain, child, "json_host_failed", tuple_store_line(&plain, slot));
+    }
+    // Promise<number> now reads borrowed JSON when building the resolved
+    // native Promise, leaving the one owned indexed wrapper for its caller.
+    let promised = ir(r#"
+        declare function __thaw_typed_js_7475706c6550726f6d6973654e756d626572(): [string | Promise<number>, number];
+        function main(): void { const value = __thaw_typed_js_7475706c6550726f6d6973654e756d626572(); console.log(value[1]); }
+    "#);
+    assert!(promised.contains("dynamic_union_promise"), "{promised}");
+    let promised_children = owned_result_ids(&promised, "@thaw_json_index(");
+    let promised_slots = tuple_slot_ids(&promised);
+    assert_eq!(promised_children.len(), 2, "{promised}");
+    assert_eq!(promised_slots.len(), 2, "{promised}");
+    for (child, slot) in promised_children.iter().zip(&promised_slots) {
+        // A Promise decoder-side destroy would add a third site for the
+        // same input, beyond the mutually exclusive host-error and owner sites.
+        assert_one_normal_destroy(&promised, child, "json_host_failed", tuple_store_line(&promised, slot));
+    }
+    // A non-scalar Promise member still borrows the Union input. Its native
+    // object is detached; the outer tuple owns exactly one indexed Box.
+    let promised_object = ir(r#"
+        declare function __thaw_typed_js_70726f6d6973654f626a656374(): [string | Promise<{ value: number }>, number];
+        function main(): void { const value = __thaw_typed_js_70726f6d6973654f626a656374(); console.log(value[1]); }
+    "#);
+    let promised_object_children = owned_result_ids(&promised_object, "@thaw_json_index(");
+    let promised_object_slots = tuple_slot_ids(&promised_object);
+    assert_eq!(promised_object_children.len(), 2, "{promised_object}");
+    assert_eq!(promised_object_slots.len(), 2, "{promised_object}");
+    for (child, slot) in promised_object_children.iter().zip(&promised_object_slots) {
+        assert_one_normal_destroy(&promised_object, child, "json_host_failed",
+            tuple_store_line(&promised_object, slot));
+    }
+    // Detached direct typed results consume their decoded root once on the
+    // normal path; the invalid-graph path has its own exclusive release.
+    for (source, produced) in [
+        (r#"declare function __thaw_typed_js_6e756d4172726179(): number[];
+            function main(): void { const xs = __thaw_typed_js_6e756d4172726179(); console.log(xs.length); }"#,
+            "dynamic_number_array_result"),
+        (r#"declare function __thaw_typed_js_70726f6d697365566f6964(): Promise<void>;
+            async function main(): Promise<void> { await __thaw_typed_js_70726f6d697365566f6964(); }"#,
+            "dynamic_promise"),
+        (r#"declare function __thaw_typed_js_6f626a656374526573756c74(): { value: number };
+            function main(): void { const item = __thaw_typed_js_6f626a656374526573756c74(); console.log(item.value); }"#,
+            "dynamic_result_field_json"),
+        (r#"declare function __thaw_typed_js_6e756c6c556e646566(): { nil: null, missing: undefined };
+            function main(): void { const item = __thaw_typed_js_6e756c6c556e646566(); console.log(item.nil, item.missing); }"#,
+            "dynamic_result_field_json"),
+    ] {
+        let decoded = ir(source);
+        let roots = typed_result_decode_ids(&decoded, "@thaw_json_graph_decode(");
+        assert_eq!(roots.len(), 1, "{decoded}");
+        let output = decoded.lines().position(|line| line.contains(produced)).expect(&decoded);
+        assert_transferred_root_destroy(
+            &decoded,
+            &roots[0],
+            "quickjs_graph_invalid",
+            output,
+            produced == "dynamic_number_array_result",
+        );
+    }
+    // The top-level typed-result Union is also an owned JSON wrapper.
+    let top_level = ir(r#"
+        declare function __thaw_typed_js_746f70556e696f6e(): number | string;
+        function main(): void { const value = __thaw_typed_js_746f70556e696f6e(); console.log(value); }
+    "#);
+    let top_level_owned = typed_result_decode_ids(&top_level, "@thaw_json_graph_decode(");
+    assert_eq!(top_level_owned.len(), 1, "{top_level}");
+    let union_loaded = top_level.lines().position(|line| line.contains("dynamic_union_value = load"))
+        .expect(&top_level);
+    assert_transferred_root_destroy(
+        &top_level,
+        &top_level_owned[0],
+        "quickjs_graph_invalid",
+        union_loaded,
+        false,
+    );
+}
+
+/// Native values crossed into `any` or a typed QuickJS call must retain
+/// explicit undefined slots; JSON.stringify still applies its public
+/// object-omission/array-null policy.
+#[test]
+fn explicit_undefined_slots_survive_dynamic_conversion() {
+    let source = r#"
+        declare function __thaw_typed_js_70726f6265556e646566696e6564(
+            object: { x: undefined },
+            items: undefined[],
+            nested: { x: undefined }[],
+        ): string;
+        function main(): void {
+            loadScript("globalThis.probeUndefined = (object, items, nested) => [Object.keys(object).includes('x'), object.x === undefined, items[0] === undefined, items[0] !== null, Object.keys(nested[0]).includes('x')].join(',');");
+            const native = { x: undefined };
+            const boxed: any = native;
+            console.log(Object.keys(boxed).join(","), Object.hasOwn(boxed, "x"), boxed.x === undefined);
+            console.log(__thaw_typed_js_70726f6265556e646566696e6564(native, [undefined], [native]));
+            console.log(JSON.stringify(native), JSON.stringify([undefined]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "explicit_undefined_dynamic_slots"),
+        "x true true\ntrue,true,true,true,true\n{} [null]\n"
+    );
+}
+
+#[test]
+fn setter_only_source_copies_undefined_own_value_in_object_assign() {
+    let source = r#"
+        function main(): void {
+            const target: any = { x: 1 };
+            const source = { set x(value: number) {} };
+            const result: any = Object.assign(target, source);
+            console.log(result === target, Object.hasOwn(result, "x"), result.x === undefined);
+            console.log(JSON.stringify(source));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "setter_only_object_assign_undefined"),
+        "true true true\n{}\n"
+    );
+}
+// Unrun regression: the first field/element/local has a 24-byte LLVM value,
+// followed by a sentinel that the former fixed 16-byte slot overwrote.
+#[test]
+fn nested_tagged_values_preserve_adjacent_arena_slots() {
+    let source = r#"
+        interface Holder { value: (string | number) | undefined; tail: number; }
+        function choose(kind: number): (string | number) | undefined {
+            if (kind === 1) return "first";
+            if (kind === 2) return 82;
+            return "tuple";
+        }
+        async function carry(input: (string | number) | undefined): Promise<(string | number) | undefined> {
+            let saved: (string | number) | undefined = input;
+            let tail: number = 93;
+            await sleep(1);
+            console.log(tail);
+            return saved;
+        }
+        async function main(): Promise<void> {
+            const holder: Holder = { value: choose(1), tail: 71 };
+            console.log(holder.value);
+            console.log(holder.tail);
+            const values: ((string | number) | undefined)[] = [choose(1), choose(2)];
+            console.log(values[0]);
+            console.log(values[1]);
+            const pair: [(string | number) | undefined, number] = [choose(3), 83];
+            console.log(pair[0]);
+            console.log(pair[1]);
+            console.log(await carry(84));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_tagged_arena_slots"),
+        "first\n71\nfirst\n82\ntuple\n83\n93\n84\n"
+    );
+}
+
+#[test]
+fn object_to_string_dispatches_tagged_values_after_one_evaluation() {
+    let source = r#"
+        let calls = 0;
+        function next(): string | number | null | undefined {
+            calls += 1;
+            return "value";
+        }
+        function optional(value: string | undefined): string {
+            return Object.prototype.toString.call(value);
+        }
+        function nullable(value: number | null): string {
+            return Object.prototype.toString.call(value);
+        }
+        function mixed(value: string | number | null | undefined): string {
+            return Object.prototype.toString.call(value);
+        }
+        function arrays(value: number[] | null | undefined): string {
+            return Object.prototype.toString.call(value);
+        }
+        function main(): void {
+            console.log(optional("x"), optional(undefined));
+            console.log(nullable(7), nullable(null));
+            console.log(mixed("x"), mixed(7), mixed(null), mixed(undefined));
+            console.log(arrays([1]), arrays(null), arrays(undefined));
+            console.log(Object.prototype.toString.call(next()), calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "object_tagged_to_string"),
+        "[object String] [object Undefined]\n[object Number] [object Null]\n[object String] [object Number] [object Null] [object Undefined]\n[object Array] [object Null] [object Undefined]\n[object String] 1\n");
+}
+
+#[test]
+fn discarded_fresh_json_results_are_destroyed_but_borrowed_or_nested_values_are_not() {
+    let source = r#"
+        function discarded(): void {
+            JSON.parse("{}");
+        }
+        function borrowed(value: Json): void {
+            value;
+        }
+        function scalarWrapper(): void {
+            String(JSON.parse("1"));
+        }
+        function nestedLambda(): void {
+            (() => JSON.parse("{}"))();
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "discarded_fresh_json");
+    compiler.compile_program(&program).unwrap();
+    let function_ir = |name: &str| {
+        inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
+    };
+    fn cleanup_blocks(body: &str) -> usize {
+        body.lines().filter(|line| {
+            let line = line.trim();
+            line.starts_with("destroy_untransferred_json_result") && line.contains(':')
+        }).count()
+    }
+
+    let discarded = function_ir("discarded");
+    assert!(discarded.contains("@thaw_json_destroy"), "fresh JSON.parse result must be destroyed at its discarded statement");
+    assert_eq!(cleanup_blocks(&discarded), 1, "fresh JSON.parse result gets one guarded cleanup block");
+
+    let borrowed = function_ir("borrowed");
+    assert!(!borrowed.contains("@thaw_json_destroy"), "borrowed Json parameter must remain borrowed");
+    assert_eq!(cleanup_blocks(&borrowed), 0, "borrowed Json parameter must not get a cleanup block");
+
+    let scalar = function_ir("scalarWrapper");
+    let destroys = scalar.matches("call void @thaw_json_destroy").count();
+    assert_eq!(destroys, 1, "only JSON.parse's invalid-input edge destroys; the scalar wrapper must not destroy its nested JSON temporary");
+    assert_eq!(cleanup_blocks(&scalar), 0, "nested JSON temporary is not the scalar wrapper's discarded result");
+
+    let nested = function_ir("nestedLambda");
+    assert_eq!(cleanup_blocks(&nested), 0,
+        "a fresh result emitted while compiling a nested lambda must not authorize cleanup of the outer unknown call");
+}
+
+#[test]
+fn json_discard_candidates_are_revoked_when_pure_wrappers_store_the_result() {
+    use thaw_hir::{HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
+
+    fn json_object() -> HirExpr {
+        HirExpr::JsonObjectLit(
+            vec![("keep".into(), HirExpr::Lit(HirLit::Str("alive".into())))],
+            HirType::Json,
+        )
+    }
+    fn assignment(name: &str) -> HirExpr {
+        HirExpr::Assign(name.into(), Box::new(json_object()))
+    }
+    fn getter(name: &str) -> HirStmt {
+        HirStmt::Expr(HirExpr::JsonGet(Box::new(HirExpr::Var(name.into())), "keep".into()))
+    }
+    fn function(name: &str, wrapper: HirExpr) -> HirFunction {
+        HirFunction {
+            name: name.into(),
+            params: Vec::new(),
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![
+                HirStmt::Let("stored".into(), HirType::Json, json_object()),
+                HirStmt::Expr(wrapper),
+                getter("stored"),
+            ],
+        }
+    }
+
+    let program = HirProgram {
+        globals: Vec::new(),
+        initializers: Vec::new(),
+        functions: vec![
+            function("typed", HirExpr::TypedClosure(HirType::Json, Box::new(assignment("stored")))),
+            function("eval_then", HirExpr::EvalThen(
+                Box::new(HirExpr::Lit(HirLit::Bool(true))), Box::new(assignment("stored")),
+            )),
+            function("block", HirExpr::Block(vec![HirStmt::Return(Some(assignment("stored")))])),
+        ],
+        extern_functions: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_store_wrappers");
+    compiler.compile_program(&program).unwrap();
+    let function_ir = |name: &str| {
+        inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
+    };
+    fn cleanup_blocks(body: &str) -> usize {
+        body.lines().filter(|line| {
+            let line = line.trim();
+            line.starts_with("destroy_untransferred_json_result") && line.contains(':')
+        }).count()
+    }
+
+    for name in ["typed", "eval_then", "block"] {
+        let body = function_ir(name);
+        assert_eq!(cleanup_blocks(&body), 2,
+            "{name}: assignment and later property result each need a guarded cleanup site");
+        assert!(body.contains("discarded_json_still_owned"), "{name}: each cleanup is guarded by the transfer state");
+        assert!(body.contains("@thaw_json_destroy"), "{name}: fresh JSON results have a real destroy path");
+        assert!(body.contains("store i1 true"), "{name}: the assignment path must mark its candidate as transferred");
+        assert!(body.contains("@thaw_json_get"), "{name}: the stored object must remain usable after the wrapped assignment");
+    }
+}
+
+
+#[test]
+fn expression_type_tracks_assignment_values_and_explicit_block_tail() {
+    use thaw_hir::{HirExpr, HirLit, HirStmt, HirType};
+
+    let context = inkwell::context::Context::create();
+    let compiler = crate::hir_codegen::HirCompiler::new(&context, "expr_hir_type_values");
+    let json_value = || HirExpr::JsonObjectLit(Vec::new(), HirType::Json);
+    let json_result = HirType::Dictionary(Box::new(HirType::Json));
+    let object_type = HirType::Object(vec![("payload".into(), json_result.clone())]);
+
+    let field_assignment = HirExpr::PropAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        object_type,
+        "payload".into(),
+        Box::new(json_value()),
+    );
+    assert_eq!(compiler.expr_hir_type(&field_assignment), Some(json_result.clone()));
+
+    let index_assignment = HirExpr::IndexAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        Box::new(json_value()),
+    );
+    assert_eq!(compiler.expr_hir_type(&index_assignment), Some(json_result.clone()));
+    let invalid_index_assignment = HirExpr::IndexAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+        Box::new(json_value()),
+    );
+    assert_eq!(compiler.expr_hir_type(&invalid_index_assignment), Some(json_result.clone()));
+    for name in [
+        "__thaw_json_from_consumed_dynamic",
+        "__thaw_json_host_from_dynamic",
+        "__thaw_json_host_from_borrowed_dynamic",
+    ] {
+        let intrinsic = HirExpr::Call(
+            Box::new(HirExpr::Var(name.into())),
+            vec![HirExpr::Var("handle".into())],
+        );
+        assert_eq!(compiler.expr_hir_type(&intrinsic), Some(HirType::Json), "{name}");
+    }
+
+    let untyped_index_assignment = HirExpr::IndexAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        Box::new(HirExpr::Var("unknown_rhs".into())),
+    );
+    assert_eq!(compiler.expr_hir_type(&untyped_index_assignment), None);
+
+    let returned_block = HirExpr::Block(vec![
+        HirStmt::Expr(HirExpr::Lit(HirLit::Bool(true))),
+        HirStmt::Return(Some(json_value())),
+    ]);
+    assert_eq!(compiler.expr_hir_type(&returned_block), Some(json_result));
+    assert_eq!(
+        compiler.expr_hir_type(&HirExpr::Block(vec![HirStmt::Return(None)])),
+        None,
+        "a block with no returned value has no expression type",
+    );
+    assert_eq!(
+        compiler.expr_hir_type(&HirExpr::Block(vec![HirStmt::Expr(json_value())])),
+        None,
+        "a block whose last statement is not Return(Some(..)) must not infer a tail type",
+    );
+}
+
+#[test]
+fn json_discard_candidates_are_revoked_by_field_index_and_json_writes() {
+    use thaw_hir::{HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
+
+    fn json_object() -> HirExpr {
+        HirExpr::JsonObjectLit(
+            vec![("keep".into(), HirExpr::Lit(HirLit::Str("alive".into())))],
+            HirType::Json,
+        )
+    }
+    fn function(name: &str, local_type: HirType, init: HirExpr, write: HirExpr, read: HirExpr) -> HirFunction {
+        HirFunction {
+            name: name.into(), params: Vec::new(), ret: HirType::Void, is_async: false,
+            body: vec![
+                HirStmt::Let("holder".into(), local_type, init),
+                HirStmt::Expr(write),
+                HirStmt::Expr(read),
+            ],
+        }
+    }
+
+    let object_type = HirType::Object(vec![("keep".into(), HirType::Json)]);
+    let array_type = HirType::Array(Box::new(HirType::Json));
+    let program = HirProgram {
+        globals: Vec::new(), initializers: Vec::new(),
+        functions: vec![
+            function(
+                "field_write", object_type.clone(),
+                HirExpr::ObjectAlloc(object_type.clone()),
+                HirExpr::PropAssign(Box::new(HirExpr::Var("holder".into())), object_type.clone(),
+                    "keep".into(), Box::new(json_object())),
+                HirExpr::PropAccess(Box::new(HirExpr::Var("holder".into())), object_type.clone(), "keep".into()),
+            ),
+            function(
+                "index_write", array_type.clone(),
+                HirExpr::ArrayLit(vec![json_object()]),
+                HirExpr::IndexAssign(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))), Box::new(json_object())),
+                HirExpr::TypedIndex(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::Json),
+            ),
+            function(
+                "invalid_index_write", array_type.clone(),
+                HirExpr::ArrayLit(vec![json_object()]),
+                HirExpr::IndexAssign(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(-1.0))), Box::new(json_object())),
+                HirExpr::TypedIndex(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::Json),
+            ),
+            function(
+                "json_write", HirType::Json,
+                HirExpr::JsonObjectLit(vec![("keep".into(), json_object())], HirType::Json),
+                HirExpr::JsonSet(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::Str("keep".into()))), Box::new(json_object()),
+                    HirType::Json, false),
+                HirExpr::JsonGet(Box::new(HirExpr::Var("holder".into())), "keep".into()),
+            ),
+            HirFunction {
+                name: "owned_json_write".into(), params: Vec::new(), ret: HirType::Void, is_async: false,
+                body: vec![
+                    HirStmt::Let("__thaw_json_wrap_obj_owned".into(), HirType::Json, json_object()),
+                    HirStmt::Expr(HirExpr::JsonSet(
+                        Box::new(HirExpr::Var("__thaw_json_wrap_obj_owned".into())),
+                        Box::new(HirExpr::Lit(HirLit::Str("keep".into()))), Box::new(json_object()),
+                        HirType::Json, false,
+                    )),
+                    HirStmt::Expr(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var("__thaw_json_wrap_obj_owned".into())), "keep".into(),
+                    )),
+                ],
+            },
+            HirFunction {
+                name: "consume_json".into(),
+                params: vec![thaw_hir::HirParam { name: "value".into(), ty: HirType::Json }],
+                ret: HirType::Void, is_async: false,
+                body: vec![HirStmt::Return(None)],
+            },
+            HirFunction {
+                name: "consumed_index_write".into(),
+                params: vec![thaw_hir::HirParam { name: "handle".into(), ty: HirType::JsValue }],
+                ret: HirType::Void, is_async: false,
+                body: vec![
+                    HirStmt::Let("holder".into(), array_type.clone(), HirExpr::ArrayLit(vec![json_object()])),
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(HirExpr::Var("holder".into())),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                            vec![HirExpr::Var("handle".into())])),
+                    )),
+                    HirStmt::Expr(HirExpr::TypedIndex(Box::new(HirExpr::Var("holder".into())),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::Json)),
+                ],
+            },
+            HirFunction {
+                name: "consumed_json_return".into(),
+                params: vec![thaw_hir::HirParam { name: "handle".into(), ty: HirType::JsValue }],
+                ret: HirType::Json, is_async: false,
+                body: vec![HirStmt::Return(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                    vec![HirExpr::Var("handle".into())],
+                )))],
+            },
+            HirFunction {
+                name: "consumed_json_call_argument".into(),
+                params: vec![thaw_hir::HirParam { name: "handle".into(), ty: HirType::JsValue }],
+                ret: HirType::Void, is_async: false,
+                body: vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("consume_json".into())),
+                    vec![HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                        vec![HirExpr::Var("handle".into())])],
+                ))],
+            },
+        ],
+        extern_functions: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_write_sites");
+    compiler.compile_program(&program).unwrap();
+    let function_ir = |name: &str| {
+        inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
+    };
+    fn cleanup_blocks(body: &str) -> usize {
+        body.lines().filter(|line| {
+            let line = line.trim();
+            line.starts_with("destroy_untransferred_json_result") && line.contains(':')
+        }).count()
+    }
+
+    for (name, expected_discard_mark, read_helper, transferred) in [
+        ("field_write", 1, "@thaw_object_property_flags", true),
+        ("index_write", 1, "@thaw_array_presence_mark", true),
+        // A rejected negative index skips ownership transfer; the fresh RHS
+        // still has the same guarded cleanup site in the generated IR.
+        ("invalid_index_write", 1, "@thaw_array_presence_mark", true),
+        // Normal JsonSet uses the cloning setter; its RHS remains owned by
+        // the expression and must be destroyed when discarded.
+        ("json_write", 2, "@thaw_json_get", false),
+        ("owned_json_write", 2, "@thaw_json_take", true),
+    ] {
+        let body = function_ir(name);
+        assert_eq!(cleanup_blocks(&body), expected_discard_mark,
+            "{name}: each fresh result gets a cleanup site, guarded by its runtime transfer flag");
+        assert!(body.contains("discarded_json_still_owned"), "{name}: cleanup must test the transfer flag before destroying");
+        assert!(body.contains("@thaw_json_destroy"), "{name}: fresh JSON results have a real destroy path");
+        assert_eq!(body.contains("store i1 true"), transferred,
+            "{name}: only stores that take ownership may mark the candidate transferred");
+        assert!(body.contains(read_helper), "{name}: the stored value must be read after its write");
+    }
+
+    let consumed_write = function_ir("consumed_index_write");
+    assert_eq!(cleanup_blocks(&consumed_write), 1,
+        "consumed dynamic conversion is a fresh JSON result and needs guarded cleanup");
+    assert!(consumed_write.contains("discarded_json_still_owned"));
+    assert!(consumed_write.contains("store i1 true"), "valid index transfer must keep the JSON host alive");
+    assert!(consumed_write.contains("@thaw_array_presence_mark"));
+    assert!(consumed_write.contains("@thaw_json_destroy"));
+
+    for name in ["consumed_json_return", "consumed_json_call_argument"] {
+        let body = function_ir(name);
+        // The intrinsic's own HostError cleanup may destroy a failed result;
+        // these uses must not add a statement-discard cleanup on success.
+        assert_eq!(cleanup_blocks(&body), 0,
+            "{name}: returned/passed JSON must remain available to its consumer");
+        assert!(!body.contains("destroy_untransferred_json_result"),
+            "{name}: no statement-discard cleanup belongs on this ownership path");
+    }
+}

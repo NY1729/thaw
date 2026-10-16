@@ -111,7 +111,8 @@ fn keeps_unannotated_dynamic_method_promises_raw_until_awaited() {
     assert!(main.body.iter().any(|statement| matches!(
         statement,
         HirStmt::Let(_, HirType::JsValue, HirExpr::Call(callee, _))
-            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "callDynamicMethodHandleRaw")
+            // (formerly `callDynamicMethodHandleRaw`)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_call_selected_dynamic_method_raw")
     )));
 }
 
@@ -266,11 +267,12 @@ fn promise_combinators_accept_homogeneous_array_spreads() {
             if matches!(inner.as_ref(), HirExpr::PromiseAllArray(array, _)
                 if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
     ));
+    // allSettled settles each input on its own: the result is an array of
+    // per-status Json objects, joined by Promise.all.
     assert!(matches!(
         &main.body[1],
-        HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
-            if matches!(inner.as_ref(), HirExpr::PromiseAllSettledArray(array, _)
-                if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
+        HirStmt::Expr(HirExpr::AwaitPromise(_, HirType::Array(element)))
+            if **element == HirType::Json
     ));
     assert!(matches!(
         &main.body[2],
@@ -349,7 +351,9 @@ fn promise_any_accepts_empty_and_rejects_mixed_and_non_promise_inputs() {
 }
 
 #[test]
-fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
+fn promise_all_settled_accepts_mixed_and_non_promise_inputs() {
+    // Each input settles on its own in Node, so heterogeneous result types and
+    // plain values are valid; every entry is a per-status object.
     let mixed = thaw_parser::parse_typescript(
         r#"
         async function numberValue(): Promise<number> { return 1; }
@@ -360,17 +364,13 @@ fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
         "#,
     )
     .unwrap();
-    assert!(lower_module(&mixed)
-        .unwrap_err()
-        .contains("Promise.allSettled element 1 resolves to Str, expected F64"));
+    lower_module(&mixed).unwrap();
 
     let plain = thaw_parser::parse_typescript(
         "async function main(): Promise<void> { await Promise.allSettled([1]); }",
     )
     .unwrap();
-    assert!(lower_module(&plain)
-        .unwrap_err()
-        .contains("Promise.allSettled element 0 must be a Promise"));
+    lower_module(&plain).unwrap();
 }
 
 #[test]
@@ -465,15 +465,45 @@ fn lowers_fetch_and_json_parse_field_access() {
             ),
         )
     );
+    // A `Json` field read is guarded against a nullish receiver, which
+    // throws the same tagged `TypeError` real JS does.
+    let guarded_json_get = |receiver: &str, field: &str| {
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: receiver.into(),
+                    ty: HirType::Json,
+                }],
+                HirType::Json,
+                Box::new(HirExpr::Block(vec![
+                    HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                            vec![HirExpr::Var(receiver.into())],
+                        ),
+                        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                            format!(
+                                "\u{1}TypeError\u{1}Cannot read properties of null (reading '{field}')"
+                            ),
+                        )))],
+                        Vec::new(),
+                    ),
+                    HirStmt::Return(Some(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var(receiver.into())),
+                        field.into(),
+                    ))),
+                ])),
+            )),
+            vec![HirExpr::Var("data".into())],
+        )
+    };
     assert_eq!(
         f.body[2],
         HirStmt::Let(
             "name".into(),
             HirType::Str,
-            HirExpr::JsonAsString(Box::new(HirExpr::JsonGet(
-                Box::new(HirExpr::Var("data".into())),
-                "name".into(),
-            ))),
+            HirExpr::JsonAsString(Box::new(guarded_json_get("__thaw_json_receiver_0", "name"))),
         )
     );
     assert_eq!(
@@ -482,10 +512,7 @@ fn lowers_fetch_and_json_parse_field_access() {
             "count".into(),
             HirType::F64,
             HirExpr::JsonAsNumber(Box::new(HirExpr::JsonIndex(
-                Box::new(HirExpr::JsonGet(
-                    Box::new(HirExpr::Var("data".into())),
-                    "items".into(),
-                )),
+                Box::new(guarded_json_get("__thaw_json_receiver_1", "items")),
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
             ))),
         )
@@ -509,4 +536,58 @@ fn iterator_from_rejects_async_generators_clearly() {
         error.contains("`Iterator.from` does not accept an async generator"),
         "{error}"
     );
+}
+
+#[test]
+fn inferred_async_returns_include_undefined_for_fallthrough_and_bare_return() {
+    let program = lower(r#"
+        async function fallthrough(flag: boolean) { if (flag) return 1; }
+        async function bare(flag: boolean) { if (flag) return 2; return; }
+        function main(): void {
+            const callback = async (flag: boolean) => {
+                if (flag) return 3;
+                return;
+            };
+        }
+    "#);
+    let expected = HirType::Union(vec![HirType::F64, HirType::Undefined]);
+    for name in ["fallthrough", "bare"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert_eq!(function.ret, expected, "{name}");
+        assert!(function.is_async);
+    }
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let HirStmt::Let(_, HirType::Function(_, ret), _) = &main.body[0] else {
+        panic!("expected inferred async arrow binding");
+    };
+    assert_eq!(ret.as_ref(), &HirType::Promise(Box::new(expected)));
+}
+
+#[test]
+fn promise_tuple_combinators_evaluate_sources_once_even_when_empty() {
+    let program = lower(r#"
+        function pending(): [Promise<number>, Promise<number>] {
+            return [Promise.resolve(1), Promise.resolve(2)];
+        }
+        function empty(): [] { return []; }
+        function mixed(): [Promise<number>, Promise<string>] {
+            return [Promise.resolve(1), Promise.resolve("two")];
+        }
+        async function main(): Promise<void> {
+            await Promise.all(pending());
+            await Promise.allSettled(pending());
+            await Promise.race(pending());
+            await Promise.any(pending());
+            await Promise.all(empty());
+            await Promise.allSettled(empty());
+            await Promise.race(empty());
+            await Promise.any(empty());
+            await Promise.all(mixed());
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert_eq!(body.matches("\"pending\"").count(), 4, "{body}");
+    assert_eq!(body.matches("\"empty\"").count(), 4, "{body}");
+    assert_eq!(body.matches("\"mixed\"").count(), 1, "{body}");
 }

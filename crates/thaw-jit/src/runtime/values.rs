@@ -11,14 +11,13 @@ fn clamped_string_position(position: f64, length: usize) -> usize {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn positioned_string_search(value: f64, search: f64, position: f64, kind: u8) -> f64 {
-    let Some(value) = string_argument(value) else {
+    let Some(value) = string_utf16_argument(value) else {
         return -1.0;
     };
-    let Some(search) = string_argument(search) else {
+    let Some(search) = string_utf16_argument(search) else {
         return -1.0;
     };
-    let value = value.encode_utf16().collect::<Vec<_>>();
-    let search = search.encode_utf16().collect::<Vec<_>>();
+    let position = if kind == 4 && position.is_nan() { f64::INFINITY } else { position };
     let position = clamped_string_position(position, value.len());
     match kind {
         0 => f64::from(value.get(position..position.saturating_add(search.len())) == Some(&search)),
@@ -102,6 +101,11 @@ extern "C" fn string_includes(value: f64, search: f64) -> f64 {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn arena_string(value: String) -> f64 {
+    arena_string_bytes(value.as_bytes())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn arena_string_bytes(value: &[u8]) -> f64 {
     let size = value.len() + 1;
     let Some(output) =
         ARENA_ALLOC.with(|allocator| allocator.get().map(|alloc| unsafe { alloc(size, 1) }))
@@ -116,6 +120,7 @@ fn arena_string(value: String) -> f64 {
     unsafe {
         std::ptr::copy_nonoverlapping(value.as_ptr(), output, value.len());
         output.add(value.len()).write(0);
+        register_jit_string(output, value.len());
     }
     f64::from_bits(output as usize as u64)
 }
@@ -513,7 +518,11 @@ fn tagged_tuple_field(tuple: f64, index: f64, kind: u8, present_tag: u8) -> f64 
         return 0.0;
     }
     let field = unsafe { data.add(8 + index as usize * 16) };
-    if unsafe { field.read() } != present_tag {
+    let tag = unsafe { field.read() };
+    if tag != present_tag {
+        if present_tag == 0 {
+            CALL_ABSENCE.with(|absence| absence.set(if tag == 1 { 2 } else { 1 }));
+        }
         CALL_PRESENT.with(|present| present.set(false));
         return 0.0;
     }
@@ -1178,8 +1187,11 @@ extern "C" fn number_to_exponential_shortest(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_lower_case(value: f64) -> f64 {
     unsafe {
-        string_argument(value).map_or(f64::from_bits(0), |value| {
-            arena_string(value.to_lowercase())
+        string_utf16_argument(value).map_or(f64::from_bits(0), |units| {
+            let mapped = thaw_arena::utf16_map_segments(&units, |text, output| {
+                output.extend(text.to_lowercase().encode_utf16());
+            });
+            arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&mapped))
         })
     }
 }
@@ -1187,8 +1199,11 @@ extern "C" fn string_to_lower_case(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_upper_case(value: f64) -> f64 {
     unsafe {
-        string_argument(value).map_or(f64::from_bits(0), |value| {
-            arena_string(value.to_uppercase())
+        string_utf16_argument(value).map_or(f64::from_bits(0), |units| {
+            let mapped = thaw_arena::utf16_map_segments(&units, |text, output| {
+                output.extend(text.to_uppercase().encode_utf16());
+            });
+            arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&mapped))
         })
     }
 }
@@ -1212,20 +1227,15 @@ fn is_javascript_whitespace(character: char) -> bool {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn trim_string(value: f64, start: bool, end: bool) -> f64 {
-    let Some(value) = string_argument(value) else {
+    let Some(units) = string_utf16_argument(value) else {
         return f64::from_bits(0);
     };
-    let value = if start {
-        value.trim_start_matches(is_javascript_whitespace)
-    } else {
-        value.as_str()
+    let whitespace = |unit: &u16| {
+        char::from_u32(u32::from(*unit)).is_some_and(is_javascript_whitespace)
     };
-    let value = if end {
-        value.trim_end_matches(is_javascript_whitespace)
-    } else {
-        value
-    };
-    arena_string(value.to_owned())
+    let first = if start { units.iter().position(|unit| !whitespace(unit)).unwrap_or(units.len()) } else { 0 };
+    let last = if end { units[first..].iter().rposition(|unit| !whitespace(unit)).map_or(first, |index| first + index + 1) } else { units.len() };
+    arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&units[first..last]))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1246,22 +1256,23 @@ extern "C" fn string_trim_end(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_repeat(value: f64, count: f64) -> f64 {
     unsafe {
-        let Some(value) = string_argument(value) else {
+        let Some(value) = string_bytes_argument(value) else {
             return f64::from_bits(0);
         };
+        let count = count.trunc();
         let count = if count.is_nan() || count == 0.0 {
             0
         } else if !count.is_finite() || count < 0.0 {
             CALL_ERROR.with(|error| error.set(INVALID_REPEAT_COUNT.as_ptr().cast()));
             return f64::from_bits(0);
         } else {
-            count.trunc() as usize
+            count as usize
         };
         if value.len().checked_mul(count).is_none() {
             CALL_ERROR.with(|error| error.set(INVALID_REPEAT_COUNT.as_ptr().cast()));
             return f64::from_bits(0);
         }
-        arena_string(value.repeat(count))
+        arena_string_bytes(&value.repeat(count))
     }
 }
 
@@ -1324,17 +1335,16 @@ unsafe fn string_range(
     negative_from_end: bool,
     swap: bool,
 ) -> f64 {
-    let Some(value) = string_argument(value) else {
+    let Some(value) = string_utf16_argument(value) else {
         return f64::from_bits(0);
     };
-    let value = value.encode_utf16().collect::<Vec<_>>();
     let length = value.len() as f64;
     let mut start = normalize_string_index(start, length, negative_from_end);
     let mut end = normalize_string_index(end, length, negative_from_end);
     if swap && start > end {
         std::mem::swap(&mut start, &mut end);
     }
-    arena_string(String::from_utf16_lossy(&value[start..end.max(start)]))
+    arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&value[start..end.max(start)]))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1359,18 +1369,16 @@ extern "C" fn string_substring_range(value: f64, start: f64, end: f64) -> f64 {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn string_pad(value: f64, target_length: f64, pad: f64, at_start: bool) -> f64 {
-    let (Some(value), Some(pad)) = (string_argument(value), string_argument(pad)) else {
+    let (Some(units), Some(pad)) = (string_utf16_argument(value), string_utf16_argument(pad)) else {
         return f64::from_bits(0);
     };
-    let units = value.encode_utf16().collect::<Vec<_>>();
     let target_length = if target_length.is_finite() && target_length > 0.0 {
         target_length as usize
     } else {
         0
     };
-    let pad = pad.encode_utf16().collect::<Vec<_>>();
     if target_length <= units.len() || pad.is_empty() {
-        return arena_string(value);
+        return arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&units));
     }
     let needed = target_length - units.len();
     let filler = pad.into_iter().cycle().take(needed);
@@ -1379,7 +1387,7 @@ unsafe fn string_pad(value: f64, target_length: f64, pad: f64, at_start: bool) -
     } else {
         units.into_iter().chain(filler).collect()
     };
-    arena_string(String::from_utf16_lossy(&combined))
+    arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&combined))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1395,17 +1403,15 @@ extern "C" fn string_pad_end(value: f64, target_length: f64, pad: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn string_replace(value: f64, search: f64, replacement: f64, all: bool) -> f64 {
     let (Some(value), Some(search), Some(replacement)) = (
-        string_argument(value),
-        string_argument(search),
-        string_argument(replacement),
+        string_utf16_argument(value),
+        string_utf16_argument(search),
+        string_utf16_argument(replacement),
     ) else {
         return f64::from_bits(0);
     };
-    arena_string(if all {
-        value.replace(&search, &replacement)
-    } else {
-        value.replacen(&search, &replacement, 1)
-    })
+    arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&thaw_arena::utf16_replace(
+        &value, &search, &replacement, all,
+    )))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1427,8 +1433,8 @@ extern "C" fn string_concat(left: f64, right: f64) -> f64 {
             CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
             return f64::from_bits(0);
         }
-        let left = CStr::from_ptr(left).to_bytes();
-        let right = CStr::from_ptr(right).to_bytes();
+        let left = thaw_arena::NativeStr::from_ptr(left).to_bytes();
+        let right = thaw_arena::NativeStr::from_ptr(right).to_bytes();
         let Some(size) = left
             .len()
             .checked_add(right.len())
@@ -1450,6 +1456,7 @@ extern "C" fn string_concat(left: f64, right: f64) -> f64 {
         std::ptr::copy_nonoverlapping(left.as_ptr(), output, left.len());
         std::ptr::copy_nonoverlapping(right.as_ptr(), output.add(left.len()), right.len());
         output.add(size - 1).write(0);
+        register_jit_string(output, size - 1);
         f64::from_bits(output as usize as u64)
     }
 }
@@ -1462,13 +1469,17 @@ fn intern_string(encoded: &str) -> Option<*const c_char> {
         .step_by(2)
         .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
         .collect::<Option<Vec<_>>>()?;
-    let value = CString::new(bytes).ok()?;
+    let length = bytes.len();
+    let mut value = bytes;
+    value.push(0);
     let mut constants = STRING_CONSTANTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap();
     let value = constants.entry(encoded.to_owned()).or_insert(value);
-    Some(value.as_ptr())
+    let pointer = value.as_ptr().cast();
+    unsafe { thaw_arena::thaw_string_register_literal(pointer, length) };
+    Some(pointer)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1568,4 +1579,29 @@ extern "C" fn power(base: f64, exponent: f64) -> f64 {
         return f64::NAN;
     }
     base.powf(exponent)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_utf16_argument(value: f64) -> Option<Vec<u16>> {
+    unsafe { string_bytes_argument(value) }.map(|bytes| thaw_arena::wtf8_decode_utf16(&bytes))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_bytes_argument(value: f64) -> Option<Vec<u8>> {
+    let pointer = value.to_bits() as usize as *const c_char;
+    if pointer.is_null() {
+        None
+    } else {
+        Some(unsafe { thaw_arena::NativeStr::from_ptr(pointer) }.to_bytes().to_vec())
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn register_jit_string(output: *mut u8, length: usize) {
+    // Register only actual arena allocations: custom allocators own their deallocation.
+    if ARENA_ALLOC.with(|allocator| allocator.get().is_some_and(|alloc| {
+        std::ptr::fn_addr_eq(alloc, thaw_arena::thaw_arena_alloc as ArenaAlloc)
+    })) {
+        unsafe { thaw_arena::thaw_string_register(output.cast(), length) };
+    }
 }

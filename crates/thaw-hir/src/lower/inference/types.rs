@@ -1,3 +1,270 @@
+/// Is a callback whose parameter is typed `actual` usable where one
+/// whose parameter is typed `expected` is wanted? The caller will
+/// hand the callback an `expected`, so `actual` may be a *narrower*
+/// object that names only a leading subset of `expected`'s fields
+/// (width subtyping, as in TS: a `(r: { method; url }) => void`
+/// handler is fine for a slot that provides `{ method; url; body;
+/// ... }`). Restricted to a matching *prefix* so the handler's
+/// field offsets still line up with the value it's handed; the
+/// reverse -- naming a field the caller won't provide, or a
+/// different order -- stays rejected. Real trigger: `createServer`
+/// handlers annotated `{ method; url; statusCode; body }` after
+/// `IncomingMessage` grew an `on` member.
+///
+fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
+    if expected == actual {
+        return true;
+    }
+    // A Promise rejection callback annotated `any` receives the active
+    // caught value through the same owned Json adapter as lexical catches.
+    // Normalization performs that conversion before invoking its declared
+    // `(value: Json)` ABI; it must not reinterpret the union's 16 bytes as a
+    // Json pointer.
+    if expected == &crate::caught_exception_carrier_type() && actual == &HirType::Json {
+        return true;
+    }
+    // `expected`'s own omittable slots (a `CallableFunction`'s
+    // `fixed` params, e.g. `TemplateFunction = (data?: Data) =>
+    // string`) are wrapped in `Optional`/`Nullish`
+    // (`optional_parameter_type`, thaw-hir's `lower_ts_type` for a
+    // `TsFnType`) so the callable's *own body* can synthesize a
+    // real default when a caller omits that argument -- a
+    // parallel `HirOptionalMask` already conveys the same
+    // omittability to any external arity check, which is all that
+    // matters when checking whether some other value's parameter
+    // list can stand in for this one. A plain adapter `Function`
+    // (the generated wrapper around a dynamic call's returned JS
+    // closure, real example: ejs's own `compile(...):
+    // TemplateFunction`) always supplies a definite value at every
+    // declared slot, so its own matching param position stays
+    // unwrapped -- `Optional(Json)` has no direct match against a
+    // bare `Json` above, rejecting every such returned-callable
+    // value outright, whether it was ever invoked or not (an
+    // unconditionally-processed Fallback declaration). Retry
+    // against the unwrapped inner type before giving up; checked
+    // *after* the exact-match attempt above so two independently
+    // wrapped shapes (a callback-typed slot, which this same
+    // wrapping applies to on both sides) still compare equal
+    // first, rather than each losing its wrapper and potentially
+    // matching something it shouldn't.
+    if let HirType::Optional(inner) | HirType::Nullish(inner) = expected {
+        if callback_param_compatible(inner, actual) {
+            return true;
+        }
+    }
+    if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, actual) {
+        return actual_fields.len() <= expected_fields.len()
+            && actual_fields.iter().zip(expected_fields).all(
+                |((name, actual_ty), (expected_name, expected_ty))| {
+                    name == expected_name && callback_param_compatible(expected_ty, actual_ty)
+                },
+            );
+    }
+    matches!(
+        (expected, actual),
+        (
+            HirType::Json,
+            HirType::F64
+                | HirType::I64
+                | HirType::Bool
+                | HirType::Undefined
+                | HirType::Null
+                | HirType::Str
+                | HirType::StrLiteral(_)
+                | HirType::Dictionary(_)
+                | HirType::Array(_)
+                | HirType::Tuple(_)
+                | HirType::Object(_)
+                | HirType::Union(_)
+                | HirType::Optional(_)
+                | HirType::Nullable(_)
+                | HirType::Nullish(_)
+                | HirType::JsValue
+        ) | (HirType::JsValue, HirType::Json)
+    )
+}
+
+/// Is `narrow` an object type that names only fields `wide` also has, with
+/// identical types, in any order (width subtyping by name)? Such a parameter can
+/// be lowered at the wider type: the value handed over keeps its one physical
+/// layout, so field reads and writes through the narrower annotation still reach
+/// the original object.
+fn object_width_subset(narrow: &HirType, wide: &HirType) -> bool {
+    let (HirType::Object(narrow_fields), HirType::Object(wide_fields)) = (narrow, wide) else {
+        return false;
+    };
+    narrow != wide
+        && narrow_fields.len() <= wide_fields.len()
+        && narrow_fields.iter().all(|(name, ty)| {
+            wide_fields
+                .iter()
+                .any(|(wide_name, wide_ty)| wide_name == name && wide_ty == ty)
+        })
+}
+
+/// A callback parameter declared to return `void` accepts a function
+/// value of any return type, including `Promise<T>` -- the caller has
+/// stated it discards whatever comes back, so an `async` handler
+/// passed where a `=> void` callback is declared (e.g. `createServer`'s
+/// handler, which may legitimately be written either plain or `async`)
+/// is compatible. This mirrors TypeScript's own contextual typing of
+/// void-returning callback types (what lets `async` callbacks pass to
+/// `Array.prototype.forEach` etc.).
+///
+/// An expected `JsValue` return (a `(...) => any` callback whose declared
+/// return type genuinely accepts anything, including nothing) also accepts
+/// a real, concrete callback that returns void -- otherwise an ordinary
+/// `function(x) { ... }` with no explicit `return` (inferred `Void`) never
+/// satisfied it. Real trigger: a generic Events-map method's callback
+/// parameter (`handler: (...args: Events[Event]) => any`, e.g.
+/// `minipass`'s `.on()`).
+fn callable_return_compatible(expected_ret: &HirType, ret: &HirType) -> bool {
+    expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
+}
+
+/// Whether a `Function` value of type `actual` can stand in where `declared`
+/// is expected *without an adapter*: same parameter count and per-parameter
+/// physical layout (identical types, or a narrower `Object` whose fields are
+/// a prefix of the declared object's -- same offsets), and an identical
+/// return (`void` discards any). Unlike `callable_value_compatible` this
+/// deliberately rejects `Optional`/`CallableFunction` differences, which
+/// change the ABI and need a real adapter (e.g. a default-argument wrapper).
+fn callable_abi_compatible(declared: &HirType, actual: &HirType) -> bool {
+    let (HirType::Function(declared_params, declared_ret), HirType::Function(params, ret)) =
+        (declared, actual)
+    else {
+        return false;
+    };
+    (declared_ret == ret || **declared_ret == HirType::Void)
+        && declared_params.len() == params.len()
+        && declared_params
+            .iter()
+            .zip(params)
+            .all(|(declared, actual)| {
+                declared == actual
+                    || match (declared, actual) {
+                        (HirType::Object(declared_fields), HirType::Object(actual_fields)) => {
+                            actual_fields.len() <= declared_fields.len()
+                                && actual_fields.iter().zip(declared_fields).all(
+                                    |((actual_name, actual_ty), (declared_name, declared_ty))| {
+                                        actual_name == declared_name && actual_ty == declared_ty
+                                    },
+                                )
+                        }
+                        _ => false,
+                    }
+            })
+}
+
+/// Whether a `Function`/`CallableFunction` value of type `actual` can stand
+/// in where `expected` is declared: return-type compatibility (ignoring
+/// `void`) plus per-parameter width subtyping.
+fn callable_value_compatible(expected: &HirType, actual: &HirType) -> bool {
+    // A `this`-taking closure also carries the ordinary receiver-free entry, so
+    // it stands in wherever its visible function type is expected.
+    let actual = match actual {
+        HirType::FunctionWithThis(_, visible) => visible.as_ref(),
+        other => other,
+    };
+    match (expected, actual) {
+        (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
+            callable_return_compatible(expected_ret, ret)
+                && expected_params.len() == params.len()
+                && expected_params
+                    .iter()
+                    .zip(params)
+                    .all(|(expected, actual)| callback_param_compatible(expected, actual))
+        }
+        (
+            HirType::CallableFunction(fixed, _, rest, expected_ret),
+            HirType::Function(params, ret),
+        ) => {
+            callable_return_compatible(expected_ret, ret)
+                && params.len() >= fixed.len()
+                && fixed
+                    .iter()
+                    .zip(params)
+                    .all(|(expected, actual)| callback_param_compatible(expected, actual))
+                && match rest {
+                    Some(rest) => {
+                        let tail = &params[fixed.len()..];
+                        tail == [HirType::Array(rest.clone())]
+                            || tail
+                                .iter()
+                                .all(|ty| callback_param_compatible(rest, ty))
+                    }
+                    None => params.len() == fixed.len(),
+                }
+        }
+        (
+            HirType::CallableFunction(
+                expected_fixed,
+                expected_optional,
+                Some(expected_rest),
+                expected_ret,
+            ),
+            HirType::CallableFunction(actual_fixed, actual_optional, Some(actual_rest), ret),
+        ) => {
+            expected_optional.is_empty()
+                && actual_optional.is_empty()
+                && expected_rest == actual_rest
+                && callable_return_compatible(expected_ret, ret)
+                && actual_fixed.len() >= expected_fixed.len()
+                && expected_fixed
+                    .iter()
+                    .zip(actual_fixed)
+                    .all(|(expected, actual)| callback_param_compatible(expected, actual))
+                && actual_fixed[expected_fixed.len()..]
+                    .iter()
+                    .all(|actual| callback_param_compatible(expected_rest, actual))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod callable_compatibility_tests {
+    use super::*;
+
+    fn rest_callable(fixed: Vec<HirType>, rest: HirType, ret: HirType) -> HirType {
+        HirType::CallableFunction(
+            fixed,
+            HirOptionalMask::Inline(0),
+            Some(Box::new(rest)),
+            Box::new(ret),
+        )
+    }
+
+    #[test]
+    fn accepts_compatible_actual_rest_callables_and_rejects_mismatches() {
+        let json_rest = rest_callable(vec![], HirType::Json, HirType::Void);
+        assert!(callable_value_compatible(
+            &json_rest,
+            &rest_callable(vec![HirType::Json], HirType::Json, HirType::Void),
+        ));
+        assert!(callable_value_compatible(
+            &rest_callable(vec![HirType::Str], HirType::Json, HirType::Void),
+            &rest_callable(
+                vec![HirType::Str, HirType::Json],
+                HirType::Json,
+                HirType::Void,
+            ),
+        ));
+        assert!(!callable_value_compatible(
+            &rest_callable(vec![HirType::Str], HirType::Json, HirType::Void),
+            &rest_callable(vec![HirType::Json, HirType::Json], HirType::Json, HirType::Void),
+        ));
+        assert!(!callable_value_compatible(
+            &json_rest,
+            &rest_callable(vec![HirType::Json], HirType::Str, HirType::Void),
+        ));
+        assert!(!callable_value_compatible(
+            &rest_callable(vec![HirType::Json], HirType::Json, HirType::Str),
+            &rest_callable(vec![HirType::Json], HirType::Json, HirType::Void),
+        ));
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     fn expect_type(
         &self,
@@ -6,141 +273,7 @@ impl<'a> FnLowerer<'a> {
         context: &str,
     ) -> Result<(), String> {
         let actual = self.infer_expr_type(value)?;
-        // Is a callback whose parameter is typed `actual` usable where one
-        // whose parameter is typed `expected` is wanted? The caller will
-        // hand the callback an `expected`, so `actual` may be a *narrower*
-        // object that names only a leading subset of `expected`'s fields
-        // (width subtyping, as in TS: a `(r: { method; url }) => void`
-        // handler is fine for a slot that provides `{ method; url; body;
-        // ... }`). Restricted to a matching *prefix* so the handler's
-        // field offsets still line up with the value it's handed; the
-        // reverse -- naming a field the caller won't provide, or a
-        // different order -- stays rejected. Real trigger: `createServer`
-        // handlers annotated `{ method; url; statusCode; body }` after
-        // `IncomingMessage` grew an `on` member.
-        fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
-            if expected == actual {
-                return true;
-            }
-            // `expected`'s own omittable slots (a `CallableFunction`'s
-            // `fixed` params, e.g. `TemplateFunction = (data?: Data) =>
-            // string`) are wrapped in `Optional`/`Nullish`
-            // (`optional_parameter_type`, thaw-hir's `lower_ts_type` for a
-            // `TsFnType`) so the callable's *own body* can synthesize a
-            // real default when a caller omits that argument -- a
-            // parallel `HirOptionalMask` already conveys the same
-            // omittability to any external arity check, which is all that
-            // matters when checking whether some other value's parameter
-            // list can stand in for this one. A plain adapter `Function`
-            // (the generated wrapper around a dynamic call's returned JS
-            // closure, real example: ejs's own `compile(...):
-            // TemplateFunction`) always supplies a definite value at every
-            // declared slot, so its own matching param position stays
-            // unwrapped -- `Optional(Json)` has no direct match against a
-            // bare `Json` above, rejecting every such returned-callable
-            // value outright, whether it was ever invoked or not (an
-            // unconditionally-processed Fallback declaration). Retry
-            // against the unwrapped inner type before giving up; checked
-            // *after* the exact-match attempt above so two independently
-            // wrapped shapes (a callback-typed slot, which this same
-            // wrapping applies to on both sides) still compare equal
-            // first, rather than each losing its wrapper and potentially
-            // matching something it shouldn't.
-            if let HirType::Optional(inner) | HirType::Nullish(inner) = expected {
-                if callback_param_compatible(inner, actual) {
-                    return true;
-                }
-            }
-            if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) =
-                (expected, actual)
-            {
-                return actual_fields.len() <= expected_fields.len()
-                    && actual_fields.iter().zip(expected_fields).all(
-                        |((name, actual_ty), (expected_name, expected_ty))| {
-                            name == expected_name
-                                && callback_param_compatible(expected_ty, actual_ty)
-                        },
-                    );
-            }
-            matches!(
-                (expected, actual),
-                (
-                    HirType::Json,
-                    HirType::F64
-                        | HirType::I64
-                        | HirType::Bool
-                        | HirType::Undefined
-                        | HirType::Null
-                        | HirType::Str
-                        | HirType::StrLiteral(_)
-                        | HirType::Dictionary(_)
-                        | HirType::Array(_)
-                        | HirType::Tuple(_)
-                        | HirType::Object(_)
-                        | HirType::Union(_)
-                        | HirType::Optional(_)
-                        | HirType::Nullable(_)
-                        | HirType::Nullish(_)
-                        | HirType::JsValue
-                )
-                    | (HirType::JsValue, HirType::Json)
-            )
-        }
-        // A callback parameter declared to return `void` accepts a function
-        // value of any return type, including `Promise<T>` -- the caller has
-        // stated it discards whatever comes back, so an `async` handler
-        // passed where a `=> void` callback is declared (e.g. `createServer`'s
-        // handler, which may legitimately be written either plain or `async`)
-        // is compatible. This mirrors TypeScript's own contextual typing of
-        // void-returning callback types (what lets `async` callbacks pass to
-        // `Array.prototype.forEach` etc.).
-        let return_compatible = |expected_ret: &HirType, ret: &HirType| {
-            // An expected `JsValue` return (a `(...) => any` callback
-            // whose declared return type genuinely accepts anything,
-            // including nothing) also accepts a real, concrete callback
-            // that returns void -- otherwise an ordinary `function(x) {
-            // ... }` with no explicit `return` (inferred `Void`) never
-            // satisfied it, even though real Node's `=> any` callback
-            // signatures are routinely written exactly that way. Real
-            // trigger: a generic Events-map method's callback parameter
-            // (`handler: (...args: Events[Event]) => any`, e.g.
-            // `minipass`'s `.on()`), whose classified return type widens
-            // to `JsValue` per `contextual_dynamic_type`'s own existing
-            // "any" handling.
-            expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
-        };
-        let callable_compatible = match (expected, &actual) {
-            (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
-                return_compatible(expected_ret, ret)
-                    && expected_params.len() == params.len()
-                    && expected_params
-                        .iter()
-                        .zip(params)
-                        .all(|(expected, actual)| callback_param_compatible(expected, actual))
-            }
-            (
-                HirType::CallableFunction(fixed, _, rest, expected_ret),
-                HirType::Function(params, ret),
-            ) => {
-                return_compatible(expected_ret, ret)
-                    && params.len() >= fixed.len()
-                    && fixed
-                        .iter()
-                        .zip(params)
-                        .all(|(expected, actual)| callback_param_compatible(expected, actual))
-                    && match rest {
-                        Some(rest) => {
-                            let tail = &params[fixed.len()..];
-                            tail == [HirType::Array(rest.clone())]
-                                || tail
-                                    .iter()
-                                    .all(|ty| callback_param_compatible(rest, ty))
-                        }
-                        None => params.len() == fixed.len(),
-                    }
-            }
-            _ => false,
-        };
+        let callable_compatible = callable_value_compatible(expected, &actual);
         // `Bytes` and `Array(F64)` are one physical layout; the separate
         // identity is only for method dispatch, so they assign either
         // way (a `Buffer` into a `number[]` slot and back).
@@ -156,6 +289,7 @@ impl<'a> FnLowerer<'a> {
             || actual == *expected
             || bytes_array_compatible(expected, &actual)
             || callable_compatible
+            || (*expected == HirType::Str && matches!(actual, HirType::StrLiteral(_)))
             || match (expected, value) {
                 (HirType::Tuple(types), HirExpr::ArrayLit(values)) => {
                     types.len() == values.len()
@@ -163,6 +297,12 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .zip(values)
                             .all(|(ty, value)| self.expect_type(ty, value, context).is_ok())
+                }
+                // `[[k, v], ...]` against `Array<Tuple>`: each literal element is the tuple.
+                (HirType::Array(element), HirExpr::ArrayLit(values)) if matches!(element.as_ref(), HirType::Tuple(_)) => {
+                    values
+                        .iter()
+                        .all(|value| self.expect_type(element, value, context).is_ok())
                 }
                 (HirType::Object(types), HirExpr::ObjectLit(values)) => {
                     types.len() == values.len()
@@ -202,7 +342,7 @@ impl<'a> FnLowerer<'a> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Ok(HirType::I64),
-            HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
+            HirExpr::Lit(HirLit::Str(_)) | HirExpr::Lit(HirLit::Wtf8(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Ok(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Ok(HirType::Null),
@@ -214,7 +354,30 @@ impl<'a> FnLowerer<'a> {
             HirExpr::FunctionRef(_, params, ret) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
-            HirExpr::MethodRef(_, _, params, ret, _) => {
+            HirExpr::FunctionRefThis(symbol, receiver, params, ret) => {
+                let declared = self.signatures.get(symbol).or_else(|| {
+                    symbol.split_once("__thaw_")
+                        .and_then(|(base, _)| self.signatures.get(base))
+                });
+                let rest = declared.filter(|signature| signature.native_rest.is_some())
+                    .and_then(|_| match params.last() {
+                        Some(HirType::Array(element)) => Some(element.clone()),
+                        _ => None,
+                    });
+                let fixed = params.len().saturating_sub(usize::from(rest.is_some()));
+                let optional = declared.map(|signature| signature.generic_param_optional
+                    .iter().copied().take(fixed).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let visible = if rest.is_some() || optional.iter().any(|value| *value) {
+                    HirType::CallableFunction(params[..fixed].to_vec(),
+                        optional_parameter_mask(&optional), rest,
+                        Box::new(ret.clone()))
+                } else {
+                    HirType::Function(params.clone(), Box::new(ret.clone()))
+                };
+                Ok(HirType::FunctionWithThis(Box::new(receiver.clone()), Box::new(visible)))
+            },
+            HirExpr::MethodRef(_, _, params, ret, _, _) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::OptionalSome(value, payload) => {
@@ -418,9 +581,14 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+            HirExpr::EvalThen(_, second) => self.infer_expr_type(second),
             HirExpr::Call(callee, args) => {
                 let HirExpr::Var(name) = callee.as_ref() else {
-                    let (params, ret) = match self.infer_expr_type(callee)? {
+                    let callable = match self.infer_expr_type(callee)? {
+                        HirType::FunctionWithThis(_, visible) => *visible,
+                        other => other,
+                    };
+                    let (params, ret) = match callable {
                         HirType::Function(params, ret) => (params, ret),
                         HirType::CallableFunction(mut params, _, rest, ret) => {
                             if let Some(rest) = rest {
@@ -440,6 +608,15 @@ impl<'a> FnLowerer<'a> {
                     return Ok(*ret);
                 };
                 match name.as_str() {
+                    "__thaw_exception_json_from_handle"
+                    | "__thaw_exception_json_from_owned_handle" => {
+                        let [handle] = args.as_slice() else {
+                            return Err("live JSON handle capture expects one operand".into());
+                        };
+                        self.expect_type(&HirType::JsValue, handle,
+                            "live JSON handle capture source")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_object_set_state"
                     | "__thaw_object_set_state_and_return"
                     | "__thaw_object_state" => {
@@ -451,6 +628,171 @@ impl<'a> FnLowerer<'a> {
                             return self.infer_expr_type(object);
                         }
                         return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_property_flags" => {
+                        if args.len() != 2 { return Err("native descriptor query expects object and key".into()); }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_object_set_property_flags"
+                    | "__thaw_object_can_set_property_flags" => {
+                        if args.len() != 3 { return Err("native descriptor update expects object, key, flags".into()); }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_define_data_value" => {
+                        if args.len() != 4 { return Err("native data definition expects object, key, value, flags".into()); }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_date_assert_native_identity" => {
+                        let [value] = args.as_slice() else { return Err("Date identity assertion expects one operand".into()); };
+                        self.expect_type(&date_object_type(), value, "Date identity operand")?;
+                        return Ok(date_object_type());
+                    }
+                    "__thaw_date_has_native_identity" => {
+                        let [value] = args.as_slice() else { return Err("Date identity check expects one operand".into()); };
+                        self.expect_type(&date_object_type(), value, "Date identity operand")?;
+                        return Ok(HirType::Bool);
+                    }
+
+                    "__thaw_assert_class_identity" => {
+                        let (object, HirExpr::Lit(HirLit::Str(_))) = (match args.as_slice() {
+                            [object, name] | [object, name, HirExpr::Lit(HirLit::Str(_))] => (object, name),
+                            _ => return Err("class identity assertion expects an object and a literal class name".into()),
+                        }) else {
+                            return Err("class identity assertion expects an object and a literal class name".into());
+                        };
+                        let ty = self.infer_expr_type(object)?;
+                        if !matches!(ty, HirType::Object(_)) {
+                            return Err("class identity assertion requires a fixed object".into());
+                        }
+                        return Ok(ty);
+                    }
+                    "__thaw_object_has_class_identity" => {
+                        let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
+                            return Err("class identity query expects an object and a literal class name".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("class identity query requires a fixed object".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_marker_hidden" => {
+                        let [object, marker] = args.as_slice() else {
+                            return Err("object marker query expects an object and a name".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("object marker query requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, marker, "object marker query name")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_has_full_layout" => {
+                        let [object] = args.as_slice() else {
+                            return Err("full object layout query expects one object".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("full object layout query requires a fixed object".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_reflected_tuple_has" => {
+                        let [value] = args.as_slice() else {
+                            return Err("reflected tuple query expects one tuple".into());
+                        };
+                        if !matches!(self.infer_expr_type(value)?, HirType::Tuple(_)) {
+                            return Err("reflected tuple query requires a tuple".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_full_has_own" => {
+                        let [object, key] = args.as_slice() else {
+                            return Err("full object own-property query expects object and key".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("full object own-property query requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "full object own-property key")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_full_own_keys" => {
+                        let [object, include_non_enumerable] = args.as_slice() else {
+                            return Err("full object keys query expects object and mode".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("full object keys query requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Bool, include_non_enumerable, "full object keys mode")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
+                    "__thaw_object_hide_marker" | "__thaw_object_set_class_identity" => {
+                        let [object, marker] = args.as_slice() else {
+                            return Err("object marker registration expects an object and a marker".into());
+                        };
+                        let object_type = self.infer_expr_type(object)?;
+                        if !matches!(object_type, HirType::Object(_)) {
+                            return Err("object marker registration requires an object".into());
+                        }
+                        self.expect_type(&HirType::Str, marker, "object marker name")?;
+                        return Ok(object_type);
+                    }
+                    "__thaw_object_order_begin" => {
+                        let [object] = args.as_slice() else {
+                            return Err("object order initialization expects one object".into());
+                        };
+                        let object_type = self.infer_expr_type(object)?;
+                        if !matches!(object_type, HirType::Object(_)) {
+                            return Err("object order initialization requires a fixed object".into());
+                        }
+                        return Ok(object_type);
+                    }
+                    "__thaw_object_order_seed" => {
+                        let [object, key] = args.as_slice() else {
+                            return Err("object order insertion expects an object and key".into());
+                        };
+                        let object_type = self.infer_expr_type(object)?;
+                        if !matches!(object_type, HirType::Object(_)) {
+                            return Err("object order insertion requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "object order key")?;
+                        return Ok(object_type);
+                    }
+                    "__thaw_object_order_delete" => {
+                        let [object, key] = args.as_slice() else {
+                            return Err("object own-key deletion expects an object and key".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("object own-key deletion requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "object own-key deletion key")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_error_initialize_slot" => {
+                        let [object, key, value] = args.as_slice() else {
+                            return Err("Error slot initialization expects object, key, value".into());
+                        };
+                        let HirType::Object(fields) = self.infer_expr_type(object)? else {
+                            return Err("Error slot initialization requires a fixed object".into());
+                        };
+                        if !object_type_is_error_family(&HirType::Object(fields.clone())) {
+                            return Err("Error slot initialization requires an Error-family record".into());
+                        }
+                        let HirExpr::Lit(HirLit::Str(name)) = key else {
+                            return Err("Error slot initialization needs a literal field name".into());
+                        };
+                        let field_type = fields.iter().find(|(field, _)| field == name)
+                            .map(|(_, ty)| ty).ok_or("Error initializer field is absent")?;
+                        self.expect_type(field_type, value, "Error initializer value")?;
+                        return Ok(HirType::Object(fields));
+                    }
+                    "__thaw_object_order_rank" => {
+                        let [object, key, rank] = args.as_slice() else {
+                            return Err("object order rank expects an object, key, and fallback".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("object order rank requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "object order key")?;
+                        self.expect_type(&HirType::I64, rank, "object order fallback")?;
+                        return Ok(HirType::I64);
                     }
                     "__thaw_object_has_accessor" => {
                         let [_, property, setter] = args.as_slice() else {
@@ -472,7 +814,17 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "array presence index")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_array_has_property" | "__thaw_array_has_own"
+                    "__thaw_tuple_has_reflected_authority" => {
+                        let [tuple] = args.as_slice() else {
+                            return Err("tuple authority query expects one operand".into());
+                        };
+                        if !matches!(self.infer_expr_type(tuple)?, HirType::Tuple(_)) {
+                            return Err("tuple authority query requires a tuple".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_array_delete_strict" | "__thaw_array_delete_reflect"
+                    | "__thaw_array_has_property" | "__thaw_array_has_own"
                     | "__thaw_array_property_is_enumerable" => {
                         let [array, key] = args.as_slice() else {
                             return Err("array property check expects two operands".into());
@@ -697,11 +1049,16 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bytes_write"
                     | "__thaw_bytes_write_i64"
                     | "__thaw_bytes_copy"
-                    | "__thaw_bytes_set_from_string"
                     | "__thaw_bytes_index_of" => return Ok(HirType::F64),
+                    "__thaw_bytes_set_from_string" => {
+                        return Ok(HirType::Object(vec![
+                            ("read".to_string(), HirType::F64),
+                            ("written".to_string(), HirType::F64),
+                        ]));
+                    }
                     "__thaw_bytes_read_i64" => return Ok(HirType::I64),
                     "__thaw_bytes_equals" => return Ok(HirType::Bool),
-                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc"
+                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
                     | "__thaw_bytes_from_array" | "__thaw_bytes_concat"
                     | "__thaw_bytes_slice" => {
                         // `Bytes`, not `Array(F64)`, so a chained
@@ -763,7 +1120,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
-                    "__thaw_array_slice" => {
+                    "__thaw_array_slice" | "__thaw_array_rest" => {
                         if args.len() != 3 {
                             return Err("array slice expects three operands".into());
                         }
@@ -937,6 +1294,7 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_trim_end"
                     | "__thaw_string_to_lower_case"
                     | "__thaw_string_to_upper_case"
+                    | "__thaw_string_to_well_formed"
                     | "__thaw_atob"
                     | "__thaw_btoa"
                     | "__thaw_escape"
@@ -946,6 +1304,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
+                    }
+                    "__thaw_string_is_well_formed" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("string well-formed check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "string well-formed receiver")?;
+                        return Ok(HirType::Bool);
                     }
                     "__thaw_string_to_locale_lower_case"
                     | "__thaw_string_to_locale_upper_case" => {
@@ -1106,7 +1471,11 @@ impl<'a> FnLowerer<'a> {
                         let [description] = args.as_slice() else {
                             return Err("Symbol expects one description operand".into());
                         };
-                        self.expect_type(&HirType::Str, description, "Symbol description")?;
+                        let ty = self.infer_expr_type(description)?;
+                        if !matches!(ty, HirType::Str | HirType::StrLiteral(_))
+                            && ty != HirType::Optional(Box::new(HirType::Str)) {
+                            return Err("Symbol description must be string or optional string".into());
+                        }
                         return Ok(HirType::Symbol);
                     }
                     "__thaw_symbol_to_string" => {
@@ -1158,6 +1527,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "error property receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_error_frame" => {
+                        let [name, message] = args.as_slice() else {
+                            return Err("error frame expects a name and message".into());
+                        };
+                        self.expect_type(&HirType::Str, name, "error name")?;
+                        self.expect_type(&HirType::Str, message, "error message")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_error_suppress" => {
                         let [error, suppressed, message] = args.as_slice() else {
                             return Err(format!("{name} expects three operands"));
@@ -1179,6 +1556,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "error property name")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_error_property_json" => {
+                        let [receiver, key] = args.as_slice() else {
+                            return Err(format!("{name} expects a receiver and a property name"));
+                        };
+                        self.expect_type(&HirType::Str, receiver, "error property receiver")?;
+                        self.expect_type(&HirType::Str, key, "error property name")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_js_handle_to_string" => {
                         let [argument] = args.as_slice() else {
                             return Err("JsValue string conversion expects one operand".into());
@@ -1194,6 +1579,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, class_name, "instanceof class name")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_native_wrapper_is_live" => {
+                        let [value] = args.as_slice() else {
+                            return Err("native wrapper check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "native wrapper check receiver")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_error_is_error" => {
                         let [value] = args.as_slice() else {
                             return Err("Error.isError expects one operand".into());
@@ -1207,6 +1599,65 @@ impl<'a> FnLowerer<'a> {
                         };
                         if !matches!(self.infer_expr_type(value)?, HirType::Object(_)) {
                             return Err(format!("{name} expects an object operand"));
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_set_pending_exception_json" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        if !matches!(self.infer_expr_type(value)?, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!("{name} expects a JSON-backed operand"));
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_set_pending_exception_native" => {
+                        if args.len() != 3
+                            || crate::native_exception_tag(&self.infer_expr_type(&args[0])?).is_none()
+                            || self.infer_expr_type(&args[1])? != HirType::I64
+                            || self.infer_expr_type(&args[2])? != HirType::Str
+                        {
+                            return Err("native exception publication requires a supported native value, category, and layout token".into());
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_set_pending_exception_native_value" => {
+                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
+                            return Err("native exception restoration requires its private descriptor".into());
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_native_exception_owner" => {
+                        if args.len() != 3 || self.infer_expr_type(&args[0])? != HirType::NativeException
+                            || self.infer_expr_type(&args[1])? != HirType::I64
+                            || self.infer_expr_type(&args[2])? != HirType::Str
+                        {
+                            return Err("native exception projection requires descriptor, category, and layout".into());
+                        }
+                        return Ok(HirType::NativeException);
+                    }
+                    "__thaw_native_exception_owner_present" => {
+                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
+                            return Err("native exception owner check requires its projected pointer".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_native_exception_tag" => {
+                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
+                            return Err("native exception category requires its descriptor".into());
+                        }
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_capture_exception_js_value" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::JsValue, value, name)?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_clear_pending_exception_provenance" => {
+                        if !args.is_empty() {
+                            return Err(format!("{name} expects no operands"));
                         }
                         return Ok(HirType::Void);
                     }
@@ -1231,9 +1682,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::I64, tag, "exception typeof tag")?;
                         return Ok(HirType::Str);
                     }
+                    "@@thaw_published_exception_text"
+                    | "@@thaw_rethrow_pending_exception"
+                    | "@@thaw_snapshot_caught_exception" => return Ok(HirType::Str),
+                    "__thaw_pending_exception_native_text" => return Ok(HirType::Str),
+                    "__thaw_pending_exception_aggregate" => return Ok(HirType::Object(Vec::new())),
                     "__thaw_pending_exception_object" => {
                         return Ok(HirType::Object(Vec::new()));
                     }
+                    "__thaw_pending_exception_native" => return Ok(HirType::NativeException),
                     "__thaw_exception_object_present" => {
                         let [value] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
@@ -1254,6 +1711,12 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::I64, tag, "exception tag")?;
                         return Ok(HirType::Void);
+                    }
+                    "__thaw_closure_alias" => {
+                        let [adapter, _original] = args.as_slice() else {
+                            return Err("closure alias expects an adapter and the original closure".into());
+                        };
+                        return self.infer_expr_type(adapter);
                     }
                     "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                         let [promise] = args.as_slice() else {
@@ -1415,8 +1878,10 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_zoned_zone_from_string" => return Ok(HirType::Str),
                     "__thaw_temporal_now"
                     | "__thaw_temporal_now_nanos"
-                    |                     "__thaw_temporal_instant_from_string"
+                    | "__thaw_temporal_instant_from_string"
                     | "__thaw_temporal_instant_nanos_from_string"
+                    | "__thaw_temporal_plain_date_time_from_string"
+                    | "__thaw_temporal_plain_date_time_nanos_from_string"
                     | "__thaw_temporal_plain_month_day_from_string"
                     | "__thaw_temporal_plain_time_from_string"
                     | "__thaw_temporal_plain_time_nanos_from_string"
@@ -1553,14 +2018,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, flags, "RegExp.exec flags")?;
                         self.expect_type(&HirType::Str, value, "RegExp.exec value")?;
                         self.expect_type(&HirType::F64, last_index, "RegExp.exec lastIndex")?;
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
                     "__thaw_regex_exec_groups" => {
                         let [matches] = args.as_slice() else {
                             return Err("RegExp groups expects one operand".into());
                         };
                         self.expect_type(
-                            &HirType::Array(Box::new(HirType::Str)),
+                            &HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))),
                             matches,
                             "RegExp groups result",
                         )?;
@@ -1573,7 +2038,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("RegExp index expects one operand".into());
                         };
                         self.expect_type(
-                            &HirType::Array(Box::new(HirType::Str)),
+                            &HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))),
                             matches,
                             "RegExp index result",
                         )?;
@@ -1584,7 +2049,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("RegExp input expects one operand".into());
                         };
                         self.expect_type(
-                            &HirType::Array(Box::new(HirType::Str)),
+                            &HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))),
                             matches,
                             "RegExp input result",
                         )?;
@@ -1600,6 +2065,22 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&array_type, cooked, "tagged template cooked strings")?;
                         self.expect_type(&array_type, raw, "tagged template raw strings")?;
                         return Ok(HirType::Void);
+                    }
+                    "__thaw_template_site" => {
+                        let [site, cooked, raw] = args.as_slice() else {
+                            return Err("template site expects three operands".into());
+                        };
+                        let array_type = HirType::Array(Box::new(HirType::Str));
+                        self.expect_type(&HirType::F64, site, "tagged template site")?;
+                        // Invalid escapes make some cooked entries `undefined`
+                        // (a null pointer in the same one-pointer layout).
+                        if self.infer_expr_type(cooked)?
+                            != HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))))
+                        {
+                            self.expect_type(&array_type, cooked, "tagged template cooked strings")?;
+                        }
+                        self.expect_type(&array_type, raw, "tagged template raw strings")?;
+                        return Ok(array_type);
                     }
                     "__thaw_template_strings_raw" => {
                         let [cooked] = args.as_slice() else {
@@ -1623,23 +2104,25 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::F64);
                     }
                     "__thaw_regex_match" => {
-                        let [value, source, flags] = args.as_slice() else {
-                            return Err("String.match expects three operands".into());
+                        let [value, source, flags, last_index] = args.as_slice() else {
+                            return Err("String.match expects four operands".into());
                         };
                         self.expect_type(&HirType::Str, value, "match receiver")?;
                         self.expect_type(&HirType::Str, source, "match source")?;
                         self.expect_type(&HirType::Str, flags, "match flags")?;
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        self.expect_type(&HirType::F64, last_index, "match lastIndex")?;
+                        return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
                     "__thaw_regex_match_all" => {
-                        let [value, source, flags] = args.as_slice() else {
-                            return Err("String.matchAll expects three operands".into());
+                        let [value, source, flags, last_index] = args.as_slice() else {
+                            return Err("String.matchAll expects four operands".into());
                         };
                         self.expect_type(&HirType::Str, value, "matchAll receiver")?;
                         self.expect_type(&HirType::Str, source, "matchAll source")?;
                         self.expect_type(&HirType::Str, flags, "matchAll flags")?;
+                        self.expect_type(&HirType::F64, last_index, "matchAll lastIndex")?;
                         return Ok(HirType::Array(Box::new(HirType::Array(Box::new(
-                            HirType::Str,
+                            HirType::Optional(Box::new(HirType::Str)),
                         )))));
                     }
                     "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
@@ -1660,7 +2143,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, source, "split source")?;
                         self.expect_type(&HirType::Str, flags, "split flags")?;
                         self.expect_type(&HirType::F64, limit, "split limit")?;
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
@@ -1676,6 +2159,22 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Json, value, "Array.isArray JSON operand")?;
                         return Ok(HirType::Bool);
+                    }
+                    "__thaw_json_array_join" => {
+                        let [value, separator] = args.as_slice() else {
+                            return Err("Array.join expects a value and separator".into());
+                        };
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(
+                            ty,
+                            HirType::Json | HirType::Dictionary(_) | HirType::JsValue
+                        ) {
+                            return Err(format!(
+                                "__thaw_json_array_join expected a JSON value, got {ty:?}"
+                            ));
+                        }
+                        self.expect_type(&HirType::Str, separator, "Array.join separator")?;
+                        return Ok(HirType::Str);
                     }
                     "__thaw_json_is_buffer" => {
                         let [value] = args.as_slice() else {
@@ -1700,7 +2199,9 @@ impl<'a> FnLowerer<'a> {
                         let [object] = args.as_slice() else {
                             return Err("Object.getPrototypeOf expects one operand".into());
                         };
-                        self.expect_type(&HirType::Json, object, "Object.getPrototypeOf operand")?;
+                        if !matches!(self.infer_expr_type(object)?, HirType::Dictionary(_)) {
+                            self.expect_type(&HirType::Json, object, "Object.getPrototypeOf operand")?;
+                        }
                         return Ok(HirType::Json);
                     }
                     "__thaw_json_get_mut" => {
@@ -1726,7 +2227,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "structuredClone JSON operand")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_json_keys" | "__thaw_json_own_keys" => {
+                    "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
                         };
@@ -1736,7 +2237,11 @@ impl<'a> FnLowerer<'a> {
                                 "Object.keys expected a JSON value or dictionary, got {ty:?}"
                             ));
                         }
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        return Ok(HirType::Array(Box::new(if name == "__thaw_json_own_keys" {
+                            HirType::Json
+                        } else {
+                            HirType::Str
+                        })));
                     }
                     "__thaw_array_keys" => {
                         let [value, include_length] = args.as_slice() else {
@@ -1865,6 +2370,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(target_type);
                     }
+                    "__thaw_json_array_assign" => {
+                        let [target, source] = args.as_slice() else {
+                            return Err("array write-back expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, target, "array write-back target")?;
+                        self.expect_type(&HirType::Json, source, "array write-back source")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_array_slice" => {
                         let [value, start] = args.as_slice() else {
                             return Err("dynamic array rest expects two operands".into());
@@ -1873,7 +2386,8 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, start, "dynamic array rest start")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_json_has_own" => {
+                    "__thaw_json_has_own" | "__thaw_json_property_is_enumerable" | "__thaw_json_has"
+                    | "__thaw_json_object_delete_reflect" => {
                         let [value, key] = args.as_slice() else {
                             return Err("Object.hasOwn expects two operands".into());
                         };
@@ -1893,6 +2407,16 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "JSON null check operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_is_object_like" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON object check expects one operand".into());
+                        };
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(ty, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!("JSON object check expected JSON or dictionary, got {ty:?}"));
+                        }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_json_is_undefined" => {
                         let [value] = args.as_slice() else {
                             return Err("JSON undefined check expects one operand".into());
@@ -1908,9 +2432,112 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
+                    "__thaw_json_undefined" | "__thaw_json_null" => {
+                        if !args.is_empty() {
+                            return Err(format!("{name} expects no operands"));
+                        }
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_receiver_number" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON number expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, value, "JSON number")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_receiver_bool" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON bool expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Bool, value, "JSON bool")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_error_to_string" | "__thaw_json_error_stack" => {
+                        let [value] = args.as_slice() else {
+                            return Err("caught JSON error helper expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "caught JSON error value")?;
+                        return Ok(if name == "__thaw_json_error_stack" { HirType::Json } else { HirType::Str });
+                    }
+                    "__thaw_json_receiver_string" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON string expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "JSON string")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_host_from_borrowed_dynamic" => {
+                        let [value] = args.as_slice() else {
+                            return Err("borrowed live JSON host conversion expects one handle".into());
+                        };
+                        self.expect_type(&HirType::JsValue, value, "borrowed live JSON host handle")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_track_owned" => {
+                        let [value] = args.as_slice() else {
+                            return Err("owned catch JSON root expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "owned catch JSON root")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_host_from_dynamic" => {
+                        let [value] = args.as_slice() else {
+                            return Err("live JSON host conversion expects one handle".into());
+                        };
+                        self.expect_type(&HirType::JsValue, value, "live JSON host handle")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_from_consumed_dynamic" => {
+                        let [value] = args.as_slice() else {
+                            return Err("consuming live JSON conversion expects one handle".into());
+                        };
+                        self.expect_type(&HirType::JsValue, value, "consumed live JSON handle")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_argument_array" => {
+                        for value in args {
+                            self.expect_type(&HirType::Json, value, "dynamic JSON argument")?;
+                        }
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_borrowed_handle_id" => {
+                        let [value] = args.as_slice() else {
+                            return Err("borrowed JSON handle probe expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "borrowed JSON handle")?;
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_strict_retained_handles" => {
+                        let [left, right] = args.as_slice() else {
+                            return Err("retained handle comparison expects two operands".into());
+                        };
+                        for operand in [left, right] {
+                            if !matches!(self.infer_expr_type(operand)?, HirType::I64 | HirType::JsValue) {
+                                return Err("retained handle comparison expects handle operands".into());
+                            }
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_json_receiver_bigint" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON bigint expects one operand".into());
+                        };
+                        self.expect_type(&HirType::I64, value, "JSON bigint")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_as_bigint_i64" => {
+                        let [value] = args.as_slice() else {
+                            return Err("checked Json BigInt assertion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "checked Json BigInt assertion")?;
+                        return Ok(HirType::I64);
+                    }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
-                    "__thaw_json_is_buffer_shape" => return Ok(HirType::Bool),
+                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable" => return Ok(HirType::Bool),
+                    "__thaw_console_bytes" => return Ok(HirType::Array(Box::new(HirType::F64))),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
+                    "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),
+                    "__thaw_json_brand_wrapper" => return Ok(HirType::Json),
                     "__thaw_json_has_wrapper_key" => return Ok(HirType::Bool),
                     "__thaw_json_map_or_set_entries"
                     | "__thaw_json_map_or_set_get"
@@ -2121,30 +2748,65 @@ impl<'a> FnLowerer<'a> {
                     // args in and a `Json` result out.
                     "loadScript" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
+                    "newDynamicFunction" | "__thaw_eval_class_token" => return Ok(HirType::JsValue),
                     "getDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValue" => return Ok(HirType::Json),
                     "callNativeAddonValue" => return Ok(HirType::Json),
-                    "callDynamicValueHandle" => return Ok(HirType::JsValue),
+                    "callDynamicValueHandle" | "__thaw_to_iterator_exact" | "__thaw_to_async_iterator_exact" =>
+                        return Ok(HirType::JsValue),
                     "resolveDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
                     "releaseDynamicValue" => return Ok(HirType::Bool),
                     "getDynamicProperty" => return Ok(HirType::JsValue),
-                    "setDynamicProperty" | "setDynamicPropertyJson"
+                    "__thaw_super_static_base_handle" | "__thaw_track_generator_super_base" =>
+                        return Ok(HirType::JsValue),
+                    "__thaw_release_generator_super_base" => return Ok(HirType::Bool),
+                    "__thaw_get_static_property_json" | "__thaw_get_super_static_property_json"
+                    | "__thaw_static_binary_json" | "__thaw_static_update_pair_json" => return Ok(HirType::Json),
+                    "setDynamicProperty" | "setDynamicPropertyJson" | "__thaw_set_static_property_json"
+                    | "__thaw_define_static_property"
+                    | "__thaw_set_super_static_property_json"
                     | "deleteDynamicProperty" | "hasDynamicProperty" => {
                         return Ok(HirType::Bool)
                     }
-                    "callDynamicMethod" => return Ok(HirType::Json),
+                    "callDynamicMethod" | "__thaw_dynamic_iterator_step_exact"
+                    | "__thaw_call_selected_dynamic_method"
+                    | "__thaw_call_selected_static_method"
+                    | "__thaw_call_selected_super_static_method" => return Ok(HirType::Json),
                     // Sibling of `callDynamicMethod` for a method whose
                     // own result is itself a `JsValue` rather than plain
                     // data -- see `lower_dynamic_value_method_call`'s doc
                     // comment for how a call chooses between the two.
-                    "callDynamicMethodHandle" | "callDynamicMethodHandleRaw" => {
+                    "callDynamicMethodHandle" | "callDynamicMethodHandleRaw"
+                    | "__thaw_call_selected_dynamic_method_handle"
+                    | "__thaw_call_selected_dynamic_method_raw"
+                    | "__thaw_call_selected_static_method_handle"
+                    | "__thaw_call_selected_static_method_raw" => {
                         return Ok(HirType::JsValue)
                     }
                     "readDynamicValue" => return Ok(HirType::Json),
-                    "retainDynamicJson" => return Ok(HirType::JsValue),
+                    "retainDynamicJson" | "retainDynamicNative" => return Ok(HirType::JsValue),
+                    "retainEventKey" => return Ok(HirType::JsValue),
+                    "__thaw_mark_typed_wrapper_json_argument" => return Ok(HirType::Json),
+                    "@@thaw_retain_borrowed_dynamic_handle" => return Ok(HirType::JsValue),
                     "callDynamicValueMixed" => return Ok(HirType::Json),
-                    "callDynamicValueMixedHandle" => return Ok(HirType::JsValue),
+                    "callDynamicValueMixedExact" => return Ok(HirType::Json),
+                    "callDynamicValueMixedNativeJson" => return Ok(HirType::Json),
+                    "__thaw_lookup_native_object" =>
+                        return Ok(HirType::Optional(Box::new(HirType::JsValue))),
+                    "__thaw_lookup_native_projector" =>
+                        return Ok(HirType::Optional(Box::new(HirType::Function(
+                            Vec::new(), Box::new(HirType::JsValue))))),
+                    "__thaw_lookup_native_exception_describer" =>
+                        return Ok(HirType::Optional(Box::new(HirType::Function(
+                            Vec::new(), Box::new(HirType::Json))))),
+                    "__thaw_register_native_exception_describer"
+                    | "__thaw_register_native_object_projector"
+                    | "__thaw_register_native_object_layout" => return Ok(HirType::Bool),
+                    "__thaw_release_native_projection_callbacks" => return Ok(HirType::Void),
+                    "__thaw_require_native_owner" => return Ok(HirType::Void),
+                    "callDynamicValueMixedHandle" | "__thaw_build_native_object_wrapper"
+                    | "__thaw_intern_native_object" => return Ok(HirType::JsValue),
                     "constructDynamicValue" => return Ok(HirType::JsValue),
                     "loadNativeAddon" => return Ok(HirType::Bool),
                     "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
@@ -2160,7 +2822,8 @@ impl<'a> FnLowerer<'a> {
                     // `coerce_to_declared`'s own doc comment for why this
                     // is built here instead of a bare pass-through the
                     // way `JsValue`/`Undefined` are.
-                    "registerNativeCallback" => return Ok(HirType::JsValue),
+                    "registerNativeCallback" | "registerNativeCallbackGraph"
+                    | "__thaw_register_native_method_callback_graph" => return Ok(HirType::JsValue),
                     _ => {}
                 }
                 if let Some(HirType::Function(params, ret)) = self.scope.get(name) {
@@ -2172,6 +2835,18 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     return Ok(ret.as_ref().clone());
+                }
+                if let Some(HirType::FunctionWithThis(_, visible)) = self.scope.get(name) {
+                    let (params, ret) = match visible.as_ref() {
+                        HirType::Function(params, ret) => (params.len(), ret.as_ref()),
+                        HirType::CallableFunction(params, _, rest, ret) =>
+                            (params.len() + usize::from(rest.is_some()), ret.as_ref()),
+                        _ => return Err("receiver-aware function has invalid signature".into()),
+                    };
+                    if params != args.len() {
+                        return Err(format!("function value expects {params} argument(s), got {}", args.len()));
+                    }
+                    return Ok(ret.clone());
                 }
                 if let Some(HirType::CallableFunction(params, _, rest, ret)) = self.scope.get(name)
                 {
@@ -2199,9 +2874,18 @@ impl<'a> FnLowerer<'a> {
                                 .iter()
                                 .map(|arg| self.infer_expr_type(arg))
                                 .collect::<Result<Vec<_>, _>>()?;
-                            let types = infer_generic_type_tuple(
+                            let (receiver, visible) = if sig.uses_this {
+                                let Some((receiver, visible)) = actual.split_first() else {
+                                    return Err(format!("generic function `{name}` needs a thisArg"));
+                                };
+                                (Some(receiver), visible)
+                            } else {
+                                (None, actual.as_slice())
+                            };
+                            let types = infer_generic_type_tuple_with_receiver(
                                 sig,
-                                &actual,
+                                visible,
+                                receiver,
                                 self.interfaces,
                                 self.generic_interfaces,
                                 None,
@@ -2254,10 +2938,13 @@ impl<'a> FnLowerer<'a> {
             | HirExpr::PromiseAllSettledArray(_, element) => Ok(HirType::Promise(Box::new(
                 HirType::Array(Box::new(promise_settled_result_type(element.clone()))),
             ))),
-            HirExpr::PromiseNew(_, resolved, _, _) => {
+            HirExpr::PromiseNew(_, resolved, _, _) | HirExpr::PromiseNewMixed(_, resolved, _) => {
                 Ok(HirType::Promise(Box::new(resolved.clone())))
             }
             HirExpr::PromiseThen(_, _, _, output, _, _) => {
+                Ok(HirType::Promise(Box::new(output.clone())))
+            }
+            HirExpr::PromiseThenBoth(_, _, _, _, output, _, _) => {
                 Ok(HirType::Promise(Box::new(output.clone())))
             }
             HirExpr::PromiseFinally(_, _, input, _) => {
@@ -2290,7 +2977,16 @@ impl<'a> FnLowerer<'a> {
                 if elements.iter().all(|element| element == &elements[0]) {
                     Ok(HirType::Array(Box::new(elements[0].clone())))
                 } else {
-                    Ok(HirType::Tuple(elements))
+                    // A heterogeneous literal keeps its physical indices.
+                    // Filtering holes above is only valid for deciding
+                    // whether a sparse literal has one uniform element
+                    // type: Tuple member indices must still line up with
+                    // the raw Array slots and their presence mask.
+                    let mut physical = Vec::with_capacity(values.len());
+                    for value in values {
+                        physical.push(array_element_type(value)?);
+                    }
+                    Ok(HirType::Tuple(physical))
                 }
             }
             HirExpr::ArrayConcat(_, element) => Ok(HirType::Array(Box::new(element.clone()))),
@@ -2320,8 +3016,9 @@ impl<'a> FnLowerer<'a> {
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(HirType::Object(fields))
             }
-            HirExpr::ObjectAlloc(ty @ HirType::Object(_)) => Ok(ty.clone()),
-            HirExpr::ObjectAlloc(other) => Err(format!(
+            HirExpr::ObjectAlloc(ty @ HirType::Object(_))
+            | HirExpr::ClassAlloc(ty @ HirType::Object(_)) => Ok(ty.clone()),
+            HirExpr::ObjectAlloc(other) | HirExpr::ClassAlloc(other) => Err(format!(
                 "object allocation requires an object type, got {other:?}"
             )),
             HirExpr::PropAccess(_, object_ty, field) => match object_ty {
@@ -2405,7 +3102,23 @@ impl<'a> FnLowerer<'a> {
             // callback-lowering phase. Keep the enclosing local dynamic
             // instead of discarding or pretending to know that ABI.
             HirExpr::RecursiveClosure(_, ty, _) => Ok(ty.clone()),
-            HirExpr::TypedClosure(ty, _) => Ok(ty.clone()),
+            HirExpr::TypedClosure(ty, inner) => {
+                // Only a function type can carry a `this` receiver; other closures
+                // (e.g. `new Map()` over the `__thaw_map_new` intrinsic) must not
+                // have their inner intrinsic call inferred.
+                if matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)) {
+                    if let HirType::FunctionWithThis(receiver, _) = self.infer_expr_type(inner)? {
+                        return Ok(HirType::FunctionWithThis(receiver, Box::new(ty.clone())));
+                    }
+                }
+                Ok(ty.clone())
+            },
+            HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
+                HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>
+                    Ok(HirType::FunctionWithThis(Box::new(params[0].ty.clone()), Box::new(
+                        HirType::Function(params[1..].iter().map(|param| param.ty.clone()).collect(), Box::new(ret.clone()))))),
+                _ => self.infer_expr_type(closure),
+            },
             HirExpr::Lambda(_, params, ret, _) => Ok(HirType::Function(
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),

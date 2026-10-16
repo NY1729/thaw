@@ -1,3 +1,93 @@
+use thaw_arena::{wtf8_decode_utf16, wtf8_encode_utf16, wtf8_push_code_point};
+
+/// `true` when the UTF-16 code units contain no lone surrogate.
+fn wtf8_is_well_formed(bytes: &[u8]) -> bool {
+    let units = wtf8_decode_utf16(bytes);
+    units.iter().enumerate().all(|(index, &unit)| {
+        !(0xD800..=0xDFFF).contains(&unit)
+            || ((0xD800..=0xDBFF).contains(&unit)
+                && units.get(index + 1).is_some_and(|next| (0xDC00..=0xDFFF).contains(next)))
+            || ((0xDC00..=0xDFFF).contains(&unit)
+                && index > 0 && (0xD800..=0xDBFF).contains(&units[index - 1]))
+    })
+}
+
+/// Replaces every *lone* surrogate with U+FFFD (the `toWellFormed` result),
+/// leaving valid surrogate pairs untouched.
+fn wtf8_to_well_formed(bytes: &[u8]) -> Vec<u8> {
+    let units = wtf8_decode_utf16(bytes);
+    let mut out = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            out.push(unit);
+            out.push(units[index + 1]);
+            index += 2;
+        } else if (0xD800..=0xDFFF).contains(&unit) {
+            out.push(0xFFFD);
+            index += 1;
+        } else {
+            out.push(unit);
+            index += 1;
+        }
+    }
+    wtf8_encode_utf16(&out)
+}
+
+/// Reads a native string pointer as its raw WTF-8 bytes.
+///
+/// # Safety
+/// `value` must be non-null and reference a NUL-terminated byte string.
+unsafe fn wtf8_bytes<'a>(value: *const c_char) -> &'a [u8] {
+    unsafe { thaw_arena::NativeStr::from_ptr(value) }.to_bytes()
+}
+
+/// Case-maps a WTF-8 string, preserving lone surrogates (which have no
+/// case mapping).
+///
+/// # Safety
+/// `value` must be non-null and reference a NUL-terminated WTF-8 string.
+unsafe fn wtf8_case_map(value: *const c_char, upper: bool, language: &icu_locale_core::LanguageIdentifier) -> *const c_char {
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let mapper = icu_casemap::CaseMapperBorrowed::new();
+    let out = thaw_arena::utf16_map_segments(&units, |segment, output| {
+        let mapped = if upper {
+            mapper.uppercase_to_string(segment, language)
+        } else {
+            mapper.lowercase_to_string(segment, language)
+        };
+        output.extend(mapped.encode_utf16());
+    });
+    arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// Allocates a NUL-terminated copy of raw WTF-8 bytes in the arena,
+/// preserving both embedded NULs and lone surrogates.
+fn arena_wtf8(bytes: &[u8]) -> Option<*const u8> {
+    let pointer = thaw_arena::arena_string(bytes);
+    (!pointer.is_null()).then_some(pointer.cast())
+}
+
+/// Writes native text without treating embedded NULs as terminators.
+/// # Safety
+/// `value` must reference a live native or C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_console_write(value: *const c_char, descriptor: i32, newline: bool) {
+    unsafe { libc::fflush(std::ptr::null_mut()) };
+    let bytes = unsafe { wtf8_bytes(value) };
+    for mut remaining in [bytes, if newline { &b"\n"[..] } else { &[] }] {
+        while !remaining.is_empty() {
+            let count = unsafe { libc::write(descriptor, remaining.as_ptr().cast(), remaining.len()) };
+            if count > 0 { remaining = &remaining[count as usize..]; }
+            else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { return; }
+        }
+    }
+}
+
 #[no_mangle]
 /// Compares UTF-8 native strings using JavaScript's UTF-16 code-unit order.
 ///
@@ -8,10 +98,8 @@ pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const 
     if left.is_null() || right.is_null() {
         return 0;
     }
-    let left = unsafe { CStr::from_ptr(left) }.to_string_lossy();
-    let right = unsafe { CStr::from_ptr(right) }.to_string_lossy();
-    let left = left.encode_utf16().collect::<Vec<_>>();
-    let right = right.encode_utf16().collect::<Vec<_>>();
+    let left = wtf8_decode_utf16(unsafe { wtf8_bytes(left) });
+    let right = wtf8_decode_utf16(unsafe { wtf8_bytes(right) });
     match left.cmp(&right) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -26,8 +114,7 @@ pub unsafe extern "C" fn thaw_string_to_lower_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    arena_c_string(&value.to_lowercase()).map_or(std::ptr::null(), |value| value.cast())
+    unsafe { wtf8_case_map(value, false, &icu_locale_core::LanguageIdentifier::UNKNOWN) }
 }
 
 #[no_mangle]
@@ -37,8 +124,7 @@ pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    arena_c_string(&value.to_uppercase()).map_or(std::ptr::null(), |value| value.cast())
+    unsafe { wtf8_case_map(value, true, &icu_locale_core::LanguageIdentifier::UNKNOWN) }
 }
 
 unsafe fn thaw_string_to_locale_case(
@@ -49,30 +135,14 @@ unsafe fn thaw_string_to_locale_case(
     if value.is_null() || locale.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let locale = unsafe { CStr::from_ptr(locale) }.to_string_lossy();
-    let language = locale.split('-').next().unwrap_or("").to_ascii_lowercase();
-    let turkic = matches!(language.as_str(), "tr" | "az");
-    let result: String = value
-        .chars()
-        .flat_map(|character| {
-            if turkic {
-                match (upper, character) {
-                    (false, 'I') => return "ı".chars().collect::<Vec<_>>(),
-                    (false, 'İ') => return "i".chars().collect::<Vec<_>>(),
-                    (true, 'i') => return "İ".chars().collect::<Vec<_>>(),
-                    (true, 'ı') => return "I".chars().collect::<Vec<_>>(),
-                    _ => {}
-                }
-            }
-            if upper {
-                character.to_uppercase().collect()
-            } else {
-                character.to_lowercase().collect()
-            }
-        })
-        .collect();
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    let language = locale
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .parse::<icu_locale_core::LanguageIdentifier>()
+        .unwrap_or(icu_locale_core::LanguageIdentifier::UNKNOWN);
+    unsafe { wtf8_case_map(value, upper, &language) }
 }
 
 #[no_mangle]
@@ -110,9 +180,11 @@ pub unsafe extern "C" fn thaw_encode_uri_component(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let bytes = unsafe { wtf8_bytes(value) };
+    if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
+    let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
     let mut output = String::with_capacity(value.len());
-    for byte in value.bytes() {
+    for byte in value {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
             | b'\'' | b'(' | b')' => output.push(byte as char),
@@ -133,9 +205,11 @@ pub unsafe extern "C" fn thaw_encode_uri(value: *const c_char) -> *const c_char 
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let bytes = unsafe { wtf8_bytes(value) };
+    if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
+    let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
     let mut output = String::with_capacity(value.len());
-    for byte in value.bytes() {
+    for byte in value {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
             | b'\'' | b'(' | b')' | b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+'
@@ -156,35 +230,7 @@ pub unsafe extern "C" fn thaw_encode_uri(value: *const c_char) -> *const c_char 
 /// # Safety
 /// `value` must reference a valid NUL-terminated UTF-8 string.
 pub unsafe extern "C" fn thaw_decode_uri_component(value: *const c_char) -> *const c_char {
-    if value.is_null() {
-        return std::ptr::null();
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let Some(hex) = bytes.get(index + 1..index + 3) else {
-                return std::ptr::null();
-            };
-            let Ok(hex) = std::str::from_utf8(hex) else {
-                return std::ptr::null();
-            };
-            let Ok(byte) = u8::from_str_radix(hex, 16) else {
-                return std::ptr::null();
-            };
-            output.push(byte);
-            index += 3;
-        } else {
-            output.push(bytes[index]);
-            index += 1;
-        }
-    }
-    let Ok(text) = String::from_utf8(output) else {
-        return std::ptr::null();
-    };
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    unsafe { decode_uri(value, false) }
 }
 
 #[no_mangle]
@@ -197,31 +243,55 @@ pub unsafe extern "C" fn thaw_decode_uri_component(value: *const c_char) -> *con
 /// # Safety
 /// `value` must reference a valid NUL-terminated UTF-8 string.
 pub unsafe extern "C" fn thaw_decode_uri(value: *const c_char) -> *const c_char {
+    unsafe { decode_uri(value, true) }
+}
+
+fn percent_byte(bytes: &[u8], index: usize) -> Option<u8> {
+    let hex = bytes.get(index + 1..index + 3)?;
+    if bytes.get(index) != Some(&b'%') || !hex.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
+}
+
+unsafe fn decode_uri(value: *const c_char, preserve_reserved: bool) -> *const c_char {
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let bytes = value.as_bytes();
+    let bytes = unsafe { wtf8_bytes(value) };
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            let Some(hex) = bytes.get(index + 1..index + 3) else {
+            let Some(byte) = percent_byte(bytes, index) else {
                 return std::ptr::null();
             };
-            let Ok(hex_str) = std::str::from_utf8(hex) else {
-                return std::ptr::null();
-            };
-            let Ok(byte) = u8::from_str_radix(hex_str, 16) else {
-                return std::ptr::null();
-            };
-            if matches!(
+            if preserve_reserved && matches!(
                 byte,
                 b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'
             ) {
                 output.extend_from_slice(&bytes[index..index + 3]);
-            } else {
+            } else if byte < 0x80 {
                 output.push(byte);
+            } else {
+                let width = match byte {
+                    0xC2..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF4 => 4,
+                    _ => return std::ptr::null(),
+                };
+                let mut sequence = vec![byte];
+                for offset in 1..width {
+                    let Some(next) = percent_byte(bytes, index + offset * 3) else {
+                        return std::ptr::null();
+                    };
+                    sequence.push(next);
+                }
+                if std::str::from_utf8(&sequence).is_err() {
+                    return std::ptr::null();
+                }
+                output.extend(sequence);
+                index += (width - 1) * 3;
             }
             index += 3;
         } else {
@@ -229,10 +299,7 @@ pub unsafe extern "C" fn thaw_decode_uri(value: *const c_char) -> *const c_char 
             index += 1;
         }
     }
-    let Ok(text) = String::from_utf8(output) else {
-        return std::ptr::null();
-    };
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -243,18 +310,20 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
     if value.is_null() || !count.is_finite() || count < 0.0 {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    // Repeat the raw WTF-8 bytes so a lone surrogate survives.
+    let bytes = unsafe { wtf8_bytes(value) };
     let count = count as usize;
-    let Some(capacity) = value.len().checked_mul(count) else {
+    let Some(capacity) = bytes.len().checked_mul(count) else {
         return std::ptr::null();
     };
-    let mut output = String::with_capacity(capacity);
+    let mut output = Vec::with_capacity(capacity + 1);
     for _ in 0..count {
-        output.push_str(&value);
+        output.extend_from_slice(bytes);
     }
-    arena_c_string(&output).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[allow(dead_code)]
 fn expand_replacement(
     replacement: &str,
     matched: &str,
@@ -291,18 +360,18 @@ fn expand_replacement(
                 chars.next();
                 output.push_str(suffix);
             }
-            '1'..='9' if !captures.is_empty() => {
+            '0'..='9' if !captures.is_empty() => {
                 chars.next();
                 let first = next.to_digit(10).unwrap() as usize;
                 let mut capture = first;
                 if let Some(&(_, second @ '0'..='9')) = chars.peek() {
                     let two_digits = first * 10 + second.to_digit(10).unwrap() as usize;
-                    if two_digits <= captures.len() {
+                    if (1..=captures.len()).contains(&two_digits) {
                         chars.next();
                         capture = two_digits;
                     }
                 }
-                if capture <= captures.len() {
+                if (1..=captures.len()).contains(&capture) {
                     if let Some(value) = captures[capture - 1].as_deref() {
                         output.push_str(value);
                     }
@@ -346,29 +415,11 @@ unsafe fn thaw_string_replace_impl(
     if value.is_null() || search.is_null() || replacement.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let search = unsafe { CStr::from_ptr(search) }.to_string_lossy();
-    let replacement = unsafe { CStr::from_ptr(replacement) }.to_string_lossy();
-    let mut replaced = String::new();
-    let mut cursor = 0;
-    for (start, matched) in value.match_indices(search.as_ref()) {
-        replaced.push_str(&value[cursor..start]);
-        let end = start + matched.len();
-        replaced.push_str(&expand_replacement(
-            &replacement,
-            matched,
-            &value[..start],
-            &value[end..],
-            &[],
-            &[],
-        ));
-        cursor = end;
-        if !all {
-            break;
-        }
-    }
-    replaced.push_str(&value[cursor..]);
-    arena_c_string(&replaced).map_or(std::ptr::null(), |value| value.cast())
+    let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let search = wtf8_decode_utf16(unsafe { wtf8_bytes(search) });
+    let replacement = wtf8_decode_utf16(unsafe { wtf8_bytes(replacement) });
+    let output = thaw_arena::utf16_replace(&value, &search, &replacement, all);
+    arena_wtf8(&wtf8_encode_utf16(&output)).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -414,17 +465,16 @@ unsafe fn thaw_string_pad(
     if value.is_null() || pad.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let pad = unsafe { CStr::from_ptr(pad) }.to_string_lossy();
-    let units: Vec<u16> = value.encode_utf16().collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let pad_units = wtf8_decode_utf16(unsafe { wtf8_bytes(pad) });
     let target_length = if target_length.is_finite() && target_length > 0.0 {
         target_length as usize
     } else {
         0
     };
-    let pad_units: Vec<u16> = pad.encode_utf16().collect();
     if target_length <= units.len() || pad_units.is_empty() {
-        return arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast());
+        return arena_wtf8(&wtf8_encode_utf16(&units))
+            .map_or(std::ptr::null(), |value| value.cast());
     }
     let needed = target_length - units.len();
     let mut filler = Vec::with_capacity(needed);
@@ -437,8 +487,7 @@ unsafe fn thaw_string_pad(
     } else {
         units.into_iter().chain(filler).collect()
     };
-    let combined = String::from_utf16_lossy(&combined);
-    arena_c_string(&combined).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&combined)).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -493,14 +542,8 @@ unsafe fn utf16_strings(
     if value.is_null() || search.is_null() {
         return None;
     }
-    let value = unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
-    let search = unsafe { CStr::from_ptr(search) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
+    let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let search = wtf8_decode_utf16(unsafe { wtf8_bytes(search) });
     Some((value, search))
 }
 
@@ -541,7 +584,7 @@ pub unsafe extern "C" fn thaw_string_last_index_of(
     let Some((value, search)) = (unsafe { utf16_strings(value, search) }) else {
         return -1.0;
     };
-    let position = clamped_string_position(position, value.len());
+    let position = clamped_string_position(if position.is_nan() { f64::INFINITY } else { position }, value.len());
     if search.is_empty() {
         return position as f64;
     }
@@ -613,8 +656,7 @@ pub unsafe extern "C" fn thaw_string_slice(
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let index = |position: f64| {
         if position.is_nan() {
             0
@@ -626,7 +668,7 @@ pub unsafe extern "C" fn thaw_string_slice(
     };
     let start = index(start);
     let end = index(end).max(start);
-    arena_c_string(&String::from_utf16_lossy(&units[start..end]))
+    arena_wtf8(&wtf8_encode_utf16(&units[start..end]))
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -646,8 +688,7 @@ pub unsafe extern "C" fn thaw_string_substring(
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let length = units.len() as f64;
     let clamp = |position: f64| {
         if position.is_nan() {
@@ -663,10 +704,8 @@ pub unsafe extern "C" fn thaw_string_substring(
     } else {
         (end, start)
     };
-    arena_c_string(&String::from_utf16_lossy(
-        &units[start as usize..end as usize],
-    ))
-    .map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&units[start as usize..end as usize]))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -684,8 +723,7 @@ pub unsafe extern "C" fn thaw_string_substr(
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let count = units.len() as f64;
     let start = if start.is_nan() { 0.0 } else { start.trunc() };
     let start = if start < 0.0 {
@@ -699,10 +737,8 @@ pub unsafe extern "C" fn thaw_string_substr(
     } else {
         length.min(count - start as f64)
     } as usize;
-    arena_c_string(&String::from_utf16_lossy(
-        &units[start..start + length],
-    ))
-    .map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&units[start..start + length]))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 fn is_javascript_whitespace(character: char) -> bool {
@@ -721,22 +757,59 @@ fn is_javascript_whitespace(character: char) -> bool {
     )
 }
 
+#[no_mangle]
+/// `console.log`/`%s` rendering of a native WTF-8 string: a lone surrogate
+/// becomes one U+FFFD so the printed bytes are valid UTF-8 -- matching
+/// Node's own lossy terminal output (a raw WTF-8 lone surrogate would print
+/// as its 3 component bytes, i.e. 3 replacement characters).
+///
+/// # Safety
+/// `value` must be null or point to a NUL-terminated WTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_display(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let bytes = unsafe { wtf8_bytes(value) };
+    if wtf8_is_well_formed(bytes) {
+        return value;
+    }
+    let fixed = wtf8_to_well_formed(bytes);
+    arena_wtf8(&fixed).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// `String.prototype.isWellFormed`: `false` when the string contains a
+/// lone UTF-16 surrogate.
+///
+/// # Safety
+/// `value` must be null or point to a NUL-terminated WTF-8 string.
+pub unsafe extern "C" fn thaw_string_is_well_formed(value: *const c_char) -> bool {
+    value.is_null() || wtf8_is_well_formed(unsafe { wtf8_bytes(value) })
+}
+
+#[no_mangle]
+/// `String.prototype.toWellFormed`: replaces every lone surrogate with
+/// U+FFFD, leaving valid surrogate pairs (astral code points) untouched.
+///
+/// # Safety
+/// `value` must be null or point to a NUL-terminated WTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_well_formed(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let bytes = unsafe { wtf8_bytes(value) };
+    arena_wtf8(&wtf8_to_well_formed(bytes)).map_or(std::ptr::null(), |value| value.cast())
+}
+
 unsafe fn trim_javascript_string(value: *const c_char, start: bool, end: bool) -> *const c_char {
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let value = if start {
-        value.trim_start_matches(is_javascript_whitespace)
-    } else {
-        value.as_ref()
-    };
-    let value = if end {
-        value.trim_end_matches(is_javascript_whitespace)
-    } else {
-        value
-    };
-    arena_c_string(value).map_or(std::ptr::null(), |value| value.cast())
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let first = if start { units.iter().position(|&unit| !char::from_u32(unit as u32).is_some_and(is_javascript_whitespace)).unwrap_or(units.len()) } else { 0 };
+    let last = if end { units.iter().rposition(|&unit| !char::from_u32(unit as u32).is_some_and(is_javascript_whitespace)).map_or(0, |index| index + 1) } else { units.len() };
+    arena_wtf8(&wtf8_encode_utf16(&units[first..last.max(first)]))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -773,10 +846,7 @@ pub unsafe extern "C" fn thaw_string_length(value: *const c_char) -> f64 {
     if value.is_null() {
         return 0.0;
     }
-    unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .count() as f64
+    wtf8_decode_utf16(unsafe { wtf8_bytes(value) }).len() as f64
 }
 
 #[no_mangle]
@@ -793,11 +863,9 @@ pub unsafe extern "C" fn thaw_string_char_code_at(value: *const c_char, index: f
     if index < 0.0 || index > usize::MAX as f64 {
         return f64::NAN;
     }
-    unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .nth(index as usize)
-        .map_or(f64::NAN, f64::from)
+    wtf8_decode_utf16(unsafe { wtf8_bytes(value) })
+        .get(index as usize)
+        .map_or(f64::NAN, |unit| f64::from(*unit))
 }
 
 #[no_mangle]
@@ -818,15 +886,13 @@ pub unsafe extern "C" fn thaw_string_at(value: *const c_char, index: f64) -> *co
     if value.is_null() || index < 0.0 {
         return std::ptr::null();
     }
-    let units: Vec<u16> = unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let Some(&unit) = units.get(index as usize) else {
         return std::ptr::null();
     };
-    let text = String::from_utf16_lossy(&[unit]);
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    // WTF-8-encode the single unit so a lone surrogate is preserved.
+    let text = wtf8_encode_utf16(&[unit]);
+    arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -844,10 +910,7 @@ pub unsafe extern "C" fn thaw_string_code_point_at(value: *const c_char, index: 
     if value.is_null() || !index.is_finite() || index < 0.0 || index > usize::MAX as f64 {
         return -1.0;
     }
-    let units: Vec<u16> = unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let index = index as usize;
     let Some(&unit) = units.get(index) else {
         return -1.0;
@@ -867,36 +930,28 @@ pub unsafe extern "C" fn thaw_string_code_point_at(value: *const c_char, index: 
 #[no_mangle]
 /// Converts a JS char code (per `ToUint16`: truncated toward zero, non-finite
 /// treated as zero, then reduced modulo 65536) into the UTF-16 code unit it
-/// names, decoded losslessly or replaced with U+FFFD when the unit is an
-/// unpaired surrogate, since Thaw's native strings are valid UTF-8. Matches
+/// names, including an unpaired surrogate in WTF-8. Matches
 /// one code-unit position of `String.fromCharCode`.
 pub extern "C" fn thaw_string_from_char_code(code: f64) -> *const c_char {
-    let unit = if code.is_finite() {
-        code.trunc() as i64
-    } else {
-        0
-    }
-    .rem_euclid(65536) as u16;
-    let text = String::from_utf16_lossy(&[unit]);
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    let unit = if code.is_finite() { code.trunc().rem_euclid(65536.0) as u16 } else { 0 };
+    // A lone surrogate is preserved (WTF-8), not replaced with U+FFFD.
+    let text = wtf8_encode_utf16(&[unit]);
+    arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
 /// Converts a full Unicode code point into its one-character string,
 /// matching one argument of `String.fromCodePoint`. Returns a null pointer
-/// for a non-integer, negative, or out-of-range/surrogate code point,
+/// for a non-integer, negative, or out-of-range code point,
 /// letting the caller detect the failure with `thaw_string_is_null` and
 /// throw a `RangeError` as the specification requires.
 pub extern "C" fn thaw_string_from_code_point(point: f64) -> *const c_char {
-    if !point.is_finite() || point.fract() != 0.0 || point < 0.0 {
+    if !point.is_finite() || point.fract() != 0.0 || !(0.0..=0x10FFFF as f64).contains(&point) {
         return std::ptr::null();
     }
-    let Some(character) = char::from_u32(point as u32) else {
-        return std::ptr::null();
-    };
-    let mut buffer = [0u8; 4];
-    let text = character.encode_utf8(&mut buffer);
-    arena_c_string(text).map_or(std::ptr::null(), |value| value.cast())
+    let mut text = Vec::with_capacity(4);
+    wtf8_push_code_point(&mut text, point as u32);
+    arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -915,30 +970,48 @@ pub unsafe extern "C" fn thaw_string_normalize(
     if value.is_null() || form.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let form = unsafe { CStr::from_ptr(form) }.to_string_lossy();
-    let normalized: std::borrow::Cow<str> = match form.as_ref() {
-        "NFC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&value),
-        "NFD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfd().normalize(&value),
-        "NFKC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(&value),
-        "NFKD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd().normalize(&value),
-        _ => return std::ptr::null(),
+    if !matches!(form.as_ref(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+        return std::ptr::null();
+    }
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let mut output = Vec::with_capacity(units.len());
+    let mut segment = String::new();
+    let flush = |segment: &mut String, output: &mut Vec<u16>| {
+        let normalized = match form.as_ref() {
+            "NFC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(segment),
+            "NFD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfd().normalize(segment),
+            "NFKC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(segment),
+            _ => icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd().normalize(segment),
+        };
+        output.extend(normalized.encode_utf16());
+        segment.clear();
     };
-    arena_c_string(&normalized).map_or(std::ptr::null(), |value| value.cast())
+    for character in char::decode_utf16(units) {
+        match character {
+            Ok(character) => segment.push(character),
+            Err(error) => {
+                flush(&mut segment, &mut output);
+                output.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    flush(&mut segment, &mut output);
+    arena_wtf8(&wtf8_encode_utf16(&output)).map_or(std::ptr::null(), |value| value.cast())
 }
 static NEXT_SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[no_mangle]
 /// # Safety
-/// `description` must point to a valid NUL-terminated UTF-8 string.
+/// `description` is null for absent, otherwise a live native WTF-8 string.
 pub unsafe extern "C" fn thaw_symbol_new(description: *const c_char) -> *const c_char {
-    if description.is_null() {
-        return std::ptr::null();
-    }
-    let description = unsafe { CStr::from_ptr(description) }.to_string_lossy();
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    arena_c_string(&format!("\u{3}{id}:{description}"))
-        .map_or(std::ptr::null(), |value| value.cast())
+    let mut symbol = format!("\u{3}{id}").into_bytes();
+    if !description.is_null() {
+        symbol.push(b':');
+        symbol.extend_from_slice(unsafe { wtf8_bytes(description) });
+    }
+    arena_wtf8(&symbol).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -948,10 +1021,12 @@ pub unsafe extern "C" fn thaw_symbol_to_string(symbol: *const c_char) -> *const 
     if symbol.is_null() {
         return std::ptr::null();
     }
-    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
-    let description = symbol.split_once(':').map_or("", |value| value.1);
-    arena_c_string(&format!("Symbol({description})"))
-        .map_or(std::ptr::null(), |value| value.cast())
+    let symbol = unsafe { wtf8_bytes(symbol) };
+    let description = symbol.splitn(2, |&byte| byte == b':').nth(1).unwrap_or_default();
+    let mut output = b"Symbol(".to_vec();
+    output.extend_from_slice(description);
+    output.push(b')');
+    arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -961,9 +1036,9 @@ pub extern "C" fn thaw_symbol_key(symbol: *const c_char) -> *const c_char {
 
 /// The process-wide `Symbol.for` registry: description -> registered symbol
 /// text, so `Symbol.for("x")` returns the *same* symbol every time.
-fn symbol_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+fn symbol_registry() -> &'static std::sync::Mutex<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
     static REGISTRY: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, String>>,
+        std::sync::Mutex<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
     > = std::sync::OnceLock::new();
     REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -979,37 +1054,37 @@ pub unsafe extern "C" fn thaw_symbol_for(description: *const c_char) -> *const c
     if description.is_null() {
         return std::ptr::null();
     }
-    let description = unsafe { CStr::from_ptr(description) }
-        .to_string_lossy()
-        .into_owned();
+    let description = unsafe { wtf8_bytes(description) }.to_vec();
     let mut registry = symbol_registry().lock().unwrap_or_else(|error| error.into_inner());
     if let Some(symbol) = registry.get(&description) {
-        return arena_c_string(symbol).map_or(std::ptr::null(), |value| value.cast());
+        return arena_wtf8(symbol).map_or(std::ptr::null(), |value| value.cast());
     }
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let symbol = format!("\u{3}{id}:{description}");
+    // The `R` distinguishes a registered Symbol from the otherwise identical
+    // unique-symbol wire before any QuickJS property-key decode.
+    let mut symbol = format!("\u{3}R{id}:").into_bytes();
+    symbol.extend_from_slice(&description);
     registry.insert(description, symbol.clone());
-    arena_c_string(&symbol).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&symbol).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
 /// # Safety
 /// `symbol` must point to a valid NUL-terminated UTF-8 string.
 ///
-/// `Symbol.keyFor(symbol)`: the registered key, or the empty string for a
-/// symbol that was not created by `Symbol.for`.
+/// `Symbol.keyFor(symbol)`: the registered key, or null for an unregistered symbol.
 pub unsafe extern "C" fn thaw_symbol_key_for(symbol: *const c_char) -> *const c_char {
     if symbol.is_null() {
         return std::ptr::null();
     }
-    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
+    let symbol = unsafe { wtf8_bytes(symbol) };
     let registry = symbol_registry().lock().unwrap_or_else(|error| error.into_inner());
     let key = registry
         .iter()
-        .find(|(_, value)| value.as_str() == symbol.as_ref())
-        .map(|(key, _)| key.clone())
-        .unwrap_or_default();
-    arena_c_string(&key).map_or(std::ptr::null(), |value| value.cast())
+        .find(|(_, value)| value.as_slice() == symbol)
+        .map(|(key, _)| key.clone());
+    key.and_then(|key| arena_wtf8(&key))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1018,14 +1093,16 @@ pub unsafe extern "C" fn thaw_symbol_key_for(symbol: *const c_char) -> *const c_
 /// `thaw_symbol_for`.
 ///
 /// The description part of any symbol (`Symbol("x").description`), or the
-/// empty string for a symbol with no description.
+/// null pointer for a symbol with no description.
 pub unsafe extern "C" fn thaw_symbol_description(symbol: *const c_char) -> *const c_char {
     if symbol.is_null() {
         return std::ptr::null();
     }
-    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
-    let description = symbol.split_once(':').map_or("", |value| value.1);
-    arena_c_string(description).map_or(std::ptr::null(), |value| value.cast())
+    let symbol = unsafe { wtf8_bytes(symbol) };
+    let Some(description) = symbol.splitn(2, |&byte| byte == b':').nth(1) else {
+        return std::ptr::null();
+    };
+    arena_wtf8(description).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1086,9 +1163,9 @@ pub unsafe extern "C" fn thaw_escape(value: *const c_char) -> *const c_char {
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let mut out = String::new();
-    for unit in value.encode_utf16() {
+    for unit in units {
         let keep = unit < 0x80
             && ((unit as u8).is_ascii_alphanumeric()
                 || matches!(unit as u8, b'@' | b'*' | b'_' | b'+' | b'-' | b'.' | b'/'));
@@ -1121,8 +1198,7 @@ pub unsafe extern "C" fn thaw_unescape(value: *const c_char) -> *const c_char {
         }
         Some(result)
     };
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units: Vec<u16> = value.encode_utf16().collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let mut out: Vec<u16> = Vec::with_capacity(units.len());
     let mut index = 0;
     while index < units.len() {
@@ -1145,6 +1221,5 @@ pub unsafe extern "C" fn thaw_unescape(value: *const c_char) -> *const c_char {
         out.push(units[index]);
         index += 1;
     }
-    let text = String::from_utf16_lossy(&out);
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
 }

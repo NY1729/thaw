@@ -12,12 +12,13 @@ struct GenericClassMethodUse {
     span: swc_common::Span,
     class: Symbol,
     method: Symbol,
+    is_static: bool,
     arguments: Option<Vec<TsType>>,
     actual_params: Option<Vec<HirType>>,
 }
 
 struct GenericClassMethodUseCollector<'a, 'ast> {
-    templates: &'a HashMap<(Symbol, Symbol), GenericClassMethodTemplate>,
+    templates: &'a HashMap<(Symbol, Symbol, bool), GenericClassMethodTemplate>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'ast>,
     scopes: Vec<HashMap<Symbol, HirType>>,
@@ -71,7 +72,8 @@ impl GenericClassMethodUseCollector<'_, '_> {
 
     fn is_static_receiver(&self, expression: &Expr) -> bool {
         match expression {
-            Expr::Ident(identifier) => self.classes.contains(identifier.sym.as_ref()),
+            Expr::Ident(identifier) => self.classes.contains(identifier.sym.as_ref())
+                && !self.scopes.iter().rev().any(|scope| scope.contains_key(identifier.sym.as_ref())),
             Expr::This(_) => self.current_static_contexts.last().copied().unwrap_or(true),
             Expr::Paren(parenthesized) => self.is_static_receiver(&parenthesized.expr),
             Expr::TsAs(assertion) => self.is_static_receiver(&assertion.expr),
@@ -124,12 +126,12 @@ impl GenericClassMethodUseCollector<'_, '_> {
         )
     }
 
-    fn template_owner(&self, class: &str, method: &str) -> Option<Symbol> {
+    fn template_owner(&self, class: &str, method: &str, is_static: bool) -> Option<Symbol> {
         let mut current = Some(class);
         while let Some(class) = current {
             if self
                 .templates
-                .contains_key(&(class.to_string(), method.to_string()))
+                .contains_key(&(class.to_string(), method.to_string(), is_static))
             {
                 return Some(class.to_string());
             }
@@ -160,19 +162,13 @@ impl GenericClassMethodUseCollector<'_, '_> {
     fn receiver_class(&self, expression: &Expr) -> Option<Symbol> {
         match expression {
             Expr::Ident(identifier) => {
-                if self
-                    .templates
-                    .keys()
-                    .any(|(class, _)| class == identifier.sym.as_ref())
-                {
-                    return Some(identifier.sym.to_string());
+                if let Some(ty) = self.scopes.iter().rev()
+                    .find_map(|scope| scope.get(identifier.sym.as_ref())) {
+                    return class_name_from_type(ty).map(str::to_owned);
                 }
-                self.scopes
-                    .iter()
-                    .rev()
-                    .find_map(|scope| scope.get(identifier.sym.as_ref()))
-                    .and_then(class_name_from_type)
-                    .map(str::to_owned)
+                self.templates.keys()
+                    .any(|(class, _, _)| class == identifier.sym.as_ref())
+                    .then(|| identifier.sym.to_string())
             }
             Expr::New(construction) => construction.callee.as_ident().and_then(|class| {
                 self.interfaces
@@ -255,23 +251,33 @@ impl GenericClassMethodUseCollector<'_, '_> {
             .parameter_patterns
             .len()
             .saturating_sub(usize::from(template.rest_pattern.is_some()));
-        for (index, argument) in call.args.iter().enumerate() {
+        for argument in &call.args {
+            if argument.spread.is_some() {
+                let ty = self.infer_actual_type(&argument.expr)?;
+                let HirType::Tuple(elements) = ty else {
+                    return Err(format!(
+                        "generic class method inference requires a statically sized tuple spread, got {ty:?}"
+                    ));
+                };
+                for element in elements {
+                    let index = actual.len();
+                    let pattern = (index < fixed_count)
+                        .then(|| &template.parameter_patterns[index])
+                        .or(template.rest_pattern.as_ref())
+                        .ok_or("generic method received too many arguments")?;
+                    match_generic_pattern(pattern, &element, &mut inferred)?;
+                    actual.push(element);
+                }
+                continue;
+            }
+            let index = actual.len();
             let pattern = (index < fixed_count)
                 .then(|| &template.parameter_patterns[index])
                 .or(template.rest_pattern.as_ref())
                 .ok_or("generic method received too many arguments")?;
             let ty = self.contextual_argument_type(&argument.expr, pattern, &inferred)?;
-            if argument.spread.is_none() {
-                match_generic_pattern(pattern, &ty, &mut inferred)?;
-                actual.push(ty);
-                continue;
-            }
-            let HirType::Tuple(elements) = ty else {
-                return Err(format!(
-                    "generic class method inference requires a statically sized tuple spread, got {ty:?}"
-                ));
-            };
-            actual.extend(elements);
+            match_generic_pattern(pattern, &ty, &mut inferred)?;
+            actual.push(ty);
         }
         Ok(actual)
     }
@@ -367,11 +373,11 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                     self.receiver_class(&member.obj),
                     member_property_name(&member.prop),
                 ) {
-                    if let Some(owner) = self.template_owner(&class, &method) {
+                    if let Some(owner) = self.template_owner(&class, &method, self.is_static_receiver(&member.obj)) {
                         let actual_params = if call.type_args.is_none() {
                             match self.call_actual_params(
                                 call,
-                                &self.templates[&(owner.clone(), method.clone())],
+                                &self.templates[&(owner.clone(), method.clone(), self.is_static_receiver(&member.obj))],
                             ) {
                                 Ok(actual) => Some(actual),
                                 Err(error) => {
@@ -388,6 +394,7 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                             span: call.span,
                             class: owner,
                             method,
+                            is_static: self.is_static_receiver(&member.obj),
                             arguments: call
                                 .type_args
                                 .as_ref()
@@ -403,12 +410,12 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                         .current_classes
                         .last()
                         .and_then(|class| self.parents.get(class))
-                        .and_then(|parent| self.template_owner(parent, &method));
+                        .and_then(|parent| self.template_owner(parent, &method, self.current_static_contexts.last().copied().unwrap_or(false)));
                     if let Some(owner) = owner {
                         let actual_params = if call.type_args.is_none() {
                             match self.call_actual_params(
                                 call,
-                                &self.templates[&(owner.clone(), method.clone())],
+                                &self.templates[&(owner.clone(), method.clone(), self.current_static_contexts.last().copied().unwrap_or(false))],
                             ) {
                                 Ok(actual) => Some(actual),
                                 Err(error) => {
@@ -425,6 +432,7 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                             span: call.span,
                             class: owner,
                             method,
+                            is_static: self.current_static_contexts.last().copied().unwrap_or(false),
                             arguments: call
                                 .type_args
                                 .as_ref()
@@ -444,11 +452,12 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                 self.receiver_class(&member.obj),
                 member_property_name(&member.prop),
             ) {
-                if let Some(owner) = self.template_owner(&class, &method) {
+                if let Some(owner) = self.template_owner(&class, &method, self.is_static_receiver(&member.obj)) {
                     self.uses.push(GenericClassMethodUse {
                         span: instantiation.span,
                         class: owner,
                         method,
+                        is_static: self.is_static_receiver(&member.obj),
                         arguments: Some(unbox_types(&instantiation.type_args.params)),
                         actual_params: None,
                     });
@@ -531,9 +540,7 @@ fn resolve_explicit_generic_class_method_types(
                     )
                 })?
         };
-        argument.visit_mut_with(&mut GenericClassTypeSubstituter {
-            substitutions: &ast_substitution,
-        });
+        argument.visit_mut_with(&mut GenericClassTypeSubstituter::new(&ast_substitution));
         let ty = lower_ts_type(&argument, interfaces, generic_interfaces)?;
         ast_substitution.insert(parameter.clone(), Box::new(argument.clone()));
         hir_substitution.insert(parameter.clone(), ty.clone());
@@ -682,12 +689,12 @@ fn generic_class_method_shape(
         constraints: type_parameters
             .params
             .iter()
-            .map(|parameter| parameter.constraint.as_deref().map(&convert).transpose())
+            .map(|parameter| parameter.constraint.as_deref().map(convert).transpose())
             .collect::<Result<_, _>>()?,
         defaults: type_parameters
             .params
             .iter()
-            .map(|parameter| parameter.default.as_deref().map(&convert).transpose())
+            .map(|parameter| parameter.default.as_deref().map(convert).transpose())
             .collect::<Result<_, _>>()?,
         is_async: method.function.is_async,
     }))
@@ -864,6 +871,7 @@ fn specialize_generic_class_methods(
                 (
                     declaration.ident.sym.to_string(),
                     class_property_name(&method.key)?,
+                    method.is_static,
                 ),
                 GenericClassMethodTemplate {
                     method: method.clone(),
@@ -1026,11 +1034,11 @@ fn specialize_generic_class_methods(
         return Err(error);
     }
     let has_uses = !collector.uses.is_empty();
-    let mut instances = Vec::<(Symbol, Symbol, Vec<HirType>, Symbol)>::new();
+    let mut instances = Vec::<(Symbol, Symbol, bool, Vec<HirType>, Symbol)>::new();
     let mut calls = HashMap::new();
     let mut generated = HashMap::<Symbol, Vec<ClassMethod>>::new();
     for usage in collector.uses {
-        let template = &templates[&(usage.class.clone(), usage.method.clone())];
+        let template = &templates[&(usage.class.clone(), usage.method.clone(), usage.is_static)];
         let (types, arguments) = resolve_explicit_generic_class_method_types(
             &usage.class,
             &usage.method,
@@ -1049,8 +1057,8 @@ fn specialize_generic_class_methods(
         let specialized_name = if let Some(existing) =
             instances
                 .iter()
-                .find_map(|(class, method, candidate_types, symbol)| {
-                    (class == &usage.class && method == &usage.method && candidate_types == &types)
+                .find_map(|(class, method, is_static, candidate_types, symbol)| {
+                    (class == &usage.class && method == &usage.method && is_static == &usage.is_static && candidate_types == &types)
                         .then(|| symbol.clone())
                 }) {
             existing
@@ -1062,6 +1070,7 @@ fn specialize_generic_class_methods(
                     && declaration.class.body.iter().any(|member| {
                         matches!(member, ClassMember::Method(method)
                             if method.function.type_params.is_none()
+                                && method.is_static == usage.is_static
                                 && class_property_name(&method.key).ok().as_deref()
                                     == Some(specialized_name.as_str()))
                     }))
@@ -1079,9 +1088,7 @@ fn specialize_generic_class_methods(
                 method.function.type_params = None;
                 method
                     .function
-                    .visit_mut_with(&mut GenericClassTypeSubstituter {
-                        substitutions: &substitutions,
-                    });
+                    .visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
                 generated
                     .entry(usage.class.clone())
                     .or_default()
@@ -1090,6 +1097,7 @@ fn specialize_generic_class_methods(
             instances.push((
                 usage.class.clone(),
                 usage.method.clone(),
+                usage.is_static,
                 types,
                 specialized_name.clone(),
             ));
@@ -1104,7 +1112,7 @@ fn specialize_generic_class_methods(
             continue;
         };
         let class = declaration.ident.sym.to_string();
-        if !has_uses && templates.keys().any(|(owner, _)| owner == &class) {
+        if !has_uses && templates.keys().any(|(owner, _, _)| owner == &class) {
             // `implements` was checked before specialization. Once its generic
             // method template is removed, checking the rewritten class again
             // would mistake the generated, type-specific methods for a missing

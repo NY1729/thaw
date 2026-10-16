@@ -893,7 +893,8 @@ async function main(): Promise<void> {
         await new Promise<void>((resolve): void => resolve());
         console.log(holder.check((value: string): string => value));
     });
-    console.log(await runRejected(async (): Promise<void> => { throw "boom"; }));
+    // An Error (not a bare string, whose `.message` is `undefined` in Node too).
+    console.log(await runRejected(async (): Promise<void> => { throw new Error("boom"); }));
 }
 "#,
     )
@@ -1308,7 +1309,8 @@ fn a_thrown_js_errors_own_properties_survive_a_native_callback_boundary() {
     .unwrap();
     std::fs::write(
         thrower.join("bundle.js"),
-        "module.exports.boom = function() { var e = new Error('teapot'); e.status = 418; e.expose = true; throw e; };\n",
+        "var original;\n\
+         module.exports.boom = function() { original = new Error('teapot'); original.status = 418; original.expose = true; globalThis.__identityOriginal = original; throw original; };\n",
     )
     .unwrap();
     std::fs::write(
@@ -1318,7 +1320,7 @@ fn a_thrown_js_errors_own_properties_survive_a_native_callback_boundary() {
     .unwrap();
     std::fs::write(
         handler.join("bundle.js"),
-        "module.exports.handle = async function(cb) { try { await cb(); return 'ok'; } catch (e) { return 'err:' + e.status + ':' + e.expose; } };\n",
+        "module.exports.handle = async function(cb) { try { await cb(); return 'ok'; } catch (e) { const status = e.status; const same = e === globalThis.__identityOriginal; globalThis.__identityOriginal.status = 419; return 'err:' + status + ':' + e.expose + ':' + same + ':' + e.status; } };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -1343,7 +1345,7 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "err:418:true\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "err:418:true:true:419\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1460,6 +1462,84 @@ function main(): void {
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
         "object Error true 418 true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Dynamic `.includes` uses JavaScript's selected member-call path for
+/// Json receivers: holes and NaN follow Array.prototype.includes, and a
+/// custom getter is read before argument effects with the original receiver
+/// preserved as `this`.
+#[test]
+fn dynamic_includes_preserves_array_and_selected_method_semantics() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-dynamic-includes-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("includes-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeValues(): JsValue;\n\
+         export declare function makeProbe(): JsValue;\n\
+         export declare function makePlainText(): any;\n\
+         export declare function makePlainValues(): any;\n\
+         export declare function makeThrowingProbe(): JsValue;\n\
+         export declare function markArgument(): number;\n\
+         export declare function takeOrder(): string;\n\
+         export declare function resetOrder(): void;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "var order = [];\n\
+         module.exports.makeValues = function() { var values = []; values.length = 2; values[1] = NaN; return values; };\n\
+         var probe = { marker: 'receiver' };\n\
+         Object.defineProperty(probe, 'includes', { get: function() { order.push('get'); return function(value) { order.push(this === probe ? 'this' : 'wrong-this'); return value === 7; }; } });\n\
+         module.exports.makeProbe = function() { return probe; };\n\
+         module.exports.makePlainText = function() { return 'snowman ☃'; };\n\
+         module.exports.makePlainValues = function() { return [1, 2, 3]; };\n\
+         var throwingProbe = {};\n\
+         Object.defineProperty(throwingProbe, 'includes', { get: function() { order.push('throw-get'); throw new Error('getter boom'); } });\n\
+         module.exports.makeThrowingProbe = function() { return throwingProbe; };\n\
+         module.exports.markArgument = function() { order.push('arg'); return 7; };\n\
+         module.exports.takeOrder = function() { return order.join(','); };\n\
+         module.exports.resetOrder = function() { order = []; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeValues, makeProbe, makePlainText, makePlainValues, makeThrowingProbe, markArgument, takeOrder, resetOrder } from "includes-kit";
+function main(): void {
+    const values: any = makeValues();
+    console.log(values.includes(undefined), values.includes(NaN), values.includes(0));
+    const probe: any = makeProbe();
+    console.log(probe.includes(markArgument()), takeOrder());
+    const text: any = makePlainText();
+    const plainValues: any = makePlainValues();
+    console.log(text.includes("☃"), plainValues.includes(2), plainValues.includes(9));
+    resetOrder();
+    const throwing: any = makeThrowingProbe();
+    let caught = false;
+    try { throwing.includes(markArgument()); } catch (error) { caught = (error as any).message === "getter boom"; }
+    console.log(caught, takeOrder());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true true false\ntrue get,arg,this\ntrue true false\ntrue throw-get\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

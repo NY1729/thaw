@@ -145,3 +145,22 @@ fn posts_async_json_lambda_rejections_to_the_error_endpoint() {
     assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/error"));
     assert!(post_request.contains("async json handler failed"));
 }
+#[test]
+fn lambda_invocations_preserve_globals_and_newly_escaped_values() {
+    let source = r#"
+        const numbers: number[] = [10, 20];
+        const state = Object.freeze({ value: 42 });
+        let saved: string = "first";
+        function handler(event: string): string {
+            console.log(numbers[0], numbers.length, state.value, Object.isFrozen(state), saved.length);
+            saved = event + "\u0000tail";
+            numbers.push(30);
+            const scratch: number[] = [1, 2, 3, 4, 5, 6];
+            return String(scratch.length);
+        }
+    "#;
+    let (requests, stdout) = compile_and_invoke_lambda_events(source, "lambda_global_lifetimes", &["a", "bb", "ccc"]);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(stdout, "10 2 42 true 5\n10 3 42 true 6\n10 4 42 true 7\n");
+    for request in requests { assert!(request.ends_with("\r\n\r\n6")); }
+}

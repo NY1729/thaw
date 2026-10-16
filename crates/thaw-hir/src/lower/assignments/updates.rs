@@ -38,24 +38,154 @@ impl<'a> FnLowerer<'a> {
                         UpdateOp::MinusMinus => BinOp::Sub,
                     };
                     let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), Vec::new());
-                    let one = HirExpr::Lit(HirLit::F64(1.0));
-                    if update.prefix {
-                        let updated = HirExpr::BinOp(operator, Box::new(current), Box::new(one));
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![updated]));
-                    }
                     let old_name = format!("__thaw_static_update_old_{}", self.next_binding);
                     self.next_binding += 1;
+                    let updated_name = format!("__thaw_static_update_value_{}", self.next_binding);
+                    self.next_binding += 1;
                     self.scope.insert(old_name.clone(), HirType::F64);
+                    self.scope.insert(updated_name.clone(), HirType::F64);
                     let old = HirExpr::Var(old_name.clone());
-                    let updated = HirExpr::BinOp(operator, Box::new(old.clone()), Box::new(one));
+                    let updated = HirExpr::BinOp(
+                        operator,
+                        Box::new(old.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    );
                     let result = HirExpr::Block(vec![
-                        HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![updated])),
-                        HirStmt::Return(Some(old)),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(setter)),
+                            vec![HirExpr::Var(updated_name.clone())],
+                        )),
+                        HirStmt::Return(Some(if update.prefix {
+                            HirExpr::Var(updated_name.clone())
+                        } else {
+                            old
+                        })),
                     ]);
-                    return self
-                        .wrap_call_argument_bindings(result, &[(old_name, HirType::F64, current)]);
+                    return self.wrap_call_argument_bindings(
+                        result,
+                        &[
+                            (old_name, HirType::F64, current),
+                            (updated_name, HirType::F64, updated),
+                        ],
+                    );
                 }
             }
+        }
+        if let Expr::Member(member) = update.arg.as_ref() {
+            if let Some(property) = member_property_name(&member.prop) {
+                let instance_receiver = match member.obj.as_ref() {
+                    Expr::This(_) => !self.class_static_context,
+                    Expr::Ident(identifier) => self.scope
+                        .get(&self.resolve_binding(identifier.sym.as_ref()))
+                        .and_then(class_name_from_type).is_some(),
+                    Expr::New(_) | Expr::Call(_) => true,
+                    _ => false,
+                };
+                if instance_receiver {
+                    let receiver = self.lower_member_receiver(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property) {
+                        let getter = class_getter_symbol(&owner, &property, false);
+                        let setter = class_setter_symbol(&owner, &property, false);
+                        let own_getter = self.signatures.get(&getter)
+                            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()));
+                        let own_setter = self.signatures.get(&setter)
+                            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()));
+                        let getter_signature = own_getter.ok_or_else(||
+                            format!("cannot update write-only instance accessor `{owner}.{property}`"))?;
+                        if getter_signature.ret != HirType::F64 {
+                            return Err(format!("cannot apply ++/-- to non-number instance accessor `{owner}.{property}`"));
+                        }
+                        if own_setter.is_none() {
+                            return Err(format!("cannot update readonly instance accessor `{owner}.{property}`"));
+                        }
+                        if own_setter.and_then(|signature| signature.params.get(1)) != Some(&HirType::F64) {
+                            return Err(format!("cannot update instance accessor `{owner}.{property}` with non-number setter"));
+                        }
+                        let receiver_name = format!("__thaw_instance_update_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let old_name = format!("__thaw_instance_update_old_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let updated_name = format!("__thaw_instance_update_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                        self.scope.insert(old_name.clone(), HirType::F64);
+                        self.scope.insert(updated_name.clone(), HirType::F64);
+                        let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), vec![
+                            self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), &owner),
+                        ]);
+                        let old = HirExpr::Var(old_name.clone());
+                        let updated = HirExpr::BinOp(
+                            match update.op { UpdateOp::PlusPlus => BinOp::Add, UpdateOp::MinusMinus => BinOp::Sub },
+                            Box::new(old.clone()), Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        );
+                        let result = HirExpr::Block(vec![
+                            HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![
+                                self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), &owner),
+                                HirExpr::Var(updated_name.clone()),
+                            ])),
+                            HirStmt::Return(Some(if update.prefix { HirExpr::Var(updated_name.clone()) } else { old })),
+                        ]);
+                        return self.wrap_call_argument_bindings(result, &[
+                            (receiver_name, receiver_type, receiver),
+                            (old_name, HirType::F64, current),
+                            (updated_name, HirType::F64, updated),
+                        ]);
+                    }
+                }
+            }
+        }
+        if let Expr::SuperProp(member) = update.arg.as_ref() {
+            let (_, base_type, base_name) = self.super_initializer.clone()
+                .ok_or("`super` update is only valid in a derived class")?;
+            let property = super_property_name(&member.prop)?;
+            let owner = if self.class_static_context { base_name } else {
+                self.class_super_instance_accessor_owner(&base_type, &property)
+                    .ok_or_else(|| format!("base class `{base_name}` has no accessor `{property}`"))?
+            };
+            let getter = class_getter_symbol(&owner, &property, self.class_static_context);
+            let setter = class_setter_symbol(&owner, &property, self.class_static_context);
+            let getter_signature = self.signatures.get(&getter)
+                .filter(|signature| self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .ok_or_else(|| format!("cannot update write-only super accessor `{owner}.{property}`"))?;
+            if getter_signature.ret != HirType::F64 {
+                return Err(format!("cannot apply ++/-- to non-number super accessor `{owner}.{property}`"));
+            }
+            let setter_signature = self.signatures.get(&setter)
+                .filter(|signature| self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .ok_or_else(|| format!("cannot update readonly super accessor `{owner}.{property}`"))?;
+            let value_index = usize::from(!self.class_static_context);
+            if setter_signature.params.get(value_index) != Some(&HirType::F64) {
+                return Err(format!("cannot update super accessor `{owner}.{property}` with non-number setter"));
+            }
+            let receiver = HirExpr::Var(self.resolve_binding("this"));
+            let getter_args = if self.class_static_context { Vec::new() } else {
+                vec![self.assert_class_accessor_receiver(receiver.clone(), &owner)]
+            };
+            let old_name = format!("__thaw_super_update_old_{}", self.next_binding);
+            self.next_binding += 1;
+            let updated_name = format!("__thaw_super_update_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(old_name.clone(), HirType::F64);
+            self.scope.insert(updated_name.clone(), HirType::F64);
+            let old = HirExpr::Var(old_name.clone());
+            let updated = HirExpr::BinOp(
+                match update.op { UpdateOp::PlusPlus => BinOp::Add, UpdateOp::MinusMinus => BinOp::Sub },
+                Box::new(old.clone()), Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+            );
+            let setter_args = if self.class_static_context {
+                vec![HirExpr::Var(updated_name.clone())]
+            } else {
+                vec![self.assert_class_accessor_receiver(receiver, &owner), HirExpr::Var(updated_name.clone())]
+            };
+            let result = HirExpr::Block(vec![
+                HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), setter_args)),
+                HirStmt::Return(Some(if update.prefix { HirExpr::Var(updated_name.clone()) } else { old })),
+            ]);
+            return self.wrap_call_argument_bindings(result, &[
+                (old_name, HirType::F64, HirExpr::Call(Box::new(HirExpr::Var(getter)), getter_args)),
+                (updated_name, HirType::F64, updated),
+            ]);
         }
         if let Expr::Member(member) = update.arg.as_ref() {
             if member_property_name(&member.prop).as_deref() == Some("length") {
@@ -268,6 +398,50 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        // A normalized constructor-function static field starts absent and
+        // therefore has Optional(F64) storage.  Update its numeric value at
+        // the original expression, without using scalar-only PostfixUpdate.
+        if let (Expr::Member(member), Target::Var(symbol)) = (update.arg.as_ref(), &target) {
+            let class = match member.obj.as_ref() {
+                Expr::Ident(class) => Some(class.sym.to_string()),
+                Expr::This(_) if self.class_static_context => self.class_context.clone(),
+                _ => None,
+            };
+            let is_static_field = class.and_then(|class| member_property_name(&member.prop)
+                .map(|property| class_static_field_symbol(&class, &property)))
+                .as_deref() == Some(symbol.as_str());
+            if is_static_field && self.scope.get(symbol)
+                == Some(&HirType::Optional(Box::new(HirType::F64))) {
+                self.record_binding_write(symbol);
+                let old_name = format!("__thaw_static_optional_old_{}", self.next_binding);
+                self.next_binding += 1;
+                let updated_name = format!("__thaw_static_optional_updated_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(old_name.clone(), HirType::F64);
+                self.scope.insert(updated_name.clone(), HirType::F64);
+                let current = self.coerce_primitive_to_number(HirExpr::Var(symbol.clone()))?;
+                let updated = HirExpr::BinOp(
+                    match update.op { UpdateOp::PlusPlus => BinOp::Add, UpdateOp::MinusMinus => BinOp::Sub },
+                    Box::new(HirExpr::Var(old_name.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                );
+                let result = HirExpr::Block(vec![
+                    HirStmt::Expr(HirExpr::Assign(symbol.clone(), Box::new(HirExpr::OptionalSome(
+                        Box::new(HirExpr::Var(updated_name.clone())), HirType::F64,
+                    )))),
+                    HirStmt::Return(Some(HirExpr::Var(if update.prefix {
+                        updated_name.clone()
+                    } else {
+                        old_name.clone()
+                    }))),
+                ]);
+                return self.wrap_call_argument_bindings(result, &[
+                    (old_name, HirType::F64, current),
+                    (updated_name, HirType::F64, updated),
+                ]);
+            }
+        }
+
         let op = match update.op {
             UpdateOp::PlusPlus => BinOp::Add,
             UpdateOp::MinusMinus => BinOp::Sub,
@@ -316,8 +490,20 @@ impl<'a> FnLowerer<'a> {
                 ],
             );
         }
-        let current = target_to_read_expr(&target)?;
+        let current = self.lower_assignment_target_read(&target)?;
+        // An array element read is `T | undefined`; `undefined++` is NaN, so coerce it.
+        let current = if matches!(&target, Target::Index(..))
+            || matches!(&target, Target::Prop(_, HirType::Object(fields), field)
+            if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")))
+        {
+            self.coerce_primitive_to_number(current)?
+        } else {
+            current
+        };
         self.expect_type(&HirType::F64, &current, "update operand")?;
+        if let Target::Var(name) = &target {
+            self.record_binding_write(name);
+        }
         if update.prefix {
             if let Target::Index(array, index) = target {
                 let array_name = format!("__thaw_update_array_{}", self.next_binding);
@@ -341,8 +527,10 @@ impl<'a> FnLowerer<'a> {
                     &[(array_name, array_type, array), (index_name, HirType::F64, *index)],
                 );
             }
-            let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
-            return Ok(build_assign(target, value));
+            if let Target::Var(name) = target {
+                let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
+                return Ok(build_assign(Target::Var(name), value));
+            }
         }
         if let Target::Var(name) = target {
             return Ok(HirExpr::PostfixUpdate(name, op));
@@ -414,15 +602,26 @@ impl<'a> FnLowerer<'a> {
                 index.as_ref().clone(),
             )?
         } else {
-            target_to_read_expr(&target)?
+            self.lower_assignment_target_read(&target)?
         };
         bindings.push((old_name.clone(), HirType::F64, self.coerce_primitive_to_number(current)?));
         let old = HirExpr::Var(old_name);
         let updated = HirExpr::BinOp(op, Box::new(old.clone()), Box::new(one));
-        let result = HirExpr::Block(vec![
-            HirStmt::Expr(build_assign(target, updated)),
-            HirStmt::Return(Some(old)),
-        ]);
+        let result = if update.prefix {
+            let updated_name = format!("__thaw_update_new_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(updated_name.clone(), HirType::F64);
+            bindings.push((updated_name.clone(), HirType::F64, updated));
+            HirExpr::Block(vec![
+                HirStmt::Expr(self.lower_assignment_target_write(target, HirExpr::Var(updated_name.clone()))?),
+                HirStmt::Return(Some(HirExpr::Var(updated_name))),
+            ])
+        } else {
+            HirExpr::Block(vec![
+                HirStmt::Expr(self.lower_assignment_target_write(target, updated)?),
+                HirStmt::Return(Some(old)),
+            ])
+        };
         self.wrap_call_argument_bindings(result, &bindings)
     }
 }

@@ -61,10 +61,15 @@ impl<'a> FnLowerer<'a> {
         Self {
             scope: HashMap::new(),
             immutable_bindings: HashSet::new(),
+            function_var_names: HashMap::new(),
+            strict_nullable_bindings: HashSet::new(),
             static_string_bindings: HashMap::new(),
             narrowings: HashMap::new(),
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
+            partial_nullable_narrowings: HashMap::new(),
+            narrowing_write_versions: HashMap::new(),
+            last_if_condition_narrowing: None,
             json_narrowings: HashMap::new(),
             exception_object_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
@@ -74,6 +79,8 @@ impl<'a> FnLowerer<'a> {
             object_array_property_discriminants: HashMap::new(),
             object_function_property_discriminants: HashMap::new(),
             destructured_union_correlations: HashMap::new(),
+            for_of_json_mode: None,
+            for_of_prelowered: None,
             destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
             function_value_array_discriminants: HashMap::new(),
@@ -83,6 +90,8 @@ impl<'a> FnLowerer<'a> {
             bindings: HashMap::new(),
             used_hir_bindings: HashSet::new(),
             sparse_arrays: HashSet::new(),
+            fresh_object_bindings: HashSet::new(),
+            alias_native_arrays: false,
             conservative_sparse_arrays: HashSet::new(),
             sparse_array_functions: HashSet::new(),
             next_binding: 0,
@@ -95,6 +104,9 @@ impl<'a> FnLowerer<'a> {
             call_constraints,
             generic_call_returns: HashMap::new(),
             generic_arrows: HashMap::new(),
+            generic_non_arrow_names: HashSet::new(),
+            generic_non_arrow_receivers: HashMap::new(),
+            generic_non_arrow_receiver_templates: HashMap::new(),
             generic_arrow_self_names: HashMap::new(),
             generic_named_templates: HashMap::new(),
             native_method_values: HashMap::new(),
@@ -105,11 +117,14 @@ impl<'a> FnLowerer<'a> {
             promise_catch_bindings: HashSet::new(),
             promise_catch_parameter: None,
             loop_depth: 0,
+            source_break_depths: Vec::new(),
+            source_continue_depths: Vec::new(),
             labels: Vec::new(),
             super_initializer: None,
             class_static_context: false,
             class_context: None,
             unbound_this_context: false,
+            non_arrow_receiver: None,
             expected_return_hint: None,
             expected_arrow_return_hint: None,
             sparse_mapping_result: false,
@@ -141,6 +156,20 @@ impl<'a> FnLowerer<'a> {
             && matches!(member.prop, MemberProp::Computed(_))
             && self.infer_member_receiver_type(&member.obj)
                 == Some(HirType::Array(Box::new(element.clone())))
+    }
+
+    /// Records a declared parameter whose type includes `undefined`/`null` (see
+    /// `strict_nullable_bindings`).
+    fn mark_declared_nullable_parameter(&mut self, name: &str, ty: &HirType) {
+        if matches!(ty, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) {
+            self.strict_nullable_bindings.insert(name.to_string());
+        }
+    }
+
+    /// Whether a property read on `receiver` must be rejected when its type is not narrowed.
+    fn receiver_requires_narrowing(&self, receiver: &Expr) -> bool {
+        matches!(receiver, Expr::Ident(ident)
+            if self.strict_nullable_bindings.contains(&self.resolve_binding(ident.sym.as_ref())))
     }
 
     fn mark_array_parameter(&mut self, name: &str, ty: &HirType) {

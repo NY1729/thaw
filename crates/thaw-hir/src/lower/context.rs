@@ -1,11 +1,29 @@
+#[derive(Clone)]
+struct NarrowingSnapshot {
+    optional: HashMap<Symbol, HirType>,
+    nullable: HashMap<Symbol, HirType>,
+    nullish: HashMap<Symbol, HirType>,
+    partial_nullable: HashMap<Symbol, HirType>,
+    write_versions: HashMap<Symbol, u64>,
+}
+
 /// Lowers one function body while retaining its typed lexical scope.
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     immutable_bindings: HashSet<Symbol>,
+    /// `var` names already declared in the current function, mapped to the
+    /// HIR binding they own; a redeclaration reuses that binding.
+    function_var_names: HashMap<String, Symbol>,
+    /// Declared (annotated) function/method parameters whose type may be `undefined`/`null`:
+    /// an un-narrowed property read on one is a compile error, as in `tsc`.
+    strict_nullable_bindings: HashSet<Symbol>,
     static_string_bindings: HashMap<Symbol, String>,
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,
+    partial_nullable_narrowings: HashMap<Symbol, HirType>,
+    narrowing_write_versions: HashMap<Symbol, u64>,
+    last_if_condition_narrowing: Option<(Symbol, HirType, bool, u8)>,
     json_narrowings: HashMap<Symbol, HirType>,
     exception_object_narrowings: HashMap<Symbol, HirType>,
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
@@ -15,6 +33,11 @@ struct FnLowerer<'a> {
     object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     object_function_property_discriminants: HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
+    /// `for...of` over a `Json` value is lowered twice (array loop / live-iterable protocol);
+    /// `Some(true)` selects the live-iterable lowering, `Some(false)` the array loop.
+    for_of_json_mode: Option<bool>,
+    /// The right-hand side already lowered by the `for...of` dispatch.
+    for_of_prelowered: Option<HirExpr>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
@@ -26,6 +49,11 @@ struct FnLowerer<'a> {
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     sparse_arrays: HashSet<Symbol>,
+    /// `__thaw_native_arg_N` temporaries bound to a fresh object literal (not a native owner).
+    fresh_object_bindings: HashSet<Symbol>,
+    /// Set by the `any` declaration/assignment sites: the next native array converted to
+    /// `Json` is a live view that aliases the array instead of a copy.
+    alias_native_arrays: bool,
     conservative_sparse_arrays: HashSet<Symbol>,
     sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,
@@ -38,6 +66,9 @@ struct FnLowerer<'a> {
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     generic_call_returns: HashMap<Symbol, HirType>,
     generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,
+    generic_non_arrow_names: HashSet<Symbol>,
+    generic_non_arrow_receivers: HashMap<Symbol, HirType>,
+    generic_non_arrow_receiver_templates: HashMap<Symbol, Box<TsType>>,
     generic_arrow_self_names: HashMap<Symbol, Symbol>,
     generic_named_templates: HashMap<Symbol, Symbol>,
     native_method_values: HashMap<Symbol, NativeMethodValue>,
@@ -52,11 +83,16 @@ struct FnLowerer<'a> {
     promise_catch_bindings: HashSet<Symbol>,
     promise_catch_parameter: Option<Symbol>,
     loop_depth: usize,
+    /// Emitted HIR depths for source breakable statements (iterations and switches).
+    source_break_depths: Vec<usize>,
+    /// Emitted HIR depths for source iterations only.
+    source_continue_depths: Vec<usize>,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
     class_static_context: bool,
     class_context: Option<Symbol>,
     unbound_this_context: bool,
+    non_arrow_receiver: Option<HirType>,
     /// A contextual type hint for the *next* call expression `lower_call`
     /// handles, consumed (taken, not just read) as its very first action
     /// so it can never leak into a nested/argument call's own inference --

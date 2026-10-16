@@ -9,29 +9,57 @@
 /// skipped: this is a function-signature extractor, not a full `.d.ts`
 /// model.
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
-    let module = thaw_parser::parse_typescript(source)?;
+    parse_dts_named(source, thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn parse_dts_named(
+    source: &str, filename: thaw_parser::common::FileName,
+) -> Result<Vec<DtsFunction>, String> {
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
+    let generated_internals = generated_public_alias_internals(&module);
+    let type_only_namespaces = type_only_namespace_names_named(source, &filename);
+    let export_assignment = export_assignment_namespace(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
-    let mut functions = module
-        .body
-        .iter()
-        .flat_map(extract_fn_decls)
-        .map(|(name, func)| {
-            let name = name.rsplit('.').next().unwrap_or(name);
-            lower_dts_function(name, func, &interfaces, &generic_interfaces)
+    let mut functions = scoped_fn_decls(&module)
+        .into_iter()
+        .filter(|(full_name, _, _)| !namespace_member_is_type_only(full_name, &type_only_namespaces))
+        .map(|(full_name, _, func)| {
+            let (context, generic_context) = scoped_type_context(
+                declaration_scope(&full_name), &interfaces, &generic_interfaces,
+            );
+            let public_name = export_assignment
+                .and_then(|namespace| full_name.strip_prefix(format!("{namespace}.").as_str()))
+                .map(str::to_string)
+                .unwrap_or(full_name);
+            lower_dts_function(&public_name, func, &context, &generic_context)
         })
         .collect::<Vec<_>>();
+    for (original, public) in namespace_value_aliases(&module).into_iter()
+        .chain(scoped_exported_import_equals_aliases(&module)) {
+        let prefix = format!("{original}.");
+        let aliases = functions.iter().filter_map(|function| {
+            function.name.strip_prefix(&prefix).map(|suffix| {
+                let mut alias = function.clone();
+                alias.name = format!("{public}.{suffix}");
+                alias
+            })
+        }).collect::<Vec<_>>();
+        functions.extend(aliases);
+    }
+    let hidden_namespaces = nonpublic_namespace_sources_named(source, &filename);
+    functions.retain(|function| !namespace_member_is_type_only(&function.name, &hidden_namespaces));
     if let Some(target) = export_assignment_interface_name(&module) {
-        functions.extend(
-            module
-                .body
-                .iter()
-                .flat_map(|item| extract_interface_method_decls(item, &target))
-                .map(|(name, method)| {
-                    lower_dts_method_signature(&name, method, &interfaces, &generic_interfaces)
-                }),
-        );
+        functions.extend(export_assignment_interface_methods(&module, &target)
+            .into_iter()
+            .map(|(name, owner, method)| {
+                let (context, generic_context) = scoped_type_context(
+                    declaration_scope(&owner), &interfaces, &generic_interfaces,
+                );
+                lower_dts_method_signature(&name, method, &context, &generic_context)
+            }));
     }
     let call_signature_interfaces = all_interface_decls_by_name(&module);
+    let merged_call_signature_interfaces = all_interface_decls_by_name_merged(&module);
     let local_type_aliases = all_type_alias_decls_by_name(&module);
     functions.extend(
         module
@@ -40,11 +68,13 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
             .flat_map(|item| {
                 extract_const_call_signature_decls(
                     item,
-                    &call_signature_interfaces,
+                    &merged_call_signature_interfaces,
                     &local_type_aliases,
+                    "",
+                    &HashMap::new(),
                 )
             })
-            .map(|(name, signature)| match signature {
+            .map(|(name, signature, _)| match signature {
                 CallableConstSignature::Interface(call) => lower_dts_call_signature(
                     &name,
                     call,
@@ -69,13 +99,409 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
                 ),
             }),
     );
+    let mut scoped_consts = Vec::new();
+    let mut scoped_tables = HashMap::new();
+    for (scope, item) in scoped_module_items(&module) {
+        if scope.is_empty() { continue; }
+        let is_variable = matches!(item,
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(_)))
+                | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(
+                    swc_ecma_ast::ExportDecl { decl: Decl::Var(_), .. })));
+        if !is_variable { continue; }
+        let (raw_interfaces, scoped_aliases, owners) = scoped_tables.entry(scope.clone())
+            .or_insert_with(|| scoped_callable_type_tables(&module, &scope));
+        let extracted = extract_const_call_signature_decls(
+            item, raw_interfaces, scoped_aliases, &scope, owners,
+        );
+        for (name, signature, owner) in extracted {
+            let full_name = format!("{scope}.{name}");
+            let (owner_interfaces, owner_aliases, _) = scoped_tables.entry(owner.clone())
+                .or_insert_with(|| scoped_callable_type_tables(&module, &owner));
+            let first_interfaces = owner_interfaces.iter().filter_map(|(name, declarations)|
+                declarations.first().map(|declaration| (name.clone(), *declaration)))
+                .collect::<HashMap<_, _>>();
+            let (context, generic_context) = scoped_type_context(&owner, &interfaces, &generic_interfaces);
+            let function = match signature {
+                CallableConstSignature::Interface(call) => lower_dts_call_signature(
+                    &full_name, call, &context, &generic_context, owner_aliases, &first_interfaces,
+                ),
+                CallableConstSignature::Direct(function) => lower_dts_fn_type(
+                    &full_name, function, &context, &generic_context, owner_aliases, &first_interfaces,
+                ),
+                CallableConstSignature::Method(method) => lower_dts_method_signature(
+                    &full_name, method, &context, &generic_context,
+                ),
+            };
+            scoped_consts.push(function);
+        }
+    }
+    for (original, public) in namespace_value_aliases(&module).into_iter()
+        .chain(scoped_exported_import_equals_aliases(&module)) {
+        let prefix = format!("{original}.");
+        let aliases = scoped_consts.iter().filter_map(|function| {
+            function.name.strip_prefix(&prefix).map(|suffix| {
+                let mut alias = function.clone();
+                alias.name = format!("{public}.{suffix}");
+                alias
+            })
+        }).collect::<Vec<_>>();
+        scoped_consts.extend(aliases);
+    }
+    scoped_consts.retain(|function| !namespace_member_is_type_only(&function.name, &type_only_namespaces)
+        && !namespace_member_is_type_only(&function.name, &hidden_namespaces));
+    functions.extend(scoped_consts);
+    // An export specifier may expose a reserved property name that cannot be
+    // the name of a function declaration (`export { _null as null }`). The
+    // registry keeps the valid internal declaration and the public export;
+    // carry its signatures under that public name for the qualified shim.
+    // Ordinary aliases are already materialized as renamed declarations by
+    // the registry and do not need a second copy here.
+    let mut seen_aliases = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            continue;
+        };
+        if export.type_only || export.src.is_some() {
+            continue;
+        }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            if named.is_type_only {
+                continue;
+            }
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else {
+                continue;
+            };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(exported)) = &named.exported else {
+                continue;
+            };
+            let original = original.sym.as_ref();
+            let exported = exported.sym.as_ref();
+            if !is_reserved_js_identifier(exported)
+                || !seen_aliases.insert((original, exported))
+                || (!original.starts_with("__thaw_public_")
+                    && functions.iter().any(|function| function.name == exported))
+            {
+                continue;
+            }
+            let aliases = functions
+                .iter()
+                .filter(|function| function.name == original)
+                .cloned()
+                .map(|mut function| {
+                    function.name = exported.to_string();
+                    function
+                })
+                .collect::<Vec<_>>();
+            functions.extend(aliases);
+        }
+    }
+    let mut scoped_generated_internals = HashSet::new();
+    let mut scoped_aliases_seen = HashSet::new();
+    for (scope, item) in scoped_module_items(&module) {
+        if scope.is_empty() { continue; }
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.type_only || export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            if named.is_type_only { continue; }
+            let (swc_ecma_ast::ModuleExportName::Ident(original),
+                Some(swc_ecma_ast::ModuleExportName::Ident(public))) =
+                (&named.orig, &named.exported) else { continue };
+            let source_name = format!("{scope}.{}", original.sym);
+            let public_name = format!("{scope}.{}", public.sym);
+            if source_name == public_name
+                || !scoped_aliases_seen.insert((source_name.clone(), public_name.clone())) {
+                continue;
+            }
+            let aliases = functions.iter().filter(|function| function.name == source_name)
+                .cloned().map(|mut function| {
+                    function.name = public_name.clone();
+                    function
+                }).collect::<Vec<_>>();
+            if !aliases.is_empty() && original.sym.as_str().starts_with("__thaw_public_") {
+                scoped_generated_internals.insert(source_name);
+            }
+            functions.extend(aliases);
+        }
+    }
+    // A selected function can be exposed directly through a qualified
+    // `export import Public = Owner.function`; the namespace alias pass
+    // above copies descendants only and has no descendant for the
+    // function itself.
+    for (original, public) in scoped_exported_import_equals_aliases(&module) {
+        if functions.iter().any(|function| function.name == public) { continue; }
+        let aliases = functions.iter().filter(|function| function.name == original)
+            .cloned().map(|mut function| {
+                function.name = public.clone();
+                function
+            }).collect::<Vec<_>>();
+        functions.extend(aliases);
+    }
+    functions.retain(|function| !generated_internals.contains(&function.name)
+        && !scoped_generated_internals.contains(&function.name));
     Ok(functions)
+}
+
+fn export_assignment_namespace(module: &Module) -> Option<&str> {
+    module.body.iter().find_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) = item else {
+            return None;
+        };
+        match export.expr.as_ref() {
+            Expr::Ident(ident) => Some(ident.sym.as_str()),
+            _ => None,
+        }
+    })
+}
+
+fn namespace_member_is_type_only(full_name: &str, type_only: &HashSet<String>) -> bool {
+    full_name.match_indices('.').any(|(index, _)| type_only.contains(&full_name[..index]))
+}
+
+fn generated_type_only_namespace_marker(name: &str) -> bool {
+    name.strip_prefix("__thaw_type_only_namespace_marker_")
+        .is_some_and(|suffix| suffix.len() == 16
+            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn namespace_value_aliases(module: &Module) -> Vec<(String, String)> {
+    use swc_ecma_ast::{ExportSpecifier, ModuleExportName};
+    module.body.iter().filter_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { return None };
+        (!export.type_only && export.src.is_none()).then_some(export)
+    }).flat_map(|export| export.specifiers.iter().filter_map(|specifier| {
+        let ExportSpecifier::Named(named) = specifier else { return None };
+        if named.is_type_only { return None; }
+        let (ModuleExportName::Ident(original), Some(ModuleExportName::Ident(public))) =
+            (&named.orig, &named.exported) else { return None; };
+        (original.sym != public.sym).then(|| (original.sym.to_string(), public.sym.to_string()))
+    })).collect()
+}
+
+/// Original bindings that have a live namespace alias but are not themselves
+/// public runtime properties. Their declarations still supply type context.
+pub fn nonpublic_namespace_sources(source: &str) -> HashSet<String> {
+    nonpublic_namespace_sources_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn nonpublic_namespace_sources_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else { return HashSet::new(); };
+    let public = exported_value_names_named(source, filename);
+    let assigned = export_assignment_namespace(&module);
+    namespace_value_aliases(&module).into_iter().filter_map(|(original, _)| {
+        (!public.contains(&original) && assigned != Some(original.as_str())).then_some(original)
+    }).collect()
+}
+
+/// Namespaces with no runtime export of their original binding. A value
+/// alias (`export { Source as Live }`) keeps Source live even if another
+/// edge exports Source only as a type.
+pub fn type_only_namespace_names(source: &str) -> HashSet<String> {
+    type_only_namespace_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn type_only_namespace_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    use swc_ecma_ast::{ExportSpecifier, ModuleExportName, Stmt, TsKeywordTypeKind,
+        TsModuleName, TsNamespaceBody, TsType};
+
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
+        return HashSet::new();
+    };
+    let mut candidates = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else { continue };
+            if !export.type_only && !named.is_type_only { continue; }
+            if let ModuleExportName::Ident(original) = &named.orig {
+                candidates.insert(original.sym.to_string());
+            }
+        }
+    }
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                match &export.decl {
+                    Decl::TsModule(namespace) => {
+                        if let TsModuleName::Ident(ident) = &namespace.id {
+                            candidates.remove(ident.sym.as_ref());
+                        }
+                    }
+                    Decl::Class(class) => { candidates.remove(class.ident.sym.as_ref()); }
+                    Decl::TsEnum(enumeration) => { candidates.remove(enumeration.id.sym.as_ref()); }
+                    _ => {}
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                if !export.type_only && export.src.is_none() => {
+                for specifier in &export.specifiers {
+                    match specifier {
+                        ExportSpecifier::Named(named) if !named.is_type_only => {
+                            if let ModuleExportName::Ident(original) = &named.orig {
+                                candidates.remove(original.sym.as_ref());
+                            }
+                        }
+                        ExportSpecifier::Namespace(namespace) => {
+                            if let ModuleExportName::Ident(name) = &namespace.name {
+                                candidates.remove(name.sym.as_ref());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+                if let Expr::Ident(ident) = export.expr.as_ref() {
+                    candidates.remove(ident.sym.as_ref());
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(export)) => {
+                if let Expr::Ident(ident) = export.expr.as_ref() {
+                    candidates.remove(ident.sym.as_ref());
+                }
+            }
+            _ => {}
+        }
+    }
+    // A generated type-only namespace can itself live inside a public
+    // namespace (for example `parts.Shapes`). Its local `export type`
+    // marker must suppress runtime capture of class members below it.
+    fn nested_type_only(
+        body: &[ModuleItem], scope: &str, names: &mut HashSet<String>,
+    ) {
+        let mut local = HashSet::new();
+        for item in body {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+            if export.src.is_some() || !export.type_only { continue; }
+            for specifier in &export.specifiers {
+                let ExportSpecifier::Named(named) = specifier else { continue };
+                if let ModuleExportName::Ident(original) = &named.orig {
+                    local.insert(original.sym.to_string());
+                }
+            }
+        }
+        for item in body {
+            match item {
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                    Decl::TsModule(namespace) => {
+                        if let TsModuleName::Ident(ident) = &namespace.id {
+                            local.remove(ident.sym.as_ref());
+                        }
+                    }
+                    Decl::Class(class) => { local.remove(class.ident.sym.as_ref()); }
+                    Decl::TsEnum(enumeration) => { local.remove(enumeration.id.sym.as_ref()); }
+                    _ => {}
+                },
+                ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                    if !export.type_only && export.src.is_none() => {
+                    for specifier in &export.specifiers {
+                        let ExportSpecifier::Named(named) = specifier else { continue };
+                        if let ModuleExportName::Ident(original) = &named.orig {
+                            local.remove(original.sym.as_ref());
+                        }
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+                    if let Expr::Ident(ident) = export.expr.as_ref() {
+                        local.remove(ident.sym.as_ref());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names.extend(local.into_iter().map(|name| format!("{scope}.{name}")));
+        for item in body {
+            let namespace = match item {
+                ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(namespace))) => Some(namespace),
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) =>
+                    if let Decl::TsModule(namespace) = &export.decl { Some(namespace) } else { None },
+                _ => None,
+            };
+            let Some(namespace) = namespace else { continue };
+            let TsModuleName::Ident(name) = &namespace.id else { continue };
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body else { continue };
+            let child_scope = format!("{scope}.{}", name.sym);
+            if block.body.iter().any(|member| matches!(member,
+                ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias)))
+                    if generated_type_only_namespace_marker(alias.id.sym.as_ref())
+                        && matches!(alias.type_ann.as_ref(), TsType::TsKeywordType(keyword)
+                            if keyword.kind == TsKeywordTypeKind::TsNeverKeyword))) {
+                names.insert(child_scope.clone());
+            }
+            nested_type_only(&block.body, &child_scope, names);
+        }
+    }
+    for item in &module.body {
+        let namespace = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(namespace))) => Some(namespace),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) =>
+                if let Decl::TsModule(namespace) = &export.decl { Some(namespace) } else { None },
+            _ => None,
+        };
+        let Some(namespace) = namespace else { continue };
+        let TsModuleName::Ident(name) = &namespace.id else { continue };
+        let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body else { continue };
+        nested_type_only(&block.body, name.sym.as_ref(), &mut candidates);
+    }
+    candidates
+}
+
+fn generated_public_alias_internals(module: &Module) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.type_only || export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            if named.is_type_only { continue; }
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(exported)) = &named.exported else { continue };
+            if original.sym.as_str().starts_with("__thaw_public_")
+                && is_reserved_js_identifier(exported.sym.as_ref())
+            {
+                names.insert(original.sym.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Extracts typed, non-callable top-level value declarations. Callable
 /// `const`s are already returned by [`parse_dts`] and are excluded here.
+/// Whether a callable `const`'s annotation names (or intersects with) an object type that also has
+/// members: `KyInstance`, `debug.Debug & { debug: Debug }`, `{ (x): R; get: ... }`.
+fn type_is_callable_object(ty: &TsType, callable_objects: &HashSet<String>) -> bool {
+    match ty {
+        TsType::TsTypeRef(reference) => {
+            let name = match &reference.type_name {
+                TsEntityName::Ident(ident) => ident.sym.as_str(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
+            };
+            callable_objects.contains(name)
+        }
+        TsType::TsParenthesizedType(inner) => type_is_callable_object(&inner.type_ann, callable_objects),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(intersection)) => {
+            intersection.types.iter().any(|member| type_is_callable_object(member, callable_objects))
+        }
+        TsType::TsTypeLit(literal) => literal.members.iter().any(|member| matches!(
+            member,
+            TsTypeElement::TsPropertySignature(_) | TsTypeElement::TsMethodSignature(_)
+        )),
+        _ => false,
+    }
+}
+
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
-    let module = thaw_parser::parse_typescript(source)?;
+    parse_dts_values_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn parse_dts_values_named(source: &str, filename: &thaw_parser::common::FileName) -> Result<Vec<DtsValue>, String> {
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module)?;
+    let generated_internals = generated_public_alias_internals(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let interface_declarations = all_interface_decls_by_name(&module);
     let callable_objects = module
@@ -91,12 +517,21 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             })
         })
         .map(|interface| interface.id.sym.to_string())
+        // `type KyInstance = { (url): R; get: ...; }` is the same callable object as the
+        // interface spelling.
+        .chain(module.body.iter().flat_map(extract_type_alias_decls).filter_map(|alias| {
+            let TsType::TsTypeLit(literal) = alias.type_ann.as_ref() else { return None };
+            literal.members.iter().any(|member| matches!(
+                member,
+                TsTypeElement::TsPropertySignature(_) | TsTypeElement::TsMethodSignature(_)
+            )).then(|| alias.id.sym.to_string())
+        }))
         .collect::<HashSet<_>>();
-    let callable = parse_dts(source)?
+    let callable = parse_dts_named(source, filename.clone())?
         .into_iter()
         .map(|function| function.name)
         .collect::<HashSet<_>>();
-    let class_names = parse_dts_classes(source)?
+    let class_names = parse_dts_classes_named(source, filename)?
         .into_iter()
         .map(|class| class.name)
         .collect::<HashSet<_>>();
@@ -115,7 +550,10 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     // `NodeBase`, socket.io's `StrictEventEmitter`), just never applied
     // here too. First occurrence wins, matching that precedent.
     let mut seen_names = HashSet::new();
-    for item in &module.body {
+    for (scope, item) in scoped_module_items(&module) {
+        let (value_context, generic_value_context) = scoped_type_context(
+            &scope, &interfaces, &generic_interfaces,
+        );
         let declaration = match item {
             ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(declaration))) => {
                 declaration.as_ref()
@@ -158,6 +596,7 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
                         }
                         swc_ecma_ast::ObjectPatProp::Rest(_) => continue,
                     };
+                    let name = if scope.is_empty() { name } else { format!("{scope}.{name}") };
                     if callable.contains(&name)
                         || class_names.contains(&name)
                         || !seen_names.insert(name.clone())
@@ -178,8 +617,8 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
                     let ty = resolve_ts_type_with_substitution(
                         &type_annotation.type_ann,
                         &HashMap::new(),
-                        &interfaces,
-                        &generic_interfaces,
+                        &value_context,
+                        &generic_value_context,
                         &mut Vec::new(),
                     );
                     values.push(DtsValue { name, ty });
@@ -189,7 +628,8 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             let Pat::Ident(binding) = &declarator.name else {
                 continue;
             };
-            let name = binding.id.sym.to_string();
+            let name = if scope.is_empty() { binding.id.sym.to_string() }
+                else { format!("{scope}.{}", binding.id.sym) };
             let Some(annotation) = &binding.type_ann else {
                 continue;
             };
@@ -197,12 +637,7 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
                 continue;
             }
             if callable.contains(&name) {
-                let callable_object = matches!(
-                    annotation.type_ann.as_ref(),
-                    TsType::TsTypeRef(reference)
-                        if matches!(&reference.type_name, TsEntityName::Ident(interface)
-                            if callable_objects.contains(interface.sym.as_str()))
-                );
+                let callable_object = type_is_callable_object(annotation.type_ann.as_ref(), &callable_objects);
                 if callable_object {
                     values.push(DtsValue {
                         name,
@@ -214,8 +649,8 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             let mut ty = resolve_ts_type_with_substitution(
                 &annotation.type_ann,
                 &HashMap::new(),
-                &interfaces,
-                &generic_interfaces,
+                &value_context,
+                &generic_value_context,
                 &mut Vec::new(),
             );
             if matches!(&ty, DtsType::Unsupported(_)) {
@@ -243,13 +678,47 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     if values.is_empty()
         && callable.is_empty()
         && class_names.is_empty()
-        && self_referential_namespace_aliases(source).contains("default")
+        && self_referential_namespace_aliases_named(source, filename).contains("default")
     {
         values.push(DtsValue {
             name: "default".to_string(),
             ty: DtsType::Native(HirType::JsValue),
         });
     }
+    let mut aliases = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(public)) = &named.exported else { continue };
+            if original.sym == public.sym { continue; }
+            if callable.contains(public.sym.as_ref()) || class_names.contains(public.sym.as_ref()) {
+                continue;
+            }
+            aliases.push((original.sym.to_string(), public.sym.to_string()));
+        }
+    }
+    for (original, public) in scoped_exported_import_equals_aliases(&module) {
+        if callable.contains(&public) || class_names.contains(&public) {
+            continue;
+        }
+        aliases.push((original, public));
+    }
+    loop {
+        let mut changed = false;
+        for (original, public) in &aliases {
+            if values.iter().any(|value| &value.name == public) { continue; }
+            if let Some(mut value) = values.iter().find(|value| &value.name == original).cloned() {
+                value.name = public.clone();
+                values.push(value);
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    values.retain(|value| !generated_internals.contains(&value.name));
     Ok(values)
 }
 
@@ -265,6 +734,14 @@ fn all_interface_decls_by_name(module: &Module) -> HashMap<String, &TsInterfaceD
     let mut map = HashMap::new();
     for iface in module.body.iter().flat_map(extract_interface_decls) {
         map.entry(iface.id.sym.to_string()).or_insert(iface);
+    }
+    map
+}
+
+fn all_interface_decls_by_name_merged(module: &Module) -> HashMap<String, Vec<&TsInterfaceDecl>> {
+    let mut map: HashMap<String, Vec<&TsInterfaceDecl>> = HashMap::new();
+    for iface in module.body.iter().flat_map(extract_interface_decls) {
+        map.entry(iface.id.sym.to_string()).or_default().push(iface);
     }
     map
 }
@@ -295,6 +772,49 @@ fn all_type_alias_decls_by_name(module: &Module) -> HashMap<String, &TsType> {
     map
 }
 
+/// A callable const inside a namespace resolves local type names before
+/// equally named declarations in an outer scope. Keep the old top-level
+/// maps untouched; only nested declarations need this lexical view.
+#[allow(clippy::type_complexity)]
+fn scoped_callable_type_tables<'a>(
+    module: &'a Module,
+    scope: &str,
+) -> (HashMap<String, Vec<&'a TsInterfaceDecl>>, HashMap<String, &'a TsType>, HashMap<String, String>) {
+    let (interfaces, aliases) = scoped_type_declarations(module);
+    let mut scoped_interfaces = HashMap::<String, Vec<&TsInterfaceDecl>>::new();
+    let mut scoped_aliases = HashMap::<String, &TsType>::new();
+    let mut owners = HashMap::new();
+    for (name, declaration) in interfaces {
+        owners.insert(name.clone(), declaration_scope(&name).to_string());
+        scoped_interfaces.entry(name).or_default().push(declaration);
+    }
+    for (name, declaration) in aliases {
+        owners.insert(name.clone(), declaration_scope(&name).to_string());
+        scoped_aliases.entry(name).or_insert(declaration.type_ann.as_ref());
+    }
+    let interface_names = scoped_interfaces.keys()
+        .map(|name| name.rsplit('.').next().unwrap_or(name).to_string())
+        .collect::<HashSet<_>>();
+    for bare in interface_names {
+        if let Some(name) = lexical_type_key(&bare, scope, |name| scoped_interfaces.contains_key(name)) {
+            let declarations = scoped_interfaces[&name].clone();
+            owners.insert(bare.clone(), declaration_scope(&name).to_string());
+            scoped_interfaces.insert(bare, declarations);
+        }
+    }
+    let alias_names = scoped_aliases.keys()
+        .map(|name| name.rsplit('.').next().unwrap_or(name).to_string())
+        .collect::<HashSet<_>>();
+    for bare in alias_names {
+        if let Some(name) = lexical_type_key(&bare, scope, |name| scoped_aliases.contains_key(name)) {
+            let declaration = scoped_aliases[&name];
+            owners.insert(bare.clone(), declaration_scope(&name).to_string());
+            scoped_aliases.insert(bare, declaration);
+        }
+    }
+    (scoped_interfaces, scoped_aliases, owners)
+}
+
 /// Resolves `ty` to zero or more direct function-type call signatures,
 /// following a chain of local (bare or exported) non-generic type-alias
 /// references and unwrapping an intersection into each of its own
@@ -320,31 +840,33 @@ fn resolve_local_callable_fn_types<'a>(
     ty: &'a TsType,
     aliases: &HashMap<String, &'a TsType>,
     visited: &mut HashSet<String>,
-) -> Vec<CallableConstSignature<'a>> {
+    scope: &str,
+    owners: &HashMap<String, String>,
+) -> Vec<(CallableConstSignature<'a>, String)> {
     match ty {
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
-            vec![CallableConstSignature::Direct(function)]
+            vec![(CallableConstSignature::Direct(function), scope.to_string())]
         }
         TsType::TsTypeLit(lit) => lit
             .members
             .iter()
             .filter_map(|member| match member {
                 TsTypeElement::TsCallSignatureDecl(call) => {
-                    Some(CallableConstSignature::Interface(call))
+                    Some((CallableConstSignature::Interface(call), scope.to_string()))
                 }
                 _ => None,
             })
             .collect(),
         TsType::TsTypeRef(ty_ref) => {
-            let name = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            let name = callable_type_lookup_key(&ty_ref.type_name, aliases, scope);
             if !visited.insert(name.clone()) {
                 return Vec::new();
             }
             match aliases.get(name.as_str()) {
-                Some(aliased) => resolve_local_callable_fn_types(aliased, aliases, visited),
+                Some(aliased) => resolve_local_callable_fn_types(
+                    aliased, aliases, visited,
+                    owners.get(&name).map(String::as_str).unwrap_or(scope), owners,
+                ),
                 None => Vec::new(),
             }
         }
@@ -353,9 +875,23 @@ fn resolve_local_callable_fn_types<'a>(
         )) => intersection
             .types
             .iter()
-            .flat_map(|member| resolve_local_callable_fn_types(member, aliases, visited))
+            .flat_map(|member| resolve_local_callable_fn_types(member, aliases, visited, scope, owners))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+fn callable_type_lookup_key<T>(name: &TsEntityName, table: &HashMap<String, T>, scope: &str) -> String {
+    let qualified = type_reference_name(name);
+    if let Some(name) = lexical_type_key(&qualified, scope, |name| table.contains_key(name)) {
+        return name;
+    }
+    // Preserve the old top-level fallback. In a namespace, an unresolved
+    // qualified reference must not bind to a same-named local declaration.
+    if scope.is_empty() {
+        qualified.rsplit('.').next().unwrap_or(&qualified).to_string()
+    } else {
+        qualified
     }
 }
 
@@ -397,9 +933,11 @@ enum CallableConstSignature<'a> {
 /// an ordinary ambient function declaration.
 fn extract_const_call_signature_decls<'a>(
     item: &'a ModuleItem,
-    interfaces: &HashMap<String, &'a TsInterfaceDecl>,
+    interfaces: &HashMap<String, Vec<&'a TsInterfaceDecl>>,
     local_type_aliases: &HashMap<String, &'a TsType>,
-) -> Vec<(String, CallableConstSignature<'a>)> {
+    scope: &str,
+    owners: &HashMap<String, String>,
+) -> Vec<(String, CallableConstSignature<'a>, String)> {
     let var_decl = match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(var_decl))) => var_decl.as_ref(),
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
@@ -417,11 +955,9 @@ fn extract_const_call_signature_decls<'a>(
                 let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
                     return None;
                 };
-                let interface_name = match &reference.type_name {
-                    TsEntityName::Ident(ident) => ident.sym.as_str(),
-                    TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
-                };
-                let interface = interfaces.get(interface_name)?;
+                let interface_name = callable_type_lookup_key(&reference.type_name, interfaces, scope);
+                let declarations = interfaces.get(&interface_name)?;
+                let interface_scope = owners.get(&interface_name).map(String::as_str).unwrap_or(scope);
                 let bindings = object
                     .props
                     .iter()
@@ -443,7 +979,7 @@ fn extract_const_call_signature_decls<'a>(
                     })
                     .collect::<HashMap<_, _>>();
                 let mut signatures = Vec::new();
-                for member in &interface.body.body {
+                for member in declarations.iter().flat_map(|iface| iface.body.body.iter()) {
                     match member {
                         TsTypeElement::TsMethodSignature(method) => {
                             let Expr::Ident(key) = method.key.as_ref() else {
@@ -452,7 +988,7 @@ fn extract_const_call_signature_decls<'a>(
                             let Some(name) = bindings.get(key.sym.as_str()) else {
                                 continue;
                             };
-                            signatures.push((name.clone(), CallableConstSignature::Method(method)));
+                            signatures.push((name.clone(), CallableConstSignature::Method(method), interface_scope.to_string()));
                         }
                         TsTypeElement::TsPropertySignature(property) => {
                             let Expr::Ident(key) = property.key.as_ref() else {
@@ -469,21 +1005,22 @@ fn extract_const_call_signature_decls<'a>(
                                     annotation.type_ann.as_ref(),
                                     local_type_aliases,
                                     &mut HashSet::new(),
+                                    interface_scope,
+                                    owners,
                                 )
                                 .into_iter()
-                                .map(|signature| (name.clone(), signature)),
+                                .map(|(signature, owner)| (name.clone(), signature, owner)),
                             );
                             if let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() {
-                                let callable_name = match &reference.type_name {
-                                    TsEntityName::Ident(ident) => ident.sym.as_str(),
-                                    TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
-                                };
-                                if let Some(callable) = interfaces.get(callable_name) {
-                                    signatures.extend(callable.body.body.iter().filter_map(|member| {
+                                let callable_name = callable_type_lookup_key(&reference.type_name, interfaces, interface_scope);
+                                if let Some(callable) = interfaces.get(&callable_name) {
+                                    let callable_scope = owners.get(&callable_name).map(String::as_str).unwrap_or(scope);
+                                    signatures.extend(callable.iter().flat_map(|iface| iface.body.body.iter()).filter_map(|member| {
                                         match member {
                                             TsTypeElement::TsCallSignatureDecl(call) => Some((
                                                 name.clone(),
                                                 CallableConstSignature::Interface(call),
+                                                callable_scope.to_string(),
                                             )),
                                             _ => None,
                                         }
@@ -501,55 +1038,43 @@ fn extract_const_call_signature_decls<'a>(
             };
             let annotation = binding.type_ann.as_ref()?;
             let name = binding.id.sym.to_string();
-            // `A & { ... }` (`debug`: `debug.Debug & { debug: ...;
-            // default: ... }`): a callable interface intersected with a
-            // plain property bag. Use the callable member's signatures.
-            let type_ann = match annotation.type_ann.as_ref() {
-                TsType::TsUnionOrIntersectionType(
-                    TsUnionOrIntersectionType::TsIntersectionType(intersection),
-                ) => intersection
-                    .types
-                    .iter()
-                    .map(Box::as_ref)
-                    .find(|member| {
-                        let TsType::TsTypeRef(ty_ref) = member else {
-                            return matches!(
-                                member,
-                                TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(_))
-                            );
-                        };
-                        let iface_name = match &ty_ref.type_name {
-                            TsEntityName::Ident(ident) => ident.sym.to_string(),
-                            TsEntityName::TsQualifiedName(qualified) => {
-                                qualified.right.sym.to_string()
-                            }
-                        };
-                        interfaces.get(iface_name.as_str()).is_some_and(|iface| {
-                            iface.body.body.iter().any(|member| {
-                                matches!(member, TsTypeElement::TsCallSignatureDecl(_))
-                            })
-                        })
-                    })
-                    .unwrap_or(annotation.type_ann.as_ref()),
-                other => other,
-            };
+            if let TsType::TsUnionOrIntersectionType(
+                TsUnionOrIntersectionType::TsIntersectionType(intersection),
+            ) = annotation.type_ann.as_ref() {
+                let mut signatures = Vec::new();
+                for member in &intersection.types {
+                    if let TsType::TsTypeRef(reference) = member.as_ref() {
+                        let iface_name = callable_type_lookup_key(&reference.type_name, interfaces, scope);
+                        if let Some(iface) = interfaces.get(&iface_name) {
+                            let iface_scope = owners.get(&iface_name).map(String::as_str).unwrap_or(scope);
+                            signatures.extend(iface.iter().flat_map(|decl| decl.body.body.iter()).filter_map(|member| match member {
+                                TsTypeElement::TsCallSignatureDecl(call) =>
+                                    Some((name.clone(), CallableConstSignature::Interface(call), iface_scope.to_string())),
+                                _ => None,
+                            }));
+                        }
+                    }
+                    signatures.extend(resolve_local_callable_fn_types(
+                        member, local_type_aliases, &mut HashSet::new(), scope, owners,
+                    ).into_iter().map(|(signature, owner)| (name.clone(), signature, owner)));
+                }
+                return (!signatures.is_empty()).then_some(signatures);
+            }
+            let type_ann = annotation.type_ann.as_ref();
             match type_ann {
                 TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
-                    Some(vec![(name, CallableConstSignature::Direct(function))])
+                    Some(vec![(name, CallableConstSignature::Direct(function), scope.to_string())])
                 }
                 TsType::TsTypeRef(ty_ref) => {
-                    let iface_name = match &ty_ref.type_name {
-                        TsEntityName::Ident(ident) => ident.sym.to_string(),
-                        TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-                    };
-                    if let Some(iface) = interfaces.get(iface_name.as_str()) {
+                    let iface_name = callable_type_lookup_key(&ty_ref.type_name, interfaces, scope);
+                    if let Some(iface) = interfaces.get(&iface_name) {
+                        let iface_scope = owners.get(&iface_name).map(String::as_str).unwrap_or(scope);
                         let mut signatures = iface
-                            .body
-                            .body
                             .iter()
+                            .flat_map(|decl| decl.body.body.iter())
                             .filter_map(|member| match member {
                                 TsTypeElement::TsCallSignatureDecl(call) => {
-                                    Some((name.clone(), CallableConstSignature::Interface(call)))
+                                    Some((name.clone(), CallableConstSignature::Interface(call), iface_scope.to_string()))
                                 }
                                 _ => None,
                             })
@@ -565,7 +1090,7 @@ fn extract_const_call_signature_decls<'a>(
                         // actually callable, so an ordinary property-bag
                         // interface is unaffected.
                         if !signatures.is_empty() {
-                            for member in &iface.body.body {
+                            for member in iface.iter().flat_map(|decl| decl.body.body.iter()) {
                                 if let TsTypeElement::TsPropertySignature(property) = member {
                                     let Some(annotation) = &property.type_ann else {
                                         continue;
@@ -582,6 +1107,7 @@ fn extract_const_call_signature_decls<'a>(
                                     signatures.push((
                                         key.sym.to_string(),
                                         CallableConstSignature::Direct(function),
+                                        iface_scope.to_string(),
                                     ));
                                 }
                             }
@@ -599,6 +1125,8 @@ fn extract_const_call_signature_decls<'a>(
                         annotation.type_ann.as_ref(),
                         local_type_aliases,
                         &mut HashSet::new(),
+                        scope,
+                        owners,
                     );
                     if signatures.is_empty() {
                         return None;
@@ -606,7 +1134,7 @@ fn extract_const_call_signature_decls<'a>(
                     Some(
                         signatures
                             .into_iter()
-                            .map(|signature| (name.clone(), signature))
+                            .map(|(signature, owner)| (name.clone(), signature, owner))
                             .collect::<Vec<_>>(),
                     )
                 }
@@ -728,7 +1256,7 @@ fn lower_dts_call_signature(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -748,7 +1276,7 @@ fn lower_dts_call_signature(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
+        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.id.optional))
         .count();
     let mut param_field_constraints = Vec::new();
     let params = call
@@ -764,7 +1292,7 @@ fn lower_dts_call_signature(
                 param_field_constraints.push(None);
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => {
                     param_field_constraints.push(field_constraints(
@@ -906,7 +1434,7 @@ fn lower_dts_fn_type(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -926,7 +1454,7 @@ fn lower_dts_fn_type(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
+        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.id.optional))
         .count();
     let mut param_field_constraints = Vec::new();
     let params = function
@@ -942,7 +1470,7 @@ fn lower_dts_fn_type(
                 param_field_constraints.push(None);
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => {
                     param_field_constraints.push(field_constraints(
@@ -977,8 +1505,8 @@ fn lower_dts_fn_type(
 
 /// For every top-level function declaration in `source` (see
 /// `extract_fn_decls`) whose return type is a plain or namespace-
-/// qualified type reference, `name -> <the reference's own bare
-/// identifier>` -- independent of whether that reference ever resolves
+/// qualified type reference, `name -> <the reference's qualified
+/// identity>` -- independent of whether that reference ever resolves
 /// to a `Native` `DtsType` at all (`classify_ts_type` still calls a
 /// qualified name like `dayjs.Dayjs` `Unsupported`, since qualified
 /// names aren't resolved). Lets a caller elsewhere (thaw-cli's
@@ -1012,7 +1540,11 @@ fn lower_dts_fn_type(
 /// shape -- its members are declared *inside* it, not a star-import of
 /// an already-flattened sibling module -- and isn't recognized here.
 pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    self_referential_namespace_aliases_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn self_referential_namespace_aliases_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashSet::new();
     };
     let namespace_imports: HashSet<String> = module
@@ -1024,7 +1556,8 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
             };
             Some(import.specifiers.iter().filter_map(|specifier| {
                 match specifier {
-                    swc_ecma_ast::ImportSpecifier::Namespace(namespace) => {
+                    swc_ecma_ast::ImportSpecifier::Namespace(namespace)
+                        if import.src.value.starts_with(".") => {
                         Some(namespace.local.sym.to_string())
                     }
                     _ => None,
@@ -1087,10 +1620,32 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
 /// Names explicitly exported only as TypeScript types. Registry imports of
 /// these names are erased at runtime but still need a local type binding.
 pub fn exported_type_names(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    exported_type_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+/// Interfaces and type aliases a declaration file exports directly
+/// (`export interface X`, `export type X = ...`). They have no runtime value,
+/// but an `import { X }` / `import type { X }` of one must still bind.
+pub fn exported_declared_type_names_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())
+        .map(|(module, _)| module) else { return HashSet::new() };
+    module.body.iter().filter_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            swc_ecma_ast::Decl::TsInterface(interface) => Some(interface.id.sym.to_string()),
+            swc_ecma_ast::Decl::TsTypeAlias(alias) => Some(alias.id.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }).collect()
+}
+
+pub fn exported_type_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashSet::new();
     };
-    module
+    let mut names: HashSet<String> = module
         .body
         .iter()
         .filter_map(|item| match item {
@@ -1114,37 +1669,233 @@ pub fn exported_type_names(source: &str) -> HashSet<String> {
                 }
             })
         })
-        .collect()
+        .collect();
+    for (scope, item) in scoped_module_items(&module) {
+        if scope.is_empty() { continue; }
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            if !export.type_only && !named.is_type_only { continue; }
+            let swc_ecma_ast::ModuleExportName::Ident(name) =
+                named.exported.as_ref().unwrap_or(&named.orig) else { continue };
+            names.insert(format!("{scope}.{}", name.sym));
+        }
+    }
+    names
+}
+
+/// Value exports in the flattened declaration, kept separate from
+/// `exported_type_names`: the same class can be exported as a type through
+/// one edge and as a value through another.
+pub fn exported_value_names(source: &str) -> HashSet<String> {
+    exported_value_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn exported_value_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
+        return HashSet::new();
+    };
+    let mut value_bindings = HashSet::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            if !import.type_only {
+                for specifier in &import.specifiers {
+                    match specifier {
+                        swc_ecma_ast::ImportSpecifier::Named(named) if !named.is_type_only => {
+                            value_bindings.insert(named.local.sym.to_string());
+                        }
+                        swc_ecma_ast::ImportSpecifier::Default(default) => {
+                            value_bindings.insert(default.local.sym.to_string());
+                        }
+                        swc_ecma_ast::ImportSpecifier::Namespace(namespace) => {
+                            value_bindings.insert(namespace.local.sym.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let declaration = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(declaration)) => Some(declaration),
+            _ => None,
+        };
+        match declaration {
+            Some(Decl::Class(class)) => { value_bindings.insert(class.ident.sym.to_string()); }
+            Some(Decl::Fn(function)) => { value_bindings.insert(function.ident.sym.to_string()); }
+            Some(Decl::TsEnum(enumeration)) => { value_bindings.insert(enumeration.id.sym.to_string()); }
+            Some(Decl::TsModule(namespace)) => {
+                if let swc_ecma_ast::TsModuleName::Ident(ident) = &namespace.id {
+                    value_bindings.insert(ident.sym.to_string());
+                }
+            }
+            Some(Decl::Var(variables)) => {
+                for declarator in &variables.decls {
+                    if let Pat::Ident(binding) = &declarator.name {
+                        value_bindings.insert(binding.id.sym.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut names = HashSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                let name = match &export.decl {
+                    Decl::Class(class) => Some(class.ident.sym.to_string()),
+                    Decl::Fn(function) => Some(function.ident.sym.to_string()),
+                    Decl::TsEnum(enumeration) => Some(enumeration.id.sym.to_string()),
+                    Decl::TsModule(namespace) => match &namespace.id {
+                        swc_ecma_ast::TsModuleName::Ident(ident) => Some(ident.sym.to_string()),
+                        _ => None,
+                    },
+                    Decl::Var(variables) => {
+                        for declarator in &variables.decls {
+                            if let Pat::Ident(binding) = &declarator.name {
+                                names.insert(binding.id.sym.to_string());
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(name) = name { names.insert(name); }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only && export.src.is_none() => {
+                for specifier in &export.specifiers {
+                    let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+                    if named.is_type_only { continue; }
+                    let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+                    if !value_bindings.contains(original.sym.as_ref()) { continue; }
+                    let name = named.exported.as_ref().unwrap_or(&named.orig);
+                    if let swc_ecma_ast::ModuleExportName::Ident(ident) = name {
+                        names.insert(ident.sym.to_string());
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only => {
+                for specifier in &export.specifiers {
+                    let swc_ecma_ast::ExportSpecifier::Namespace(namespace) = specifier else { continue };
+                    if let swc_ecma_ast::ModuleExportName::Ident(name) = &namespace.name {
+                        names.insert(name.sym.to_string());
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default))
+                if matches!(&default.decl, DefaultDecl::Class(_) | DefaultDecl::Fn(_)) => {
+                names.insert("default".to_string());
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(_)
+                | ModuleDecl::TsExportAssignment(_)) => {
+                names.insert("default".to_string());
+            }
+            _ => {}
+        }
+    }
+    let scoped_bindings = scoped_module_items(&module).into_iter()
+        .filter(|(scope, _)| !scope.is_empty())
+        .flat_map(|(scope, item)| namespace_value_member_names(item).into_iter()
+            .map(move |name| format!("{scope}.{name}")))
+        .collect::<HashSet<_>>();
+    for (scope, item) in scoped_module_items(&module) {
+        if scope.is_empty() { continue; }
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.type_only || export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            if named.is_type_only { continue; }
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+            if !scoped_bindings.contains(&format!("{scope}.{}", original.sym)) { continue; }
+            let swc_ecma_ast::ModuleExportName::Ident(name) =
+                named.exported.as_ref().unwrap_or(&named.orig) else { continue };
+            names.insert(format!("{scope}.{}", name.sym));
+        }
+    }
+    names
 }
 
 /// Every `declare namespace NAME { ... }` block whose members can be
 /// reached as runtime values.
 ///
-/// Two shapes are recognized, both flattening members to bare top-level
-/// names in `package.d.ts` (`parse_dts`'s own namespace recursion):
+/// Two shapes are recognized; both retain their namespace-relative paths:
 ///
 /// 1. `declare namespace NAME { export { A as B, C as D, ... }; }` --
-///    the shape thaw-registry's own flattening emits for a real nested-
-///    namespace re-export (`export * as NAME from "...";`, e.g. zod's
-///    `z.coerce`, `z.core`, `z.iso`; see
-///    `dts_source_with_reexported_functions`). Maps `B -> A` etc.
-/// 2. A hand-written `declare namespace NAME { function foo(...): T;
-///    var bar: ...; }` (real example: marked's own `declare namespace
-///    marked { var parse: typeof marked; let use: ...; }`, merged onto
-///    the exported `marked` function itself). Each value member is
-///    already flattened under its own name, so `foo -> foo`.
+///    an alias-marker shape accepted from existing declaration files.
+///    Maps `B -> A` etc.
+/// 2. A direct `declare namespace NAME { function foo(...): T;
+///    var bar: ...; class Client { ... } }`, from hand-written files or
+///    registry-flattened `export * as NAME` declarations. Each value
+///    member is declared under its own name, so `foo -> foo`.
 ///
-/// Either way the result maps `NAME -> { member name -> the real,
-/// already-flattened top-level name to call }`, so a caller (thaw-cli's
-/// `shims.rs`/`module_graph.rs`) can rewrite a member access
-/// (`z.coerce.number(...)`, `marked.parse(...)`) straight to the
-/// flattened binding it actually names.
+/// The result maps `NAME -> { relative member path -> runtime target }`.
+/// Paths can be nested (`Outer -> Inner.make`) and the CLI preserves each
+/// qualified function's own binding rather than collapsing equal bare names.
+/// Names of generated, source-owned namespaces that hold only supporting
+/// declaration shapes. The exact private `never` marker distinguishes them
+/// from ordinary ambient namespaces, which may have runtime members.
+pub fn internal_support_namespace_names_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> HashSet<String> {
+    use thaw_parser::ast::{Stmt, TsModuleName};
+    let Ok((module, _)) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()) else {
+        return HashSet::new();
+    };
+    module.body.iter().filter_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(namespace))) = item else { return None };
+        let TsModuleName::Ident(name) = &namespace.id else { return None };
+        if !name.sym.as_ref().starts_with("__thaw_support_") { return None; }
+        let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body else { return None };
+        let marked = block.body.iter().any(|member| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) = member else { return false };
+            alias.id.sym == "__thaw_private_support_marker__"
+                && matches!(alias.type_ann.as_ref(), TsType::TsKeywordType(keyword)
+                    if keyword.kind == TsKeywordTypeKind::TsNeverKeyword)
+        });
+        marked.then(|| name.sym.to_string())
+    }).collect()
+}
+
+/// Generated per-origin declaration containers are type lookup scopes, not
+/// JavaScript namespace objects. Match the reserved direct marker as well
+/// as the generated name; a user namespace with a similar prefix stays live.
+pub fn internal_owned_namespace_names_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> HashSet<String> {
+    use thaw_parser::ast::{Stmt, TsModuleName};
+    let Ok((module, _)) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()) else {
+        return HashSet::new();
+    };
+    module.body.iter().filter_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(namespace))) = item else { return None };
+        let TsModuleName::Ident(name) = &namespace.id else { return None };
+        let suffix = name.sym.as_ref().strip_prefix("__thaw_owned_")?;
+        let expected_marker = format!("__thaw_owned_origin_marker_{suffix}");
+        let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body else { return None };
+        let marked = block.body.iter().any(|member| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) = member else { return false };
+            alias.id.sym.as_ref() == expected_marker
+                && matches!(alias.type_ann.as_ref(), TsType::TsKeywordType(keyword)
+                    if keyword.kind == TsKeywordTypeKind::TsNeverKeyword)
+        });
+        marked.then(|| name.sym.to_string())
+    }).collect()
+}
+
 pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String, String>> {
+    nested_namespace_members_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn nested_namespace_members_named(source: &str, filename: &thaw_parser::common::FileName) -> HashMap<String, HashMap<String, String>> {
     use thaw_parser::ast::{ExportSpecifier, ModuleExportName, Stmt, TsModuleName};
 
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashMap::new();
     };
+    let mut internal_support = internal_support_namespace_names_named(source, filename);
+    internal_support.extend(internal_owned_namespace_names_named(source, filename));
+    let type_only_namespaces = type_only_namespace_names_named(source, filename);
     let mut namespaces: HashMap<String, HashMap<String, String>> = HashMap::new();
     for item in &module.body {
         let module_decl = match item {
@@ -1158,48 +1909,71 @@ pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String,
         let TsModuleName::Ident(name) = &module_decl.id else {
             continue;
         };
+        if internal_support.contains(name.sym.as_ref()) { continue; }
         let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
             continue;
         };
         let members = namespaces.entry(name.sym.to_string()).or_default();
-        for member in &block.body {
-            match member {
-                ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
-                    if export.type_only || export.src.is_some() {
-                        continue;
+        fn collect_members(
+            body: &[ModuleItem], scope: &str, root: &str,
+            type_only: &HashSet<String>, members: &mut HashMap<String, String>,
+        ) {
+            for member in body {
+                match member {
+                    ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(import)) if import.is_export => {
+                        let swc_ecma_ast::TsModuleRef::TsEntityName(target) = &import.module_ref else { continue };
+                        let member_name = if scope.is_empty() { import.id.sym.to_string() }
+                            else { format!("{scope}.{}", import.id.sym) };
+                        members.insert(member_name, type_reference_name(target));
                     }
-                    for specifier in &export.specifiers {
-                        let ExportSpecifier::Named(named) = specifier else {
-                            continue;
-                        };
-                        if named.is_type_only {
+                    ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(nested)))
+                    | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl { decl: Decl::TsModule(nested), .. })) => {
+                        let TsModuleName::Ident(name) = &nested.id else { continue; };
+                        let Some(TsNamespaceBody::TsModuleBlock(block)) = &nested.body else { continue; };
+                        let child = if scope.is_empty() { name.sym.to_string() }
+                            else { format!("{scope}.{}", name.sym) };
+                        if type_only.contains(&format!("{root}.{child}")) { continue; }
+                        collect_members(&block.body, &child, root, type_only, members);
+                    }
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
+                        if export.type_only || export.src.is_some() {
                             continue;
                         }
-                        let export_name = |name: &ModuleExportName| match name {
-                            ModuleExportName::Ident(name) => Some(name.sym.to_string()),
-                            ModuleExportName::Str(_) => None,
-                        };
-                        let Some(target) = export_name(&named.orig) else {
-                            continue;
-                        };
-                        let Some(member_name) = named.exported.as_ref().and_then(export_name) else {
-                            continue;
-                        };
-                        members.insert(member_name, target);
+                        for specifier in &export.specifiers {
+                            let ExportSpecifier::Named(named) = specifier else { continue; };
+                            if named.is_type_only { continue; }
+                            let export_name = |name: &ModuleExportName| match name {
+                                ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                                ModuleExportName::Str(_) => None,
+                            };
+                            let Some(target) = export_name(&named.orig) else { continue; };
+                            let member_name = named.exported.as_ref().and_then(export_name)
+                                .unwrap_or_else(|| target.clone());
+                            let member_name = if scope.is_empty() { member_name }
+                                else { format!("{scope}.{member_name}") };
+                            members.insert(member_name, target);
+                        }
                     }
-                }
-                // A hand-written namespace's own value declarations
-                // (`function`, `var`/`let`/`const`, `class`) -- flattened
-                // to bare names by `parse_dts`, so the member is its own
-                // target. Types/interfaces have no runtime binding and
-                // are deliberately skipped.
-                other => {
-                    for member_name in namespace_value_member_names(other) {
-                        members.entry(member_name.clone()).or_insert(member_name);
+                    // Types/interfaces have no runtime binding.
+                    other => {
+                        for member_name in namespace_value_member_names(other) {
+                            let path = if scope.is_empty() { member_name.clone() }
+                                else { format!("{scope}.{member_name}") };
+                            members.entry(path.clone()).or_insert(path);
+                        }
                     }
                 }
             }
         }
+        collect_members(&block.body, "", name.sym.as_ref(), &type_only_namespaces, members);
+    }
+    for (original, public) in namespace_value_aliases(&module) {
+        if let Some(members) = namespaces.get(&original).cloned() {
+            namespaces.entry(public).or_default().extend(members);
+        }
+    }
+    for original in nonpublic_namespace_sources_named(source, filename) {
+        namespaces.remove(&original);
     }
     namespaces
 }
@@ -1257,9 +2031,17 @@ fn resolve_bare_type_alias_chain(
 }
 
 pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    function_return_named_types_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn function_return_named_types_named(source: &str, filename: &thaw_parser::common::FileName) -> HashMap<String, String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashMap::new();
     };
+    let type_only_namespaces = type_only_namespace_names_named(source, filename);
+    let export_assignment = export_assignment_namespace(&module);
+    let class_names = scoped_class_names(&module).into_iter()
+        .map(|(qualified, _)| qualified).collect::<HashSet<_>>();
     // `type Alias<T, ...> = Target<...>;` -> `Alias -> Target`, bare
     // names only (see `resolve_bare_type_alias_chain`'s own doc comment).
     let type_aliases: HashMap<String, String> = module
@@ -1270,32 +2052,43 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
             let TsType::TsTypeRef(ty_ref) = alias.type_ann.as_ref() else {
                 return None;
             };
-            let target = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            let target = type_reference_name(&ty_ref.type_name);
             Some((alias.id.sym.to_string(), target))
         })
         .collect();
-    module
-        .body
-        .iter()
-        .flat_map(extract_fn_decls)
-        .filter_map(|(name, function)| {
+    let mut returns = scoped_fn_decls(&module)
+        .into_iter()
+        .filter(|(full_name, _, _)| !namespace_member_is_type_only(full_name, &type_only_namespaces))
+        .filter_map(|(full_name, _, function)| {
             let ann = function.return_type.as_ref()?;
             let TsType::TsTypeRef(ty_ref) = ann.type_ann.as_ref() else {
                 return None;
             };
-            let type_name = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            let type_name = type_reference_name(&ty_ref.type_name);
             let type_name =
                 resolve_bare_type_alias_chain(&type_name, &type_aliases, &mut HashSet::new());
-            Some((
-                name.rsplit('.').next().unwrap_or(name).to_string(),
-                type_name,
-            ))
+            let type_name = lexical_type_key(&type_name, declaration_scope(&full_name),
+                |candidate| class_names.contains(candidate)).unwrap_or(type_name);
+            let name = export_assignment
+                .and_then(|namespace| full_name.strip_prefix(format!("{namespace}.").as_str()))
+                .map(str::to_string)
+                .unwrap_or(full_name);
+            Some((name, type_name))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    for (original, public) in namespace_value_aliases(&module) {
+        let prefix = format!("{original}.");
+        let aliases = returns.iter().filter_map(|(name, class)| {
+            name.strip_prefix(&prefix).map(|suffix| {
+                let class = class.strip_prefix(&prefix)
+                    .map(|class_suffix| format!("{public}.{class_suffix}"))
+                    .unwrap_or_else(|| class.clone());
+                (format!("{public}.{suffix}"), class)
+            })
+        }).collect::<Vec<_>>();
+        returns.extend(aliases);
+    }
+    let hidden = nonpublic_namespace_sources_named(source, filename);
+    returns.retain(|name, _| !namespace_member_is_type_only(name, &hidden));
+    returns
 }

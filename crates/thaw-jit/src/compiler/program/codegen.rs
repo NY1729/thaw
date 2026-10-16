@@ -20,7 +20,7 @@ impl NumericProgram {
                     depth += 1;
                 }
                 NumericValue::DynamicArgument(index) => {
-                    if depth == 8 {
+                    if depth >= 7 {
                         return None;
                     }
                     code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x47 | (depth << 3), index * 8]);
@@ -1550,6 +1550,9 @@ impl NumericProgram {
                     emit_move(&mut code, destination, 0);
                     emit_restore(&mut code, destination);
                     depth -= 1;
+                    if *kind >= 3 && tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::AggregateLocalArrayInsert(kind, index, unshift) => {
                     if depth == 0 || *index >= depth - 1 {
@@ -1899,6 +1902,7 @@ impl NumericProgram {
                     if let Some(fallthrough) = fallthrough {
                         patch_near_jump(&mut code, fallthrough)?;
                     }
+                    switch.has_case = true;
                     switch.has_default = true;
                     switch.default_body = Some(body);
                 }
@@ -2224,7 +2228,11 @@ impl NumericProgram {
                 NumericValue::NumberDictionaryGet
                 | NumericValue::BoolDictionaryGet
                 | NumericValue::StringDictionaryGet
+                | NumericValue::OptionalNumberDictionaryGet
+                | NumericValue::OptionalBoolDictionaryGet
+                | NumericValue::OptionalStringDictionaryGet
                 | NumericValue::DictionaryDelete
+                | NumericValue::DictionaryStrictDelete
                 | NumericValue::DictionaryHasOwn
                 | NumericValue::DictionaryIn
                 | NumericValue::DictionaryAssign => {
@@ -2235,7 +2243,11 @@ impl NumericProgram {
                         NumericValue::NumberDictionaryGet => number_dictionary_get,
                         NumericValue::BoolDictionaryGet => bool_dictionary_get,
                         NumericValue::StringDictionaryGet => string_dictionary_get,
+                        NumericValue::OptionalNumberDictionaryGet => optional_number_dictionary_get,
+                        NumericValue::OptionalBoolDictionaryGet => optional_bool_dictionary_get,
+                        NumericValue::OptionalStringDictionaryGet => optional_string_dictionary_get,
                         NumericValue::DictionaryDelete => dictionary_delete,
+                        NumericValue::DictionaryStrictDelete => dictionary_strict_delete,
                         NumericValue::DictionaryHasOwn => dictionary_has_own,
                         NumericValue::DictionaryIn => dictionary_in,
                         NumericValue::DictionaryAssign => dictionary_assign,
@@ -2243,6 +2255,9 @@ impl NumericProgram {
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                    if tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::SetUnion
                 | NumericValue::SetIntersection
@@ -2298,6 +2313,9 @@ impl NumericProgram {
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                    if tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::NumberDictionarySet
                 | NumericValue::StringDictionarySet
@@ -2313,6 +2331,9 @@ impl NumericProgram {
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
                     depth -= 2;
+                    if tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::EmptyDictionary => {
                     if depth == 8 {
@@ -2359,6 +2380,9 @@ impl NumericProgram {
                     code.extend_from_slice(&[0xff, 0xd0]);
                     emit_restore(&mut code, depth);
                     depth -= 2;
+                    if tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::DictionaryStaticAppend(kind, key) => {
                     if depth < 2 {
@@ -2382,6 +2406,9 @@ impl NumericProgram {
                     code.extend_from_slice(&[0xff, 0xd0]);
                     emit_restore(&mut code, depth);
                     depth -= 1;
+                    if tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::NumberDictionaryPostSet => {
                     if depth < 4 {
@@ -2400,6 +2427,9 @@ impl NumericProgram {
                     emit_restore(&mut code, depth);
                     emit_move(&mut code, left, left + 2);
                     depth -= 3;
+                    if tries.is_empty() {
+                        emit_return_if_call_error(&mut code, depth)?;
+                    }
                 }
                 NumericValue::NumberArrayJoin
                 | NumericValue::BoolArrayJoin
@@ -2471,6 +2501,11 @@ impl NumericProgram {
                     if depth == 0 {
                         return None;
                     }
+                    emit_unary_call(
+                        &mut code,
+                        string_to_well_formed as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::UnaryMath(operation) => {
                     if depth == 0 {
