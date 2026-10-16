@@ -2830,8 +2830,37 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_js_note_view_copy",
+            "thaw_json_link_native_object_by_serial",
+            self.context.void_type().fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_note_view_copy",
             self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_has_native_link",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_linked_array",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_origin_serial",
+            self.context.i64_type().fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_link_native_by_serial",
+            self.context.void_type().fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), self.context.i8_type().into(),
+            ], false),
             Some(Linkage::External),
         );
         self.module.add_function(
