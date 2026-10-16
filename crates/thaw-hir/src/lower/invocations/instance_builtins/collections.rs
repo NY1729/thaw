@@ -45,6 +45,15 @@ impl<'a> FnLowerer<'a> {
                 let resolved = self.resolve_binding("this");
                 self.scope.get(&resolved).cloned()
             }
+            Expr::Paren(paren) => self.peek_type_without_lowering(&paren.expr),
+            Expr::TsNonNull(assertion) => self.peek_type_without_lowering(&assertion.expr),
+            // `(x as any).list.push(..)`: an `any` assertion makes the operand a dynamic value.
+            Expr::TsAs(assertion) if matches!(assertion.type_ann.as_ref(),
+                TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsAnyKeyword) =>
+                Some(HirType::Json),
+            Expr::TsTypeAssertion(assertion) if matches!(assertion.type_ann.as_ref(),
+                TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsAnyKeyword) =>
+                Some(HirType::Json),
             Expr::Member(member) => {
                 if let MemberProp::Computed(_) = &member.prop {
                     return match self.peek_type_without_lowering(&member.obj)? {

@@ -1477,10 +1477,21 @@ impl<'a> FnLowerer<'a> {
                                 self.coerce_to_declared(&HirType::JsValue, array)?
                             }
                             nested => {
-                                self.any_object_literal = any_literal && matches!(nested, Expr::Object(_));
-                                let lowered = self.lower_object_lit_field_value(value, expected);
-                                self.any_object_literal = false;
-                                lowered?
+                                // `[..] as any[]` in an `any` literal is the same dynamic array.
+                                let asserted = match split_type_assertion(nested) {
+                                    Some((inner, ty)) if any_literal && matches!(peel_parens(inner), Expr::Array(_)) =>
+                                        self.lower_any_asserted_literal(inner, ty, true)?,
+                                    _ => None,
+                                };
+                                match asserted {
+                                    Some(array) => self.coerce_to_declared(&HirType::JsValue, array)?,
+                                    _ => {
+                                        self.any_object_literal = any_literal && matches!(nested, Expr::Object(_));
+                                        let lowered = self.lower_object_lit_field_value(value, expected);
+                                        self.any_object_literal = false;
+                                        lowered?
+                                    }
+                                }
                             }
                         };
                         vec![(name, lowered)]
