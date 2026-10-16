@@ -458,7 +458,7 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let available = [HirType::Json, HirType::Json, HirType::Json];
-                    let callback = self.lower_promise_callback(
+                    let callback = self.lower_native_iteration_callback(
                         &argument.expr,
                         &available[..arity],
                         Some(&HirType::Void),
@@ -626,7 +626,7 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let available = [value_type.clone(), key_type.clone(), receiver_type.clone()];
-                    let callback = self.lower_promise_callback(
+                    let callback = self.lower_native_iteration_callback(
                         &argument.expr,
                         &available[..arity],
                         Some(&HirType::Void),
@@ -1307,6 +1307,13 @@ impl<'a> FnLowerer<'a> {
                         _ => return Err(format!("`.{}()` requires an array or array union, got {receiver_type:?}", property.sym)),
                     };
                     let label = if property.sym == *"push" { "push" } else { "unshift" };
+                    if property.sym == *"push" && matches!(receiver_type, HirType::Array(_)) {
+                        if let Some(looped) = self.lower_push_with_array_spread(
+                            member, property, call, &receiver, &receiver_type,
+                        )? {
+                            return Ok(looped);
+                        }
+                    }
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_array_values(&call.args, &format!("Array.{label}"))?;
                     // `coerce_to_declared`, not the stricter `expect_type`
@@ -2177,5 +2184,133 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
         unreachable!("instance builtin category was checked before lowering")
+    }
+}
+
+impl<'a> FnLowerer<'a> {
+    /// `arr.push(a, ...src, b)` where a spread source is an array (or an `any` array) rather
+    /// than a literal or tuple: the receiver and each argument are evaluated once, in order,
+    /// and every spread element is pushed in a loop over the source as it was before the call.
+    /// `None` when no spread needs that (the fixed-arity path handles literals and tuples).
+    fn lower_push_with_array_spread(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+        receiver: &HirExpr,
+        receiver_type: &HirType,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::Array(element) = receiver_type else { return Ok(None) };
+        if !call.args.iter().any(|argument| {
+            argument.spread.is_some() && !matches!(argument.expr.as_ref(), Expr::Array(_))
+        }) {
+            return Ok(None);
+        }
+        // Lower the arguments once, so a spread source's type is known; fall back to the
+        // fixed-arity path unless every spread source is an array or an `any` value.
+        let mut lowered = Vec::with_capacity(call.args.len());
+        for argument in &call.args {
+            let expected = if argument.spread.is_some() { None } else { Some(element.as_ref()) };
+            let value = self.lower_expr_with_expected_type(&argument.expr, expected)?;
+            lowered.push((argument.spread.is_some(), value));
+        }
+        for (spread, value) in &lowered {
+            if *spread
+                && !matches!(
+                    self.infer_expr_type(value)?,
+                    HirType::Array(_) | HirType::Json | HirType::Tuple(_)
+                )
+                && !matches!(value, HirExpr::ArrayLit(_))
+            {
+                return Ok(None);
+            }
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let receiver_name = format!("__thaw_push_spread_receiver_{id}");
+        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+        let ident = |name: &str| {
+            Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), member.span)))
+        };
+        let push_one = |this: &mut Self, element_name: &str| -> Result<HirExpr, String> {
+            let mut push_member = member.clone();
+            push_member.obj = ident(&receiver_name);
+            let mut push_call = call.clone();
+            push_call.callee = Callee::Expr(Box::new(Expr::Member(push_member.clone())));
+            push_call.args = vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: ident(element_name) }];
+            this.lower_native_instance_builtin_unchecked(&push_member, property, &push_call)
+        };
+        let mut statements = vec![HirStmt::Let(receiver_name.clone(), receiver_type.clone(), receiver.clone())];
+        for (position, (spread, value)) in lowered.into_iter().enumerate() {
+            let mut value_type = self.infer_expr_type(&value)?;
+            let mut value = value;
+            if !spread {
+                let name = format!("__thaw_push_spread_value_{id}_{position}");
+                self.scope.insert(name.clone(), value_type.clone());
+                statements.push(HirStmt::Let(name.clone(), value_type, value));
+                statements.push(HirStmt::Expr(push_one(self, &name)?));
+                continue;
+            }
+            if value_type == HirType::Json {
+                let json_name = format!("__thaw_push_spread_json_{id}_{position}");
+                self.scope.insert(json_name.clone(), HirType::Json);
+                statements.push(HirStmt::Let(json_name.clone(), HirType::Json, value));
+                value = self.coerce_to_declared(
+                    &HirType::Array(Box::new(HirType::Json)),
+                    HirExpr::Var(json_name),
+                )?;
+                value_type = HirType::Array(Box::new(HirType::Json));
+            } else if let HirType::Tuple(elements) = &value_type {
+                value = self.lower_tuple_as_json_array(value, elements.clone())?;
+                value_type = HirType::Array(Box::new(HirType::Json));
+            }
+            let HirType::Array(source_element) = &value_type else { return Ok(None) };
+            let source_element = source_element.as_ref().clone();
+            let source_name = format!("__thaw_push_spread_source_{id}_{position}");
+            let length_name = format!("__thaw_push_spread_length_{id}_{position}");
+            let index_name = format!("__thaw_push_spread_index_{id}_{position}");
+            let element_name = format!("__thaw_push_spread_element_{id}_{position}");
+            self.scope.insert(source_name.clone(), value_type.clone());
+            self.scope.insert(length_name.clone(), HirType::F64);
+            self.scope.insert(index_name.clone(), HirType::F64);
+            self.scope.insert(element_name.clone(), source_element.clone());
+            statements.push(HirStmt::Let(source_name.clone(), value_type.clone(), value));
+            statements.push(HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(HirExpr::Var(source_name.clone()))),
+            ));
+            statements.push(HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))));
+            let push = push_one(self, &element_name)?;
+            statements.push(HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(HirExpr::Var(length_name)),
+                ),
+                vec![
+                    HirStmt::Let(
+                        element_name,
+                        source_element.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(source_name)),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            source_element,
+                        ),
+                    ),
+                    HirStmt::Expr(push),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::ArrayLen(Box::new(HirExpr::Var(receiver_name))))));
+        Ok(Some(HirExpr::Block(statements)))
     }
 }

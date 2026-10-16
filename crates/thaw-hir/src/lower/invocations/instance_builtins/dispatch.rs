@@ -210,7 +210,136 @@ impl<'a> FnLowerer<'a> {
             )?;
             return self.wrap_call_argument_bindings(result, &bindings);
         }
-        self.lower_native_instance_builtin_unchecked(member, property, call)
+        match self.lower_native_instance_builtin_unchecked(member, property, call) {
+            // A string/number/... method on an `any` receiver that the typed lowering cannot
+            // take is a live dynamic call on the value.
+            Err(error) if self.json_receiver_candidate(&member.obj) => self
+                .lower_json_dynamic_method_call(member, property.sym.as_ref(), call)
+                .map_err(|_| error),
+            result => result,
+        }
+    }
+
+    /// `receiver.name(..args)` on an `any` value as a live dynamic call.
+    fn lower_json_dynamic_method_call(
+        &mut self,
+        member: &MemberExpr,
+        name: &str,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.lower_required_member_receiver(&member.obj, name)?;
+        if self.infer_expr_type(&receiver)? != HirType::Json {
+            return Err(format!("`.{name}()` receiver is not an `any` value"));
+        }
+        let json_name = format!("__thaw_json_dynamic_json_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(json_name.clone(), HirType::Json);
+        let result = self.lower_dynamic_call_on_json_binding(&json_name, name, &call.args, member.span)?;
+        self.wrap_call_argument_bindings(result, &[(json_name, HirType::Json, receiver)])
+    }
+
+    /// The dynamic call of `name` on the `Json` binding `json_name`. A live host wrapper
+    /// yields its handle; a plain decoded value (a string, number, object copy) is lifted
+    /// into a fresh host value so the method runs on it. The result is `Json`.
+    fn lower_dynamic_call_on_json_binding(
+        &mut self,
+        json_name: &str,
+        name: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        span: swc_common::Span,
+    ) -> Result<HirExpr, String> {
+        let handle_name = format!("__thaw_json_dynamic_handle_{}", self.next_binding);
+        let live_name = format!("__thaw_json_dynamic_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(handle_name.clone(), HirType::I64);
+        self.scope.insert(live_name.clone(), HirType::JsValue);
+        let json = HirExpr::Var(json_name.to_string());
+        let borrowed_handle = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())),
+            vec![json.clone()],
+        );
+        let live = HirExpr::Conditional(
+            Box::new(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(handle_name.clone())),
+                Box::new(HirExpr::Lit(HirLit::I64(0))),
+            )),
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("retainDynamicJson".into())), vec![json.clone()])),
+            Box::new(HirExpr::JsonAsNative(Box::new(json), HirType::JsValue)),
+            HirType::JsValue,
+        );
+        let result = self.lower_dynamic_value_method_call(
+            &Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(live_name.clone().into(), span)),
+            name,
+            args,
+            None,
+        )?;
+        let result = if self.infer_expr_type(&result)? == HirType::Void {
+            let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+            HirExpr::EvalThen(Box::new(result), Box::new(undefined))
+        } else {
+            self.coerce_to_declared(&HirType::Json, result)?
+        };
+        self.wrap_call_argument_bindings(
+            result,
+            &[(handle_name, HirType::I64, borrowed_handle), (live_name, HirType::JsValue, live)],
+        )
+    }
+
+    /// Whether `expr` is probably an `any` (Json) value, decided without lowering it: a
+    /// binding or property chain typed `any`, a call to a function returning `any` (or its
+    /// `await`), a dynamic method call on an `any` receiver, `JSON.parse(..)`, and the
+    /// `?.`/`?:`/`||`/`??`/`&&` forms of those. A wrong guess is harmless: the caller lowers
+    /// the receiver once and re-checks its real type.
+    fn json_receiver_candidate(&self, expr: &Expr) -> bool {
+        if let Some(ty) = self.peek_type_without_lowering(expr) {
+            return ty == HirType::Json;
+        }
+        let call_returns_json = |call: &CallExpr, awaited: bool| -> bool {
+            let Callee::Expr(callee) = &call.callee else { return false };
+            match callee.as_ref() {
+                Expr::Ident(ident) => self
+                    .signatures
+                    .get(&self.resolve_binding(ident.sym.as_ref()))
+                    .is_some_and(|sig| match (&sig.ret, awaited) {
+                        (HirType::Json, _) => !sig.is_async || awaited,
+                        (HirType::Promise(inner), true) => **inner == HirType::Json,
+                        _ => false,
+                    }),
+                Expr::Member(callee) if !awaited => match (callee.obj.as_ref(), &callee.prop) {
+                    (Expr::Ident(object), MemberProp::Ident(property)) if object.sym == *"JSON" => {
+                        property.sym == *"parse"
+                    }
+                    _ => self.json_receiver_candidate(&callee.obj),
+                },
+                _ => false,
+            }
+        };
+        match expr {
+            // `this` outside a lowered method body (an unbound/extracted context) has no
+            // type to peek; its fields are verified once the receiver is lowered.
+            Expr::This(_) => true,
+            Expr::Paren(paren) => self.json_receiver_candidate(&paren.expr),
+            Expr::TsNonNull(assertion) => self.json_receiver_candidate(&assertion.expr),
+            Expr::Member(member) => self.json_receiver_candidate(&member.obj),
+            Expr::Call(call) => call_returns_json(call, false),
+            Expr::Await(awaited) => match awaited.arg.as_ref() {
+                Expr::Call(call) => call_returns_json(call, true),
+                other => self.json_receiver_candidate(other),
+            },
+            Expr::OptChain(chain) => match chain.base.as_ref() {
+                swc_ecma_ast::OptChainBase::Member(member) => self.json_receiver_candidate(&member.obj),
+                swc_ecma_ast::OptChainBase::Call(_) => false,
+            },
+            Expr::Cond(cond) => self.json_receiver_candidate(&cond.cons) && self.json_receiver_candidate(&cond.alt),
+            Expr::Bin(bin) if matches!(
+                bin.op,
+                swc_ecma_ast::BinaryOp::LogicalOr
+                    | swc_ecma_ast::BinaryOp::LogicalAnd
+                    | swc_ecma_ast::BinaryOp::NullishCoalescing
+            ) => self.json_receiver_candidate(&bin.left) && self.json_receiver_candidate(&bin.right),
+            _ => false,
+        }
     }
 
     /// An `Array.prototype` method on an `any` (Json) receiver: when the value
@@ -239,12 +368,13 @@ impl<'a> FnLowerer<'a> {
                     | "findLast" | "findLastIndex" | "flat" | "flatMap" | "toSorted" | "toReversed"
                     | "toSpliced" | "with" | "forEach" | "slice" | "concat" | "at"
             ))
-            || !matches!(member.obj.as_ref(), Expr::Ident(_) | Expr::Member(_))
-            || self.peek_type_without_lowering(&member.obj) != Some(HirType::Json)
+            || !self.json_receiver_candidate(&member.obj)
         {
             return Ok(None);
         }
-        let receiver = self.lower_required_member_receiver(&member.obj, name)?;
+        let Ok(receiver) = self.lower_required_member_receiver(&member.obj, name) else {
+            return Ok(None);
+        };
         if self.infer_expr_type(&receiver)? != HirType::Json {
             return Ok(None);
         }
@@ -322,12 +452,7 @@ impl<'a> FnLowerer<'a> {
         };
         let non_array = match non_array {
             Some(expr) => expr,
-            None => self.lower_dynamic_value_method_call(
-                &Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(receiver_name.clone().into(), member.span)),
-                name,
-                &call.args,
-                None,
-            )?,
+            None => self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?,
         };
         let non_array = if self.infer_expr_type(&non_array)? == HirType::Void {
             HirExpr::EvalThen(Box::new(non_array), Box::new(undefined))

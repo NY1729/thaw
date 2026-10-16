@@ -1,3 +1,109 @@
+impl<'a> FnLowerer<'a> {
+    /// `n?.a.b(..)` where `n` is an `any` value: a nullish `n` ends the whole chain with
+    /// `undefined`. The innermost `?.` root is evaluated once into a temporary, the chain is
+    /// rewritten over the temporary, and the result is guarded. `None` when the chain has
+    /// nothing after its `?.` (the plain optional read handles that), the root is not a
+    /// cheap pure expression, or it is not an `any` value.
+    fn lower_json_optional_chain(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
+        fn pure_root(expr: &Expr) -> bool {
+            match expr {
+                Expr::Ident(_) | Expr::This(_) => true,
+                Expr::Member(member) => pure_root(&member.obj) && matches!(member.prop, MemberProp::Ident(_)),
+                Expr::Paren(paren) => pure_root(&paren.expr),
+                _ => false,
+            }
+        }
+        // Rewrite the spine, replacing the innermost `?.` node `root?.p` by `tmp.p`.
+        fn rewrite(expr: &Expr, tmp: &Expr, root: &mut Option<Expr>) -> Option<Expr> {
+            Some(match expr {
+                Expr::OptChain(chain) => match chain.base.as_ref() {
+                    swc_ecma_ast::OptChainBase::Member(member) => {
+                        let mut member = member.clone();
+                        if let Some(inner) = rewrite(&member.obj, tmp, root) {
+                            member.obj = Box::new(inner);
+                        } else if chain.optional && root.is_none() {
+                            *root = Some(*member.obj.clone());
+                            member.obj = Box::new(tmp.clone());
+                        }
+                        Expr::Member(member)
+                    }
+                    swc_ecma_ast::OptChainBase::Call(call) => {
+                        if chain.optional {
+                            return None;
+                        }
+                        let callee = rewrite(&call.callee, tmp, root)?;
+                        Expr::Call(CallExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: Callee::Expr(Box::new(callee)),
+                            args: call.args.clone(),
+                            type_args: call.type_args.clone(),
+                        })
+                    }
+                },
+                Expr::Member(member) => {
+                    let inner = rewrite(&member.obj, tmp, root)?;
+                    let mut member = member.clone();
+                    member.obj = Box::new(inner);
+                    Expr::Member(member)
+                }
+                Expr::Call(call) => {
+                    let Callee::Expr(callee) = &call.callee else { return None };
+                    let callee = rewrite(callee, tmp, root)?;
+                    let mut call = call.clone();
+                    call.callee = Callee::Expr(Box::new(callee));
+                    Expr::Call(call)
+                }
+                Expr::Paren(paren) => {
+                    let inner = rewrite(&paren.expr, tmp, root)?;
+                    Expr::Paren(swc_ecma_ast::ParenExpr { span: paren.span, expr: Box::new(inner) })
+                }
+                Expr::TsNonNull(assertion) => {
+                    let inner = rewrite(&assertion.expr, tmp, root)?;
+                    Expr::TsNonNull(swc_ecma_ast::TsNonNullExpr { span: assertion.span, expr: Box::new(inner) })
+                }
+                _ => return None,
+            })
+        }
+        let Expr::OptChain(top) = expr else { return Ok(None) };
+        // The top node itself carrying the only `?.` (`n?.x`) is the plain optional read.
+        if top.optional {
+            return Ok(None);
+        }
+        let name = format!("__thaw_optional_chain_root_{}", self.next_binding);
+        let tmp = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.clone().into(), swc_common::DUMMY_SP));
+        let mut root = None;
+        let Some(rewritten) = rewrite(expr, &tmp, &mut root) else { return Ok(None) };
+        let Some(root) = root else { return Ok(None) };
+        if !pure_root(&root) || !self.json_receiver_candidate(&root) {
+            return Ok(None);
+        }
+        let Ok(root_value) = self.lower_expr(&root) else { return Ok(None) };
+        if self.infer_expr_type(&root_value)? != HirType::Json {
+            return Ok(None);
+        }
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Json);
+        let result = self.lower_expr(&rewritten)?;
+        let result = if self.infer_expr_type(&result)? == HirType::Void {
+            let undefined = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+            HirExpr::EvalThen(Box::new(result), Box::new(undefined))
+        } else {
+            self.coerce_to_declared(&HirType::Json, result)?
+        };
+        let guarded = HirExpr::Conditional(
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![HirExpr::Var(name.clone())],
+            )),
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+            Box::new(result),
+            HirType::Json,
+        );
+        Ok(Some(self.wrap_call_argument_bindings(guarded, &[(name, HirType::Json, root_value)])?))
+    }
+}
+
 struct GenericArrowThisOperation {
     receiver: (HirExpr, HirType),
     bind: bool,
