@@ -742,6 +742,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let present = self.builder.build_int_compare(IntPredicate::NE, pointer,
             self.context.i64_type().const_zero(), "native_view_target_present")
             .map_err(|error| error.to_string())?;
+        // No native owner: the caller stores a copy of the JS-owned value (see README
+        // Limitations); `THAW_WARN_COPY=1` makes the runtime say so once.
+        let function = self.current_function();
+        let note = self.context.append_basic_block(function, "native_view_copy_note");
+        let after = self.context.append_basic_block(function, "native_view_copy_noted");
+        self.builder.build_conditional_branch(present, after, note).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(note);
+        self.builder.build_call(self.module.get_function("thaw_js_note_view_copy").unwrap(), &[], "note_view_copy")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(after).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(after);
         let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
         let owner = self.builder.build_int_to_ptr(pointer, ptr_type, "native_view_target_owner")
             .map_err(|error| error.to_string())?;

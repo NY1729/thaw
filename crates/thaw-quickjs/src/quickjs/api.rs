@@ -1948,6 +1948,18 @@ pub extern "C" fn thaw_js_native_object_pointer(
     }
 }
 
+/// One-time note (only when `THAW_WARN_COPY=1`) that a JS-owned object written through an `any`
+/// view into a typed native slot was stored as a copy: later changes on either side are not shared.
+#[no_mangle]
+pub extern "C" fn thaw_js_note_view_copy() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if std::env::var_os("THAW_WARN_COPY").is_some_and(|value| value == "1") {
+        ONCE.call_once(|| eprintln!(
+            "thaw: a JavaScript-owned object was copied into a typed native slot through an `any` view; \
+             the two sides no longer share it (declare the array as any[] to keep one object)"));
+    }
+}
+
 /// Calls a live, retained function *value* (as opposed to a call by global
 /// name, `invoke_impl`, or by method name, `invoke_method`) -- used
 /// whenever the call's own *result* is itself a `JsValue`/handle rather

@@ -746,7 +746,10 @@ impl<'a> FnLowerer<'a> {
         }
         if *declared == HirType::Json {
             let actual = self.infer_expr_type(&value)?;
-            if actual == HirType::Json {
+            // A `Dictionary` is physically the same boxed Json object (element writes already
+            // encode to Json), so crossing into `any` is an alias: wrapping it in a temporary
+            // object would hand its box to an owning setter and free it with the temporary.
+            if actual == HirType::Json || matches!(actual, HirType::Dictionary(_)) {
                 return Ok(value);
             }
             if actual == crate::caught_exception_carrier_type() {
