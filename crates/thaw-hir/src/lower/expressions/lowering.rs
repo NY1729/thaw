@@ -5079,6 +5079,12 @@ impl<'a> FnLowerer<'a> {
                 return self.lower_dynamic_accessor_object_lit(object, true);
             }
         }
+        if let (Expr::Object(_), Some(HirType::Json)) = (expr, expected) {
+            self.any_object_literal = true;
+            let lowered = self.lower_expr(expr);
+            self.any_object_literal = false;
+            return lowered;
+        }
         if let (Expr::Object(object), Some(expected)) = (expr, expected) {
             let fields = match expected {
                 HirType::Object(fields) => Some(fields.as_slice()),

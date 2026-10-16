@@ -1305,6 +1305,7 @@ impl<'a> FnLowerer<'a> {
         obj_lit: &SwcObjectLit,
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
+        let any_literal = std::mem::take(&mut self.any_object_literal);
         let has_callable = obj_lit.props.iter().any(|property| {
             matches!(property, PropOrSpread::Prop(property)
                 if matches!(property.as_ref(), Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_)))
@@ -1470,7 +1471,19 @@ impl<'a> FnLowerer<'a> {
                                 .iter()
                                 .find_map(|(field, ty)| (field == &name).then_some(ty))
                         });
-                        vec![(name, self.lower_object_lit_field_value(value, expected)?)]
+                        let lowered = match value.as_ref() {
+                            Expr::Array(_) if any_literal => {
+                                let array = self.lower_object_lit_field_value(value, expected)?;
+                                self.coerce_to_declared(&HirType::JsValue, array)?
+                            }
+                            nested => {
+                                self.any_object_literal = any_literal && matches!(nested, Expr::Object(_));
+                                let lowered = self.lower_object_lit_field_value(value, expected);
+                                self.any_object_literal = false;
+                                lowered?
+                            }
+                        };
+                        vec![(name, lowered)]
                     }
                     Prop::Shorthand(ident) => vec![(
                         ident.sym.to_string(),
