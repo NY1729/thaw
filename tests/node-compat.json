@@ -1371,6 +1371,16 @@
       "name": "method result of an any object literal aliases its owner and chains",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const o: any = { arr: [1, 2], get() { return this.arr; } };\n  const r = o.get();\n  console.log(typeof r, Array.isArray(r), r.length);\n  r.push(4);\n  console.log(o.arr.length, r.length, r === o.arr);\n  const q = o.get().length;\n  console.log(q);\n  o.get().push(9);\n  console.log(o.arr.length);\n}\n"
+    },
+    {
+      "name": "bare call of a this-using function expression reports the first property read or set",
+      "expect": "matched",
+      "source": "const lam = function (this: { n: number }, k: number): number { return k + this.n; };\nconst setter = function (this: { n: number }): void { this.n = 3; };\nasync function main(): Promise<void> {\n  try { console.log(lam(1)); } catch (e: any) { console.log(\"E1 \" + e.message); }\n  try { setter(); } catch (e: any) { console.log(\"E2 \" + e.message); }\n  console.log(lam.call({ n: 5 }, 1));\n  try { console.log(lam.call(null as any, 1)); } catch (e: any) { console.log(\"E3 \" + e.message); }\n}\n"
+    },
+    {
+      "name": "function receiver error names the assignment RHS property",
+      "expect": "matched",
+      "source": "function main(): void { const assign = function(this: {a:number,b:number}):void { this.a = this.b; }; try { assign(); } catch(e:any) { console.log(e.message); } try { assign.call(null as any); } catch(e:any) { console.log(e.message); } }"
     }
   ]
 }

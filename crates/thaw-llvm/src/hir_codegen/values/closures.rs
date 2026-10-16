@@ -1,3 +1,38 @@
+// shortcut: complex bodies keep generic receiver errors; use runtime property checks for full parity.
+fn simple_this_receiver_access<'a>(body: &'a HirExpr, params: &[HirParam]) -> Option<(&'a str, bool)> {
+    fn property(expr: &HirExpr) -> Option<&str> {
+        match expr {
+            HirExpr::PropAccess(object, HirType::Object(_), field)
+                if matches!(object.as_ref(), HirExpr::Var(name) if name == "__thaw_this")
+                    && !is_hidden_accessor_field(field) => Some(field),
+            _ => None,
+        }
+    }
+    let simple = |expr: &HirExpr| matches!(expr, HirExpr::Lit(_))
+        || matches!(expr, HirExpr::Var(name) if name != "__thaw_this" && params.iter().any(|param| &param.name == name));
+    let expression = match body {
+        HirExpr::Block(statements) => match statements.as_slice() {
+            [HirStmt::Return(Some(expr))] | [HirStmt::Expr(expr)]
+                | [HirStmt::Expr(expr), HirStmt::Return(None)] => expr,
+            _ => return None,
+        },
+        expression => expression,
+    };
+    match expression {
+        HirExpr::BinOp(_, left, right)
+            if (simple(left) || property(left).is_some()) && (simple(right) || property(right).is_some()) =>
+                property(left).or_else(|| property(right)).map(|field| (field, false)),
+        HirExpr::PropAssign(object, HirType::Object(_), field, value)
+            if matches!(object.as_ref(), HirExpr::Var(name) if name == "__thaw_this")
+                && !is_hidden_accessor_field(field) => {
+            if let Some(read) = property(value) { Some((read, false)) }
+            else if simple(value) { Some((field, true)) }
+            else { None }
+        }
+        _ => property(expression).map(|field| (field, false)),
+    }
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_recursive_closure(
         &mut self,
@@ -453,7 +488,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(parent_block);
         let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
-            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name)?
+            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name, None)?
         } else {
             (adapter, self.compile_ignored_this_adapter(adapter, &param_types, &promise_type,
                 &format!("{adapter_name}__thaw_this_adapter"))?)
@@ -470,6 +505,7 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirParam],
         ret: &HirType,
         name: &str,
+        receiver_access: Option<(&str, bool)>,
     ) -> Result<(FunctionValue<'ctx>, FunctionValue<'ctx>), String> {
         let receiver = &params[0].ty;
         let visible = params[1..].iter().map(|param| param.ty.clone()).collect::<Vec<_>>();
@@ -487,7 +523,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or("undefined JsValue returned no value")?
         } else {
             self.compile_non_arrow_receiver_value(ordinary, receiver,
-                self.context.i8_type().const_zero(), self.context.i64_type().const_zero())?
+                self.context.i8_type().const_zero(), self.context.i64_type().const_zero(), receiver_access)?
         };
         let mut args = vec![ordinary.get_nth_param(0).unwrap().into(), undefined.into()];
         args.extend(ordinary.get_param_iter().skip(1).map(BasicMetadataValueEnum::from));
@@ -497,7 +533,7 @@ impl<'ctx> HirCompiler<'ctx> {
         else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
             .ok_or("non-arrow ordinary entry returned no value")?)).map_err(|error| error.to_string())?; }
         self.builder.position_at_end(parent);
-        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name)?;
+        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name, receiver_access)?;
         Ok((ordinary, explicit))
     }
 
@@ -508,6 +544,7 @@ impl<'ctx> HirCompiler<'ctx> {
         receiver: &HirType,
         ret: &HirType,
         name: &str,
+        receiver_access: Option<(&str, bool)>,
     ) -> Result<FunctionValue<'ctx>, String> {
         let parent = self.builder.get_insert_block().ok_or("this entry needs a parent block")?;
         let entry_fn = self.module.add_function(&format!("{name}__thaw_this_adapter"),
@@ -520,7 +557,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?.into_int_value();
         let word = self.builder.build_extract_value(tagged, 1, "receiver_word")
             .map_err(|error| error.to_string())?.into_int_value();
-        let value = self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word)?;
+        let value = self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word, receiver_access)?;
         let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), value.into()];
         args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
         let call = self.builder.build_call(target, &args, "invoke_non_arrow_with_this")
@@ -623,9 +660,13 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn reject_non_arrow_receiver(&mut self) -> Result<(), String> {
+        self.reject_non_arrow_receiver_message("Incompatible function receiver")
+    }
+
+    fn reject_non_arrow_receiver_message(&mut self, message: &str) -> Result<(), String> {
         let saved_catch_context = self.take_catch_context();
         let saved_async_completion = self.active_async_completion.take();
-        let thrown = self.compile_throw_type_error("Incompatible function receiver");
+        let thrown = self.compile_throw_type_error(message);
         self.replace_catch_context(saved_catch_context);
         self.active_async_completion = saved_async_completion;
         thrown
@@ -637,6 +678,7 @@ impl<'ctx> HirCompiler<'ctx> {
         receiver: &HirType,
         kind: IntValue<'ctx>,
         word: IntValue<'ctx>,
+        receiver_access: Option<(&str, bool)>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match receiver {
             HirType::Object(fields) if !fields.first().is_some_and(|(name, _)|
@@ -672,6 +714,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_conditional_branch(present, accepted, rejected)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(rejected);
+                if let Some((field, write)) = receiver_access {
+                    for (tag, receiver) in [(0, "undefined"), (1, "null")] {
+                        let matches = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                            self.context.i8_type().const_int(tag, false), "receiver_error_kind")
+                            .map_err(|error| error.to_string())?;
+                        let error = self.context.append_basic_block(entry_fn, "receiver_property_error");
+                        let next = self.context.append_basic_block(entry_fn, "receiver_other_kind");
+                        self.builder.build_conditional_branch(matches, error, next)
+                            .map_err(|error| error.to_string())?;
+                        self.builder.position_at_end(error);
+                        let message = if write {
+                            format!("Cannot set properties of {receiver} (setting '{field}')")
+                        } else {
+                            format!("Cannot read properties of {receiver} (reading '{field}')")
+                        };
+                        self.reject_non_arrow_receiver_message(&message)?;
+                        self.builder.position_at_end(next);
+                    }
+                }
                 self.reject_non_arrow_receiver()?;
                 self.builder.position_at_end(accepted);
                 let host_pointer = self.builder.build_int_to_ptr(pointer, ptr_type, "native_receiver_original_pointer")
@@ -724,7 +785,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let absent_exit = self.builder.get_insert_block().unwrap();
                 self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
                 self.builder.position_at_end(present);
-                let payload = self.compile_non_arrow_receiver_value(entry_fn, inner, kind, word)?;
+                let payload = self.compile_non_arrow_receiver_value(entry_fn, inner, kind, word, receiver_access)?;
                 let present_value = if matches!(receiver, HirType::Nullish(_)) {
                     self.build_nullish_value(payload, inner, 0)?
                 } else { self.build_optional_value(payload, inner, true)? };
@@ -829,7 +890,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let mut incoming = Vec::new();
                 for (index, _, block) in cases {
                     self.builder.position_at_end(block);
-                    let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                    let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word, receiver_access)?;
                     let tagged = self.build_union_value(value, index, members)?;
                     let exit = self.builder.get_insert_block().unwrap();
                     self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
@@ -857,7 +918,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.builder.build_conditional_branch(equal, matched, next)
                             .map_err(|error| error.to_string())?;
                         self.builder.position_at_end(matched);
-                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word, receiver_access)?;
                         let tagged = self.build_union_value(value, index, members)?;
                         let exit = self.builder.get_insert_block().unwrap();
                         self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
@@ -865,7 +926,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.builder.position_at_end(next);
                     }
                     if let Some(index) = string_catchall.or(json_fallback) {
-                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word, receiver_access)?;
                         let tagged = self.build_union_value(value, index, members)?;
                         let exit = self.builder.get_insert_block().unwrap();
                         self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
@@ -898,7 +959,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.builder.build_conditional_branch(is_class, matched, next)
                             .map_err(|error| error.to_string())?;
                         self.builder.position_at_end(matched);
-                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word, receiver_access)?;
                         let tagged = self.build_union_value(value, index, members)?;
                         let exit = self.builder.get_insert_block().unwrap();
                         self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
@@ -1123,7 +1184,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
         let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
-            self.compile_non_arrow_entries(function, params, ret, &name)?
+            self.compile_non_arrow_entries(function, params, ret, &name, simple_this_receiver_access(body, params))?
         } else {
             (function, self.compile_ignored_this_adapter(function, &param_types, ret,
                 &format!("{name}__thaw_this_adapter"))?)
