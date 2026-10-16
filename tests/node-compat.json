@@ -1341,6 +1341,16 @@
       "name": "Map and Set in nested and array any literals",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const o: any = { n: { m: new Map<string, number>() }, list: [new Set<number>()] };\n  o.n.m.set(\"a\", 1);\n  o.list[0].add(2);\n  console.log(o.n.m.get(\"a\"), o.list[0].has(2), o.list[0].size);\n  const seen: any[] = [];\n  const w: any = { m: new Map<string, number>() };\n  w.m.set(\"a\", 1); w.m.set(\"b\", 2);\n  w.m.forEach((v: any, k: any) => { seen.push(k + v); });\n  console.log(seen.join(\",\"), [...w.m].length);\n}\n"
+    },
+    {
+      "name": "nested arrays written through an any view stay linked at every level",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const nat: number[][][] = [[[1]]];\n  const v: any = nat;\n  const inner: any = [[5, 6], [7]];\n  v[0] = inner;\n  inner[0].push(8);\n  console.log(nat[0][0].length, JSON.stringify(inner));\n  nat[0][1].push(9);\n  console.log(inner[1].length, v[0][1].join(\",\"));\n  inner.push([10]);\n  console.log(nat[0].length, nat[0][2][0]);\n  nat[0][2].push(11);\n  console.log(inner[2].join(\",\"));\n  console.log(v[0] === inner, v[0][0] === inner[0]);\n  nat[0][0] = [42, 43];\n  console.log(inner[0].join(\",\"), JSON.stringify(nat));\n}\n"
+    },
+    {
+      "name": "records with array fields written through an any view stay linked",
+      "expect": "matched",
+      "source": "interface Row { n: number; tags: string[] }\nasync function main(): Promise<void> {\n  const rows: Row[] = [{ n: 1, tags: [\"a\"] }];\n  const v: any = rows;\n  const row: any = JSON.parse('{\"n\":2,\"tags\":[\"x\",\"y\"]}');\n  v[0] = row;\n  row.tags.push(\"z\");\n  console.log(rows[0].tags.join(\",\"), rows[0].n);\n  rows[0].tags.push(\"w\");\n  console.log(row.tags.join(\",\"));\n  row.n = 5;\n  console.log(rows[0].n);\n  rows[0].tags[0] = \"q\";\n  console.log(row.tags[0], v[0] === row);\n  const extra: any = JSON.parse('{\"n\":3,\"tags\":[]}');\n  v.push(extra);\n  extra.tags.push(\"t\");\n  console.log(rows.length, rows[1].tags.join(\",\"));\n  rows[1].tags.push(\"u\");\n  console.log(extra.tags.join(\",\"));\n}\n"
     }
   ]
 }

@@ -2837,6 +2837,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_link_native_tree_by_serial",
+            self.context.void_type().fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_note_view_copy",
             self.context.void_type().fn_type(&[], false),
             Some(Linkage::External),
