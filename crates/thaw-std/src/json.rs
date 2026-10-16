@@ -1557,6 +1557,7 @@ pub extern "C" fn thaw_json_root_unpin(lease_id: u64) -> u8 {
 }
 
 fn reset_arena_owned_json_roots(tracing: bool) {
+    native_links::reset(tracing);
     if !tracing {
         // A non-tracing reset is the terminal cleanup boundary. Retire global
         // owners first so their registered slots are cleared/unregistered

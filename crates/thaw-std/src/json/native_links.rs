@@ -288,7 +288,9 @@ fn run_deferred_forgets() {
     }
 }
 
-fn reset(tracing: bool) {
+/// Drops the links whose native side the arena reclaimed. Also run first by the arena-owned root
+/// cleanup: destroying a Json container pulls from its links, which must not read freed storage.
+pub(super) fn reset(tracing: bool) {
     LINKS.with(|links| {
         let mut links = links.borrow_mut();
         let mut removed = 0;
