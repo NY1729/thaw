@@ -1390,6 +1390,40 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// `new Map()`/`new Set()` elements of an `any` array literal cross as the Json collection
+    /// wrapper (a typed `Array<Map>` has no Json encoding). `None` when no element is one.
+    pub(in crate::lower) fn lower_any_array_with_collections(
+        &mut self,
+        array: &swc_ecma_ast::ArrayLit,
+    ) -> Result<Option<HirExpr>, String> {
+        let collection = |element: &Option<swc_ecma_ast::ExprOrSpread>| element.as_ref().is_some_and(|element| {
+            element.spread.is_none() && matches!(peel_parens(&element.expr), Expr::New(new)
+                if matches!(new.callee.as_ref(), Expr::Ident(name) if matches!(name.sym.as_ref(), "Map" | "Set")))
+        });
+        if !array.elems.iter().any(collection)
+            || !array.elems.iter().all(|element| element.as_ref().is_some_and(|element| element.spread.is_none()))
+        {
+            return Ok(None);
+        }
+        let mut values = Vec::new();
+        for element in array.elems.iter().flatten() {
+            let value = self.lower_expr(&element.expr)?;
+            values.push(self.coerce_to_declared(&HirType::Json, value)?);
+        }
+        let literal = HirExpr::ArrayLit(values);
+        self.infer_expr_type(&literal)?;
+        Ok(Some(literal))
+    }
+
+    /// A native `Map`/`Set` stored in a field of an `any` literal crosses as the same Json snapshot
+    /// wrapper `const m: any = new Map()` uses (the realm revives it as a JS collection).
+    fn any_literal_collection_field(&mut self, value: HirExpr, any_literal: bool) -> Result<HirExpr, String> {
+        if any_literal && matches!(self.infer_expr_type_inner(&value), Ok(HirType::Map(..) | HirType::Set(_))) {
+            return self.coerce_to_declared(&HirType::Json, value);
+        }
+        Ok(value)
+    }
+
     fn lower_object_lit(
         &mut self,
         obj_lit: &SwcObjectLit,
@@ -1563,7 +1597,14 @@ impl<'a> FnLowerer<'a> {
                         });
                         let lowered = match value.as_ref() {
                             Expr::Array(_) if any_literal => {
-                                let array = self.lower_object_lit_field_value(value, expected)?;
+                                let array = match value.as_ref() {
+                                    Expr::Array(literal) => self.lower_any_array_with_collections(literal)?,
+                                    _ => None,
+                                };
+                                let array = match array {
+                                    Some(array) => array,
+                                    None => self.lower_object_lit_field_value(value, expected)?,
+                                };
                                 self.coerce_to_declared(&HirType::JsValue, array)?
                             }
                             nested => {
@@ -1579,17 +1620,17 @@ impl<'a> FnLowerer<'a> {
                                         self.any_object_literal = any_literal && matches!(nested, Expr::Object(_));
                                         let lowered = self.lower_object_lit_field_value(value, expected);
                                         self.any_object_literal = false;
-                                        lowered?
+                                        self.any_literal_collection_field(lowered?, any_literal)?
                                     }
                                 }
                             }
                         };
                         vec![(name, lowered)]
                     }
-                    Prop::Shorthand(ident) => vec![(
-                        ident.sym.to_string(),
-                        self.lower_expr(&Expr::Ident(ident.clone()))?,
-                    )],
+                    Prop::Shorthand(ident) => {
+                        let lowered = self.lower_expr(&Expr::Ident(ident.clone()))?;
+                        vec![(ident.sym.to_string(), self.any_literal_collection_field(lowered, any_literal)?)]
+                    }
                     property => self
                         .lower_object_callable_property(property, &fields, expected_fields)?
                         .ok_or_else(|| {
