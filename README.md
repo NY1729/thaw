@@ -193,6 +193,10 @@ Known gaps against Node semantics:
   becomes a `C` with the object's fields. Declare the array `any[]` to keep references; run with
   `THAW_WARN_COPY=1` to get a one-time note on stderr the first time such a copy happens.
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
+- A bare call of a `this`-using function expression with a simple unconditional property
+  access reports Node's property-specific `TypeError`, including reads in an assignment's RHS.
+  Complex bodies (branches, nested closures, suspended async functions) and extracted
+  object-literal methods still report `TypeError: Incompatible function receiver`.
 - Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
   functions are still snapshots.
 - A `new Map()`/`new Set()` written in an `any` literal (a field, a nested field or an array
