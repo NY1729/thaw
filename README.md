@@ -206,8 +206,9 @@ Known gaps against Node semantics:
   see every change and `a === existing` holds. A view serves keys of type `number`, `string` or `any`
   and values of type `number`, `string`, `boolean` or `any` (arrays, objects and dictionaries read back
   live but are read-only through the view); storing another type through it throws a `TypeError`.
-  Iterators (`keys`, `values`, `entries`, `for..of`) walk a snapshot taken when they start. Maps and
-  sets with object keys, or whose values are themselves Maps or Sets, stay snapshots.
+  Iterators (`keys`, `values`, `entries`, `for..of`) and `forEach` observe additions, deletions and
+  updates during traversal. Collections with statically typed object keys, or whose values are
+  themselves Maps or Sets, stay snapshots.
 - An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
   self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
   element becomes `NaN`, and nesting deeper than 32 levels is stored as a plain copy.
