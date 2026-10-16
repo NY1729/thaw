@@ -3415,6 +3415,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_runtime_await_blocking",
+            run_until_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_runtime_report_unhandled",
             self.context.void_type().fn_type(&[], false),
             Some(Linkage::External),

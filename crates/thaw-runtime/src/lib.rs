@@ -695,6 +695,19 @@ pub extern "C" fn thaw_process_ppid() -> f64 {
     }
 }
 
+/// `thaw_runtime_run_until_resolved` for a blocking `await` in synchronous
+/// code. The awaiter observes the settlement, so a rejection counts as handled
+/// exactly as it does for a coroutine subscription.
+///
+/// # Safety
+///
+/// Same contract as `thaw_runtime_run_until_resolved`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_await_blocking(promise: *mut ThawPromise) -> *const u8 {
+    unsafe { thaw_promise_mark_handled(promise) };
+    unsafe { thaw_runtime_run_until_resolved(promise) }
+}
+
 /// Drives ready continuations and timers until `promise` settles. Returns its
 /// result/error pointer; use `thaw_promise_state` to distinguish fulfillment
 /// from rejection. Returns null for an invalid handle or no possible progress.
