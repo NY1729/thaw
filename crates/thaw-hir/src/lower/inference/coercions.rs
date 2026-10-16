@@ -1012,6 +1012,20 @@ impl<'a> FnLowerer<'a> {
                     &[(temp, HirType::Undefined, value)],
                 );
             }
+            // A native Map/Set that may be aliased stays one object behind `any`: a live view.
+            if self.alias_native_arrays && Self::native_collection_view_supported(&actual) {
+                let fresh = matches!(&value, HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_map_new"))
+                    || matches!(&value, HirExpr::Var(name) if self.fresh_object_bindings.contains(name));
+                if !fresh {
+                    if let Ok(view) = self.lower_native_collection_as_dynamic_view(value.clone(), &actual) {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                            vec![view],
+                        ));
+                    }
+                }
+            }
             if let HirType::Map(key, element) = &actual {
                 if !json_convertible_native_type(key) || !json_convertible_native_type(element) {
                     return Err(format!(

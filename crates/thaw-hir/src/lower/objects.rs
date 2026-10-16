@@ -1397,8 +1397,15 @@ impl<'a> FnLowerer<'a> {
         array: &swc_ecma_ast::ArrayLit,
     ) -> Result<Option<HirExpr>, String> {
         let collection = |element: &Option<swc_ecma_ast::ExprOrSpread>| element.as_ref().is_some_and(|element| {
-            element.spread.is_none() && matches!(peel_parens(&element.expr), Expr::New(new)
-                if matches!(new.callee.as_ref(), Expr::Ident(name) if matches!(name.sym.as_ref(), "Map" | "Set")))
+            element.spread.is_none() && match peel_parens(&element.expr) {
+                Expr::New(new) => matches!(new.callee.as_ref(), Expr::Ident(name) if matches!(name.sym.as_ref(), "Map" | "Set")),
+                // A variable holding a native Map/Set: it crosses as a live view.
+                Expr::Ident(name) => {
+                    let name = self.resolve_binding(name.sym.as_ref());
+                    matches!(self.scope.get(&name), Some(HirType::Map(..) | HirType::Set(_)))
+                }
+                _ => false,
+            }
         });
         if !array.elems.iter().any(collection)
             || !array.elems.iter().all(|element| element.as_ref().is_some_and(|element| element.spread.is_none()))
@@ -1408,7 +1415,10 @@ impl<'a> FnLowerer<'a> {
         let mut values = Vec::new();
         for element in array.elems.iter().flatten() {
             let value = self.lower_expr(&element.expr)?;
-            values.push(self.coerce_to_declared(&HirType::Json, value)?);
+            let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+            let converted = self.coerce_to_declared(&HirType::Json, value);
+            self.alias_native_arrays = nested;
+            values.push(converted?);
         }
         let literal = HirExpr::ArrayLit(values);
         self.infer_expr_type(&literal)?;
@@ -1419,7 +1429,10 @@ impl<'a> FnLowerer<'a> {
     /// wrapper `const m: any = new Map()` uses (the realm revives it as a JS collection).
     fn any_literal_collection_field(&mut self, value: HirExpr, any_literal: bool) -> Result<HirExpr, String> {
         if any_literal && matches!(self.infer_expr_type_inner(&value), Ok(HirType::Map(..) | HirType::Set(_))) {
-            return self.coerce_to_declared(&HirType::Json, value);
+            let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+            let converted = self.coerce_to_declared(&HirType::Json, value);
+            self.alias_native_arrays = nested;
+            return converted;
         }
         Ok(value)
     }
@@ -5181,6 +5194,216 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Return(Some(interned)),
         ];
         self.wrap_call_argument_bindings(HirExpr::Block(body), &[(source, array_type, value)])
+    }
+
+    /// Map/Set shapes a live `any` view can serve: keys the native table can take from JS
+    /// (`number`, `string`, `any`) and values that read back through the normal Json coercion.
+    pub(super) fn native_collection_view_supported(ty: &HirType) -> bool {
+        let key_ok = |key: &HirType| matches!(key, HirType::F64 | HirType::Str | HirType::Json);
+        match ty {
+            HirType::Map(key, value) => key_ok(key) && matches!(
+                value.as_ref(),
+                HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue
+                    | HirType::Array(_) | HirType::Object(_) | HirType::Dictionary(_)
+            ),
+            HirType::Set(element) => key_ok(element),
+            _ => false,
+        }
+    }
+
+    /// A native `Map`/`Set` crossing into `any` as a live view: the JS side reads and writes the
+    /// native collection through callbacks (size, has, get, set/add, delete, clear, keys), so every
+    /// mutation is shared both ways. Returns a retained `JsValue` handle interned per native pointer.
+    pub(super) fn lower_native_collection_as_dynamic_view(
+        &mut self,
+        value: HirExpr,
+        collection: &HirType,
+    ) -> Result<HirExpr, String> {
+        let (key_type, value_type) = match collection {
+            HirType::Map(key, value) => (key.as_ref().clone(), Some(value.as_ref().clone())),
+            HirType::Set(element) => (element.as_ref().clone(), None),
+            other => return Err(format!("{other:?} is not a native collection")),
+        };
+        let key_suffix = map_key_intrinsic_suffix(&key_type)?;
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let source = format!("__thaw_collection_view_source_{id}");
+        let callbacks = format!("__thaw_collection_view_callbacks_{id}");
+        let cached = format!("__thaw_collection_view_cached_{id}");
+        let builder = format!("__thaw_collection_view_builder_{id}");
+        let args = format!("__thaw_collection_view_args_{id}");
+        let failure = format!("__thaw_collection_view_failure_{id}");
+        let key_name = format!("__thaw_collection_view_key_{id}");
+        let item_name = format!("__thaw_collection_view_item_{id}");
+        self.scope.insert(source.clone(), collection.clone());
+        self.scope.insert(callbacks.clone(), HirType::Array(Box::new(HirType::JsValue)));
+        self.scope.insert(key_name.clone(), key_type.clone());
+        if let Some(value_type) = &value_type {
+            self.scope.insert(item_name.clone(), value_type.clone());
+        }
+        let layout = format!("collection:{collection:?}");
+        let capture = || vec![HirParam { name: source.clone(), ty: collection.clone() }];
+        let source_var = || HirExpr::Var(source.clone());
+        let key_var = || HirExpr::Var(key_name.clone());
+        let key_param = || HirParam { name: key_name.clone(), ty: key_type.clone() };
+        let register = |lambda: HirExpr| HirExpr::Call(
+            Box::new(HirExpr::Var("registerNativeCallbackGraph".into())), vec![lambda]);
+        let void_body = |expr: HirExpr| HirExpr::Block(vec![HirStmt::Expr(expr), HirStmt::Return(None)]);
+        let undefined = || HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+        );
+        let json_undefined = || HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new());
+        let has_call = || HirExpr::Call(
+            Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_has"))),
+            vec![source_var(), key_var()],
+        );
+        let size = register(HirExpr::Lambda(
+            capture(), Vec::new(), HirType::F64,
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_size".into())), vec![source_var()])),
+        ));
+        let has = register(HirExpr::Lambda(
+            capture(), vec![key_param()], HirType::Bool, Box::new(has_call()),
+        ));
+        let delete = register(HirExpr::Lambda(
+            capture(), vec![key_param()], HirType::Bool,
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_delete"))),
+                vec![source_var(), key_var()],
+            )),
+        ));
+        let clear = register(HirExpr::Lambda(
+            capture(), Vec::new(), HirType::Void,
+            Box::new(void_body(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_map_clear".into())), vec![source_var()]))),
+        ));
+        // A snapshot of the keys (Set: the values) as a Json array; entries are read back one by
+        // one with `get`, so a value that is itself a native owner stays a live view.
+        let keys = {
+            let keys_type = HirType::Array(Box::new(key_type.clone()));
+            let snapshot = HirExpr::TypedClosure(
+                keys_type,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_map_snapshot_keys".into())), vec![source_var()])),
+            );
+            let nested = std::mem::replace(&mut self.alias_native_arrays, false);
+            let converted = self.coerce_to_declared(&HirType::Json, snapshot);
+            self.alias_native_arrays = nested;
+            register(HirExpr::Lambda(
+                capture(), Vec::new(), HirType::Json, Box::new(converted?),
+            ))
+        };
+        let (get, set, value_kind) = if let Some(value_type) = &value_type {
+            let (value_suffix, needs_wrap) = map_value_get_suffix(value_type)?;
+            let raw = HirExpr::Call(
+                Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_get_{value_suffix}"))),
+                vec![source_var(), key_var()],
+            );
+            let decoded = if needs_wrap {
+                HirExpr::TypedClosure(value_type.clone(), Box::new(raw))
+            } else {
+                raw
+            };
+            let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+            let converted = self.coerce_to_declared(&HirType::Json, decoded);
+            self.alias_native_arrays = nested;
+            let get = register(HirExpr::Lambda(
+                capture(), vec![key_param()], HirType::Json,
+                Box::new(HirExpr::Conditional(
+                    Box::new(has_call()), Box::new(converted?), Box::new(json_undefined()), HirType::Json,
+                )),
+            ));
+            let value_kind = match value_type {
+                HirType::F64 => "number",
+                HirType::Str => "string",
+                HirType::Bool => "boolean",
+                HirType::Json | HirType::JsValue => "any",
+                // Arrays, objects and dictionaries read back live but cannot be decoded from JS.
+                _ => "none",
+            };
+            let set = if value_kind == "none" {
+                undefined()
+            } else {
+                register(HirExpr::Lambda(
+                    capture(),
+                    vec![key_param(), HirParam { name: item_name.clone(), ty: value_type.clone() }],
+                    HirType::Void,
+                    Box::new(void_body(HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
+                        vec![source_var(), key_var(), HirExpr::Var(item_name.clone())],
+                    ))),
+                ))
+            };
+            (get, set, value_kind)
+        } else {
+            let add = register(HirExpr::Lambda(
+                capture(), vec![key_param()], HirType::Void,
+                Box::new(void_body(HirExpr::Call(
+                    Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
+                    vec![source_var(), key_var(), HirExpr::Lit(HirLit::F64(0.0))],
+                ))),
+            ));
+            (undefined(), add, "none")
+        };
+        let key_kind = match &key_type {
+            HirType::F64 => "number",
+            HirType::Str => "string",
+            _ => "any",
+        };
+        let cached_type = HirType::Optional(Box::new(HirType::JsValue));
+        self.scope.insert(cached.clone(), cached_type.clone());
+        self.scope.insert(args.clone(), HirType::Json);
+        self.scope.insert(builder.clone(), HirType::JsValue);
+        self.scope.insert(failure.clone(), HirType::Str);
+        let push_callback = |callback: HirExpr| HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![HirExpr::Var(callbacks.clone()), callback],
+        ));
+        let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![
+            HirExpr::Lit(HirLit::Bool(value_type.is_some())),
+            HirExpr::Lit(HirLit::Str(key_kind.into())),
+            HirExpr::Lit(HirLit::Str(value_kind.into())),
+        ]))?;
+        let wrapper = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_build_native_object_wrapper".into())),
+            vec![HirExpr::Var(builder.clone()), HirExpr::Var(args.clone()), HirExpr::Var(callbacks.clone())],
+        );
+        let interned = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_intern_native_object".into())),
+            vec![source_var(), HirExpr::Lit(HirLit::Str(layout.clone())), wrapper],
+        );
+        let body = vec![
+            HirStmt::Let(cached.clone(), cached_type,
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_lookup_native_object".into())),
+                    vec![source_var(), HirExpr::Lit(HirLit::Str(layout))])),
+            HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(HirExpr::Var(cached.clone())), HirType::JsValue),
+                Vec::new(),
+                vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                    Box::new(HirExpr::Var(cached)), HirType::JsValue)))],
+            ),
+            HirStmt::Let(callbacks.clone(), HirType::Array(Box::new(HirType::JsValue)),
+                HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(args.clone(), HirType::Json, arguments),
+            HirStmt::Let(builder.clone(), HirType::JsValue,
+                HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("__thaw_collection_with_native_view".into()))])),
+            HirStmt::Try(
+                [size, has, get, set, delete, clear, keys].into_iter().map(push_callback).collect(),
+                failure.clone(),
+                vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_release_native_projection_callbacks".into())),
+                        vec![HirExpr::Var(callbacks.clone())],
+                    )),
+                    HirStmt::Throw(HirExpr::Var(failure)),
+                ],
+                None,
+            ),
+            HirStmt::Return(Some(interned)),
+        ];
+        self.wrap_call_argument_bindings(HirExpr::Block(body), &[(source, collection.clone(), value)])
     }
 
     fn lower_native_accessor_definition(
