@@ -3375,6 +3375,21 @@ fn generic_non_arrow_function_infers_this_for_call_apply_and_bind() {
 }
 
 #[test]
+fn generic_non_arrow_deferred_bind_uses_captured_receiver() {
+    let source = r#"
+        function main(): void {
+            const identity = function<T>(this: T): T { return this; };
+            const bound = identity.bind("captured");
+            console.log(bound());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_non_arrow_deferred_bind"),
+        "captured\n"
+    );
+}
+
+#[test]
 fn generic_non_arrow_scoped_alias_and_empty_operations() {
     let source = r#"
         function main(): void {

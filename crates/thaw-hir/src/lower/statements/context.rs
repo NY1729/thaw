@@ -111,6 +111,7 @@ impl<'a> FnLowerer<'a> {
             generic_non_arrow_receiver_templates: HashMap::new(),
             generic_arrow_self_names: HashMap::new(),
             generic_named_templates: HashMap::new(),
+            deferred_generic_binds: HashMap::new(),
             native_method_values: HashMap::new(),
             native_class_aliases: HashMap::new(),
             member_receiver_bindings: HashSet::new(),

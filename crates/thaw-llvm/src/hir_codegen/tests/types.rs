@@ -524,6 +524,148 @@ fn generic_optional_arrow_preserves_present_and_absent_argument_values() {
 }
 
 #[test]
+fn generic_optional_bound_arrow_accepts_explicit_type_arguments() {
+    let source = r#"
+        type OptionalIdentity = <T>(value?: T) => T | undefined;
+        function main(): void {
+            const identity: OptionalIdentity = <T>(value?: T): T | undefined => value;
+            const later = identity.bind(null);
+            console.log(later(41));
+            console.log(later<number>(41));
+            console.log(later<number>());
+            console.log(later<string>("ok"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_optional_arrow_bind_explicit_types"),
+        "41\n41\nundefined\nok\n"
+    );
+}
+
+#[test]
+fn generic_arrow_bind_defers_specialization_until_direct_call() {
+    let source = r#"
+        function main(): void {
+            const identity = <T>(value: T): T => value;
+            const bound = identity.bind(null);
+            console.log(bound(42));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_arrow_bind_deferred"), "42\n");
+}
+
+#[test]
+fn generic_arrow_bind_combines_bound_and_call_site_inference() {
+    let source = r#"
+        function main(): void {
+            const pair = <T, U>(left: T, right: U): U => right;
+            const bound = pair.bind(null, 1);
+            console.log(typeof bound);
+            console.log(bound("x"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_arrow_bind_mixed_inference"), "function\nx\n");
+}
+
+#[test]
+fn generic_arrow_bind_evaluates_captures_once_at_binding_time() {
+    let source = r#"
+        let thisCount = 0;
+        let argumentCount = 0;
+        function nextThis(): null { thisCount++; return null; }
+        function nextArgument(): number { argumentCount++; return 42; }
+        function main(): void {
+            const identity = <T>(value: T): T => value;
+            const bound = identity.bind(nextThis(), nextArgument());
+            console.log(thisCount);
+            console.log(argumentCount);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_arrow_bind_capture_once"), "1\n1\n");
+}
+
+#[test]
+fn generic_arrow_bind_aliases_specialize_independently_and_respect_shadowing() {
+    let source = r#"
+        function main(): void {
+            const identity = <T>(value: T): T => value;
+            const bound = identity.bind(null);
+            const alias = bound;
+            {
+                const bound = (value: number): number => value + 1;
+                console.log(bound(2));
+            }
+            console.log(alias(42));
+            console.log(bound("ok"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_arrow_bind_alias_specializations"),
+        "3\n42\nok\n"
+    );
+}
+
+#[test]
+fn generic_arrow_bind_keeps_lexical_this_but_evaluates_this_arg_once() {
+    let source = r#"
+        class Counter {
+            value: number;
+            constructor(value: number) { this.value = value; }
+            make(): void {
+                let effects = 0;
+                function other(): Counter { effects++; return new Counter(99); }
+                const read = <T>(unused: T): number => this.value;
+                const bound = read.bind(other(), 0);
+                console.log(bound());
+                console.log(effects);
+            }
+        }
+        function main(): void { new Counter(7).make(); }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_arrow_bind_lexical_this"),
+        "7\n1\n"
+    );
+}
+
+#[test]
+fn generic_arrow_bind_preserves_omitted_optional_and_call_time_rest_values() {
+    let source = r#"
+        function main(): void {
+            const optional = <T>(first: T, later?: T): T | undefined => later;
+            const boundOptional = optional.bind(null, 42);
+            console.log(boundOptional());
+            const count = <T>(first: T, ...rest: T[]): number => rest.length;
+            const boundRest = count.bind(null, 1);
+            console.log(boundRest(2, 3));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_arrow_bind_optional_rest"),
+        "undefined\n2\n"
+    );
+}
+
+#[test]
+fn generic_arrow_bind_snapshots_tuple_spread_once() {
+    let source = r#"
+        function main(): void {
+            const pair = <A, B>(left: A, right: B): string => `${left}:${right}`;
+            const values: [number, string] = [1, "before"];
+            const mutable: any = values;
+            const bound = pair.bind(null, ...values);
+            mutable[0] = 9;
+            mutable[1] = "after";
+            console.log(bound());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_arrow_bind_tuple_snapshot"),
+        "1:before\n"
+    );
+}
+
+#[test]
 fn compiles_inline_generic_function_type_arrows() {
     let source = r#"
         function named<T>(value: T): T { return value; }

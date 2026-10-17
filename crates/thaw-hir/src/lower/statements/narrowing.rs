@@ -121,6 +121,7 @@ impl<'a> FnLowerer<'a> {
             self.generic_non_arrow_receiver_templates.clone();
         let saved_generic_arrow_self_names = self.generic_arrow_self_names.clone();
         let saved_generic_named_templates = self.generic_named_templates.clone();
+        let saved_deferred_generic_binds = self.deferred_generic_binds.clone();
         let saved_native_method_values = self.native_method_values.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
@@ -133,6 +134,7 @@ impl<'a> FnLowerer<'a> {
         self.generic_non_arrow_receiver_templates = saved_generic_non_arrow_receiver_templates;
         self.generic_arrow_self_names = saved_generic_arrow_self_names;
         self.generic_named_templates = saved_generic_named_templates;
+        self.deferred_generic_binds = saved_deferred_generic_binds;
         self.native_method_values = saved_native_method_values;
         lowered
     }
