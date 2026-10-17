@@ -2130,6 +2130,29 @@ fn generic_optional_bound_arrow_requires_inference_for_omitted_generic_argument(
 }
 
 #[test]
+fn non_generic_optional_arrow_bind_keeps_omittable_parameter() {
+    let program = lower(
+        r#"function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            const later = plain.bind(null);
+            console.log(later());
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn non_generic_optional_arrow_direct_call_keeps_omittable_parameter() {
+    let program = lower(
+        r#"function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            console.log(plain());
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
 fn non_generic_bound_arrow_rejects_explicit_type_arguments() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {

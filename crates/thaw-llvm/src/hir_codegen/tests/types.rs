@@ -543,6 +543,18 @@ fn generic_optional_bound_arrow_accepts_explicit_type_arguments() {
 }
 
 #[test]
+fn bound_non_generic_optional_arrow_accepts_omitted_argument() {
+    let source = r#"
+        function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            const later = plain.bind(null);
+            console.log(later());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_non_generic_optional_arrow"), "undefined\n");
+}
+
+#[test]
 fn generic_arrow_bind_defers_specialization_until_direct_call() {
     let source = r#"
         function main(): void {
