@@ -1702,6 +1702,25 @@ fn contextual_rest_callback_preserves_optional_metadata_and_shadowed_bindings() 
 }
 
 #[test]
+fn named_function_bind_preserves_optional_and_default_metadata() {
+    let program = lower(
+        r#"
+        function plain(value?: number): number | undefined { return value; }
+        function defaulted(value: number = 7): number { return value; }
+        function main(): void {
+            const later = plain.bind(null);
+            const laterDefault = defaulted.bind(null);
+            console.log(later(), laterDefault());
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let hir = format!("{:?}", main.body);
+    assert!(hir.contains("CallableFunction([Optional(F64)], Inline(1), None, Optional(F64)"), "{hir}");
+    assert!(hir.contains("CallableFunction([Optional(F64)], Inline(1), None, F64"), "{hir}");
+}
+
+#[test]
 fn promise_then_keeps_single_value_callback_validation() {
     lower(
         r#"

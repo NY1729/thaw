@@ -555,6 +555,21 @@ fn bound_non_generic_optional_arrow_accepts_omitted_argument() {
 }
 
 #[test]
+fn bound_named_optional_and_default_functions_accept_omitted_arguments() {
+    let source = r#"
+        function plain(value?: number): number | undefined { return value; }
+        function defaulted(value: number = 7): number { return value; }
+        function main(): void {
+            const later = plain.bind(null);
+            const laterDefault = defaulted.bind(null);
+            console.log(later());
+            console.log(laterDefault());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_named_omissions"), "undefined\n7\n");
+}
+
+#[test]
 fn bound_optional_function_expression_keeps_this_receiver() {
     let source = r#"
         function main(): void {
