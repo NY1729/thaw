@@ -581,6 +581,7 @@
       : operation === 4 ? thawGraphArrayFrom(thawGraphApply(thawGraphMapKeys, value, []))
       : operation === 5 ? thawGraphArrayFrom(thawGraphApply(thawGraphSetValues, value, []))
       : operation === 6 ? thawGraphArrayFrom(thawGraphApply(thawGraphMapValues, value, []))
+      : operation === 7 ? [...value]
       : null;
     if (entries === null) throw new thawGraphTypeError('Invalid native host enumeration');
     return thawGraphEncode(entries, 0, true);
@@ -1191,6 +1192,11 @@
   const thawGraphMapKeys = thawGraphMapConstructor.prototype.keys;
   const thawGraphMapValues = thawGraphMapConstructor.prototype.values;
   const thawGraphSetValues = thawGraphSetConstructor.prototype.values;
+  const thawMapIteratorPrototype = thawGraphGetPrototypeOf(thawGraphApply(thawGraphMapKeys, new thawGraphMapConstructor(), []));
+  const thawSetIteratorPrototype = thawGraphGetPrototypeOf(thawGraphApply(thawGraphSetValues, new thawGraphSetConstructor(), []));
+  const thawMapIteratorNext = thawMapIteratorPrototype.next;
+  const thawSetIteratorNext = thawSetIteratorPrototype.next;
+  const thawNativeIteratorSteps = new WeakMap();
   const thawGraphKind = (getter, value) => {
     if (value === null || typeof value !== 'object') return false;
     try { thawGraphApply(getter, value, []); return true; }
@@ -2364,9 +2370,9 @@
   // A native Map/Set held in `any` is a live view: every operation goes through callbacks over the
   // native collection, so both sides observe each change. The object inherits from Map.prototype /
   // Set.prototype (so `instanceof` and the toStringTag say Map/Set) but never touches their internal
-  // slots: its own closures serve the whole API. Iterators walk a snapshot of the keys.
+  // slots: its own closures serve the whole API. Iterators follow the native insertion cursor.
   thawGraphDefineProperty(globalThis, '__thaw_collection_with_native_view', {
-    value: (isMap, keyKind, valueKind, sizeCb, hasCb, getCb, setCb, deleteCb, clearCb, keysCb) => {
+    value: (isMap, keyKind, valueKind, sizeCb, hasCb, getCb, setCb, deleteCb, clearCb, keysCb, nextKeyCb) => {
       const receiver = thawGraphObjectCreate(null);
       const keyOk = key => keyKind === 'any' || typeof key === keyKind;
       const valueOk = value => valueKind === 'any' || typeof value === valueKind;
@@ -2377,16 +2383,34 @@
       const view = thawGraphObjectCreate(proto);
       const define = (name, fn) => thawGraphDefineProperty(proto, name,
         { value: fn, writable: true, configurable: true, enumerable: false });
-      const iterate = items => thawDateApply(Array.prototype[thawBootstrapIteratorKey], items, []);
+      const iterate = mode => {
+        let cursor = 0;
+        let done = false;
+        const iterator = thawGraphObjectCreate(isMap ? thawMapIteratorPrototype : thawSetIteratorPrototype);
+        const advance = () => {
+          if (done) return { value: undefined, done: true };
+          // Retain the view along with its callbacks while an iterator outlives its receiver.
+          const step = thawGraphApply(nextKeyCb, view, [cursor]);
+          if (step.length === 0) {
+            done = true;
+            return { value: undefined, done: true };
+          }
+          cursor = step[0];
+          const key = step[1];
+          const value = mode === 0 ? key : isMap ? get(key) : key;
+          return { value: mode === 2 ? [key, value] : value, done: false };
+        };
+        thawGraphApply(thawOriginSerialSet, thawNativeIteratorSteps, [iterator, { isMap, advance }]);
+        thawGraphDefineProperty(iterator, 'next', { value: function () {
+          const state = thawGraphApply(thawOriginSerialGet, thawNativeIteratorSteps, [this]);
+          if (state && state.isMap === isMap) return state.advance();
+          return thawGraphApply(isMap ? thawMapIteratorNext : thawSetIteratorNext, this, []);
+        }, writable: true, configurable: true });
+        thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [iterator]);
+        return iterator;
+      };
       const reject = () => new thawGraphTypeError(
         'Cannot store this value in a native ' + (isMap ? 'Map' : 'Set') + ' view');
-      const entries = () => {
-        const out = [];
-        const all = keys();
-        for (let index = 0; index < all.length; index++)
-          thawGraphApply(thawGraphArrayPush, out, [isMap ? [all[index], get(all[index])] : [all[index], all[index]]]);
-        return out;
-      };
       thawGraphDefineProperty(proto, 'size', {
         get: () => thawGraphApply(sizeCb, receiver, []), configurable: true, enumerable: false,
       });
@@ -2395,11 +2419,9 @@
       define('clear', () => { thawGraphApply(clearCb, receiver, []); });
       define('forEach', (callback, thisArg) => {
         if (typeof callback !== 'function') throw new thawGraphTypeError(String(callback) + ' is not a function');
-        const all = keys();
-        for (let index = 0; index < all.length; index++) {
-          const key = all[index];
-          if (!has(key)) continue;
-          thawDateApply(callback, thisArg, [isMap ? get(key) : key, key, view]);
+        const iterator = iterate(2);
+        for (let step = iterator.next(); !step.done; step = iterator.next()) {
+          thawDateApply(callback, thisArg, [step.value[1], step.value[0], view]);
         }
       });
       if (isMap) {
@@ -2409,25 +2431,20 @@
           thawGraphApply(setCb, receiver, [key, value]);
           return view;
         });
-        define('keys', () => iterate(keys()));
-        define('values', () => {
-          const all = keys();
-          const out = [];
-          for (let index = 0; index < all.length; index++) thawGraphApply(thawGraphArrayPush, out, [get(all[index])]);
-          return iterate(out);
-        });
-        define('entries', () => iterate(entries()));
-        define(thawBootstrapIteratorKey, () => iterate(entries()));
+        define('keys', () => iterate(0));
+        define('values', () => iterate(1));
+        define('entries', () => iterate(2));
+        define(thawBootstrapIteratorKey, () => iterate(2));
       } else {
         define('add', value => {
           if (!keyOk(value)) throw reject();
           thawGraphApply(setCb, receiver, [value]);
           return view;
         });
-        define('values', () => iterate(keys()));
-        define('keys', () => iterate(keys()));
-        define('entries', () => iterate(entries()));
-        define(thawBootstrapIteratorKey, () => iterate(keys()));
+        define('values', () => iterate(0));
+        define('keys', () => iterate(0));
+        define('entries', () => iterate(2));
+        define(thawBootstrapIteratorKey, () => iterate(0));
       }
       thawGraphApply(thawOriginSerialSet, thawNativeCollections, [view, { isMap, keys, get }]);
       thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [view]);
@@ -2440,10 +2457,19 @@
   // receiver. Such a result is handed back by reference, not as a data snapshot, so mutating it
   // reaches the owner (`o.items().push(x)`).
   thawGraphDefineProperty(globalThis, '__thaw_json_result_is_live', {
-    value: (receiver, result) => {
+    value: (receiver, result, method) => {
       if (result === null || typeof result !== 'object') return false;
       if (thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [result])
         || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [result])) return true;
+      if ((method === 'keys' || method === 'values' || method === 'entries')
+        && (thawNativeCollectionState(receiver) || thawGraphArrayIsArray(receiver)
+          || thawGraphKind(thawGraphMapSize, receiver) || thawGraphKind(thawGraphSetSize, receiver))) {
+        thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [result]);
+        return true;
+      }
+      // Keep yielded reference values intact inside the IteratorResult object.
+      if (method === 'next' && receiver !== null && typeof receiver === 'object'
+        && thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [receiver])) return true;
       if (receiver === null || typeof receiver !== 'object'
         || thawGraphArrayIsArray(receiver)
         || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [receiver])

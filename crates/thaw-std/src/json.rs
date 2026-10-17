@@ -8126,22 +8126,8 @@ fn is_map_wrapper(value: &Value) -> bool {
 #[no_mangle]
 pub extern "C" fn thaw_json_map_or_set_entries(value: *mut Value) -> *mut Value {
     let value = unsafe { &*value };
-    // A host `Map`/`Set` (a JS collection, e.g. an `any` literal field) is read through the realm.
     if let Value::Host(lease) = value {
-        match host_query(lease, 24).as_deref() {
-            Some("map") => {
-                let keys = host_enumerate_values(lease, 4);
-                let values = host_enumerate_values(lease, 6);
-                return leak(Value::shared_array(
-                    keys.into_iter()
-                        .zip(values)
-                        .map(|(key, value)| Value::shared_array(vec![key, value]))
-                        .collect(),
-                ));
-            }
-            Some("set") => return leak(Value::shared_array(host_enumerate_values(lease, 5))),
-            _ => {}
-        }
+        return leak(Value::shared_array(host_enumerate_values(lease, 7)));
     }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return leak(value.clone());

@@ -1396,6 +1396,31 @@
       "name": "native collection replacer keeps requested custom properties",
       "expect": "matched",
       "source": "function main(): void { const native = new Map<string, number>(); native.set(\"a\", 1); const m: any = native; m.extra = 7; m.missing = undefined; m.inf = Infinity; console.log(JSON.stringify(m, [\"size\", \"extra\", \"missing\", \"inf\"])); const set = new Set<number>([1, 2]); const s: any = set; s.extra = \"kept\"; console.log(JSON.stringify(s, [\"extra\", \"size\"])); }"
+    },
+    {
+      "name": "native collection views iterate live insertion order across mutations",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n const m = new Map<string, number>(); m.set(\"a\", 1); m.set(\"b\", 2); m.set(\"c\", 3);\n const a:any = m; const keys:any = a.keys(); const values:any = a.values(); const entries:any = a.entries();\n console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));\n m.delete(\"b\"); m.set(\"c\", 30); m.set(\"d\", 4);\n console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));\n m.clear(); m.set(\"a\", 10);\n console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));\n console.log(keys.next().done); m.set(\"e\", 5); console.log(keys.next().done);\n console.log(values.next().value, JSON.stringify(entries.next().value));\n const seen:string[] = [];\n a.forEach((v:any,k:any) => { seen.push(k + \"=\" + v); if(k === \"a\") { m.delete(\"e\"); m.set(\"f\", 6); } });\n console.log(seen.join(\",\"));\n const s = new Set<number>([1, 2, 3]); const b:any = s; const si:any = b.values(); const se:any = b.entries();\n console.log(si.next().value, JSON.stringify(se.next().value));\n s.delete(2); s.delete(1); s.add(1); s.add(4);\n console.log(si.next().value, JSON.stringify(se.next().value));\n console.log(si.next().value, JSON.stringify(se.next().value));\n s.clear(); s.add(5);\n await new Promise<void>((resolve) => setTimeout(resolve, 1));\n console.log(si.next().value, JSON.stringify(se.next().value));\n const seenSet:number[] = [];\n b.forEach((v:any) => { seenSet.push(v); if(v === 5) { s.add(6); } }); console.log(seenSet.join(\",\"));\n}"
+    },
+    {
+      "name": "native collection iterator next validates and uses its receiver",
+      "expect": "matched",
+      "source": "function main():void { const m=new Map<string,number>(); m.set(\"a\",1); const a:any=m; const it:any=a.keys(); const next:any=it.next; try { next(); console.log(\"accepted\"); } catch(e:any) { console.log(e instanceof TypeError); } console.log(it.next().value); const other:any=a.keys(); console.log(next.call(other).value); const real:any=new Map([[\"x\",1]]); const ri:any=real.keys(); console.log(next.call(ri).value); }"
+    },
+    {
+      "name": "collection iterator outlives receiver across arena resets",
+      "expect": "matched",
+      "source": "function make():any { const m=new Map<string,number>(); m.set(\"kept\",42); const a:any=m; return a.entries(); }\nasync function main():Promise<void> { const it:any=make(); for(let i=0;i<40;i++){ await new Promise<void>((resolve)=>setTimeout(resolve,1)); } console.log(JSON.stringify(it.next().value),it.next().done); }"
+    },
+    {
+      "name": "native collection iterator spread",
+      "expect": "matched",
+      "source": "function main():void { const m = new Map<string,number>(); m.set(\"a\",1); m.set(\"b\",2); const a:any=m; console.log([...a.keys()].join(\",\"), [...a.values()].join(\",\"), [...a].length); }"
+    },
+    {
+      "name": "native collection iterator spread propagates next errors",
+      "expect": "matched",
+      "source": "function main():void { const m=new Map<string,number>();m.set(\"a\",1);const a:any=m;const it:any=a.keys();it.next=()=>{throw new Error(\"next failed\");};try {const xs:any=[...it];console.log(xs.length);} catch(e:any){console.log(e.message);} }"
     }
   ]
 }
