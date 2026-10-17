@@ -1344,7 +1344,11 @@ impl<'a> FnLowerer<'a> {
                             if let Some(target @ HirType::Object(_)) = target {
                                 let structural = matches!(&target, HirType::Object(fields)
                                     if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_")));
-                                if structural && has_dynamic_storage(assertion.span) {
+                                let promise_catch = self.promise_catch_bindings.contains(&resolved)
+                                    || self.promise_catch_parameter.as_deref().is_some_and(
+                                        |name| self.resolve_binding(name) == resolved,
+                                    );
+                                if structural && (has_dynamic_storage(assertion.span) || promise_catch) {
                                     let carrier = self.promise_rejection_carrier(&resolved);
                                     return self.caught_carrier_as_json(carrier);
                                 }

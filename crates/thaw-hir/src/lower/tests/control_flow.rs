@@ -1193,6 +1193,24 @@ fn promise_catch_direct_rethrow_uses_binding_snapshot_marker() {
 }
 
 #[test]
+fn promise_catch_structural_assert_uses_saved_rejection_carrier() {
+    let program = lower(
+        r#"
+        interface Failure { code: number; }
+        async function main(): Promise<void> {
+            await Promise.reject<number>("plain string").catch(error => {
+                console.log((error as Failure).code);
+                return 0;
+            });
+        }
+        "#,
+    );
+    let text = format!("{:?}", program);
+    assert!(text.contains("@@thaw_caught_exception_from_tuple"), "{text}");
+    assert!(text.contains("@@thaw_promise_rejection:"), "{text}");
+}
+
+#[test]
 fn inferred_return_includes_undefined_for_fallthrough_and_bare_return() {
     let program = lower(r#"
         function fallthrough(flag: boolean) { if (flag) return 1; }

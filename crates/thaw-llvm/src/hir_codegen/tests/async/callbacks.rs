@@ -856,6 +856,8 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
                 throw "fresh JSON constructor lookup cleanup failed";
             }}
             const borrowed: Json = JSON.parse('{{"marker":"borrowed"}}');
+            // JSON.parse adds one intentionally live QuickJS host handle.
+            callDynamicValue(mark, __thaw_json_argument_array());
             let borrowedCaught = 0;
             for (let index = 0; index < 3; index++) {{
                 try {{

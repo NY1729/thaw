@@ -26,6 +26,14 @@ struct NerFixture {
     consumer_name: Option<String>,
 }
 
+extern "C" fn ner_error_frame(name: *const std::ffi::c_char, _message: *const std::ffi::c_char) -> *const std::ffi::c_char {
+    name
+}
+
+extern "C" fn ner_error_frame_own(value: *const std::ffi::c_char) -> *const std::ffi::c_char {
+    value
+}
+
 fn ner_shape_types() -> [(&'static str, HirType); 3] {
     [
         ("exact", udjit_promise_f64()),
@@ -2143,6 +2151,16 @@ fn ner_jit_map_lifecycle_stubs<'ctx>(
     assert!(destroy.get_type().get_param_types()[0].is_pointer_type());
     assert!(destroy.get_type().get_return_type().is_none());
     engine.add_global_mapping(&destroy, ner_jit_destroy_stub as *const () as usize);
+    let frame = compiler.module.get_function("thaw_error_frame").unwrap();
+    assert_eq!(frame.get_type().get_param_types().len(), 2);
+    assert!(frame.get_type().get_param_types().iter().all(|ty| ty.is_pointer_type()));
+    assert!(frame.get_type().get_return_type().unwrap().is_pointer_type());
+    engine.add_global_mapping(&frame, ner_error_frame as *const () as usize);
+    let own = compiler.module.get_function("thaw_error_frame_own").unwrap();
+    assert_eq!(own.get_type().get_param_types().len(), 1);
+    assert!(own.get_type().get_param_types()[0].is_pointer_type());
+    assert!(own.get_type().get_return_type().unwrap().is_pointer_type());
+    engine.add_global_mapping(&own, ner_error_frame_own as *const () as usize);
 }
 
 fn ner_jit_run_owned_case(result_type: HirType, second_token: usize, tag: Option<u8>) -> Vec<NerJitEvent> {
@@ -2255,6 +2273,7 @@ fn ner_jit_run_borrowed_case(fail_retain: bool) -> (Vec<NerJitEvent>, usize, usi
     assert_eq!(external, BTreeSet::from([
         "thaw_promise_destroy".to_string(),
         "thaw_promise_retain".to_string(),
+        "thaw_error_frame".to_string(),
     ]), "all return/error calls are inventoried before invocation:\n{ir}");
     let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
     ner_jit_map_lifecycle_stubs(&compiler, &engine);
@@ -2358,6 +2377,7 @@ fn ner_jit_run_borrowed_union_case(
     assert_eq!(external, BTreeSet::from([
         "thaw_promise_destroy".to_string(),
         "thaw_promise_retain".to_string(),
+        "thaw_error_frame".to_string(),
     ]), "borrowed Union paths inventory all lifecycle calls before invocation:\n{ir}");
     let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
     ner_jit_map_lifecycle_stubs(&compiler, &engine);

@@ -772,6 +772,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Object.assign returned no value")?;
+                self.compile_check_json_host_error(assigned, None)?;
                 let error = self.builder.build_call(
                     self.module.get_function("thaw_json_take_assign_error").unwrap(),
                     &[], "object_assign_error",

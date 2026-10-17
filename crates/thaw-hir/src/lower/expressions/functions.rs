@@ -1428,7 +1428,10 @@ impl<'a> FnLowerer<'a> {
                         .map(|ty| HirParam { name, ty })
                 })
                 .collect();
-            Ok(HirExpr::Lambda(captures, params, ret, Box::new(body)))
+            Ok(rest_aware_closure(
+                arrow,
+                HirExpr::Lambda(captures, params, ret, Box::new(body)),
+            ))
         });
         self.scope = saved_scope;
         self.source_scope = saved_source_scope;

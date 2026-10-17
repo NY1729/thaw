@@ -7623,7 +7623,7 @@ fn json_assign_delete_and_prototype_constraints_throw() {
     "#;
     assert_eq!(
         compile_and_run(source, "json_assign_delete_prototype_constraints"),
-        "true\n1\nfalse\ntrue\n1\ntrue\ntrue\n"
+        "true\n1\nfalse\ntrue\n1\ntrue\nfalse\n"
     );
 }
 
@@ -9289,7 +9289,7 @@ fn catch_preserves_arbitrary_object_identity_through_typed_assertions() {
 }
 
 #[test]
-fn invalid_catch_object_assertions_throw_instead_of_dereferencing_null() {
+fn catch_structural_assertions_keep_javascript_property_semantics() {
     let source = r#"
         interface Failure { code: number; }
 
@@ -9319,7 +9319,7 @@ fn invalid_catch_object_assertions_throw_instead_of_dereferencing_null() {
     "#;
     assert_eq!(
         compile_and_run(source, "invalid_catch_object_assertion"),
-        "caught value is not an object\ncaught value is not an object\n"
+        "undefined\nundefined\n"
     );
 }
 

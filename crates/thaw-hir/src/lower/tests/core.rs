@@ -1557,6 +1557,24 @@ fn contextual_rest_callback_preserves_zero_and_fixed_prefix_rest_shapes() {
 }
 
 #[test]
+fn dynamic_storage_object_literal_keeps_contextual_rest_callback_metadata() {
+    let program = lower(
+        r#"
+        declare function accept(options: { callback?: (...values: string[]) => void }): JsValue;
+        function main(): void {
+            accept({ callback: (...values: string[]) => console.log(values.length) });
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let hir = format!("{:?}", main.body);
+    assert!(
+        hir.contains("CallableFunction([], Inline(0), Some(Str), Void)"),
+        "the escaped callback retains its logical rest marker through object lowering: {hir}"
+    );
+}
+
+#[test]
 fn contextual_rest_callbacks_keep_inline_and_named_fixed_prefixes() {
     let program = lower(
         r#"

@@ -23,6 +23,84 @@ fn jit_symbols_in_declaration(source: &str) -> Result<std::collections::HashSet<
     Ok(finder.0)
 }
 
+fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
+    use thaw_hir::HirType;
+
+    match ty {
+        HirType::Array(_)
+        | HirType::Tuple(_)
+        | HirType::Object(_)
+        | HirType::Dictionary(_)
+        | HirType::Bytes
+        | HirType::Map(..)
+        | HirType::WeakMap(..)
+        | HirType::Set(_)
+        | HirType::WeakSet(_) => true,
+        HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner)
+        | HirType::Promise(inner) => jit_type_needs_live_json_adaptation(inner),
+        HirType::Union(types) => types.iter().any(jit_type_needs_live_json_adaptation),
+        // These already have a direct scalar, dynamic, or opaque-handle ABI.
+        // In particular, JsValue is a live QuickJS handle rather than a
+        // native aggregate that needs a JSON adapter.
+        HirType::F64
+        | HirType::I64
+        | HirType::Bool
+        | HirType::Undefined
+        | HirType::Null
+        | HirType::Void
+        | HirType::Str
+        | HirType::Symbol
+        | HirType::StrLiteral(_)
+        | HirType::Json
+        | HirType::JsValue
+        | HirType::NativeException
+        | HirType::Function(..)
+        | HirType::CallableFunction(..)
+        | HirType::FunctionWithThis(..)
+        | HirType::Dynamic => false,
+    }
+}
+
+fn jit_function_needs_live_json_adaptation(function: &thaw_bridge::DtsFunction) -> bool {
+    use thaw_bridge::DtsType;
+
+    let needs_adaptation = |ty: &DtsType| {
+        matches!(ty, DtsType::Native(ty) if jit_type_needs_live_json_adaptation(ty))
+    };
+    function.params.iter().any(|(_, ty)| needs_adaptation(ty))
+        || function
+            .rest_param
+            .as_ref()
+            .is_some_and(|(_, ty)| needs_adaptation(ty))
+        || needs_adaptation(&function.ret)
+}
+
+#[cfg(test)]
+mod jit_dynamic_abi_tests {
+    use super::jit_type_needs_live_json_adaptation;
+    use thaw_hir::HirType;
+
+    #[test]
+    fn only_native_aggregate_slots_require_live_json_adaptation() {
+        assert!(!jit_type_needs_live_json_adaptation(&HirType::JsValue));
+        assert!(!jit_type_needs_live_json_adaptation(&HirType::F64));
+        assert!(jit_type_needs_live_json_adaptation(&HirType::Array(Box::new(
+            HirType::F64,
+        ))));
+        assert!(jit_type_needs_live_json_adaptation(&HirType::Nullable(Box::new(
+            HirType::Dictionary(Box::new(HirType::F64)),
+        ))));
+        assert!(jit_type_needs_live_json_adaptation(&HirType::Promise(Box::new(
+            HirType::Union(vec![HirType::Str, HirType::Bytes]),
+        ))));
+        assert!(!jit_type_needs_live_json_adaptation(&HirType::Promise(Box::new(
+            HirType::F64,
+        ))));
+    }
+}
+
 /// Mirrors `is_error_family_name`'s exact list (thaw-hir, `lower/
 /// module/helpers.rs`) -- duplicated here rather than exposed as a
 /// shared dependency, matching this codebase's own established
@@ -1158,7 +1236,7 @@ fn generate_registry_shims(
                 // calling convention) before this loop ever reaches it.
                 let already_bound = typed_targets.contains_key(&(pkg.name.clone(), function.name.clone()));
                 if let Some((symbol, declaration)) = declaration.filter(|_| !already_bound) {
-                    if jit_operation.is_some() {
+                    if jit_operation.is_some() && jit_function_needs_live_json_adaptation(function) {
                         for jit_symbol in jit_symbols_in_declaration(&declaration)? {
                             jit_symbol_origins.insert(
                                 jit_symbol,

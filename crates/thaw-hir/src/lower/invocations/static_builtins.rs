@@ -1370,8 +1370,18 @@ impl<'a> FnLowerer<'a> {
                         && matches!(&dynamic_target_var, HirExpr::Var(_))
                     {
                                     let label = format!("{}.defineProperty", object.sym);
+                                    let HirExpr::Var(target_name) = &dynamic_target_var else {
+                                        unreachable!("host-backed target was bound above")
+                                    };
+                                    let mut host_call_args = call.args.clone();
+                                    *host_call_args[0].expr = Expr::Ident(
+                                        swc_ecma_ast::Ident::new_no_ctxt(
+                                            target_name.clone().into(),
+                                            call.span,
+                                        ),
+                                    );
                                     let (arguments, bindings) =
-                                        self.lower_native_spread_values(&call.args, &label)?;
+                                        self.lower_native_spread_values(&host_call_args, &label)?;
                                     let json_arguments = arguments
                                         .iter()
                                         .map(|argument| {

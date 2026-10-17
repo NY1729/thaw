@@ -1958,6 +1958,144 @@ fn function_expression_receiver_provenance_survives_contextual_lowering() {
 }
 
 #[test]
+fn named_function_assigned_to_local_callback_keeps_native_scalar_return() {
+    let program = lower(
+        r#"function captureFunction(): () => boolean {
+            let read: () => boolean = () => false;
+            try {
+                throw true;
+            } catch (error) {
+                read = function readCaught(): boolean { return error as boolean; };
+                error = false;
+            }
+            return read;
+        }
+        function main(): void { console.log(captureFunction()()); }"#,
+    );
+    let capture = program
+        .functions
+        .iter()
+        .find(|function| function.name == "captureFunction")
+        .unwrap();
+    let catch_body = capture.body.iter().find_map(|statement| match statement {
+        HirStmt::Try(_, _, catch_body, _) => Some(catch_body),
+        _ => None,
+    }).expect("expected the catch body with the named callback assignment");
+    let HirStmt::Expr(HirExpr::Assign(_, value)) = &catch_body[0] else {
+        panic!("expected the callback assignment in the catch body");
+    };
+    let HirExpr::NonArrowFunction(closure) = value.as_ref() else {
+        panic!("expected a non-arrow function expression");
+    };
+    let HirExpr::Lambda(_, _, ret, _) = closure.as_ref() else {
+        panic!("expected the lowered callback body");
+    };
+    assert_eq!(*ret, HirType::Bool);
+}
+
+#[test]
+fn arrow_assigned_to_local_callback_keeps_native_scalar_return() {
+    let program = lower(
+        r#"function captureArrow(): () => boolean {
+            let read: () => boolean = () => false;
+            try {
+                throw true;
+            } catch (error) {
+                read = (): boolean => error as boolean;
+                error = false;
+            }
+            return read;
+        }
+        function main(): void { console.log(captureArrow()()); }"#,
+    );
+    let capture = program
+        .functions
+        .iter()
+        .find(|function| function.name == "captureArrow")
+        .unwrap();
+    let catch_body = capture
+        .body
+        .iter()
+        .find_map(|statement| match statement {
+            HirStmt::Try(_, _, catch_body, _) => Some(catch_body),
+            _ => None,
+        })
+        .expect("expected the catch body with the callback assignment");
+    let HirStmt::Expr(HirExpr::Assign(_, value)) = &catch_body[0] else {
+        panic!("expected the callback assignment in the catch body");
+    };
+    let HirExpr::Lambda(_, _, ret, _) = value.as_ref() else {
+        panic!("expected the lowered callback body");
+    };
+    assert_eq!(*ret, HirType::Bool);
+}
+
+#[test]
+fn named_function_assigned_to_quickjs_function_alias_keeps_boundary_mapping() {
+    let program = lower(
+        r#"declare function __thaw_typed_js_6563686f(values: number[]): number[];
+        function main(): void {
+            let alias: (values: number[]) => number[] = __thaw_typed_js_6563686f;
+            alias = function echoValues(values: number[]): number[] { return values; };
+            const input: any = JSON.parse('[1]');
+            const result: any = alias(input);
+            result[0] = 7;
+            console.log(input === result, input[0]);
+        }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(
+        body.contains("params: [Json], ret: Json"),
+        "the imported QuickJS function alias and its named replacement must keep live JSON slots: {body}"
+    );
+}
+
+#[test]
+fn generic_optional_arrow_accepts_a_present_native_argument() {
+    let program = lower(
+        r#"type OptionalIdentity = <T>(value?: T) => T;
+        function main(): void {
+            const optionalIdentity: OptionalIdentity = <T>(value?: T): T => value;
+            console.log(optionalIdentity(41));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn generic_optional_arrow_keeps_omitted_and_undefined_capable_arguments_optional() {
+    let program = lower(
+        r#"type OptionalIdentity = <T>(value?: T) => T | undefined;
+        function main(): void {
+            const identity: OptionalIdentity = <T>(value?: T): T | undefined => value;
+            console.log(identity(41));
+            console.log(identity<number>());
+            const maybe: number | undefined = undefined;
+            console.log(identity(maybe));
+            const later = identity.bind(null);
+            console.log(later<number>());
+            const destructured: OptionalIdentity = <T>(value?: T): T | undefined => {
+                [value] = [undefined];
+                return value;
+            };
+            console.log(destructured(41));
+            const iterated: OptionalIdentity = <T>(value?: T): T | undefined => {
+                const values: (number | undefined)[] = [undefined];
+                for (value of values) {}
+                return value;
+            };
+            console.log(iterated(41));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
 fn generic_function_expression_keeps_receiver_provenance_after_specialization() {
     let program = lower(
         r#"function main(): void {
