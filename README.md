@@ -212,13 +212,15 @@ Known gaps against Node semantics:
 - An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
   self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
   element becomes `NaN`, and nesting deeper than 32 levels is stored as a plain copy.
-- A method result that belongs to its receiver is returned by reference
-  (`v.inner.get().push(x)`, `o.cfg().x = 1`): a native array or class instance a class method
-  hands back (declared as `T[]` or a class type), and a JavaScript object stored in the receiver
+- Supported native method results preserve their identity even when freshly allocated
+  (`v.inner.get().push(x)`, `o.cfg().x = 1`): a native array, class instance or supported Map/Set a class method
+  hands back (declared as `T[]`, a class type or a collection type), and a JavaScript object stored in the receiver
   within two levels (a scan of at most 256 own data properties). Other results are data
-  snapshots: a fresh array or object, a result declared `T[] | undefined`, a tuple, a `Map`/`Set`
+  snapshots: a fresh JavaScript array or object, a result declared `T[] | undefined`, a tuple
   or a `Promise` of an array (`async get()`), and an owned value stored deeper or further down than
-  the scan reaches. Mutating a snapshot does not reach the owner.
+  the scan reaches. Mutating a snapshot does not reach the owner. Classes with writable
+  Map/Set fields or methods accepting Map/Set parameters cannot yet cross into `any`;
+  their native callback argument conversion is unsupported.
 
 ## Examples
 

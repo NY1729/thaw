@@ -1421,6 +1421,11 @@
       "name": "native collection iterator spread propagates next errors",
       "expect": "matched",
       "source": "function main():void { const m=new Map<string,number>();m.set(\"a\",1);const a:any=m;const it:any=a.keys();it.next=()=>{throw new Error(\"next failed\");};try {const xs:any=[...it];console.log(xs.length);} catch(e:any){console.log(e.message);} }"
+    },
+    {
+      "name": "native class methods preserve returned collection aliases",
+      "expect": "matched",
+      "source": "const sharedMap = new Map<string,number>();\nconst sharedSet = new Set<number>();\nclass Store {\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return sharedMap; }\n  getSet(): Set<number> { return sharedSet; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(sharedMap.get(\"a\"),sharedSet.has(2),m===a.getMap(),t===a.getSet(),s.calls);\n sharedMap.set(\"b\",3);sharedSet.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(sharedMap.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(x.get(\"x\"));\n}"
     }
   ]
 }
