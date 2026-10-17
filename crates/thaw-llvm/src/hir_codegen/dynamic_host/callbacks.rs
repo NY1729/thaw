@@ -9,7 +9,17 @@
 pub(super) fn json_callback_wants_graph(params: &[HirType]) -> bool {
     let takes_byte_buffer = params.iter().any(|param| *param == HirType::Bytes
         || matches!(param, HirType::Array(element) if **element == HirType::F64));
-    !takes_byte_buffer && params.contains(&HirType::Json)
+    fn contains_collection(ty: &HirType) -> bool {
+        match ty {
+            HirType::Map(..) | HirType::Set(_) => true,
+            HirType::Object(fields) => fields.iter().any(|(_, field)| contains_collection(field)),
+            HirType::Array(inner) | HirType::Optional(inner) | HirType::Nullable(inner)
+            | HirType::Nullish(inner) => contains_collection(inner),
+            HirType::Tuple(members) | HirType::Union(members) => members.iter().any(contains_collection),
+            _ => false,
+        }
+    }
+    params.iter().any(contains_collection) || (!takes_byte_buffer && params.contains(&HirType::Json))
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -3067,6 +3077,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Tuple(elements) => {
                 let value = self.compile_json_to_native_tuple(json, elements)?;
+                self.compile_destroy_typed_input_if_detached(json, ty, None)?;
+                Ok(value)
+            }
+            HirType::Map(..) | HirType::Set(_) => {
+                let value = self.compile_json_to_native_collection(json, ty)?;
                 self.compile_destroy_typed_input_if_detached(json, ty, None)?;
                 Ok(value)
             }

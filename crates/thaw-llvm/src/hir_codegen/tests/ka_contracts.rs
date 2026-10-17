@@ -232,3 +232,116 @@ async function main():Promise<void> {
 fn host_iterator_roots_survive_chained_helpers() {
     assert_eq!(compile_and_run(r###"function main():void {const arr:JsValue=[1,2,3];const a:any=arr.values().map((v:any)=>v*2).drop(1).take(1);console.log(a.next().value,a.next().done);const box:any={m:new Map<string,number>(),s:new Set<number>([1,2])};const m:JsValue=box.m;m.set("a",1);m.set("b",2);const keys:any=m.keys().map((v:any)=>v+"!");console.log(keys.next().value,[...keys].join(","));const set:JsValue=box.s;const entries:any=set.entries().flatMap((e:any)=>e);console.log([...entries].join(","));}"###, "host_iterator_roots_survive_chained_helpers"), "4 true\na! b!\n1,1,2,2\n");
 }
+
+#[test]
+fn native_class_getters_preserve_collection_identity() {
+ assert_eq!(compile_and_run(r###"const sharedMap = new Map<string,number>();
+const sharedSet = new Set<number>();
+class Store {
+  get map(): Map<string,number> { return sharedMap; }
+  get set(): Set<number> { return sharedSet; }
+  calls = 0;
+  getMap(): Map<string,number> { this.calls += 1; return this.map; }
+  getSet(): Set<number> { return this.set; }
+  fresh(): Map<string,number> { return new Map<string,number>(); }
+}
+async function main():Promise<void> {
+ const s=new Store(); const a:any=s;
+ const m:any=a.getMap(); const t:any=a.getSet();
+ m.set("a",1); t.add(2);
+ console.log(s.map.get("a"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);
+ s.map.set("b",3);s.set.add(4); console.log(m.get("b"),t.has(4));
+ await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set("c",5);console.log(s.map.get("c"));
+ const x:any=a.fresh(); const y:any=a.fresh();x.set("x",7);console.log(x===y,y.has("x"));
+}"###,"native_class_getters_preserve_collection_identity"),"1 true true true true true 2\n3 true\n5\nfalse false\n");
+}
+
+#[test]
+fn native_class_collection_fields_remain_live() {
+ assert_eq!(compile_and_run(r###"class Store {
+  map: Map<string,number> = new Map<string, number>();
+  set: Set<number> = new Set<number>();
+  calls = 0;
+  getMap(): Map<string,number> { this.calls += 1; return this.map; }
+  getSet(): Set<number> { return this.set; }
+  fresh(): Map<string,number> { return new Map<string,number>(); }
+}
+async function main():Promise<void> {
+ const s=new Store(); const a:any=s;
+ const m:any=a.getMap(); const t:any=a.getSet();
+ m.set("a",1); t.add(2);
+ console.log(s.map.get("a"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);
+ s.map.set("b",3);s.set.add(4); console.log(m.get("b"),t.has(4));
+ await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set("c",5);console.log(s.map.get("c"));
+ const x:any=a.fresh(); const y:any=a.fresh();x.set("x",7);console.log(x===y,y.has("x"));
+}"###,"native_class_collection_fields_remain_live"),"1 true true true true true 2\n3 true\n5\nfalse false\n");
+}
+
+#[test]
+fn native_collection_arguments_and_define_writes_remain_live() {
+ assert_eq!(compile_and_run(r###"class Store {
+ map:Map<string,number>=new Map<string,number>(); set:Set<number>=new Set<number>();
+ replace(m:Map<string,number>,s:Set<number>):Map<string,number> { this.map=m;this.set=s;m.set("inside",7);s.add(3);return m; }
+}
+async function main():Promise<void>{
+ const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;
+ const result:any=a.replace(b,c); console.log(store.map===m,store.set===s,result===b,a.map===b,a.set===c,m.get("inside"),s.has(3));
+ const other=new Map<string,number>();const d:any=other;a.map=d;a.set=c;console.log(store.map===other,store.set===s);
+ Object.defineProperty(a,"map",{value:b});console.log(store.map===m,a.map===b);
+ for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}a.map.set("kept",9);console.log(m.get("kept"));
+}"###,"native_collection_arguments_and_define_writes_remain_live"),"true true true true true 7 true\ntrue true\ntrue true\n9\n");
+}
+
+#[test]
+fn native_inherited_accessors_keep_receivers_and_descriptors() {
+ assert_eq!(compile_and_run(r###"class Base { n=1;get value():number{return this.n;}set value(v:number){this.n=v;} }
+class Derived extends Base { get twice():number{return this.n*2;} }
+function main():void {const x=new Derived();const y=new Derived();y.n=5;const a:any=x;const b:any=y;console.log(a.value,a.twice);a.value=3;console.log(x.n,a.twice);const proto:any=Object.getPrototypeOf(a);const getter:any=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(proto),"value").get;console.log(getter.call(b));console.log(Object.keys(a).join(","),Object.prototype.hasOwnProperty.call(a,"value"));}"###,"native_inherited_accessors_keep_receivers_and_descriptors"),"1 2\n3 6\n5\nn false\n");
+}
+
+#[test]
+fn native_inherited_accessors_keep_real_ancestor_overrides() {
+ assert_eq!(compile_and_run(r###"class Base {n=2;get value():number{return this.n;}set value(v:number){this.n=v;}}
+class Derived extends Base {ping():number{return 1;}}
+function main():void { let seen=0;const ctor:any=Base;Object.defineProperty(ctor.prototype,"value",{get:()=>100,set:(v:number)=>{seen=v;},configurable:true});const x=new Derived();const a:any=x;console.log(a.value);a.value=4;console.log(x.n,a.value,a.ping(),seen); }"###,"native_inherited_accessors_keep_real_ancestor_overrides"),"100\n2 100 1 4\n");
+}
+
+#[test]
+fn native_error_subclass_keeps_javascript_prototype() {
+ assert_eq!(compile_and_run(r###"class Failure extends Error { constructor(){super("failure");} } function main():void {const cls:any=Failure;const e=new Failure();console.log(e instanceof Error,e.message,cls.prototype instanceof Error); }"###,"native_error_subclass_keeps_javascript_prototype"),"true failure true\n");
+}
+
+#[test]
+fn native_collection_and_array_arguments_keep_escaped_owner() {
+ assert_eq!(compile_and_run(r###"class Box {stored:Map<string,number>=new Map<string,number>();run(m:Map<string,number>,values:number[]):number {this.stored=m;m.set("sum",values[0]+values[1]);return m.size;}}
+function make():any {const box=new Box();const a:any=box;const m=new Map<string,number>();const b:any=m;console.log(a.run(b,[2,3]),m.get("sum"));return a;}
+async function main():Promise<void>{const a:any=make();for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(a.stored.get("sum"));}"###,"native_collection_and_array_arguments_keep_escaped_owner"),"1 5\n5\n");
+}
+
+#[test]
+fn native_collection_arguments_reject_incompatible_and_unbranded_values() {
+ assert_eq!(compile_and_run(r###"class Store {calls=0;use(m:Map<string,number>,s:Set<number>):number {this.calls+=1;m.set("ok",1);s.add(2);return this.calls;}}
+function main():void {const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;
+const wrong=new Map<string,string>();const wrongSet=new Set<string>();const d:any=wrong;const e:any=wrongSet;
+try {a.use(d,c);console.log("accepted wrong map");}catch(error:any){console.log(error instanceof TypeError);}
+try {a.use(b,e);console.log("accepted wrong set");}catch(error:any){console.log(error instanceof TypeError);}
+const host:any=new Function("return new Map()")();try{a.use(host,c);console.log("accepted host");}catch(error:any){console.log(error instanceof TypeError);}
+const fake:any={"__thaw_js_handle_id__":1};try{a.use(fake,c);console.log("accepted fake");}catch(error:any){console.log(error instanceof TypeError);}
+console.log(store.calls,m.size,s.size);console.log(a.use(b,c),m.get("ok"),s.has(2));}"###,"native_collection_arguments_reject_incompatible_and_unbranded_values"),"true\ntrue\ntrue\ntrue\n0 0 0\n1 1 true\n");
+}
+
+#[test]
+fn native_class_real_accessors_keep_collection_assignments() {
+ assert_eq!(compile_and_run(r###"class Holder {map:Map<string,number>=new Map<string,number>();calls=0;get current():Map<string,number>{this.calls+=1;return this.map;}set current(v:Map<string,number>){this.calls+=1;this.map=v;}}
+function main():void {const token:any=Holder;const h=new Holder();const a:any=h;const m=new Map<string,number>();const b:any=m;console.log(h.calls);a.current=b;console.log(a.current===b,h.map===m,h.calls);a.current.set("x",3);console.log(m.get("x"),h.calls);}"###,"native_class_real_accessors_keep_collection_assignments"),"0\ntrue true 2\n3 3\n");
+}
+
+#[test]
+fn native_host_get_prototype_preserves_proxy_exceptions() {
+ assert_eq!(compile_and_run(r###"function main():void {const proxy:any=new Function("return new Proxy({}, {getPrototypeOf(){throw new Error('prototype failed');}})")();try{Object.getPrototypeOf(proxy);console.log("accepted");}catch(e:any){console.log(e.message);} }"###,"native_host_get_prototype_preserves_proxy_exceptions"),"prototype failed\n");
+}
+
+#[test]
+fn native_private_fields_and_accessors_keep_callback_layout() {
+ assert_eq!(compile_and_run(r###"class Counter {#n=1;get value():number{return this.#n;}set value(v:number){this.#n=v;}read():number{return this.#n;}}function main():void {const c=new Counter();const a:any=c;console.log(a.value,a.read(),Object.keys(a).length);a.value=4;console.log(c.read(),a.value);}"###,"native_private_fields_and_accessors_keep_callback_layout"),"1 1 0\n4 4\n");
+}

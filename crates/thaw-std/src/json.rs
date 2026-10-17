@@ -2109,6 +2109,14 @@ pub unsafe extern "C" fn thaw_json_set_prototype(
 /// `Object.create`/`Object.setPrototypeOf`).
 #[no_mangle]
 pub extern "C" fn thaw_json_get_prototype(object: *const Value) -> *mut Value {
+    if let Some(Value::Host(lease)) = unsafe { object.as_ref() } {
+        return leak(
+            host_enumerate_values(lease, 8)
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Null),
+        );
+    }
     let Some(key) = (unsafe { object.as_ref() }).and_then(object_identity_key) else {
         return leak(Value::Null);
     };
