@@ -94,6 +94,10 @@ fn lower_callable_default_wrappers(
                     HirType::Nullish(payload) => {
                         HirExpr::NullishUndefined(payload.as_ref().clone())
                     }
+                    HirType::Json => lowerer.coerce_to_declared(
+                        &HirType::Json,
+                        HirExpr::Lit(HirLit::Undefined),
+                    )?,
                     other => {
                         return Err(format!(
                             "optional parameter `{}` of `{symbol}` needs an undefined-capable type, got {other:?}",
@@ -263,6 +267,10 @@ fn lower_callable_omitted_parameter_wrappers(
                     HirType::Nullish(payload) => {
                         HirExpr::NullishUndefined(payload.as_ref().clone())
                     }
+                    HirType::Json => lowerer.coerce_to_declared(
+                        &HirType::Json,
+                        HirExpr::Lit(HirLit::Undefined),
+                    )?,
                     other => {
                         return Err(format!(
                             "optional parameter `{}` of `{symbol}` needs an undefined-capable type, got {other:?}",
@@ -1313,6 +1321,7 @@ fn lower_fn_decl(
         func.is_generator,
         &mut body,
     )?;
+    lowerer.prepend_referenced_promise_snapshots(&params, &mut body);
     let ret = if func.is_generator && hir_type_contains_dynamic(&declared_ret) {
         lowerer.ret_type
     } else if declared_ret == HirType::Dynamic {

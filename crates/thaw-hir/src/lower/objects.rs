@@ -1,3 +1,29 @@
+fn expected_object_fields(expected: &HirType) -> Option<&[(Symbol, HirType)]> {
+    match expected {
+        HirType::Object(fields) => Some(fields.as_slice()),
+        HirType::Optional(payload)
+        | HirType::Nullable(payload)
+        | HirType::Nullish(payload) => match payload.as_ref() {
+            HirType::Object(fields) => Some(fields.as_slice()),
+            _ => None,
+        },
+        // A `T | T[]` parameter (for example hapi's route overload) gives a
+        // literal one unambiguous contextual object shape. Keep ambiguous
+        // unions of multiple object shapes on their normal inference path.
+        HirType::Union(elements) => {
+            let mut objects = elements.iter().filter_map(|element| match element {
+                HirType::Object(fields) => Some(fields.as_slice()),
+                _ => None,
+            });
+            match (objects.next(), objects.next()) {
+                (Some(fields), None) => Some(fields),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     /// Whether an `any` object literal must be built as one live object: it has a method,
     /// accessor or well-known-symbol key, or a nested object literal that does.
@@ -765,6 +791,15 @@ impl<'a> FnLowerer<'a> {
         obj_lit: &SwcObjectLit,
         live_json: bool,
     ) -> Result<HirExpr, String> {
+        self.lower_dynamic_accessor_object_lit_with_expected_fields(obj_lit, live_json, None)
+    }
+
+    fn lower_dynamic_accessor_object_lit_with_expected_fields(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+        live_json: bool,
+        expected_fields: Option<&[(Symbol, HirType)]>,
+    ) -> Result<HirExpr, String> {
         let mut bindings = Vec::new();
         let mut kinds = Vec::new();
         let mut keys = Vec::new();
@@ -797,6 +832,15 @@ impl<'a> FnLowerer<'a> {
             };
             let (kind, key, value, callback) = match property.as_ref() {
                 Prop::KeyValue(KeyValueProp { key, value }) => {
+                    let expected_value = self
+                        .static_object_property_name(key)
+                        .and_then(|name| {
+                            expected_fields.and_then(|fields| {
+                                fields.iter().find_map(|(field, ty)| {
+                                    (field == &name).then_some(ty)
+                                })
+                            })
+                        });
                     let key = match self.dynamic_operation_property_name(key) {
                         Some(key) => HirExpr::Lit(HirLit::Str(key)),
                         None => {
@@ -813,16 +857,20 @@ impl<'a> FnLowerer<'a> {
                         let callback = self.lower_object_function(
                             &function.function,
                             HirType::JsValue,
-                            None,
+                            expected_value,
                             true,
                         )?;
                         ("method", key, None, Some(callback))
                     } else if let Expr::Object(inner) = value.as_ref() {
                         // A nested literal that itself has methods is a live object too.
                         let nested = if self.object_literal_needs_live_object(inner) {
-                            self.lower_dynamic_accessor_object_lit(inner, true)?
+                            self.lower_dynamic_accessor_object_lit_with_expected_fields(
+                                inner,
+                                true,
+                                expected_value.and_then(expected_object_fields),
+                            )?
                         } else {
-                            self.lower_object_lit_field_value(value, None)?
+                            self.lower_object_lit_field_value(value, expected_value)?
                         };
                         let nested = self.coerce_to_declared(&HirType::Json, nested)?;
                         ("data", key, Some(nested), None)
@@ -834,7 +882,7 @@ impl<'a> FnLowerer<'a> {
                         let array = self.coerce_to_declared(&HirType::Json, array)?;
                         ("data", key, Some(array), None)
                     } else {
-                        let value = self.lower_object_lit_field_value(value, None)?;
+                        let value = self.lower_object_lit_field_value(value, expected_value)?;
                         let value = self.coerce_to_declared(&HirType::Json, value)?;
                         ("data", key, Some(value), None)
                     }
@@ -850,6 +898,15 @@ impl<'a> FnLowerer<'a> {
                     )
                 }
                 Prop::Method(method) => {
+                    let expected_method = self
+                        .static_object_property_name(&method.key)
+                        .and_then(|name| {
+                            expected_fields.and_then(|fields| {
+                                fields.iter().find_map(|(field, ty)| {
+                                    (field == &name).then_some(ty)
+                                })
+                            })
+                        });
                     let key = match self.dynamic_operation_property_name(&method.key) {
                         Some(key) => HirExpr::Lit(HirLit::Str(key)),
                         None => {
@@ -863,7 +920,7 @@ impl<'a> FnLowerer<'a> {
                     let callback = self.lower_object_function(
                         &method.function,
                         HirType::JsValue,
-                        None,
+                        expected_method,
                         true,
                     )?;
                     ("method", key, None, Some(callback))
@@ -2039,7 +2096,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Lit(HirLit::Str(format!(
                 "\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{property}')"
             )))),
-            Box::new(Self::unreachable_value(ty)?),
+            Box::new(HirExpr::TypedClosure(ty.clone(), Box::new(Self::unreachable_value(ty)?))),
         ))
     }
 
@@ -4355,7 +4412,11 @@ impl<'a> FnLowerer<'a> {
         let source_type = HirType::Object(fields.to_vec());
         // A class receiver is entered through the ordinary callback ABI, so its
         // parameter must not carry the non-arrow `__thaw_this` name.
-        let this_name = if class_methods { "__thaw_class_owner" } else { "__thaw_this" };
+        let this_name = if class_name_from_type(&source_type).is_some() {
+            "__thaw_class_owner"
+        } else {
+            "__thaw_this"
+        };
         let proto_methods = if class_methods {
             self.class_instance_projected_methods(&source_type)
         } else {
@@ -6182,13 +6243,26 @@ impl<'a> FnLowerer<'a> {
         let Some(signature) = self.signatures.get(&symbol).cloned() else {
             return Ok(None);
         };
+        let args = vec![value, HirExpr::Lit(HirLit::Str(hint.to_string()))];
+        let args = signature
+            .params
+            .iter()
+            .zip(args)
+            .enumerate()
+            .map(|(index, (declared, value))| {
+                self.coerce_primitive_array_argument_aliasing(value, declared)
+                    .map_err(|error| {
+                        format!("argument {} of `{symbol}` is invalid: {error}", index + 1)
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let call = HirExpr::Call(
             Box::new(HirExpr::FunctionRef(
                 symbol,
                 signature.params.clone(),
                 signature.ret.clone(),
             )),
-            vec![value, HirExpr::Lit(HirLit::Str(hint.to_string()))],
+            args,
         );
         Ok(Some(call))
     }

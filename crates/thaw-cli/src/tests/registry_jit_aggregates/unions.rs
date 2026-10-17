@@ -42,6 +42,65 @@ fn optional_aggregates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn native_jit_array_identity_preserves_original_handles() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-identity-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-identity");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        concat!(
+            "export declare function identity(value: number[]): number[];\n",
+            "export declare function copyValues(value: number[]): number[];\n",
+            "export declare function nullableIdentity(value: number[] | null): number[] | null;\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        concat!(
+            "module.exports.identity = value => value;\n",
+            "module.exports.copyValues = value => value.slice(0);\n",
+            "module.exports.nullableIdentity = value => value;\n",
+        ),
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { copyValues, identity, nullableIdentity } from 'jit-array-identity';\n",
+            "function main(): void {\n",
+            "  const values: number[] = [1, 2]; const returned = identity(values); console.log(returned === values); returned.push(3); console.log(values.length, returned.length); values.pop(); console.log(values.length, returned.length);\n",
+            "  const copied = copyValues(values); console.log(copied === values); copied.push(4); console.log(values.length, copied.length);\n",
+            "  const empty: number[] = []; console.log(identity(empty) === empty);\n",
+            "  const absent = nullableIdentity(null); const present: number[] = [9]; const maybe = nullableIdentity(present); console.log(absent === null, maybe === present); if (maybe !== null) maybe.push(10); console.log(present.length, maybe === null ? -1 : maybe.length);\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{}", manifest["quickjs_reasons"]);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\n3 3\n2 2\nfalse\n2 3\ntrue\ntrue true\n2 2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn fixed_object_union_result_builds_native_storage() {
     let functions = thaw_bridge::parse_dts(
         "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; scores: Record<string, number>; pair: [number, string, boolean]; }\nexport declare function make(flag: boolean): Item | string;\nexport declare function describe(value: Item | string): string;\n",
@@ -175,7 +234,6 @@ fn array_union_read_methods_use_runtime_tags_once() {
         concat!(
             "export declare function reversed(value: number[] | string[]): string;\n",
             "export declare function slice(value: number[] | string[], start: number, end: number): string;\n",
-            "export declare function subarray(value: number[] | string[], start: number): string;\n",
             "export declare function at(value: number[] | string[], index: number): string;\n",
             "export declare function join(value: number[] | string[], separator: string): string;\n",
             "export declare function includesNumber(value: number[] | string[], needle: number): boolean;\n",
@@ -192,7 +250,6 @@ fn array_union_read_methods_use_runtime_tags_once() {
         concat!(
             "module.exports.reversed = value => value.toReversed().join(','); ",
             "module.exports.slice = (value, start, end) => value.slice(start, end).join(','); ",
-            "module.exports.subarray = (value, start) => { const result = value.subarray(start); return result.join(','); }; ",
             "module.exports.at = (value, index) => String(value.at(index) ?? 'missing'); ",
             "module.exports.join = (value, separator) => value.join(separator); ",
             "module.exports.includesNumber = (value, needle) => value.includes(needle); ",
@@ -209,7 +266,7 @@ fn array_union_read_methods_use_runtime_tags_once() {
         &entry,
         concat!(
             "import { at, effects, includesNumber, includesString, indexNumber, join, lastString, reversed, slice, sparse } from 'jit-array-union-reads';\n",
-            "function localSubarray(value: number[] | string[], start: number): string { return value.subarray(start).join(','); }\n",
+            "function localSlice(value: number[] | string[], start: number): string { return value.slice(start).join(','); }\n",
             "function localIncludesHole(value: number[] | string[]): boolean { return value.includes(undefined); }\n",
             "function main(): void {\n",
             "  const numbers: number[] = [1, 2, 3, 2]; const strings: string[] = ['a', 'b', 'a'];\n",
@@ -217,7 +274,8 @@ fn array_union_read_methods_use_runtime_tags_once() {
             "  const sparseStrings: string[] = [, 'x', ,];\n",
             "  console.log(reversed(numbers)); console.log(reversed(strings));\n",
             "  console.log(slice(numbers, 1, 3)); console.log(slice(strings, 1, 3));\n",
-            "  console.log(localSubarray(numbers, 2)); console.log(localSubarray(strings, 1));\n",
+            "  console.log(localSlice(numbers, 2)); console.log(localSlice(strings, 1));\n",
+            "  const absent: any = numbers; try { absent.subarray(0); } catch (error) { console.log(error instanceof TypeError); }\n",
             "  console.log(at(numbers, -1)); console.log(at(strings, -1));\n",
             "  console.log(join(numbers, '-')); console.log(join(strings, '-'));\n",
             "  console.log(includesNumber(numbers, 2)); console.log(includesNumber(strings, 2));\n",
@@ -242,7 +300,7 @@ fn array_union_read_methods_use_runtime_tags_once() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "2,3,2,1\na,b,a\n2,3\nb,a\n3,2\nb,a\n2\na\n1-2-3-2\na-b-a\ntrue\nfalse\nfalse\ntrue\n1\n-1\n-1\n2\ntrue\ntrue\n2:2,3,2\n2:b,a\n|7|:true:true:true\n|x|:true:true:true\n"
+        "2,3,2,1\na,b,a\n2,3\nb,a\n3,2\nb,a\ntrue\n2\na\n1-2-3-2\na-b-a\ntrue\nfalse\nfalse\ntrue\n1\n-1\n-1\n2\ntrue\ntrue\n2:2,3,2\n2:b,a\n|7|:true:true:true\n|x|:true:true:true\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

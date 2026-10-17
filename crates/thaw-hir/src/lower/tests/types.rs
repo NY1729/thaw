@@ -2072,6 +2072,36 @@ fn unannotated_buffer_binding_still_dispatches_byte_specific_methods() {
 }
 
 #[test]
+fn direct_and_bound_buffer_to_string_keep_byte_dispatch() {
+    let program = lower(
+        r#"
+        declare function __thaw_typed_js_627566666572(): Buffer;
+        function main(): void {
+            const direct = __thaw_typed_js_627566666572().toString();
+            const buffer: Buffer = __thaw_typed_js_627566666572();
+            const bound = buffer.toString();
+            const numbers = [72, 105].toString();
+            console.log(direct, bound, numbers);
+        }
+        "#,
+    );
+    let body = format!("{program:?}");
+    assert_eq!(
+        body.matches("__thaw_bytes_to_string").count(),
+        1,
+        "a direct Buffer result should select byte decoding: {body}"
+    );
+    assert!(
+        body.contains("__thaw_call_selected_dynamic_method"),
+        "a bound Json Buffer should keep its live method dispatch: {body}"
+    );
+    assert!(
+        body.contains("__thaw_number_array_to_string"),
+        "a number array's toString should keep its native comma-join path: {body}"
+    );
+}
+
+#[test]
 fn function_expression_this_is_hidden_from_public_signature() {
     let program = lower(
         r#"function main(): void {

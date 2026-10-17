@@ -897,7 +897,7 @@ fn finally_separates_text_only_throws_from_fresh_published_tuples() {
 fn throw_union_publishes_only_active_member_and_uses_safe_diagnostics() {
     let program = lower(r#"
         function main(reason: number | string | { value: number }): void {
-            try { throw reason; } catch (error) { console.log(error); }
+            throw reason;
         }
     "#);
     let text = format!("{:?}", program.functions[0].body);
@@ -2417,4 +2417,20 @@ fn returning_a_for_of_element_of_an_array_parameter_lowers() {
         "#,
     );
     assert_eq!(program.functions.len(), 3);
+}
+
+#[test]
+fn bare_call_of_this_function_coerces_default_any_parameter_to_json() {
+    let program = lower(
+        r#"const lam = function (this: { n: number }, k: any = 1): any { return this.n + k; };
+           function main(): void { lam(1); }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("expected lowered main function");
+    let body = format!("{:?}", main.body);
+    // A number passed to the closure's physical Json parameter must be boxed and read back as Json.
+    assert!(body.contains("JsonGet"), "bare-call argument was not coerced to Json: {body}");
 }

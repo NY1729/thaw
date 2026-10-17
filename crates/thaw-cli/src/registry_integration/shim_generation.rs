@@ -6,6 +6,23 @@ fn generated_initializer_body<'a>(source: &'a str, name: &str) -> Result<&'a str
         .ok_or_else(|| format!("unexpected generated initializer shape for {name}"))
 }
 
+fn jit_symbols_in_declaration(source: &str) -> Result<std::collections::HashSet<String>, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    #[derive(Default)]
+    struct Finder(std::collections::HashSet<String>);
+    impl Visit for Finder {
+        fn visit_fn_decl(&mut self, declaration: &thaw_parser::ast::FnDecl) {
+            if declaration.ident.sym.starts_with("__thaw_typed_jit_") {
+                self.0.insert(declaration.ident.sym.to_string());
+            }
+        }
+    }
+    let module = thaw_parser::parse_typescript(source).map_err(|error| error.to_string())?;
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    Ok(finder.0)
+}
+
 /// Mirrors `is_error_family_name`'s exact list (thaw-hir, `lower/
 /// module/helpers.rs`) -- duplicated here rather than exposed as a
 /// shared dependency, matching this codebase's own established
@@ -155,6 +172,7 @@ fn generate_registry_shims(
     embed_native_addons: bool,
     output: &Path,
     external_native_staging: Option<&Path>,
+    forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities = observed_constructor_arities_named(user_source, user_source_name)?;
@@ -493,6 +511,7 @@ fn generate_registry_shims(
     // test started reporting `quickjs: true`).
     let mut jit_targets = std::collections::HashSet::new();
     let mut jit_fallback_reasons = JitFallbackReasons::new();
+    let mut jit_symbol_origins = JitSymbolOrigins::new();
     // Names `union_overload_dispatch_declaration` already claims with a
     // runtime `typeof`-based dispatcher. The argument-shape-scoring loop
     // below (which drives each overload through `typed_dynamic_
@@ -1073,6 +1092,7 @@ fn generate_registry_shims(
                     .bundle_js
                     .as_deref()
                     .filter(|_| pkg.native_addon.is_none())
+                    .filter(|_| !forced_jit_fallbacks.contains(&(pkg.name.clone(), function.name.clone())))
                     .and_then(|source| {
                         if function.name.contains('.') { return None; }
                         jit_export_named(
@@ -1088,7 +1108,9 @@ fn generate_registry_shims(
                     jit_fallback_reasons
                         .entry((pkg.name.clone(), function.name.clone()))
                         .or_insert_with(|| {
-                            if pkg.native_addon.is_some() {
+                            if forced_jit_fallbacks.contains(&(pkg.name.clone(), function.name.clone())) {
+                                "live dynamic storage requires the JavaScript boundary".into()
+                            } else if pkg.native_addon.is_some() {
                                 "native addon call requires its N-API/JavaScript wrapper boundary"
                                     .into()
                             } else {
@@ -1136,6 +1158,14 @@ fn generate_registry_shims(
                 // calling convention) before this loop ever reaches it.
                 let already_bound = typed_targets.contains_key(&(pkg.name.clone(), function.name.clone()));
                 if let Some((symbol, declaration)) = declaration.filter(|_| !already_bound) {
+                    if jit_operation.is_some() {
+                        for jit_symbol in jit_symbols_in_declaration(&declaration)? {
+                            jit_symbol_origins.insert(
+                                jit_symbol,
+                                (pkg.name.clone(), function.name.clone()),
+                            );
+                        }
+                    }
                     shim.push_str(&declaration);
                     // The package-qualified alias (`pkg.name(...)`,
                     // rewritten to `q.alias` -- see `rewrite_qualified_calls`)
@@ -2082,6 +2112,7 @@ fn generate_registry_shims(
         external_module_indices,
         jit_fallback_reasons,
         runtime_features,
+        jit_symbol_origins,
     ))
 }
 

@@ -3265,7 +3265,7 @@ fn external_native_addons_keep_colliding_package_names_in_separate_sidecars() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(),
         "function main(): void {}",
         &thaw_parser::common::FileName::Custom("sidecar fixture.ts".into()),
-        false, &dir.join("app"), Some(&staging),
+        false, &dir.join("app"), Some(&staging), &std::collections::HashSet::new(),
     ).unwrap();
     for (name, addon, dependency) in [
         ("foo-bar", b"first addon".as_slice(), b"first dependency".as_slice()),
@@ -3316,6 +3316,42 @@ fn mixed_number_boolean_ternaries_stringify_the_selected_jit_value() {
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nfalse\nfalse\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn jit_aggregate_exports_fall_back_for_exposed_mutable_aliases() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-live-array-fallback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("live-array-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeState(): { values: number[] };\nexport declare function append(values: number[]): number;\nexport declare function appendPair(values: number[], tail: number): number;\nexport declare function appendNullable(values: number[] | null): number;\nexport declare function echoNullable(values: number[] | null): number[] | null;\nexport declare function echoUnion(values: number[] | { values: number[] }): number[] | { values: number[] };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeState = () => ({ values: [1, 2] }); module.exports.append = values => { const alias = values; alias.push(9); return values.length; }; module.exports.appendPair = (values, tail) => { values.push(tail); return values.length; }; module.exports.appendNullable = values => { values.push(9); return values.length; }; module.exports.echoNullable = values => values; module.exports.echoUnion = values => values;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { makeState, append, appendPair, appendNullable, echoNullable, echoUnion } from 'live-array-kit';\nfunction applyAppend(callback: (values: number[]) => number, values: number[]): number { return callback(values); }\nfunction main(): void { const appendAlias: (values: number[]) => number = append; const state = makeState(); const stateView: any = state; const values = state.values; const valuesView: any = values; appendAlias(values); console.log(state.values.length, stateView.values[2], valuesView[2]); applyAppend(appendAlias, values); console.log(state.values.length, stateView.values[3], valuesView[3]); values[1] = 17; console.log(stateView.values[1], valuesView[1]); const jsValues: any = JSON.parse('[4, 5]'); appendAlias(jsValues); console.log(jsValues.length, jsValues[2]); const pairAlias = appendPair; const pairValues = [1]; pairAlias(pairValues, 7); console.log(pairValues[1]); const forms = [0]; (appendAlias)(forms); appendAlias.call(null, forms); appendAlias.apply(null, [forms]); console.log(forms.length, forms[3]); const jsForms: any = JSON.parse('[0]'); (appendAlias)(jsForms); appendAlias.call(null, jsForms); appendAlias.apply(null, [jsForms]); console.log(jsForms.length, jsForms[3]); const nullableAlias = appendNullable; const nullableOriginal = [8]; const nullableValues: number[] | null = nullableOriginal; nullableAlias(nullableValues); console.log(nullableValues!.length, nullableValues![1]); console.log(nullableValues === nullableOriginal); const echoAlias = echoNullable; const echoValues: any = [6]; const echoed: any = echoAlias(echoValues); echoed.push(8); console.log(echoValues[1]); const echoUnionAlias = echoUnion; const unionValues: any = JSON.parse('[11]'); const sameUnion: any = echoUnionAlias(unionValues); sameUnion.push(12); console.log(sameUnion === unionValues, unionValues[1]); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], true);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3 9 9\n4 9 9\n17 17\n3 9\n7\n4 9\n4 9\n2 9\ntrue\n8\ntrue 12\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

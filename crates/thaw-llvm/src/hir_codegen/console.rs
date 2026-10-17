@@ -245,7 +245,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_symbol",
                 descriptor,
             )?;
-        } else if hir_type == Some(HirType::Undefined) {
+        // A void expression has no runtime value, so it prints as the
+        // JavaScript value `undefined` (for example, awaiting Promise<void>).
+        } else if matches!(hir_type, Some(HirType::Undefined | HirType::Void)) {
             let undefined = self
                 .builder
                 .build_global_string_ptr("undefined", "undefined_value")

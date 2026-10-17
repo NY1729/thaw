@@ -618,7 +618,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .transpose()?;
                 let source_annotation = annotated.clone();
-                let source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
+                let mut source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
                 if has_dynamic_storage(binding.id.span) || has_dynamic_storage(init.span()) {
                     if let Some(source) = &source_annotation { self.validate_storage_source(init, source)?; }
                 }
@@ -757,24 +757,36 @@ impl<'a> FnLowerer<'a> {
                     .flatten();
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
-                        self.lower_contextual_arrow(arrow, params, Some(ret))?
+                        self.stored_arrow_initializer = true;
+                        let lowered = self.lower_contextual_arrow(arrow, params, Some(ret));
+                        self.stored_arrow_initializer = false;
+                        lowered?
                     }
                     (Expr::Arrow(arrow), Some(HirType::CallableFunction(params, _, rest, ret))) => {
                         let mut abi_params = params.clone();
                         if let Some(rest) = rest {
                             abi_params.push(HirType::Array(rest.clone()));
                         }
-                        self.lower_contextual_arrow(arrow, &abi_params, Some(ret))?
+                        self.stored_arrow_initializer = true;
+                        let lowered = self.lower_contextual_arrow(arrow, &abi_params, Some(ret));
+                        self.stored_arrow_initializer = false;
+                        lowered?
                     }
                     (Expr::Fn(function), Some(HirType::Function(params, ret))) => {
-                        self.lower_function_expression(function, Some((params, Some(ret))))?
+                        self.stored_arrow_initializer = true;
+                        let lowered = self.lower_function_expression(function, Some((params, Some(ret))));
+                        self.stored_arrow_initializer = false;
+                        lowered?
                     }
                     (Expr::Fn(function), Some(HirType::CallableFunction(params, _, rest, ret))) => {
                         let mut abi_params = params.clone();
                         if let Some(rest) = rest {
                             abi_params.push(HirType::Array(rest.clone()));
                         }
-                        self.lower_function_expression(function, Some((&abi_params, Some(ret))))?
+                        self.stored_arrow_initializer = true;
+                        let lowered = self.lower_function_expression(function, Some((&abi_params, Some(ret))));
+                        self.stored_arrow_initializer = false;
+                        lowered?
                     }
                     (
                         Expr::Ident(identifier),
@@ -787,26 +799,40 @@ impl<'a> FnLowerer<'a> {
                             let signature = self.signatures.get(&source).ok_or_else(|| {
                                 format!("unknown function value `{}`", identifier.sym)
                             })?;
-                            if signature.is_extern || !signature.generic_type_params.is_empty() {
+                            if signature.is_extern
+                                && ordinary_quickjs_typed_symbol(&source).is_some()
+                                && signature.generic_type_params.is_empty()
+                                && is_quickjs_function_source(signature.source_range.0)
+                            {
+                                self.lower_expr(init)?
+                            } else if signature.is_extern
+                                || !signature.generic_type_params.is_empty()
+                            {
                                 return Err(format!(
                                     "function value `{}` needs a monomorphic implementation",
                                     identifier.sym
                                 ));
-                            }
-                            let ret = if signature.is_async {
-                                HirType::Promise(Box::new(signature.ret.clone()))
                             } else {
-                                signature.ret.clone()
-                            };
-                            HirExpr::FunctionRef(source, signature.params.clone(), ret)
+                                let ret = if signature.is_async {
+                                    HirType::Promise(Box::new(signature.ret.clone()))
+                                } else {
+                                    signature.ret.clone()
+                                };
+                                HirExpr::FunctionRef(source, signature.params.clone(), ret)
+                            }
                         }
                     }
                     _ => {
                         self.stored_arrow_initializer = matches!(init, Expr::Arrow(_));
+                        self.expected_source_return_hint =
+                            matches!(init, Expr::Call(_) | Expr::Await(_))
+                                .then(|| source_annotation.clone())
+                                .flatten();
                         let lowered = self.lower_expr_with_expected_type(
                             init,
                             annotated.as_ref().or(inferred_expected.as_ref()),
                         );
+                        self.expected_source_return_hint = None;
                         self.stored_arrow_initializer = false;
                         lowered?
                     }
@@ -818,6 +844,53 @@ impl<'a> FnLowerer<'a> {
                          (add an explicit type annotation)"
                     )
                 })?;
+                if source_hint.is_none() {
+                    let (source_start, is_async) = match init {
+                        Expr::Arrow(arrow) => (Some(arrow.span.lo.0), arrow.is_async),
+                        Expr::Fn(function) => {
+                            (Some(function.function.span.lo.0), function.function.is_async)
+                        }
+                        _ => (None, false),
+                    };
+                    if let Some(source_start) = source_start {
+                        source_hint = storage_source_return_type(source_start).map(|mut source| {
+                            if is_async && !matches!(source, HirType::Promise(_)) {
+                                source = HirType::Promise(Box::new(source));
+                            }
+                            match &actual_type {
+                                HirType::Function(params, _) => {
+                                    HirType::Function(
+                                        storage_source_callable_parameters(source_start, params),
+                                        Box::new(source),
+                                    )
+                                }
+                                HirType::CallableFunction(params, optional, rest, _) => {
+                                    let mut source_slots = params.clone();
+                                    if let Some(rest) = rest {
+                                        source_slots.push(HirType::Array(rest.clone()));
+                                    }
+                                    let mut source_slots =
+                                        storage_source_callable_parameters(source_start, &source_slots);
+                                    let source_rest = if rest.is_some() {
+                                        match source_slots.pop() {
+                                            Some(HirType::Array(element)) => Some(element),
+                                            _ => rest.clone(),
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    HirType::CallableFunction(
+                                        source_slots,
+                                        optional.clone(),
+                                        source_rest,
+                                        Box::new(source),
+                                    )
+                                }
+                                _ => actual_type.clone(),
+                            }
+                        });
+                    }
+                }
                 let ty = match annotated {
                     Some(ty) => ty,
                     None => actual_type.clone(),

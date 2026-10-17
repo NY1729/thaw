@@ -4022,7 +4022,7 @@ fn class_setter_assignment_result_survives_parameter_mutation_and_early_return()
         }
     "#;
     assert_eq!(compile_and_run(source, "class_setter_original_rhs"),
-        "7 8\n-1 8\n7 9\n-1 9\n7 8\n7 9\nstring string 9\n");
+        "7 8\n-1 8\n7 9\n-1 9\n7 8\n7 9\nstring string 72\n");
 }
 
 #[test]
@@ -4048,4 +4048,61 @@ fn legacy_decorator_factories_evaluate_forward_and_apply_backward_per_target() {
     "#;
     assert_eq!(compile_and_run(source, "legacy_decorator_composition_order"),
         "static\neval M1\neval M2\napply M2 method\napply M1 method\neval C1\neval C2\napply C2\napply C1\nmain\n");
+}
+
+#[test]
+fn decorated_instances_keep_identity_across_typed_js_calls() {
+    let source = r#"
+        function Mark(target: JsValue): void {}
+        @Mark
+        class Item { value: number = 1; }
+        declare function __thaw_typed_js_70726f6265(value: Item): boolean;
+        function main(): void {
+            loadScript("globalThis.probe = (value) => { if (!globalThis.keptItem) globalThis.keptItem = value; const same = globalThis.keptItem === value; value.value += 1; return same; };");
+            const item = new Item();
+            console.log(__thaw_typed_js_70726f6265(item), __thaw_typed_js_70726f6265(item), item.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "decorated_instance_bridge_identity"), "true true 3\n");
+}
+
+#[test]
+fn caught_type_error_any_projection_preserves_rethrow_identity() {
+    let source = r#"
+        function same(left: any, right: any): boolean { return left === right; }
+        function main(): void {
+            let first: any;
+            let rethrown: any;
+            let second: any;
+            try { throw new TypeError("identity"); } catch (error: any) { first = error; }
+            try { throw first; } catch (error: any) { rethrown = error; }
+            try { throw new TypeError("identity"); } catch (error: any) { second = error; }
+            console.log(first instanceof TypeError, same(first, first), first === rethrown,
+                        first === second, second instanceof TypeError);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_type_error_any_identity"),
+        "true true true false true\n",
+    );
+}
+
+#[test]
+fn native_error_identity_survives_quickjs_callback_roundtrip() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65(callback: () => void): void;
+        declare function __thaw_typed_js_73616d654572726f72(error: any): boolean;
+        function main(): void {
+            loadScript("globalThis.invoke = callback => { try { callback(); } catch (error) { globalThis.keptError = error; throw error; } }; globalThis.sameError = error => error === globalThis.keptError;");
+            try {
+                __thaw_typed_js_696e766f6b65((): void => { throw new TypeError("identity"); });
+            } catch (error: any) {
+                console.log(__thaw_typed_js_73616d654572726f72(error), error instanceof TypeError, error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_error_callback_identity_roundtrip"),
+        "true true identity\n",
+    );
 }

@@ -140,6 +140,43 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+        // A Json storage slot may still be a live Buffer or another host object.
+        // Calling its method through the Json snapshot path loses the receiver's
+        // actual `toString` implementation (for example, Buffer's byte decoder).
+        if matches!(property.sym.as_ref(), "toString" | "join")
+            && self.json_receiver_candidate(&member.obj)
+        {
+            let name = property.sym.as_ref();
+            let receiver = self.lower_required_member_receiver(&member.obj, name)?;
+            let receiver_type = self.infer_expr_type_inner(&receiver)?;
+            if receiver_type == HirType::Json {
+                return self.lower_json_dynamic_method_call_with_receiver(
+                    receiver,
+                    member.span,
+                    name,
+                    &call.args,
+                );
+            }
+            let receiver_name = format!("__thaw_dynamic_method_receiver_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(receiver_name.clone(), receiver_type.clone());
+            let mut synthetic_member = member.clone();
+            *synthetic_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                receiver_name.clone().into(),
+                member.span,
+            ));
+            let mut synthetic_call = call.clone();
+            synthetic_call.callee = Callee::Expr(Box::new(Expr::Member(synthetic_member.clone())));
+            let result = self.lower_native_instance_builtin(
+                &synthetic_member,
+                property,
+                &synthetic_call,
+            )?;
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(receiver_name, receiver_type, receiver)],
+            );
+        }
         if let Some(result) = self.lower_json_array_method(member, property, call)? {
             return Ok(result);
         }
@@ -231,13 +268,23 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
         let receiver = self.lower_required_member_receiver(&member.obj, name)?;
+        self.lower_json_dynamic_method_call_with_receiver(receiver, member.span, name, &call.args)
+    }
+
+    fn lower_json_dynamic_method_call_with_receiver(
+        &mut self,
+        receiver: HirExpr,
+        span: swc_common::Span,
+        name: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<HirExpr, String> {
         if self.infer_expr_type(&receiver)? != HirType::Json {
             return Err(format!("`.{name}()` receiver is not an `any` value"));
         }
         let json_name = format!("__thaw_json_dynamic_json_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(json_name.clone(), HirType::Json);
-        let result = self.lower_dynamic_call_on_json_binding(&json_name, name, &call.args, member.span)?;
+        let result = self.lower_dynamic_call_on_json_binding(&json_name, name, args, span)?;
         self.wrap_call_argument_bindings(result, &[(json_name, HirType::Json, receiver)])
     }
 

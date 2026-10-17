@@ -71,6 +71,145 @@ fn promise_mixed_resolver_type(resolved: &HirType, omittable: bool) -> HirType {
 }
 
 impl<'a> FnLowerer<'a> {
+    fn promise_output_join(left: &HirType, right: &HirType) -> Option<HirType> {
+        if left == right {
+            Some(left.clone())
+        } else if left == &HirType::Json || right == &HirType::Json {
+            Some(HirType::Json)
+        } else {
+            None
+        }
+    }
+
+    fn adapt_promise_callback_output(
+        &mut self,
+        callback: HirExpr,
+        parameters: &[HirType],
+        output: &HirType,
+    ) -> Result<HirExpr, String> {
+        let HirType::Function(_, original_return) = self.infer_expr_type(&callback)? else {
+            return Err("Promise callback adapter requires a fixed function".into());
+        };
+        let original_return = original_return.as_ref().clone();
+        let resolved_return = match &original_return {
+            HirType::Promise(inner) => inner.as_ref().clone(),
+            other => other.clone(),
+        };
+        if resolved_return == *output {
+            return Ok(callback);
+        }
+        if output != &HirType::Json {
+            return Err(format!(
+                "cannot adapt Promise callback result {resolved_return:?} to {output:?}"
+            ));
+        }
+
+        let callback_name = format!("__thaw_promise_result_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let argument_names = (0..parameters.len())
+            .map(|index| format!("__thaw_promise_result_arg_{index}_{}", self.next_binding))
+            .collect::<Vec<_>>();
+        let callback_args = argument_names
+            .iter()
+            .map(|name| HirExpr::Var(name.clone()))
+            .collect::<Vec<_>>();
+        let callback_type = self.infer_expr_type(&callback)?;
+        let callback_params = argument_names
+            .iter()
+            .zip(parameters)
+            .map(|(name, ty)| HirParam {
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let saved_scope = self.scope.clone();
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        for parameter in &callback_params {
+            self.scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+        }
+        let adapted = (|| -> Result<HirExpr, String> {
+            let invoked = HirExpr::Call(
+                Box::new(HirExpr::Var(callback_name.clone())),
+                callback_args,
+            );
+            if matches!(&original_return, HirType::Promise(_)) {
+                self.coerce_to_declared(
+                    &HirType::Promise(Box::new(output.clone())),
+                    invoked,
+                )
+            } else if resolved_return == HirType::Void {
+                let value = self.coerce_to_declared(output, HirExpr::Lit(HirLit::Undefined))?;
+                Ok(HirExpr::Block(vec![
+                    HirStmt::Expr(invoked),
+                    HirStmt::Return(Some(value)),
+                ]))
+            } else {
+                self.coerce_to_declared(output, invoked)
+            }
+        })();
+        self.scope = saved_scope;
+        let adapted = adapted?;
+        let return_type = match original_return {
+            HirType::Promise(_) => HirType::Promise(Box::new(output.clone())),
+            _ => output.clone(),
+        };
+        let adapted = HirExpr::Lambda(
+            vec![HirParam {
+                name: callback_name.clone(),
+                ty: callback_type.clone(),
+            }],
+            callback_params,
+            return_type,
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(adapted))])),
+        );
+        self.wrap_call_argument_bindings(
+            adapted,
+            &[(callback_name, callback_type, callback)],
+        )
+    }
+
+    fn identity_promise_callback(&mut self, input: &HirType, output: &HirType) -> Result<HirExpr, String> {
+        let params = if input == &HirType::Void {
+            Vec::new()
+        } else {
+            vec![input.clone()]
+        };
+        let names = params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("__thaw_promise_identity_{index}_{}", self.next_binding))
+            .collect::<Vec<_>>();
+        let hir_params = names
+            .iter()
+            .zip(&params)
+            .map(|(name, ty)| HirParam {
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let saved_scope = self.scope.clone();
+        for parameter in &hir_params {
+            self.scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+        }
+        let value = if input == &HirType::Void {
+            self.coerce_to_declared(output, HirExpr::Lit(HirLit::Undefined))
+        } else {
+            self.coerce_to_declared(output, HirExpr::Var(names[0].clone()))
+        };
+        self.scope = saved_scope;
+        let value = value?;
+        Ok(HirExpr::Lambda(
+            Vec::new(),
+            hir_params,
+            output.clone(),
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(value))])),
+        ))
+    }
+
     fn promise_rejection_snapshot_name(binding: &str, field: &str) -> String {
         format!("@@thaw_promise_rejection:{binding}:{field}")
     }
@@ -90,13 +229,116 @@ impl<'a> FnLowerer<'a> {
         fields.into_iter().map(|(field, ty, getter)| {
             let name = Self::promise_rejection_snapshot_name(binding, field);
             self.scope.insert(name.clone(), ty.clone());
-            let value = if let Some(getter) = getter {
+            let value = if field == "tag" {
+                let active = HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_is_active_rejection_text".into())),
+                    vec![HirExpr::Var(binding.to_string())],
+                );
+                let tag = HirExpr::Call(
+                    Box::new(HirExpr::Var(getter.expect("tag has a pending getter").to_string())),
+                    Vec::new(),
+                );
+                HirExpr::Conditional(
+                    Box::new(active),
+                    Box::new(tag),
+                    Box::new(HirExpr::Lit(HirLit::I64(4))),
+                    HirType::I64,
+                )
+            } else if let Some(getter) = getter {
                 HirExpr::Call(Box::new(HirExpr::Var(getter.to_string())), Vec::new())
             } else {
                 HirExpr::Var(binding.to_string())
             };
             HirStmt::Let(name, ty, value)
         }).collect()
+    }
+
+    fn prepend_referenced_promise_snapshots(
+        &mut self,
+        params: &[HirParam],
+        body: &mut Vec<HirStmt>,
+    ) {
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&HirExpr::Block(body.clone()), &mut referenced);
+        let mut prefix = self.required_promise_snapshot_prefix(params, body, &referenced);
+        prefix.append(body);
+        *body = prefix;
+    }
+
+    fn prepend_referenced_promise_snapshots_expr(
+        &mut self,
+        params: &[HirParam],
+        body: &mut HirExpr,
+    ) {
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(body, &mut referenced);
+        let existing = match body {
+            HirExpr::Block(statements) => statements.clone(),
+            _ => Vec::new(),
+        };
+        let prefix = self.required_promise_snapshot_prefix(params, &existing, &referenced);
+        if prefix.is_empty() {
+            return;
+        }
+        match body {
+            HirExpr::Block(statements) => {
+                let mut all = prefix;
+                all.append(statements);
+                *statements = all;
+            }
+            other => {
+                let expression = std::mem::replace(other, HirExpr::Lit(HirLit::Undefined));
+                let mut statements = prefix;
+                statements.push(HirStmt::Return(Some(expression)));
+                *other = HirExpr::Block(statements);
+            }
+        }
+    }
+
+    fn required_promise_snapshot_prefix(
+        &mut self,
+        params: &[HirParam],
+        body: &[HirStmt],
+        referenced: &BTreeSet<Symbol>,
+    ) -> Vec<HirStmt> {
+        let mut prefix = Vec::new();
+        for param in params.iter().filter(|param| param.ty == HirType::Str) {
+            let has_snapshot_reference = ["original", "object", "native", "tag", "f64", "i64", "bool"]
+                .iter()
+                .any(|field| referenced.contains(&Self::promise_rejection_snapshot_name(&param.name, field)));
+            if !has_snapshot_reference {
+                continue;
+            }
+            let original = Self::promise_rejection_snapshot_name(&param.name, "original");
+            if body.iter().any(|statement| matches!(statement, HirStmt::Let(name, _, _) if name == &original)) {
+                continue;
+            }
+            prefix.extend(self.snapshot_promise_rejection(&param.name));
+        }
+        prefix
+    }
+
+    fn promise_rejection_carrier(&mut self, binding: &str) -> HirExpr {
+        let fields = [
+            ("original", HirType::Str),
+            ("object", HirType::Object(Vec::new())),
+            ("native", HirType::NativeException),
+            ("tag", HirType::I64),
+            ("f64", HirType::F64),
+            ("i64", HirType::I64),
+            ("bool", HirType::Bool),
+        ];
+        HirExpr::Call(
+            Box::new(HirExpr::Var("@@thaw_caught_exception_from_tuple".into())),
+            fields
+                .into_iter()
+                .map(|(field, ty)| {
+                    let name = Self::promise_rejection_snapshot_name(binding, field);
+                    self.scope.entry(name.clone()).or_insert(ty);
+                    HirExpr::Var(name)
+                })
+                .collect(),
+        )
     }
     fn lower_promise_rejection_callback(
         &mut self,
@@ -267,6 +509,10 @@ impl<'a> FnLowerer<'a> {
             HirType::FunctionWithThis(_, inner) => *inner,
             other => other,
         };
+        // The function type here must stay physical: generated JS callback
+        // adapters call it using this exact ABI. Validate its TypeScript
+        // contract separately, because storage promotion can turn an
+        // annotated `number` result into a Json pointer.
         let (params, rest, ret) = match callback_type {
             HirType::Function(mut params, ret) => {
                 let rest = if let HirExpr::FunctionRef(symbol, _, _) = callback {
@@ -278,32 +524,94 @@ impl<'a> FnLowerer<'a> {
             HirType::CallableFunction(params, _, rest, ret) => (params, rest, ret),
             _ => return Err("Promise callback is not a function value".into()),
         };
-        if params.len() > parameter_types.len()
-            || !params.iter().zip(parameter_types).all(|(actual, supplied)| {
-                callback_param_compatible(supplied, actual)
+        let (source_params, source_rest, source_return) = match callback {
+            HirExpr::FunctionRef(symbol, _, _) => self.signatures.get(symbol).map(|signature| {
+                let mut params = storage_source_callable_parameters(
+                    signature.source_range.0,
+                    &signature.params,
+                );
+                let source_rest = if signature.native_rest.is_some() {
+                    match params.pop() {
+                        Some(HirType::Array(element)) => Some(element.as_ref().clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let ret = storage_source_return_type(signature.source_range.0).map(|source| {
+                    if signature.is_async && !matches!(source, HirType::Promise(_)) {
+                        HirType::Promise(Box::new(source))
+                    } else {
+                        source
+                    }
+                });
+                (Some(params), source_rest, ret)
+            }).unwrap_or((None, None, None)),
+            HirExpr::Var(name) => self.source_scope.get(name).map(|source| match source {
+                HirType::Function(params, ret) => {
+                    (Some(params.clone()), None, Some(ret.as_ref().clone()))
+                }
+                HirType::CallableFunction(params, _, rest, ret) => (
+                    Some(params.clone()),
+                    rest.as_deref().cloned(),
+                    Some(ret.as_ref().clone()),
+                ),
+                HirType::FunctionWithThis(_, inner) => match inner.as_ref() {
+                    HirType::Function(params, ret) => {
+                        (Some(params.clone()), None, Some(ret.as_ref().clone()))
+                    }
+                    HirType::CallableFunction(params, _, rest, ret) => (
+                        Some(params.clone()),
+                        rest.as_deref().cloned(),
+                        Some(ret.as_ref().clone()),
+                    ),
+                    _ => (None, None, None),
+                },
+                _ => (None, None, None),
+            }).unwrap_or((None, None, None)),
+            _ => (None, None, None),
+        };
+        let mut contract_params = source_params.unwrap_or_else(|| params.clone());
+        if rest.is_some() && contract_params.len() > params.len() {
+            contract_params.pop();
+        }
+        let contract_rest = source_rest.map(Box::new).or(rest);
+        // `any`/`unknown` callback parameters lower to Json in the source
+        // contract. They accept the Promise rejection string (and every
+        // other input) before the physical callback adapter boxes it for the
+        // callback's actual storage ABI. Keep this permissive rule local to
+        // source-level Promise validation; ordinary physical callback shape
+        // checks must still require their exact ABI.
+        let accepts_callback_input = |actual: &HirType, supplied: &HirType| {
+            actual == &HirType::Json || callback_param_compatible(supplied, actual)
+        };
+        if contract_params.len() > parameter_types.len()
+            || !contract_params.iter().zip(parameter_types).all(|(actual, supplied)| {
+                accepts_callback_input(actual, supplied)
                     || match actual {
                         HirType::Optional(payload)
                         | HirType::Nullable(payload)
-                        | HirType::Nullish(payload) => callback_param_compatible(supplied, payload),
+                        | HirType::Nullish(payload) => accepts_callback_input(payload, supplied),
                         _ => false,
                     }
             })
-            || rest.as_ref().is_some_and(|element| {
+            || contract_rest.as_ref().is_some_and(|element| {
                 !supplied_is_rest_array(&parameter_types[params.len()..], element)
                     && parameter_types[params.len()..].iter().any(|supplied| {
-                        !callback_param_compatible(supplied, element)
+                        !accepts_callback_input(element, supplied)
                     })
             })
         {
             return Err(format!(
-                "Promise callback has parameters {params:?} and rest {rest:?}, expected a prefix of {parameter_types:?}"
+                "Promise callback has parameters {contract_params:?} and rest {contract_rest:?}, expected a prefix of {parameter_types:?}"
             ));
         }
         if let Some(expected) = expected_return {
-            if !callable_return_compatible(expected, &ret) {
+            let contract_return = source_return.as_ref().unwrap_or(&ret);
+            if !callable_return_compatible(expected, contract_return) {
                 return Err(format!(
                     "Promise callback returns {:?}, expected {expected:?}",
-                    ret
+                    contract_return
                 ));
             }
         }
@@ -339,6 +647,34 @@ impl<'a> FnLowerer<'a> {
             }
             _ => return Err("Promise callback is not a function value".into()),
         };
+        let source_rest = match &callback {
+            HirExpr::FunctionRef(symbol, _, _) => self.signatures.get(symbol).and_then(|signature| {
+                signature.native_rest.as_ref()?;
+                storage_source_callable_parameters(signature.source_range.0, &signature.params)
+                    .last()
+                    .and_then(|parameter| match parameter {
+                        HirType::Array(element) => Some(element.as_ref().clone()),
+                        _ => None,
+                    })
+            }),
+            HirExpr::Var(name) => self.source_scope.get(name).and_then(|source| match source {
+                HirType::CallableFunction(_, _, rest, _) => rest.as_deref().cloned(),
+                HirType::Function(_, _) => None,
+                HirType::FunctionWithThis(_, inner) => match inner.as_ref() {
+                    HirType::CallableFunction(_, _, rest, _) => rest.as_deref().cloned(),
+                    _ => None,
+                },
+                _ => None,
+            }),
+            _ => None,
+        };
+        let promoted_parameter_adapter = fixed.len() == supplied.len()
+            && fixed.iter().zip(supplied).any(|(physical, source)| {
+                physical == &HirType::Json && source != &HirType::Json
+            })
+            || rest.as_ref().zip(source_rest.as_ref()).is_some_and(|(physical, source)| {
+                physical == &HirType::Json && source != &HirType::Json
+            });
         if matches!(&original, HirType::Function(..)) && rest.is_none() && fixed == supplied {
             return Ok(callback);
         }
@@ -360,8 +696,37 @@ impl<'a> FnLowerer<'a> {
                 arguments.push(self.coerce_to_declared(expected, input)?);
             }
             if let Some(element) = rest {
-                if supplied_is_rest_array(&supplied[fixed.len().min(supplied.len())..], &element) {
-                    arguments.push(HirExpr::Var(input_names[fixed.len()].clone()));
+                let rest_start = fixed.len().min(supplied.len());
+                let source_element = source_rest.as_ref().unwrap_or(&element);
+                if supplied_is_rest_array(&supplied[rest_start..], source_element) {
+                    let packed = HirExpr::Var(input_names[fixed.len()].clone());
+                    let packed_element = source_element.clone();
+                    if packed_element == element {
+                        arguments.push(packed);
+                    } else {
+                        let item_name = format!("__thaw_promise_rest_item_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(item_name.clone(), packed_element.clone());
+                        let item = self.coerce_to_declared(&element, HirExpr::Var(item_name.clone()))?;
+                        self.scope.remove(&item_name);
+                        let mapper = HirExpr::Lambda(
+                            Vec::new(),
+                            vec![HirParam {
+                                name: item_name,
+                                ty: packed_element.clone(),
+                            }],
+                            element.clone(),
+                            Box::new(item),
+                        );
+                        arguments.push(self.lower_array_map(
+                            packed,
+                            HirType::Array(Box::new(packed_element.clone())),
+                            packed_element.clone(),
+                            packed_element,
+                            mapper,
+                            None,
+                        )?);
+                    }
                     return Ok(arguments);
                 }
                 let remaining = input_names.iter().skip(fixed.len())
@@ -386,6 +751,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(body),
         );
         let result_type = HirType::Function(supplied.to_vec(), Box::new(ret));
+        let physical_type = result_type.clone();
         let binder = HirExpr::Lambda(
             Vec::new(),
             vec![HirParam { name: callback_name, ty: original }],
@@ -396,13 +762,23 @@ impl<'a> FnLowerer<'a> {
         // alias it to the variable's closure so the host sees one identity.
         let stable = matches!(&callback, HirExpr::Var(_));
         let adapted = HirExpr::Call(Box::new(binder), vec![callback.clone()]);
-        if stable {
-            return Ok(HirExpr::Call(
+        let adapted = if stable {
+            HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_closure_alias".into())),
                 vec![adapted, callback],
-            ));
+            )
+        } else {
+            adapted
+        };
+        if promoted_parameter_adapter {
+            // This marker records that source-level signature validation
+            // already happened before adapting a storage-promoted Json
+            // parameter. The wrapper's actual signature remains exactly the
+            // supplied one.
+            Ok(HirExpr::TypedClosure(physical_type, Box::new(adapted)))
+        } else {
+            Ok(adapted)
         }
-        Ok(adapted)
     }
 
     fn callback_parameter_count(&self, expr: &Expr, label: &str) -> Result<usize, String> {

@@ -309,6 +309,23 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_call(self.module.get_function("thaw_json_register_host_operations").unwrap(),
             &operations, "register_js_callback_host_operations")
             .map_err(|error| error.to_string())?;
+        self.compile_register_js_error_factory()?;
+        Ok(())
+    }
+
+    fn compile_register_js_error_factory(&mut self) -> Result<(), String> {
+        let operations = [
+            "thaw_js_error_from_tagged_handle",
+            "thaw_js_lookup_native_object",
+            "thaw_js_intern_native_object",
+        ].iter().map(|name| self.module.get_function(name).unwrap()
+            .as_global_value().as_pointer_value().into())
+            .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
+        self.builder.build_call(
+            self.module.get_function("thaw_json_register_error_factory").unwrap(),
+            &operations,
+            "register_js_error_factory",
+        ).map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -2064,6 +2081,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.module.get_function("thaw_json_register_host_operations").unwrap(),
                 &operations, "register_json_host_operations",
             ).map_err(|error| error.to_string())?;
+            self.compile_register_js_error_factory()?;
         }
         let result = self
             .builder

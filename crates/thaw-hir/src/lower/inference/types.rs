@@ -1655,6 +1655,31 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "@@thaw_caught_exception_from_tuple" => {
+                        let expected = [
+                            HirType::Str,
+                            HirType::Object(Vec::new()),
+                            HirType::NativeException,
+                            HirType::I64,
+                            HirType::F64,
+                            HirType::I64,
+                            HirType::Bool,
+                        ];
+                        if args.len() != expected.len() {
+                            return Err(format!("{name} expects seven saved exception fields"));
+                        }
+                        for (argument, expected) in args.iter().zip(&expected) {
+                            self.expect_type(expected, argument, name)?;
+                        }
+                        return Ok(crate::caught_exception_carrier_type());
+                    }
+                    "@@thaw_is_active_rejection_text" => {
+                        let [text] = args.as_slice() else {
+                            return Err("active rejection text check expects one string".into());
+                        };
+                        self.expect_type(&HirType::Str, text, name)?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_native_exception_tag" => {
                         if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
                             return Err("native exception category requires its descriptor".into());

@@ -111,8 +111,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_json_error_stack", args, "caught JSON stack");
             }
             "__thaw_json_receiver_string" => {
-                return self.compile_single_arg_call(
-                    "thaw_json_receiver_string", args, "JSON string");
+                let result = self.compile_single_arg_call(
+                    "thaw_json_receiver_string", args, "JSON string")?;
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_receiver_bool" => {
                 let [value] = args else {
@@ -819,7 +822,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "json_array_slice_start",
                     )
                     .map_err(|error| error.to_string())?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_json_array_slice").unwrap(),
@@ -829,7 +832,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_json_array_slice returned no value".into());
+                    .ok_or_else(|| "thaw_json_array_slice returned no value".to_string())?;
+                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
             }
             "__thaw_json_has_own" | "__thaw_json_property_is_enumerable" => {
                 let predicate = if name == "__thaw_json_property_is_enumerable" {

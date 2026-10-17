@@ -402,40 +402,6 @@ fn build_with_native_mode(
             resolved_packages.push(package);
         }
     }
-    let (
-        registry_shim,
-        registry_native_libs,
-        qualified_call_rewrites,
-        class_constructor_rewrites,
-        class_method_rewrites,
-        callback_instance_rewrites,
-        static_class_method_rewrites,
-        class_getter_rewrites,
-        class_setter_rewrites,
-        static_class_getter_rewrites,
-        static_class_setter_rewrites,
-        factory_class_rewrites,
-        fallback_function_overload_rewrites,
-        external_exports,
-        external_namespace_aliases,
-        external_nested_namespaces,
-        external_export_assignments,
-        external_module_indices,
-        jit_fallback_reasons,
-        mut runtime_features,
-    ) = generate_registry_shims(
-        registry_dir,
-        &resolved_packages,
-        &runtime_packages,
-        &static_packages,
-        &dynamic_packages,
-        &user_source,
-        &thaw_parser::common::FileName::Real(input.to_path_buf()),
-        embed_native_addons,
-        output,
-        external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
-    )?;
-    let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     let mut native_addons = resolved_packages
         .iter()
         .filter(|package| runtime_packages.contains(*package))
@@ -444,146 +410,200 @@ fn build_with_native_mode(
         .collect::<Vec<_>>();
     native_addons.sort();
     native_addons.dedup();
-    // `qs.stringify(x)`-style calls, for a name that collided across two
-    // `--use`d packages, only exist as source-level syntax sugar over the
-    // package-qualified alias `generate_registry_shims` actually
-    // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
-    // (and no parse at all) when there were no collisions.
-    let registry_shim_len = registry_shim.len();
-    let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
-    if let Some(directory) = assets {
-        shim_source.push_str(&generate_asset_shim(directory)?);
-    }
-    if static_link
-        && (shim_source.contains("loadNativeAddonEmbedded(")
-            || shim_source.contains("loadNativeAddon("))
-    {
-        return Err(
-            "--static cannot include an N-API addon: `.node` modules require the dynamic loader; use the package's JavaScript fallback or a static `native.a` backend"
-                .into(),
-        );
-    }
-    let created_require_live_result =
-        module_graph::uses_created_require_live_result(input, &user_source)?;
-    let mut quickjs_reasons = quickjs_fallback_reasons(
-        input,
-        &user_source,
-        &shim_source,
-        &resolved_packages,
-        &external_exports,
-        &jit_fallback_reasons,
-    );
-    if created_require_live_result {
-        quickjs_reasons.push(serde_json::json!({
-            "kind": "dynamic-operation",
-            "operation": "createRequire result handle",
-            "detail": "created-require calls preserve native JavaScript result identity",
-            "source": input.display().to_string(),
-        }));
-    }
-    let manifest = serde_json::json!({
-        "packages": resolved_packages,
-        // Registry fallback wrappers contain `callDynamic(...)` even when a
-        // JIT declaration shadows them, so only count the generated shim's
-        // module initializer here. User-authored dynamic calls and explicit
-        // QuickJS typed symbols are checked separately below.
-        "quickjs": shim_source.contains("loadScript(")
-            || source_uses_quickjs(&user_source)
-            || created_require_live_result
-            || shim_source.contains("__thaw_typed_js_"),
-        "quickjs_reasons": quickjs_reasons,
-        "napi": shim_source.contains("loadNativeAddonEmbedded(")
-            || shim_source.contains("loadNativeAddon(")
-            || shim_source.contains("embedExecutable("),
-    });
-    let marker = format!("{ARTIFACT_MARKER}{manifest}");
-    let constructor_package_qualifiers =
-        package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
-    let transform = |source: &str, module_path: &Path, is_override: bool| {
-        let input_name = if is_override && source != user_source.as_str() {
-            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()))
-        } else {
-            thaw_parser::common::FileName::Real(module_path.to_path_buf())
-        };
-        let imported_overload_aliases = fallback_function_overload_rewrites
-            .iter()
-            .map(|rewrite| rewrite.0.clone())
-            .collect();
-        let qualified = rewrite_qualified_calls_named(
-            source,
-            &qualified_call_rewrites,
-            &imported_overload_aliases,
-            &input_name,
+    let mut forced_jit_fallbacks = std::collections::HashSet::new();
+    let (module, registry_native_libs, mut runtime_features, shim_source, manifest) = loop {
+        let (
+            registry_shim,
+            registry_native_libs,
+            qualified_call_rewrites,
+            class_constructor_rewrites,
+            class_method_rewrites,
+            callback_instance_rewrites,
+            static_class_method_rewrites,
+            class_getter_rewrites,
+            class_setter_rewrites,
+            static_class_getter_rewrites,
+            static_class_setter_rewrites,
+            factory_class_rewrites,
+            fallback_function_overload_rewrites,
+            external_exports,
+            external_namespace_aliases,
+            external_nested_namespaces,
+            external_export_assignments,
+            external_module_indices,
+            jit_fallback_reasons,
+            runtime_features,
+            jit_symbol_origins,
+        ) = generate_registry_shims(
+            registry_dir,
+            &resolved_packages,
+            &runtime_packages,
+            &static_packages,
+            &dynamic_packages,
+            &user_source,
+            &thaw_parser::common::FileName::Real(input.to_path_buf()),
+            embed_native_addons,
+            output,
+            external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
+            &forced_jit_fallbacks,
         )?;
-        let qualified_name = if qualified != source {
-            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)"))
-        } else {
-            input_name
-        };
-        let methods = rewrite_external_class_methods_with_static_qualified_named(
-            &qualified,
-            &class_constructor_rewrites,
-            &class_method_rewrites,
-            &callback_instance_rewrites,
-            &static_class_method_rewrites,
-            &class_getter_rewrites,
-            &class_setter_rewrites,
-            &static_class_getter_rewrites,
-            &static_class_setter_rewrites,
-            &factory_class_rewrites,
-            &fallback_function_overload_rewrites,
-            &constructor_package_qualifiers,
-            &qualified_name,
-        )?;
-        let methods_name = if methods != qualified {
-            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)"))
-        } else {
-            qualified_name
-        };
-        rewrite_external_class_constructors_named(
-            &methods,
-            &class_constructor_rewrites,
-            &constructor_package_qualifiers,
-            &methods_name,
-        )
-    };
-    let mut module = module_graph::bundle_with_named_source_transform(
-        input,
-        &user_source,
-        &external_exports,
-        &external_namespace_aliases,
-        &external_nested_namespaces,
-        &external_resolutions,
-        &external_export_assignments,
-        &external_module_indices,
-        &transform,
-    )?;
-    if !shim_source.is_empty() {
-        let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map_named(
+        let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
+        // `qs.stringify(x)`-style calls, for a name that collided across two
+        // `--use`d packages, only exist as source-level syntax sugar over the
+        // package-qualified alias `generate_registry_shims` actually
+        // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
+        // (and no parse at all) when there were no collisions.
+        let registry_shim_len = registry_shim.len();
+        let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
+        if let Some(directory) = assets {
+            shim_source.push_str(&generate_asset_shim(directory)?);
+        }
+        if static_link
+            && (shim_source.contains("loadNativeAddonEmbedded(")
+                || shim_source.contains("loadNativeAddon("))
+        {
+            return Err(
+                "--static cannot include an N-API addon: `.node` modules require the dynamic loader; use the package's JavaScript fallback or a static `native.a` backend"
+                    .into(),
+            );
+        }
+        let created_require_live_result =
+            module_graph::uses_created_require_live_result(input, &user_source)?;
+        let mut quickjs_reasons = quickjs_fallback_reasons(
+            input,
+            &user_source,
             &shim_source,
-            thaw_parser::common::FileName::Custom("generated registry and bridge shims.ts".into()),
+            &resolved_packages,
+            &external_exports,
+            &jit_fallback_reasons,
+        );
+        if created_require_live_result {
+            quickjs_reasons.push(serde_json::json!({
+                "kind": "dynamic-operation",
+                "operation": "createRequire result handle",
+                "detail": "created-require calls preserve native JavaScript result identity",
+                "source": input.display().to_string(),
+            }));
+        }
+        let manifest = serde_json::json!({
+            "packages": resolved_packages,
+            // Registry fallback wrappers contain `callDynamic(...)` even when a
+            // JIT declaration shadows them, so only count the generated shim's
+            // module initializer here. User-authored dynamic calls and explicit
+            // QuickJS typed symbols are checked separately below.
+            "quickjs": shim_source.contains("loadScript(")
+                || source_uses_quickjs(&user_source)
+                || created_require_live_result
+                || shim_source.contains("__thaw_typed_js_"),
+            "quickjs_reasons": quickjs_reasons,
+            "napi": shim_source.contains("loadNativeAddonEmbedded(")
+                || shim_source.contains("loadNativeAddon(")
+                || shim_source.contains("embedExecutable("),
+        });
+        let constructor_package_qualifiers =
+            package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
+        let transform = |source: &str, module_path: &Path, is_override: bool| {
+            let input_name = if is_override && source != user_source.as_str() {
+                thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()))
+            } else {
+                thaw_parser::common::FileName::Real(module_path.to_path_buf())
+            };
+            let imported_overload_aliases = fallback_function_overload_rewrites
+                .iter()
+                .map(|rewrite| rewrite.0.clone())
+                .collect();
+            let qualified = rewrite_qualified_calls_named(
+                source,
+                &qualified_call_rewrites,
+                &imported_overload_aliases,
+                &input_name,
+            )?;
+            let qualified_name = if qualified != source {
+                thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)"))
+            } else {
+                input_name
+            };
+            let methods = rewrite_external_class_methods_with_static_qualified_named(
+                &qualified,
+                &class_constructor_rewrites,
+                &class_method_rewrites,
+                &callback_instance_rewrites,
+                &static_class_method_rewrites,
+                &class_getter_rewrites,
+                &class_setter_rewrites,
+                &static_class_getter_rewrites,
+                &static_class_setter_rewrites,
+                &factory_class_rewrites,
+                &fallback_function_overload_rewrites,
+                &constructor_package_qualifiers,
+                &qualified_name,
+            )?;
+            let methods_name = if methods != qualified {
+                thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)"))
+            } else {
+                qualified_name
+            };
+            rewrite_external_class_constructors_named(
+                &methods,
+                &class_constructor_rewrites,
+                &constructor_package_qualifiers,
+                &methods_name,
+            )
+        };
+        let mut module = module_graph::bundle_with_named_source_transform(
+            input,
+            &user_source,
+            &external_exports,
+            &external_namespace_aliases,
+            &external_nested_namespaces,
+            &external_resolutions,
+            &external_export_assignments,
+            &external_module_indices,
+            &transform,
         )?;
-        for item in &mut shim.body {
-            let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) = item else {
-                continue;
-            };
-            if shim_source_map.lookup_byte_offset(statement.span.lo).pos.0 as usize >= registry_shim_len {
-                continue;
+        if !shim_source.is_empty() {
+            let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map_named(
+                &shim_source,
+                thaw_parser::common::FileName::Custom("generated registry and bridge shims.ts".into()),
+            )?;
+            for item in &mut shim.body {
+                let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) = item else {
+                    continue;
+                };
+                if shim_source_map.lookup_byte_offset(statement.span.lo).pos.0 as usize >= registry_shim_len {
+                    continue;
+                }
+                let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) = statement.expr.as_ref() else {
+                    continue;
+                };
+                if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1"))
+                    || value.value.as_str().is_some_and(|text| text.starts_with("__thaw_internal_module:")) {
+                    // Only compiler-produced registry shim statements receive
+                    // the sentinel span recognized by HIR; user source and
+                    // later bridge shims cannot switch initializer execution.
+                    statement.span = Default::default();
+                }
             }
-            let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) = statement.expr.as_ref() else {
-                continue;
-            };
-            if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1"))
-                || value.value.as_str().is_some_and(|text| text.starts_with("__thaw_internal_module:")) {
-                // Only compiler-produced registry shim statements receive
-                // the sentinel span recognized by HIR; user source and
-                // later bridge shims cannot switch initializer execution.
-                statement.span = Default::default();
+            shim.body.extend(module.body);
+            module.body = shim.body;
+        }
+        let mut newly_forced = std::collections::HashSet::new();
+        if !jit_symbol_origins.is_empty() {
+            for symbol in thaw_hir::jit_calls_requiring_dynamic_storage(&module)? {
+                if let Some(origin) = jit_symbol_origins.get(&symbol) {
+                    if !forced_jit_fallbacks.contains(origin) {
+                        newly_forced.insert(origin.clone());
+                    }
+                }
             }
         }
-        shim.body.extend(module.body);
-        module.body = shim.body;
-    }
+        if !newly_forced.is_empty() {
+            forced_jit_fallbacks.extend(newly_forced);
+            continue;
+        }
+        break (module, registry_native_libs, runtime_features, shim_source, manifest);
+    };
+    let marker = format!("{ARTIFACT_MARKER}{manifest}");
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program

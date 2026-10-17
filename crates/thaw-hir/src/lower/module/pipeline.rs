@@ -176,6 +176,15 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
+    let normalized = normalize_module_for_lowering(module)?;
+    let mut program = lower_normalized_module(&normalized)?;
+    // `HirType::Bytes` is a lowering-time distinction only; nothing past
+    // here knows it, so collapse it to its physical `Array(F64)`.
+    erase_bytes(&mut program);
+    Ok(program)
+}
+
+fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
@@ -185,12 +194,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
-    let normalized = specialize_named_promise_rejection_callbacks(&normalized)?;
-    let mut program = lower_normalized_module(&normalized)?;
-    // `HirType::Bytes` is a lowering-time distinction only; nothing past
-    // here knows it, so collapse it to its physical `Array(F64)`.
-    erase_bytes(&mut program);
-    Ok(program)
+    specialize_named_promise_rejection_callbacks(&normalized)
 }
 
 const PROMISE_REJECTION_CALLBACK_SUFFIX: &str = "__thaw_promise_rejection";
@@ -613,6 +617,19 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .map(|p| p.ty)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let quickjs_function_value = is_extern
+                    && ordinary_quickjs_typed_symbol(&name).is_some()
+                    && func.type_params.as_ref().is_none_or(|params| params.params.is_empty())
+                    && func.this_param.is_none()
+                    && func.params.iter().all(|parameter| {
+                        !matches!(parameter.pat, Pat::Rest(_))
+                            && !matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
+                    });
+                if quickjs_function_value {
+                    for (parameter, ty) in func.params.iter().take(fixed_param_count).zip(&params) {
+                        remember_storage_source(storage_key(parameter.pat.span()), ty);
+                    }
+                }
                 if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
                     // The rejection reason is a string; a leading rest parameter
                     // receives it as a one-element array.
@@ -672,6 +689,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         None,
                     )?
                 };
+                if quickjs_function_value {
+                    remember_storage_source((func.span.lo.0, 0), &ret);
+                }
                 let ret = if is_extern { ret } else { storage_return_type(func.span, ret) };
                 let type_predicate = match func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()) {
                     Some(TsType::TsTypePredicate(predicate)) => {

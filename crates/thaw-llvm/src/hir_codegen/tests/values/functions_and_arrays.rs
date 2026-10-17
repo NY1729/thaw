@@ -204,6 +204,52 @@ fn strict_equality_supports_strings_booleans_and_object_identity() {
 }
 
 #[test]
+fn strict_equality_preserves_nullable_native_reference_identity() {
+    let source = r#"
+        interface Box { value: number; }
+        function main(): void {
+            const values = [1, 2];
+            const nullable: number[] | null = values;
+            const absent: number[] | null = null;
+            const distinct = [1, 2];
+            console.log(nullable === values);
+            console.log(values === nullable);
+            console.log(nullable === distinct);
+            console.log(absent === null);
+
+            const optional: number[] | undefined = values;
+            const missing: number[] | undefined = undefined;
+            console.log(optional === values);
+            console.log(missing === undefined);
+
+            const nullish: number[] | null | undefined = values;
+            const nullishNull: number[] | null | undefined = null;
+            const nullishUndefined: number[] | null | undefined = undefined;
+            console.log(nullish === values);
+            console.log(nullishNull === null);
+            console.log(nullishUndefined === undefined);
+
+            const box: Box = { value: 1 };
+            const nullableBox: Box | null = box;
+            console.log(nullableBox === box);
+
+            let calls = 0;
+            function once(): number[] | null {
+                calls++;
+                return values;
+            }
+            console.log(once() === values);
+            console.log(values === once());
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nullable_native_reference_identity"),
+        "true\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n2\n"
+    );
+}
+
+#[test]
 fn compiles_call_argument_spreads_in_left_to_right_order() {
     let source = r#"
         function first(): number {

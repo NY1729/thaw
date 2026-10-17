@@ -1658,17 +1658,23 @@ impl<'a> FnLowerer<'a> {
                 };
                 let then_union = branch_union(true);
                 let else_union = branch_union(false);
+                let then_json = json_narrowing.as_ref().and_then(|(name, then_type, _)| {
+                    then_type
+                        .as_ref()
+                        .map(|ty| (name.clone(), ty.clone()))
+                });
+                let else_json = json_narrowing.as_ref().and_then(|(name, _, else_type)| {
+                    else_type
+                        .as_ref()
+                        .map(|ty| (name.clone(), ty.clone()))
+                });
                 let saved_narrowings = self.save_narrowings();
                 let then_branch = self
                     .lower_body_with_union_narrowing(
                         &if_stmt.cons,
                         then_union.as_deref(),
                         then_narrowing.as_ref(),
-                        json_narrowing
-                            .as_ref()
-                            .filter(|(_, _, equal)| *equal)
-                            .map(|(name, ty, _)| (name.clone(), ty.clone()))
-                            .as_ref(),
+                        then_json.as_ref(),
                         exception_narrowing.as_ref(),
                     )?;
                 self.restore_narrowings_for_sibling(&saved_narrowings);
@@ -1677,11 +1683,7 @@ impl<'a> FnLowerer<'a> {
                         alt,
                         else_union.as_deref(),
                         else_narrowing.as_ref(),
-                        json_narrowing
-                            .as_ref()
-                                .filter(|(_, _, equal)| !*equal)
-                                .map(|(name, ty, _)| (name.clone(), ty.clone()))
-                                .as_ref(),
+                        else_json.as_ref(),
                             None,
                         )?,
                     None => Vec::new(),

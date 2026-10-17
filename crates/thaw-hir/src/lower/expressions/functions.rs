@@ -47,6 +47,7 @@ impl<'a> FnLowerer<'a> {
             lower_non_arrow_receiver_type(&annotation.type_ann, &HashMap::new(),
                 self.interfaces, self.generic_interfaces, &mut Vec::new())
                 .map(canonical_non_arrow_receiver_type)
+                .map(|receiver| storage_type(this.span(), receiver))
         } else {
             Ok(HirType::Json)
         }
@@ -80,7 +81,9 @@ impl<'a> FnLowerer<'a> {
                 .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
             return lower_non_arrow_receiver_type(template, &substitution,
                 self.interfaces, self.generic_interfaces, &mut Vec::new())
-                .map(canonical_non_arrow_receiver_type).map(Some);
+                .map(canonical_non_arrow_receiver_type)
+                .map(|receiver| storage_type(template.span(), receiver))
+                .map(Some);
         }
         Ok(self.generic_non_arrow_receivers.get(name).cloned())
     }
@@ -326,6 +329,12 @@ impl<'a> FnLowerer<'a> {
             for (pattern, name, ty) in destructuring {
                 lowerer.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }
+            if arrow.is_async {
+                lowerer.source_ret_type = lowerer.source_ret_type.take().map(|source| match source {
+                    HirType::Promise(result) => *result,
+                    other => other,
+                });
+            }
             let declared_async_result = if arrow.is_async {
                 match &declared_return {
                     Some(HirType::Promise(result)) => Some(result.as_ref().clone()),
@@ -530,6 +539,8 @@ impl<'a> FnLowerer<'a> {
                 }
             };
             let return_type = declared_return.clone().unwrap_or(inferred_return);
+            let mut body = body;
+            lowerer.prepend_referenced_promise_snapshots_expr(&params, &mut body);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
             if !referenced.contains("__thaw_this") {
@@ -867,6 +878,28 @@ impl<'a> FnLowerer<'a> {
             return self.lower_arrow(&contextual);
         }
         if arrow.is_async {
+            if let (Some(annotation), Some(expected)) = (&arrow.return_type, expected_return) {
+                let declared = lower_ts_type(
+                    &annotation.type_ann,
+                    self.interfaces,
+                    self.generic_interfaces,
+                )?;
+                let contextual = match expected {
+                    HirType::Promise(_) => expected.clone(),
+                    other => HirType::Promise(Box::new(other.clone())),
+                };
+                let contextual_inner = match &contextual {
+                    HirType::Promise(inner) => inner.as_ref(),
+                    other => other,
+                };
+                if !matches!(contextual_inner, HirType::Dynamic | HirType::Json | HirType::JsValue)
+                    && !callable_return_compatible(&contextual, &declared)
+                {
+                    return Err(format!(
+                        "contextual callback declares return type {declared:?}, expected {contextual:?}"
+                    ));
+                }
+            }
             let mut contextual = arrow.clone();
             for (parameter, ty) in contextual.params.iter_mut().zip(parameter_types) {
                 let annotation = match parameter {
@@ -1027,7 +1060,50 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
         }
-        let expected_return = generic_return.as_ref().or(expected_return);
+        let contextual_return = generic_return.as_ref().or(expected_return);
+        let annotated_return = if arrow.type_params.is_none() {
+            arrow
+                .return_type
+                .as_ref()
+                .map(|annotation| {
+                    lower_ts_type(
+                        &annotation.type_ann,
+                        self.interfaces,
+                        self.generic_interfaces,
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if let (Some(annotated), Some(contextual)) = (&annotated_return, contextual_return) {
+            if contextual != &HirType::Dynamic
+                && contextual != &HirType::Void
+                && contextual != &HirType::Json
+                && contextual != &HirType::JsValue
+                && !callable_return_compatible(contextual, annotated)
+            {
+                return Err(format!(
+                    "contextual callback declares return type {annotated:?}, expected {contextual:?}"
+                ));
+            }
+        }
+        let source_return = annotated_return
+            .as_ref()
+            .or(contextual_return)
+            .cloned();
+        let physical_return = source_return
+            .as_ref()
+            .map(|ty| {
+                if contextual_return == Some(&HirType::Void) {
+                    HirType::Void
+                } else if self.stored_arrow_initializer {
+                    ty.clone()
+                } else {
+                    storage_return_type(arrow.span, ty.clone())
+                }
+            });
+        let expected_return = physical_return.as_ref();
         let declared_parameter_types = if arrow.type_params.is_none() {
             arrow
                 .params
@@ -1095,6 +1171,10 @@ impl<'a> FnLowerer<'a> {
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = self.with_function_control_flow(|lowerer| {
+            lowerer.remember_source_return(arrow.span);
+            if lowerer.source_ret_type.is_none() {
+                lowerer.source_ret_type = source_return.clone();
+            }
             let mut params = Vec::with_capacity(parameter_types.len() + usize::from(receiver.is_some()));
             if let Some(receiver) = &receiver {
                 lowerer.class_static_context = false;
@@ -1197,7 +1277,13 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty.clone()
                 };
+                let ty = if is_quickjs_function_value_slot(pat.span()) {
+                    storage_parameter_type(pat, ty)
+                } else {
+                    ty
+                };
                 let name = lowerer.bind_local(&source_name, ty.clone());
+                lowerer.remember_source_parameter(&name, pat);
                 lowerer.mark_array_parameter(&name, &ty);
                 if lowerer.promise_catch_parameter.as_deref() == Some(source_name.as_str()) {
                     lowerer.promise_catch_bindings.insert(name.clone());
@@ -1321,6 +1407,8 @@ impl<'a> FnLowerer<'a> {
                 Some(expected) => expected.clone(),
                 None => inferred,
             };
+            let mut body = body;
+            lowerer.prepend_referenced_promise_snapshots_expr(&params, &mut body);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
             if !referenced.contains("__thaw_this") {

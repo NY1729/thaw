@@ -75,6 +75,10 @@ const TOP_LEVEL_INIT_GUARD_SYMBOL: &str = "__thaw_top_level_initialized";
 /// C FFI) while allowing callers to branch to their nearest lexical catch.
 const PENDING_EXCEPTION_SYMBOL: &str = "__thaw_pending_exception";
 const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
+/// The exact rejection text currently being delivered to a Promise callback.
+/// This scoped provenance lets structural casts distinguish their own string
+/// input from stale typed exception fields left by another throw.
+const ACTIVE_REJECTION_TEXT_SYMBOL: &str = "__thaw_active_rejection_text";
 /// Parallel, opt-in companion to `PENDING_EXCEPTION_SYMBOL`: null unless the
 /// thrown value was a real (Error-family) class instance, in which case it
 /// holds that object's own pointer so a catch site can read fields beyond
@@ -881,6 +885,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_REJECTION_SYMBOL);
         rejection.set_linkage(Linkage::Internal);
         rejection.set_initializer(&ptr_ty.const_null());
+        let active_rejection_text =
+            self.module
+                .add_global(ptr_ty, None, ACTIVE_REJECTION_TEXT_SYMBOL);
+        active_rejection_text.set_linkage(Linkage::Internal);
+        active_rejection_text.set_initializer(&ptr_ty.const_null());
         let native_text =
             self.module
                 .add_global(ptr_ty, None, PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL);
@@ -1459,6 +1468,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .get_global(PENDING_REJECTION_SYMBOL)
             .expect("rejection state is declared before code generation")
+    }
+
+    fn active_rejection_text(&self) -> inkwell::values::GlobalValue<'ctx> {
+        self.module
+            .get_global(ACTIVE_REJECTION_TEXT_SYMBOL)
+            .expect("active rejection text is declared with exception state")
     }
 
     fn clear_pending_native_text(&self) -> Result<(), String> {

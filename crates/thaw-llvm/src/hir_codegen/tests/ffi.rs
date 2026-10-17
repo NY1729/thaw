@@ -2651,6 +2651,9 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
             catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
             const collection = new Map<string, number>(); collection.set("a", 1);
             console.log(native_storage_collection(collection), native_storage_calls());
+            const validForeign: any = new Function("return new Map([['a', 1]])")();
+            try { native_storage_collection(validForeign); console.log("accepted JS collection"); }
+            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
             const foreign: any = new Function("return new Map([[1, 'bad']])")();
             try { native_storage_collection(foreign); console.log("accepted collection"); }
             catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
@@ -2709,6 +2712,6 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\ntrue 1\n7 2\ntrue 2\ntrue 2\n8 1 3\n9 4\ntrue 4\n1 5\ntrue 5\ntrue true bad\n11 false 6\ntrue 11 6\n1 7\ntrue object 1\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\ntrue 1\n7 2\ntrue 2\ntrue 2\n8 1 3\n9 4\ntrue 4\n1 5\ntrue 5\ntrue 5\ntrue true bad\n11 false 6\ntrue 11 6\n1 7\ntrue object 1\n");
     std::fs::remove_dir_all(dir).unwrap();
 }

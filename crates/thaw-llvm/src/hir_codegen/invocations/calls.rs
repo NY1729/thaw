@@ -36,9 +36,9 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match name.as_str() {
-            "@@thaw_async_caught_carrier" => {
+            "@@thaw_async_caught_carrier" | "@@thaw_caught_exception_from_tuple" => {
                 let [text, owner, native, tag, number, bigint, boolean] = args else {
-                    return Err("async caught carrier expects text, owner, native, tag, number, bigint and bool".into());
+                    return Err("caught exception carrier expects text, owner, native, tag, number, bigint and bool".into());
                 };
                 let text = self.compile_expr(text)?.into_pointer_value();
                 let owner = self.compile_expr(owner)?.into_pointer_value();
@@ -47,8 +47,50 @@ impl<'ctx> HirCompiler<'ctx> {
                 let number = self.compile_expr(number)?.into_float_value();
                 let bigint = self.compile_expr(bigint)?.into_int_value();
                 let boolean = self.compile_expr(boolean)?.into_int_value();
-                return self.build_caught_exception_carrier(text, owner, native, tag, number, bigint, boolean, false)
+                let share_json = name == "@@thaw_caught_exception_from_tuple";
+                return self.build_caught_exception_carrier(text, owner, native, tag, number, bigint, boolean, share_json)
                     .map(Into::into);
+            }
+            "@@thaw_is_active_rejection_text" => {
+                let [text] = args else {
+                    return Err("active rejection text check expects one string".into());
+                };
+                let text = self.compile_expr(text)?.into_pointer_value();
+                let active = self
+                    .builder
+                    .build_load(
+                        self.context.ptr_type(AddressSpace::default()),
+                        self.active_rejection_text().as_pointer_value(),
+                        "active_rejection_text",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                let active_non_null = self
+                    .builder
+                    .build_is_not_null(active, "has_active_rejection_text")
+                    .map_err(|error| error.to_string())?;
+                let active_word = self
+                    .builder
+                    .build_ptr_to_int(active, self.context.i64_type(), "active_rejection_word")
+                    .map_err(|error| error.to_string())?;
+                let text_word = self
+                    .builder
+                    .build_ptr_to_int(text, self.context.i64_type(), "candidate_rejection_word")
+                    .map_err(|error| error.to_string())?;
+                let same = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        active_word,
+                        text_word,
+                        "same_rejection_text",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return self
+                    .builder
+                    .build_and(active_non_null, same, "matches_active_rejection_text")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
             }
             "@@thaw_capture_throw_text" => {
                 let [value] = args else {

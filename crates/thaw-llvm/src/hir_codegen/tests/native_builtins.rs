@@ -48,7 +48,6 @@ fn number_format_explicit_undefined_uses_omitted_branch() {
     );
 }
 
-
 #[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
@@ -972,10 +971,7 @@ fn compiles_performance_now_as_a_monotonic_clock() {
             console.log(end - start >= 15);
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "performance_now"),
-        "true\ntrue\n"
-    );
+    assert_eq!(compile_and_run(source, "performance_now"), "true\ntrue\n");
 }
 
 #[test]
@@ -1359,7 +1355,10 @@ fn compiles_map_object_value() {
             printPoint(m.get("missing"));
         }
     "#;
-    assert_eq!(compile_and_run(source, "map_object_value"), "2\nundefined\n");
+    assert_eq!(
+        compile_and_run(source, "map_object_value"),
+        "2\nundefined\n"
+    );
 }
 
 #[test]
@@ -2076,10 +2075,7 @@ fn compiles_direct_generator_iteration() {
             console.log(sum);
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "direct_generator_iteration"),
-        "6\n"
-    );
+    assert_eq!(compile_and_run(source, "direct_generator_iteration"), "6\n");
 }
 
 #[test]
@@ -2118,10 +2114,7 @@ fn compiles_generator_yield_delegate() {
             console.log(total);
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "generator_yield_delegate"),
-        "10\n"
-    );
+    assert_eq!(compile_and_run(source, "generator_yield_delegate"), "10\n");
 }
 
 #[test]
@@ -2491,7 +2484,10 @@ fn compiles_array_from_first_boundary_undefined_acquisition_throw() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "array_from_first_boundary_undefined_acquisition_throw"),
+        compile_and_run(
+            source,
+            "array_from_first_boundary_undefined_acquisition_throw"
+        ),
         "true true 0\n"
     );
 }
@@ -3645,10 +3641,7 @@ fn for_await_consumes_async_generator() {
             console.log(total);
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "for_await_async_generator"),
-        "6\n"
-    );
+    assert_eq!(compile_and_run(source, "for_await_async_generator"), "6\n");
 }
 
 #[test]
@@ -4116,7 +4109,10 @@ fn any_typed_regex_test_in_while_condition_keeps_a_plain_body_read_of_last_index
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "any_typed_regex_test_while_condition_last_index_read"),
+        compile_and_run(
+            source,
+            "any_typed_regex_test_while_condition_last_index_read"
+        ),
         "1\n2\n3\n"
     );
 }
@@ -4511,7 +4507,10 @@ fn map_set_on_an_any_typed_property_chain_receiver_errors_clearly() {
             console.log(holder.m.get("b"), holder.m.size);
         }
     "#;
-    assert_eq!(compile_and_run(source, "map_set_any_property_chain"), "2 2\n");
+    assert_eq!(
+        compile_and_run(source, "map_set_any_property_chain"),
+        "2 2\n"
+    );
 }
 
 #[test]
@@ -4901,6 +4900,29 @@ fn byte_buffer_from_and_to_string() {
     );
 }
 
+#[test]
+fn dynamic_json_to_string_calls_the_live_host_method() {
+    let source = r#"
+        declare function __thaw_typed_js_6d616b65427566666572(): any;
+        declare function __thaw_typed_js_6d616b65437573746f6d(): any;
+        declare function __thaw_typed_js_6d616b655072696d6974697665(): any;
+        function main(): void {
+            loadScript("globalThis.makeBuffer = () => Buffer.from('héllo'); globalThis.makeCustom = () => ({ toString() { return 'custom'; } }); globalThis.makePrimitive = () => 17;");
+            const buffer: any = __thaw_typed_js_6d616b65427566666572();
+            console.log(buffer.toString());
+            console.log(buffer.toString("hex"));
+            const custom: any = __thaw_typed_js_6d616b65437573746f6d();
+            console.log(custom.toString());
+            const primitive: any = __thaw_typed_js_6d616b655072696d6974697665();
+            console.log(primitive.toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_json_to_string_live_method"),
+        "héllo\n68c3a96c6c6f\ncustom\n17\n"
+    );
+}
+
 /// `Buffer.isBuffer` used to unconditionally return the compile-time
 /// literal `false` for *any* operand, regardless of its real type --
 /// it read the operand's type through `infer_expr_type` (which always
@@ -5146,7 +5168,10 @@ fn native_string_failures_are_typed_and_symbol_key_can_be_undefined() {
             catch (error) { console.log(error instanceof RangeError, error.name); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "typed_string_errors"), "true\ntrue\ntrue URIError\ntrue URIError\ntrue RangeError\n");
+    assert_eq!(
+        compile_and_run(source, "typed_string_errors"),
+        "true\ntrue\ntrue URIError\ntrue URIError\ntrue RangeError\n"
+    );
 }
 
 /// `Object.freeze`/`seal`/`preventExtensions` (identity in thaw's fixed
@@ -5742,7 +5767,10 @@ fn sparse_buffer_element_method_throws_before_access() {
             catch (error) { console.log(error.name, error instanceof TypeError); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "sparse_buffer_element_method"), "104\nTypeError true\n");
+    assert_eq!(
+        compile_and_run(source, "sparse_buffer_element_method"),
+        "104\nTypeError true\n"
+    );
 }
 
 #[test]
@@ -5763,7 +5791,10 @@ fn native_array_length_compound_and_update_assignments() {
             console.log(ordered.length += rhs(), ordered.length, ordered.join(","));
         }
     "#;
-    assert_eq!(compile_and_run(source, "native_array_length_updates"), "5 5 false\n2 2 false\n2 3 4 4\n4 3 2 2\nstring 21\nRangeError 21\nRangeError 0\n3 3 1,9,\n");
+    assert_eq!(
+        compile_and_run(source, "native_array_length_updates"),
+        "5 5 false\n2 2 false\n2 3 4 4\n4 3 2 2\nstring 21\nRangeError 21\nRangeError 0\n3 3 1,9,\n"
+    );
 }
 
 #[test]
@@ -5795,7 +5826,10 @@ fn native_array_length_assignment_resizes_and_preserves_state() {
             console.log(receiver().length = amount(), order, values.length, 1 in values);
         }
     "#;
-    assert_eq!(compile_and_run(source, "native_array_resize_length"), "1 1 false\n4 4 false true\n,,,9 true\n0 0 0\n1 a\n3 3 false\n1 a\nfalse false 1,,,\nRangeError\nRangeError\nRangeError\n2 LR 2 false\n");
+    assert_eq!(
+        compile_and_run(source, "native_array_resize_length"),
+        "1 1 false\n4 4 false true\n,,,9 true\n0 0 0\n1 a\n3 3 false\n1 a\nfalse false 1,,,\nRangeError\nRangeError\nRangeError\n2 LR 2 false\n"
+    );
 }
 
 /// `array.length ||= n` / `&&= n` / `??= n` -- previously rejected outright
@@ -5845,7 +5879,10 @@ fn native_array_membership_respects_length_and_holes_after_growth() {
             console.log(values.hasOwnProperty("1"), values.propertyIsEnumerable("3"), values.propertyIsEnumerable("length"));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_growth_membership"), "true false true false false\nfalse true false\nfalse true false\nfalse true false\n");
+    assert_eq!(
+        compile_and_run(source, "array_growth_membership"),
+        "true false true false false\nfalse true false\nfalse true false\nfalse true false\n"
+    );
 }
 
 #[test]
@@ -5876,7 +5913,10 @@ fn indexed_assignment_grows_native_arrays_with_holes() {
             console.log(before, ordered.length, ordered.join(","));
         }
     "#;
-    assert_eq!(compile_and_run(source, "native_array_index_growth"), "5 4 false false true 1,,,5\nundefined 7 true true false 1,,,5,,,\n10 true false 1,,,5,,,,,,8\n3 false true true\n4 false true true\n3 false a||z\n1 4 1,,,2\n");
+    assert_eq!(
+        compile_and_run(source, "native_array_index_growth"),
+        "5 4 false false true 1,,,5\nundefined 7 true true false 1,,,5,,,\n10 true false 1,,,5,,,,,,8\n3 false true true\n4 false true true\n3 false a||z\n1 4 1,,,2\n"
+    );
 }
 
 #[test]
@@ -5903,7 +5943,10 @@ fn inferred_array_literals_preserve_sparse_reads() {
             console.log(text(words).includes(undefined), text(words).join("|"));
         }
     "#;
-    assert_eq!(compile_and_run(source, "inferred_array_sparse_reads"), "true true ,2\nfalse true 1\n0 3 true\ntrue true\ntrue 9 true\ntrue |hi\n");
+    assert_eq!(
+        compile_and_run(source, "inferred_array_sparse_reads"),
+        "true true ,2\nfalse true 1\n0 3 true\ntrue true\ntrue 9 true\ntrue |hi\n"
+    );
 }
 
 #[test]
@@ -5932,7 +5975,10 @@ fn array_factory_and_concat_keep_sparse_states() {
             console.log(text.includes(undefined), text.join("|"));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_factory_sparse_values"), "true true ,2\n3 true 1,,2,\ntrue true ,2\nfalse false true 4\ntrue true\ntrue 3 true\ntrue |ok\n");
+    assert_eq!(
+        compile_and_run(source, "array_factory_sparse_values"),
+        "true true ,2\n3 true 1,,2,\ntrue true ,2\nfalse false true 4\ntrue true\ntrue 3 true\ntrue |ok\n"
+    );
 }
 
 #[test]
@@ -5965,7 +6011,10 @@ fn array_literals_store_sparse_reads_as_present_undefined() {
             console.log(copied.includes(undefined), Object.hasOwn(copied, 0));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_literals_sparse_reads"), "true true ,2\ntrue true 1,,2\n0 1 true\n0 2 true\nfalse true 1\ntrue true\ntrue true ,2\ntrue |hi\ntrue true\n");
+    assert_eq!(
+        compile_and_run(source, "array_literals_sparse_reads"),
+        "true true ,2\ntrue true 1,,2\n0 1 true\n0 2 true\nfalse true 1\ntrue true\ntrue true ,2\ntrue |hi\ntrue true\n"
+    );
 }
 
 #[test]
@@ -6004,7 +6053,10 @@ fn array_mapping_callbacks_return_sparse_values_as_present_undefined() {
             applyWords(words);
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_mapping_sparse_results"), "true true ,2\ntrue true ,2\ntrue true ,2\ntrue true ,2\ntrue true\ntrue true\ntrue 2\ntrue true |hi\n");
+    assert_eq!(
+        compile_and_run(source, "array_mapping_sparse_results"),
+        "true true ,2\ntrue true ,2\ntrue true ,2\ntrue true ,2\ntrue true\ntrue true\ntrue 2\ntrue true |hi\n"
+    );
 }
 
 #[test]
@@ -6061,7 +6113,10 @@ fn array_methods_preserve_sparse_values_after_spread_arguments() {
             console.log(fromHole.includes(undefined), Object.hasOwn(fromHole, 0));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_spread_sparse_arguments"), "2 6 true 3,4,,,7,1,\ntrue true\n0 0 true\n3 2 true\ntrue 4\nRV\ntrue true\n");
+    assert_eq!(
+        compile_and_run(source, "array_spread_sparse_arguments"),
+        "2 6 true 3,4,,,7,1,\ntrue true\n0 0 true\n3 2 true\ntrue 4\nRV\ntrue true\n"
+    );
 }
 
 #[test]
@@ -6098,7 +6153,10 @@ fn array_fill_and_copy_by_change_accept_sparse_values() {
             console.log(stored.includes(undefined), Object.hasOwn(stored, 0));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_sparse_fill_copy"), "false true true 1\ntrue true true 2\ntrue true 1 ,,2,2\ntrue 1 true true |\n1\n0 true\n0 1\ntrue true\n");
+    assert_eq!(
+        compile_and_run(source, "array_sparse_fill_copy"),
+        "false true true 1\ntrue true true 2\ntrue true 1 ,,2,2\ntrue 1 true true |\n1\n0 true\n0 1\ntrue true\n"
+    );
 }
 
 #[test]
@@ -6132,7 +6190,10 @@ fn array_mutators_insert_sparse_elements_as_present_undefined() {
             console.log(stored.includes(undefined), Object.hasOwn(stored, 1));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_mutators_sparse_arguments"), "3 true true 7,,2\n3 0 true ,2,7\n6 1 true 5,,2\ntrue 3 ||old|\ntrue true\ntrue false 0 true\ntrue true\n");
+    assert_eq!(
+        compile_and_run(source, "array_mutators_sparse_arguments"),
+        "3 true true 7,,2\n3 0 true ,2,7\n6 1 true 5,,2\ntrue 3 ||old|\ntrue true\ntrue false 0 true\ntrue true\n"
+    );
 }
 
 #[test]
@@ -6156,7 +6217,10 @@ fn logical_assignment_reads_sparse_array_holes_as_undefined() {
             console.log(passed.includes(undefined), Object.hasOwn(passed, 0));
         }
     "#;
-    assert_eq!(compile_and_run(source, "logical_sparse_array_element"), "undefined false\n3 true\n4 7 3,4,7\nundefined false\nnew done new,done\nundefined undefined\n0 1 true\ntrue true\n");
+    assert_eq!(
+        compile_and_run(source, "logical_sparse_array_element"),
+        "undefined false\n3 true\n4 7 3,4,7\nundefined false\nnew done new,done\nundefined undefined\n0 1 true\ntrue true\n"
+    );
 }
 
 #[test]
@@ -6186,7 +6250,10 @@ fn nullish_assignment_reads_sparse_array_holes_as_undefined() {
             console.log(occupied[0] ??= load()[0], reads);
         }
     "#;
-    assert_eq!(compile_and_run(source, "nullish_sparse_array_element"), "3 2 3,2\nnew ok new,ok\n3 2\nundefined 9\ntrue true 9\ntrue true\n8 0\n");
+    assert_eq!(
+        compile_and_run(source, "nullish_sparse_array_element"),
+        "3 2 3,2\nnew ok new,ok\n3 2\nundefined 9\ntrue true 9\ntrue true\n8 0\n"
+    );
 }
 
 /// Sibling of `nullish_assignment_reads_sparse_array_holes_as_undefined`,
@@ -6367,7 +6434,10 @@ fn compound_assignment_reads_sparse_array_holes_as_undefined() {
             console.log(stringTarget[0]);
         }
     "#;
-    assert_eq!(compile_and_run(source, "compound_sparse_array_element"), "false false true\nNaN true true\n5 5\nundefined! a! true\nundefined1 a1\ntrue\nvalueundefined\n");
+    assert_eq!(
+        compile_and_run(source, "compound_sparse_array_element"),
+        "false false true\nNaN true true\n5 5\nundefined! a! true\nundefined1 a1\ntrue\nvalueundefined\n"
+    );
 }
 
 #[test]
@@ -6384,7 +6454,10 @@ fn updates_read_sparse_array_holes_as_undefined() {
             console.log(++receiver()[index()], evaluations);
         }
     "#;
-    assert_eq!(compile_and_run(source, "update_sparse_array_element"), "NaN true 2 3\nNaN true\n3 2\n");
+    assert_eq!(
+        compile_and_run(source, "update_sparse_array_element"),
+        "NaN true 2 3\nNaN true\n3 2\n"
+    );
 }
 
 #[test]
@@ -6434,7 +6507,10 @@ fn annotated_primitive_locals_accept_sparse_array_index_values() {
             console.log(Number.isNaN(assignedNumber + 1), assignedString + "!");
         }
     "#;
-    assert_eq!(compile_and_run(source, "annotated_sparse_primitive_locals"), "true undefined!\ntrue undefined!\n");
+    assert_eq!(
+        compile_and_run(source, "annotated_sparse_primitive_locals"),
+        "true undefined!\ntrue undefined!\n"
+    );
 }
 
 #[test]
@@ -6883,7 +6959,10 @@ fn reads_union_undefined_without_nested_optional_values() {
             console.log(maybe?.[1] === undefined, maybe?.[2] === undefined, missing?.[0] === undefined);
         }
     "#;
-    assert_eq!(compile_and_run(source, "reads_union_undefined"), "true true\ntrue true\n2 true\ntrue true true\n");
+    assert_eq!(
+        compile_and_run(source, "reads_union_undefined"),
+        "true true\ntrue true\n2 true\ntrue true true\n"
+    );
 }
 
 #[test]
@@ -6916,7 +6995,10 @@ fn reads_nullish_and_nullable_array_elements() {
             console.log(forOfNulls);
         }
     "#;
-    assert_eq!(compile_and_run(source, "reads_nullish_array_elements"), "true true true\ntrue true\n1 1 true\ntrue true\n1 1 false,true,false\ntrue\ntrue true\n1\n");
+    assert_eq!(
+        compile_and_run(source, "reads_nullish_array_elements"),
+        "true true true\ntrue true\n1 1 true\ntrue true\n1 1 false,true,false\ntrue\ntrue true\n1\n"
+    );
 }
 
 #[test]
@@ -6963,7 +7045,10 @@ fn flat_map_flattens_array_members_of_mixed_results() {
             console.log(JSON.stringify([0, 1, 2].flatMap(value => value === 1 ? value : [value, value + 10])));
         }
     "#;
-    assert_eq!(compile_and_run(source, "flat_map_mixed_results"), "[0,1,11,2]\n[0,10,1,2,12]\n");
+    assert_eq!(
+        compile_and_run(source, "flat_map_mixed_results"),
+        "[0,1,11,2]\n[0,10,1,2,12]\n"
+    );
 }
 
 #[test]
@@ -7140,7 +7225,10 @@ fn array_of_spread_densifies_holes() {
             console.log(visits, copied.indexOf(undefined), copied.join(","), sparse.indexOf(undefined));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_of_spread_densifies_holes"), "2 0 ,1 -1\n");
+    assert_eq!(
+        compile_and_run(source, "array_of_spread_densifies_holes"),
+        "2 0 ,1 -1\n"
+    );
 }
 
 #[test]
@@ -7156,7 +7244,10 @@ fn optional_array_index_reads_sparse_states() {
             console.log(optionalTagged?.[0], optionalTagged?.[1]);
         }
     "#;
-    assert_eq!(compile_and_run(source, "optional_array_index_sparse"), "1 undefined undefined undefined\n1 undefined\n");
+    assert_eq!(
+        compile_and_run(source, "optional_array_index_sparse"),
+        "1 undefined undefined undefined\n1 undefined\n"
+    );
 }
 
 #[test]
@@ -7278,7 +7369,10 @@ fn filters_present_undefined_without_losing_its_state() {
             console.log(values.reduce((acc, value) => acc + value));
         }
     "#;
-    assert_eq!(compile_and_run(source, "filters_present_undefined"), "3 undefined undefined undefined undefined\n1 1 true\n-1 true\n1 undefined \n1 [null]\n1\n1\nfalse,true,false\n[3,null,1]\ntrue\ntrue\nNaN\n");
+    assert_eq!(
+        compile_and_run(source, "filters_present_undefined"),
+        "3 undefined undefined undefined undefined\n1 1 true\n-1 true\n1 undefined \n1 [null]\n1\n1\nfalse,true,false\n[3,null,1]\ntrue\ntrue\nNaN\n"
+    );
 }
 
 #[test]
@@ -7737,9 +7831,9 @@ fn compiles_dynamic_object_descriptors_and_prototypes() {
 /// Proxy traps make it work), only enough bookkeeping for
 /// `getPrototypeOf` to read back exactly what `create`/`setPrototypeOf`
 /// set, by pointer identity, matching how `Object.freeze`/`seal` state
-/// already works for fixed-layout objects. A plain object literal never
-/// passed through either stays the accepted approximation: `null`
-/// (real JS: `Object.prototype`, not modeled here). Also pins that a
+/// already works for fixed-layout objects. An ordinary object literal has
+/// JavaScript's real `Object.prototype` even before any explicit prototype
+/// mutation. Also pins that a
 /// directly-`console.log`ed result (not read back through a variable
 /// first) prints correctly -- regression for a bug this fix's own
 /// investigation found in `expr_hir_type` (thaw-llvm's `operators.rs`),
@@ -7754,10 +7848,11 @@ fn compiles_dynamic_json_value_prototypes() {
             console.log(Object.getPrototypeOf(created));
 
             const plain: any = {};
-            console.log(Object.getPrototypeOf(plain));
+            console.log(Object.getPrototypeOf(plain) === Object.prototype);
 
             const withNull: any = Object.create(null);
             console.log(Object.getPrototypeOf(withNull));
+            console.log(Reflect.has(withNull, "toString"));
 
             const target: any = {};
             const other: any = { x: 1 };
@@ -7767,7 +7862,7 @@ fn compiles_dynamic_json_value_prototypes() {
     "#;
     assert_eq!(
         compile_and_run(source, "dynamic_json_value_prototypes"),
-        "true\n{ greet: 'hello' }\nnull\nnull\ntrue\ntrue\n"
+        "true\n{ greet: 'hello' }\ntrue\nnull\nfalse\ntrue\ntrue\n"
     );
 }
 
@@ -8038,8 +8133,10 @@ fn property_is_enumerable_uses_own_descriptor_without_reading_value() {
             console.log(string.propertyIsEnumerable("0"), string.propertyIsEnumerable("1"), string.propertyIsEnumerable("2"), string.propertyIsEnumerable("length"));
         }
     "#;
-    assert_eq!(compile_and_run(source, "property_is_enumerable_descriptors"),
-        "false 1 1\ntrue false\ntrue false\ntrue false\nfalse true false\nfalse true false false\n0\ntrue\ntrue true true false\n");
+    assert_eq!(
+        compile_and_run(source, "property_is_enumerable_descriptors"),
+        "false 1 1\ntrue false\ntrue false\ntrue false\nfalse true false\nfalse true false false\n0\ntrue\ntrue true true false\n"
+    );
 }
 
 /// `Array.fromAsync` over an array-like input with an optional sync or
@@ -8074,10 +8171,7 @@ fn compiles_symbol_keyed_object_methods() {
             x[Symbol.dispose]();
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "symbol_keyed_method"),
-        "disposed\n"
-    );
+    assert_eq!(compile_and_run(source, "symbol_keyed_method"), "disposed\n");
 }
 
 /// `using` disposes its resources in reverse declaration order, including
@@ -8428,11 +8522,33 @@ fn compiles_aggregate_error() {
                 console.log(error.name);
                 console.log(error.message);
             }
+            const impostor: any = JSON.parse('{"message":"not aggregate","name":"AggregateError","errors":{}}');
+            console.log(impostor);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n"
+        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
+    );
+}
+
+#[test]
+fn aggregate_error_copies_a_promoted_json_array_and_rejects_json_objects() {
+    let source = r#"
+        function main(): void {
+            const inner = new Error("inner");
+            const errors: any = [inner];
+            const aggregate = new AggregateError(errors);
+            console.log(aggregate.errors[0] === inner, aggregate.errors.length);
+
+            const invalid: any = { value: 1 };
+            try { new AggregateError(invalid); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "aggregate_error_promoted_json_array"),
+        "true 1\ntrue AggregateError errors must be an array\n"
     );
 }
 
@@ -9021,7 +9137,10 @@ fn napi_caught_json_console_does_not_enable_quickjs() {
         }),
         "N-API-only console emitted a QuickJS graph-call instruction:\n{ir}"
     );
-    assert!(!ir.contains("thaw_js_register_callback_host_operations"), "{ir}");
+    assert!(
+        !ir.contains("thaw_js_register_callback_host_operations"),
+        "{ir}"
+    );
 }
 
 /// `Reflect.defineProperty`/`getOwnPropertyDescriptor`/`isExtensible`/
@@ -9378,7 +9497,10 @@ fn async_catch_preserves_a_typed_primitive_thrown_after_await() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "async_catch_preserves_a_typed_primitive_thrown_after_await"),
+        compile_and_run(
+            source,
+            "async_catch_preserves_a_typed_primitive_thrown_after_await"
+        ),
         "number 42\n"
     );
 }
@@ -9404,7 +9526,10 @@ fn async_catch_preserves_object_identity_across_a_rejection() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "async_catch_preserves_object_identity_across_a_rejection"),
+        compile_and_run(
+            source,
+            "async_catch_preserves_object_identity_across_a_rejection"
+        ),
         "true 42\n"
     );
 }
@@ -9572,6 +9697,7 @@ fn named_promise_rejection_callbacks_preserve_typed_values() {
                 return 44;
             };
             const recoverStored: (error: string) => number = (error: string): number => {
+                try { throw { code: 99 }; } catch (_) {}
                 const caught = error as Failure;
                 console.log("stored", caught === failure, caught.code + 1);
                 return 45;
@@ -9598,6 +9724,25 @@ fn named_promise_rejection_callbacks_preserve_typed_values() {
             "named_promise_rejection_callbacks_preserve_typed_values"
         ),
         "number 42\n42\nobject true 42\n43\nnumber 42\n42\nobject true 42\n43\nlocal true 42\n44\nstored true 42\n45\nobject true 42\n"
+    );
+}
+
+#[test]
+fn ordinary_string_cast_inside_rejection_callback_ignores_unrelated_active_payload() {
+    let source = r#"
+        interface Failure { code: number; }
+        async function main(): Promise<void> {
+            const cast: (text: string) => any = (text: string): any => text as Failure;
+            const result = await Promise.reject<number>(41).catch(() => {
+                console.log(cast("abc"));
+                return 0;
+            });
+            console.log(result);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "ordinary_string_cast_ignores_unrelated_active_payload"),
+        "abc\n0\n"
     );
 }
 
@@ -9717,8 +9862,10 @@ fn math_sum_precise_sparse_and_special_values() {
             catch (error) { console.log(error instanceof TypeError); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "math_sum_precise_sparse_special"),
-        "true\ntrue\ntrue\ntrue\ntrue\ntrue\nInfinity\n-Infinity\ntrue\ntrue\n1\ntrue\n");
+    assert_eq!(
+        compile_and_run(source, "math_sum_precise_sparse_special"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\nInfinity\n-Infinity\ntrue\ntrue\n1\ntrue\n"
+    );
 }
 
 #[test]
@@ -9738,7 +9885,10 @@ fn math_sum_precise_sparse_async_rejects_type_error() {
             catch (error) { console.log(error instanceof TypeError); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "math_sum_precise_sparse_async"), "true\ntrue\n");
+    assert_eq!(
+        compile_and_run(source, "math_sum_precise_sparse_async"),
+        "true\ntrue\n"
+    );
 }
 
 /// `Math.sumPrecise` and the deprecated `Date.getYear`/`setYear`.
@@ -9777,10 +9927,7 @@ fn compiles_promise_then_two_arg() {
             console.log(await bad().then((v: number) => v + 10, (e: string) => 42));
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "promise_then_two_arg"),
-        "11\n42\n"
-    );
+    assert_eq!(compile_and_run(source, "promise_then_two_arg"), "11\n42\n");
 }
 
 #[test]
@@ -10268,7 +10415,11 @@ fn rejects_native_prototype_mutation_instead_of_returning_fake_results() {
         ),
     ] {
         let module = thaw_parser::parse_typescript(source).unwrap();
-        assert!(thaw_hir::lower_module(&module).unwrap_err().contains(expected));
+        assert!(
+            thaw_hir::lower_module(&module)
+                .unwrap_err()
+                .contains(expected)
+        );
     }
 }
 
@@ -10283,10 +10434,7 @@ fn compiles_string_raw() {
             console.log(String.raw({ raw: ["a", "b"] }, 1, 2));
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "string_raw"),
-        "a\\nb1c\na1b\n"
-    );
+    assert_eq!(compile_and_run(source, "string_raw"), "a\\nb1c\na1b\n");
 }
 
 /// All direct-call `String.raw` substitutions evaluate left to right even when
@@ -10519,7 +10667,10 @@ fn regex_exec_empty_match_preserves_last_index_and_search_respects_sticky() {
             console.log("ba".search(/a/y));
         }
     "#;
-    assert_eq!(compile_and_run(source, "regex_empty_and_sticky"), "0\n0\n-1\n");
+    assert_eq!(
+        compile_and_run(source, "regex_empty_and_sticky"),
+        "0\n0\n-1\n"
+    );
 }
 
 #[test]
@@ -10537,7 +10688,10 @@ fn regex_match_state_and_match_all_start_from_copied_last_index() {
             console.log("aa".match(global)?.length, global.lastIndex);
         }
     "#;
-    assert_eq!(compile_and_run(source, "regex_match_state"), "1\n2\n1 1 1\n2 0\n");
+    assert_eq!(
+        compile_and_run(source, "regex_match_state"),
+        "1\n2\n1 1 1\n2 0\n"
+    );
 }
 
 #[test]
@@ -10554,7 +10708,10 @@ fn regex_captures_and_metadata_survive_optional_groups_and_push() {
             console.log(parts.length, parts[2] === undefined);
         }
     "#;
-    assert_eq!(compile_and_run(source, "regex_optional_capture_metadata"), "true true\n0 bb true\n4 true\n");
+    assert_eq!(
+        compile_and_run(source, "regex_optional_capture_metadata"),
+        "true true\n0 bb true\n4 true\n"
+    );
 }
 
 #[test]
@@ -10565,7 +10722,10 @@ fn regex_javascript_ascii_digit_and_word_classes() {
             console.log(/^\d$/u.test("7"), /^\w$/u.test("A"));
         }
     "#;
-    assert_eq!(compile_and_run(source, "regex_ascii_classes"), "false false\ntrue true\n");
+    assert_eq!(
+        compile_and_run(source, "regex_ascii_classes"),
+        "false false\ntrue true\n"
+    );
 }
 
 #[test]
@@ -10654,8 +10814,10 @@ fn date_set_year_truncates_before_two_digit_year_adjustment() {
             }
         }
     "#;
-    assert_eq!(compile_and_run_with_env(source, "date_set_year_fractional", &[("TZ", "UTC")]),
-        "1900\n1900\n-1\n1999\n100\nNaN\nNaN\n");
+    assert_eq!(
+        compile_and_run_with_env(source, "date_set_year_fractional", &[("TZ", "UTC")]),
+        "1900\n1900\n-1\n1999\n100\nNaN\nNaN\n"
+    );
 }
 
 #[test]
@@ -10698,8 +10860,10 @@ fn spread_primitive_conversions_match_direct_nullish_and_bigint_conversions() {
             try { BigInt(...["bad"]); } catch (error) { console.log("invalid"); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "spread_primitive_conversion_parity"),
-        "null 1\nundefined\n0\ntrue\nfalse false\ntrue\ntrue\n9007199254740993\nfraction\ninvalid\n");
+    assert_eq!(
+        compile_and_run(source, "spread_primitive_conversion_parity"),
+        "null 1\nundefined\n0\ntrue\nfalse false\ntrue\ntrue\n9007199254740993\nfraction\ninvalid\n"
+    );
 }
 
 #[test]
@@ -10714,8 +10878,10 @@ fn spread_primitive_conversion_evaluates_tuple_and_throwing_operands_once() {
             try { String(fail()); } catch (error) { console.log("direct", calls); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "spread_primitive_operand_once"),
-        "null 1\nspread 2\ndirect 3\n");
+    assert_eq!(
+        compile_and_run(source, "spread_primitive_operand_once"),
+        "null 1\nspread 2\ndirect 3\n"
+    );
 }
 
 #[test]
@@ -10785,7 +10951,10 @@ fn array_literal_spread_snapshots_before_a_later_mutating_expression() {
             console.log(result.join(","), first.join(","));
         }
     "#;
-    assert_eq!(compile_and_run(source, "array_spread_prior_snapshot"), "1,3 2\n");
+    assert_eq!(
+        compile_and_run(source, "array_spread_prior_snapshot"),
+        "1,3 2\n"
+    );
 }
 
 #[test]
@@ -10907,8 +11076,10 @@ fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
             releaseDynamicValue(callbackHandle);
         }
     "#;
-    assert_eq!(compile_and_run(source, "date_live_value_constructor"),
-        "1704067200500 1704067200500\n1704067200500\n1704067200000 1704067200000 1 2\nhook threw\ntrue\nbigint threw\nsymbol threw\ntrue\n1704067200000 1 0\n");
+    assert_eq!(
+        compile_and_run(source, "date_live_value_constructor"),
+        "1704067200500 1704067200500\n1704067200500\n1704067200000 1704067200000 1 2\nhook threw\ntrue\nbigint threw\nsymbol threw\ntrue\n1704067200000 1 0\n"
+    );
 }
 
 #[test]
@@ -11000,8 +11171,10 @@ fn date_constructor_dispatches_static_string_and_absence_wrappers_once() {
             console.log(new Date(liveOrString(true)).getTime(), new Date(liveOrString(false)).getTime(), calls);
         }
     "#;
-    assert_eq!(compile_and_run(source, "date_static_wrapper_dispatch"),
-        "1704067200000\n1704067200000 1704067200500 2\n1704067200000 true 4\n1704067200000 0 6\n1704067200000 0 true 9\n1704067200000\n1704067200000 1704067200000 11\n");
+    assert_eq!(
+        compile_and_run(source, "date_static_wrapper_dispatch"),
+        "1704067200000\n1704067200000 1704067200500 2\n1704067200000 true 4\n1704067200000 0 6\n1704067200000 0 true 9\n1704067200000\n1704067200000 1704067200000 11\n"
+    );
 }
 
 #[test]
@@ -11055,12 +11228,14 @@ fn date_constructor_native_bigint_symbol_wrappers_throw_after_one_evaluation() {
             console.log(calls);
         }
     "#;
-    assert_eq!(compile_and_run(source, "date_native_wrapper_type_errors"),
-        "TypeError true 1\nTypeError true 2\nproducer 3\n1704067200000 1704067200500 5\nTypeError 6\nTypeError 7\ntrue 0 9\nTypeError 10\nTypeError 11\nTypeError true\nTypeError true\n13\n");
+    assert_eq!(
+        compile_and_run(source, "date_native_wrapper_type_errors"),
+        "TypeError true 1\nTypeError true 2\nproducer 3\n1704067200000 1704067200500 5\nTypeError 6\nTypeError 7\ntrue 0 9\nTypeError 10\nTypeError 11\nTypeError true\nTypeError true\n13\n"
+    );
 }
 
 #[test]
-fn native_object_method_receiver_mutations_use_original_prefix_storage() {
+fn native_object_method_receiver_mutations_preserve_the_complete_live_object() {
     let source = r#"
         function main(): void {
             const object = {
@@ -11091,8 +11266,8 @@ fn native_object_method_receiver_mutations_use_original_prefix_storage() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "native_object_method_receiver_live_prefix"),
-        "2 2\n3 3\n1 1\n2 2\n{\"value\":7}\n"
+        compile_and_run(source, "native_object_method_receiver_complete_live_object"),
+        "2 2\n3 3\n1 1\n2 2\n{\"value\":7,\"later\":9}\n"
     );
 }
 
@@ -11137,10 +11312,14 @@ fn dynamic_primitive_method_keeps_original_this_after_property_selection() {
             console.log(Number(getDynamicValue("calls")));
         }
     "#;
-    assert_eq!(compile_and_run(source, "dynamic_primitive_selected_method_this"), "string:xy:3\n1\n");
+    assert_eq!(
+        compile_and_run(source, "dynamic_primitive_selected_method_this"),
+        "string:xy:3\n1\n"
+    );
 }
 #[test]
-fn selected_dynamic_method_getter_failure_skips_arguments_and_released_receiver_fails_after_arguments() {
+fn selected_dynamic_method_getter_failure_skips_arguments_and_released_receiver_fails_after_arguments()
+ {
     let source = r#"
         let effects = 0;
         function argument(): number { effects++; return 1; }
@@ -11177,7 +11356,10 @@ fn native_any_object_method_mutates_shared_live_receiver_and_alias() {
             console.log(ordinary.getTime(), alias.value);
         }
     "#;
-    assert_eq!(compile_and_run(source, "native_any_object_live_method_alias"), "8 8 8\n21 21\n");
+    assert_eq!(
+        compile_and_run(source, "native_any_object_live_method_alias"),
+        "8 8 8\n21 21\n"
+    );
 }
 
 #[test]
@@ -11202,7 +11384,10 @@ fn public_dynamic_method_helper_evaluates_arguments_before_get_but_member_call_s
             console.log(String(getDynamicValue("memberOrder")));
         }
     "#;
-    assert_eq!(compile_and_run(source, "public_helper_vs_member_get_order"), "4\nAGC\n5\nGAC\n");
+    assert_eq!(
+        compile_and_run(source, "public_helper_vs_member_get_order"),
+        "4\nAGC\n5\nGAC\n"
+    );
 }
 
 #[test]
@@ -11225,7 +11410,10 @@ fn decoded_js_function_call_apply_bind_preserve_explicit_receiver() {
             releaseDynamicValue(handle);
         }
     "#;
-    assert_eq!(compile_and_run(source, "decoded_js_function_receiver"), "7\n8\n9\n105\n-1\n");
+    assert_eq!(
+        compile_and_run(source, "decoded_js_function_receiver"),
+        "7\n8\n9\n105\n-1\n"
+    );
 }
 
 #[test]
@@ -11251,7 +11439,10 @@ fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
             releaseDynamicValue(callback);
         }
     "#;
-    assert_eq!(compile_and_run(source, "typed_function_marshal_failure"), "true\n4 1\n");
+    assert_eq!(
+        compile_and_run(source, "typed_function_marshal_failure"),
+        "true\n4 1\n"
+    );
 }
 
 #[test]
@@ -11269,7 +11460,10 @@ fn class_instance_with_getters_converts_to_a_structural_parameter_by_reading_the
             console.log(before, total(pair));
         }
     "#;
-    assert_eq!(compile_and_run(source, "getter_class_structural_param"), "9 30\n");
+    assert_eq!(
+        compile_and_run(source, "getter_class_structural_param"),
+        "9 30\n"
+    );
 }
 
 #[test]
@@ -11287,7 +11481,10 @@ fn console_native_object_getter_failure_keeps_exception_and_next_log() {
             console.log(good);
         }
     "#;
-    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{ value: 4 }\n");
+    assert_eq!(
+        compile_and_run(source, "console_native_getter_ownership"),
+        "true 1\n{ value: 4 }\n"
+    );
 }
 
 #[test]
@@ -11362,7 +11559,10 @@ fn native_object_nonprefix_alias_remains_native_only() {
             console.log(owner.value, narrow.later, owner.tail);
         }
     "#;
-    assert_eq!(compile_and_run(source, "native_object_nonprefix_native_only"), "7 9 3\n");
+    assert_eq!(
+        compile_and_run(source, "native_object_nonprefix_native_only"),
+        "7 9 3\n"
+    );
 }
 
 #[test]
@@ -11478,8 +11678,10 @@ fn projected_native_data_descriptors_share_owner_attributes() {
             console.log(owner.value, view.value);
         }
     "#;
-    assert_eq!(compile_and_run(source, "projected_native_data_descriptor_authority"),
-        "true false true\nfalse false\nTypeError\n1 1\n");
+    assert_eq!(
+        compile_and_run(source, "projected_native_data_descriptor_authority"),
+        "true false true\nfalse false\nTypeError\n1 1\n"
+    );
 }
 
 #[test]
@@ -11526,7 +11728,7 @@ fn projected_native_data_descriptor_combines_value_and_attributes() {
 }
 
 #[test]
-fn projected_native_define_rechecks_flags_after_rhs_coercion() {
+fn projected_native_define_preserves_object_value_without_coercion() {
     let source = r#"
         function main(): void {
             const owner = { value: 1 };
@@ -11542,18 +11744,18 @@ fn projected_native_define_rechecks_flags_after_rhs_coercion() {
             console.log(Reflect.defineProperty(view, 'value', {
                 value: incoming, writable: false,
             }));
-            console.log(coercions, owner.value, view.value,
+            console.log(coercions, owner.value === incoming, view.value === incoming,
                 Object.isFrozen(owner), Object.getOwnPropertyDescriptor(owner, 'value').writable);
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "projected_native_define_reentrant_freeze"),
-        "false\n1 1 1 true false\n",
+        compile_and_run(source, "projected_native_define_preserve_object_value"),
+        "true\n0 true true false false\n",
     );
 }
 
 #[test]
-fn projected_native_define_rechecks_flags_after_nested_host_getter() {
+fn projected_native_define_does_not_read_nested_host_getter() {
     let source = r#"
         function main(): void {
             const owner: { value: { n: number } } = { value: { n: 1 } };
@@ -11572,8 +11774,8 @@ fn projected_native_define_rechecks_flags_after_nested_host_getter() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "projected_native_define_reentrant_host_getter"),
-        "false\n1 1 1 true true\n",
+        compile_and_run(source, "projected_native_define_no_getter_during_define"),
+        "true\n0 2 2 true true\n",
     );
 }
 
@@ -11594,8 +11796,10 @@ fn native_integrity_state_reaches_existing_projection_and_back() {
             catch (error) { console.log(error.name); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "projected_native_integrity_owner"),
-        "true false false\ntrue true\nTypeError\n");
+    assert_eq!(
+        compile_and_run(source, "projected_native_integrity_owner"),
+        "true false false\ntrue true\nTypeError\n"
+    );
 }
 
 #[test]
@@ -11617,7 +11821,7 @@ fn native_object_declared_reorder_keeps_source_field_effect_order() {
 }
 
 #[test]
-fn projected_native_delete_cannot_remove_only_shadow_field() {
+fn projected_native_delete_removes_plain_object_property() {
     let source = r#"
         function main(): void {
             const owner = { value: 7 };
@@ -11627,8 +11831,8 @@ fn projected_native_delete_cannot_remove_only_shadow_field() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "native_projection_delete_shadow"),
-        "false\n7 7 true\n"
+        compile_and_run(source, "native_projection_delete_plain_object_property"),
+        "true\nundefined undefined false\n"
     );
 }
 
@@ -11651,82 +11855,118 @@ fn projected_global_native_owner_is_tracked_before_module_initialization() {
 
 #[test]
 fn native_projection_method_registration_retains_physical_receiver_hir_type() {
-    let module = thaw_parser::parse_typescript(r#"
+    let module = thaw_parser::parse_typescript(
+        r#"
+        class Owner { value: number = 1; }
         function main(): void {
-            const owner = { value: 1 };
+            const owner = new Owner();
             const view: any = owner;
             console.log(view.value);
         }
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
-    fn visit_expr(expr: &thaw_hir::HirExpr, count: &mut usize) {
+    fn visit_expr(expr: &thaw_hir::HirExpr, counts: &mut [usize; 3]) {
         use thaw_hir::HirExpr;
         match expr {
             HirExpr::Call(callee, args) => {
                 if matches!(callee.as_ref(), HirExpr::Var(name)
-                    if name == "__thaw_register_native_method_callback_graph") {
+                    if name == "__thaw_register_native_method_callback_graph")
+                {
                     let [HirExpr::Lambda(_, params, _, _)] = args.as_slice() else {
                         panic!("method registration must receive a physical Lambda");
                     };
                     assert!(matches!(params.first(), Some(param)
-                        if param.name == "__thaw_this"
-                            && matches!(&param.ty, thaw_hir::HirType::Object(_))));
-                    *count += 1;
+                        if param.name == "__thaw_class_owner"
+                            && matches!(&param.ty, thaw_hir::HirType::Object(fields)
+                                if fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))
+                                    && fields.iter().any(|(name, _)| name == "value"))));
+                    let category = params
+                        .len()
+                        .checked_sub(1)
+                        .filter(|category| *category < counts.len())
+                        .expect(
+                            "native property callback has one, two, or three physical parameters",
+                        );
+                    counts[category] += 1;
                 }
-                visit_expr(callee, count);
-                for arg in args { visit_expr(arg, count); }
+                visit_expr(callee, counts);
+                for arg in args {
+                    visit_expr(arg, counts);
+                }
             }
-            HirExpr::Block(body) => visit_stmts(body, count),
-            HirExpr::Lambda(_, _, _, body) | HirExpr::NonArrowFunction(body)
-            | HirExpr::TypedClosure(_, body) | HirExpr::OptionalSome(body, _)
-            | HirExpr::OptionalValue(body, _) | HirExpr::JsValueAsJson(body) =>
-                visit_expr(body, count),
+            HirExpr::Block(body) => visit_stmts(body, counts),
+            HirExpr::Lambda(_, _, _, body)
+            | HirExpr::NonArrowFunction(body)
+            | HirExpr::TypedClosure(_, body)
+            | HirExpr::OptionalSome(body, _)
+            | HirExpr::OptionalValue(body, _)
+            | HirExpr::JsValueAsJson(body) => visit_expr(body, counts),
             HirExpr::EvalThen(first, second) => {
-                visit_expr(first, count);
-                visit_expr(second, count);
+                visit_expr(first, counts);
+                visit_expr(second, counts);
             }
             HirExpr::Conditional(test, yes, no, _) => {
-                visit_expr(test, count);
-                visit_expr(yes, count);
-                visit_expr(no, count);
+                visit_expr(test, counts);
+                visit_expr(yes, counts);
+                visit_expr(no, counts);
             }
             HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
-                for (_, value) in fields { visit_expr(value, count); }
+                for (_, value) in fields {
+                    visit_expr(value, counts);
+                }
             }
             HirExpr::ArrayLit(items) => {
-                for item in items { visit_expr(item, count); }
+                for item in items {
+                    visit_expr(item, counts);
+                }
             }
             _ => {}
         }
     }
-    fn visit_stmts(stmts: &[thaw_hir::HirStmt], count: &mut usize) {
+    fn visit_stmts(stmts: &[thaw_hir::HirStmt], counts: &mut [usize; 3]) {
         use thaw_hir::HirStmt;
         for stmt in stmts {
             match stmt {
-                HirStmt::Expr(expr) | HirStmt::Let(_, _, expr) | HirStmt::Throw(expr)
-                | HirStmt::Return(Some(expr)) => visit_expr(expr, count),
+                HirStmt::Expr(expr)
+                | HirStmt::Let(_, _, expr)
+                | HirStmt::Throw(expr)
+                | HirStmt::Return(Some(expr)) => visit_expr(expr, counts),
                 HirStmt::If(test, yes, no) => {
-                    visit_expr(test, count);
-                    visit_stmts(yes, count);
-                    visit_stmts(no, count);
+                    visit_expr(test, counts);
+                    visit_stmts(yes, counts);
+                    visit_stmts(no, counts);
                 }
                 HirStmt::While(test, body) => {
-                    visit_expr(test, count);
-                    visit_stmts(body, count);
+                    visit_expr(test, counts);
+                    visit_stmts(body, counts);
                 }
                 HirStmt::Try(body, _, catch, _) => {
-                    visit_stmts(body, count);
-                    visit_stmts(catch, count);
+                    visit_stmts(body, counts);
+                    visit_stmts(catch, counts);
                 }
                 _ => {}
             }
         }
     }
-    let mut registrations = 0;
+    let mut registrations = [0; 3];
     for function in &program.functions {
         visit_stmts(&function.body, &mut registrations);
     }
-    assert_eq!(registrations, 3, "one getter, one setter and one data-define callback");
+    let [getters, setters, defines] = registrations;
+    assert!(
+        getters > 0 && setters > 0 && defines > 0,
+        "native projection must retain getter, setter and define callbacks: {registrations:?}"
+    );
+    assert_eq!(
+        getters, setters,
+        "getter/setter callback groups must be balanced"
+    );
+    assert_eq!(
+        getters, defines,
+        "getter/define callback groups must be balanced"
+    );
 }
 
 #[test]
@@ -11747,8 +11987,10 @@ fn symbol_absent_description_is_distinct_from_empty_and_evaluates_once() {
             console.log(object[absent], Symbol.for('').description === '');
         }
     "#;
-    assert_eq!(compile_and_run(source, "symbol_absent_description"),
-        "true true true\ntrue 1\ntrue 2\nSymbol() null\n9 true\n");
+    assert_eq!(
+        compile_and_run(source, "symbol_absent_description"),
+        "true true true\ntrue 1\ntrue 2\nSymbol() null\n9 true\n"
+    );
 }
 
 #[test]
@@ -11768,8 +12010,10 @@ fn native_accessor_presence_hides_backing_closures_without_invoking_getter() {
             console.log(reads);
         }
     "#;
-    assert_eq!(compile_and_run(source, "native_accessor_presence"),
-        "true true true\nfalse false false\n0\n");
+    assert_eq!(
+        compile_and_run(source, "native_accessor_presence"),
+        "true true true\nfalse false false\n0\n"
+    );
 }
 
 #[test]
@@ -12011,7 +12255,10 @@ fn string_padding_undefined_uses_space_once() {
             console.log(calls);
         }
     "#;
-    assert_eq!(compile_and_run(source, "string_pad_undefined"), "\"  x\"\n\"x  \"\n1\n");
+    assert_eq!(
+        compile_and_run(source, "string_pad_undefined"),
+        "\"  x\"\n\"x  \"\n1\n"
+    );
 }
 
 #[test]
@@ -12047,7 +12294,10 @@ fn set_intersection_uses_smaller_operand_order() {
             console.log(Array.from(large.intersection(keys)).join(","));
         }
     "#;
-    assert_eq!(compile_and_run(source, "set_intersection_order"), "2,1\n2,1\n1,2\n2,1\n");
+    assert_eq!(
+        compile_and_run(source, "set_intersection_order"),
+        "2,1\n2,1\n1,2\n2,1\n"
+    );
 }
 
 /// `for...of` over an `any` value that is a live JS iterable follows the iteration
@@ -12070,7 +12320,10 @@ fn json_for_of_follows_the_iteration_protocol_for_live_iterables() {
             console.log(sum);
         }
     "#;
-    assert_eq!(compile_and_run(source, "json_for_of_iteration_protocol"), "10\n20\n4\n5\n7\n8\n6\n");
+    assert_eq!(
+        compile_and_run(source, "json_for_of_iteration_protocol"),
+        "10\n20\n4\n5\n7\n8\n6\n"
+    );
 }
 
 /// A value thrown by a live iterator's `next()` reaches the lexical catch unchanged.
@@ -12109,7 +12362,10 @@ fn exact_iterator_catch_preserves_thrown_identity() {
             }
         }
     "#;
-    assert_eq!(compile_and_run(source, "exact_iterator_catch_identity"), "true\n");
+    assert_eq!(
+        compile_and_run(source, "exact_iterator_catch_identity"),
+        "true\n"
+    );
 }
 
 #[test]
@@ -12141,7 +12397,10 @@ fn unannotated_symbol_iterator_function_property_drives_for_of() {
             console.log(total);
         }
     "#;
-    assert_eq!(compile_and_run(source, "symbol_iterator_function_property"), "5\n");
+    assert_eq!(
+        compile_and_run(source, "symbol_iterator_function_property"),
+        "5\n"
+    );
 }
 
 #[test]
@@ -12212,18 +12471,26 @@ fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_obj
 fn captured_fixed_two_argument_callback_alias_keeps_native_registration_type() {
     use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
 
-    let callback_type = HirType::Function(
-        vec![HirType::Str, HirType::F64],
-        Box::new(HirType::Void),
-    );
-    let adapted_type = HirType::Function(
-        vec![HirType::Json, HirType::Json],
-        Box::new(HirType::Void),
-    );
-    let callback_param = HirParam { name: "callback".into(), ty: callback_type.clone() };
-    let adapter_callback = HirParam { name: "callback".into(), ty: callback_type.clone() };
-    let first = HirParam { name: "first".into(), ty: HirType::Json };
-    let second = HirParam { name: "second".into(), ty: HirType::Json };
+    let callback_type =
+        HirType::Function(vec![HirType::Str, HirType::F64], Box::new(HirType::Void));
+    let adapted_type =
+        HirType::Function(vec![HirType::Json, HirType::Json], Box::new(HirType::Void));
+    let callback_param = HirParam {
+        name: "callback".into(),
+        ty: callback_type.clone(),
+    };
+    let adapter_callback = HirParam {
+        name: "callback".into(),
+        ty: callback_type.clone(),
+    };
+    let first = HirParam {
+        name: "first".into(),
+        ty: HirType::Json,
+    };
+    let second = HirParam {
+        name: "second".into(),
+        ty: HirType::Json,
+    };
     let adapter = HirExpr::Lambda(
         vec![adapter_callback],
         vec![first.clone(), second.clone()],
@@ -12245,10 +12512,7 @@ fn captured_fixed_two_argument_callback_alias_keeps_native_registration_type() {
         adapted_type,
         Box::new(HirExpr::Block(vec![HirStmt::Return(Some(adapter))])),
     );
-    let adapted = HirExpr::Call(
-        Box::new(binder),
-        vec![HirExpr::Var("original".into())],
-    );
+    let adapted = HirExpr::Call(Box::new(binder), vec![HirExpr::Var("original".into())]);
     let aliased = HirExpr::Call(
         Box::new(HirExpr::Var("__thaw_closure_alias".into())),
         vec![adapted, HirExpr::Var("original".into())],
@@ -12258,8 +12522,14 @@ fn captured_fixed_two_argument_callback_alias_keeps_native_registration_type() {
             HirFunction {
                 name: "fixed".into(),
                 params: vec![
-                    HirParam { name: "value".into(), ty: HirType::Str },
-                    HirParam { name: "count".into(), ty: HirType::F64 },
+                    HirParam {
+                        name: "value".into(),
+                        ty: HirType::Str,
+                    },
+                    HirParam {
+                        name: "count".into(),
+                        ty: HirType::F64,
+                    },
                 ],
                 ret: HirType::Void,
                 is_async: false,

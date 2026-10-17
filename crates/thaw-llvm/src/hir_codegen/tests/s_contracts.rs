@@ -111,11 +111,11 @@ fn s_contract_array_rest_turns_holes_into_undefined_elements() {
   const source: number[] = [1, 2, 3];
   delete source[0];
   const [...rest] = source;
-  console.log(0 in rest, rest.length, rest[0], rest[1]);
+  console.log(0 in rest, Object.keys(rest).length, rest.length, rest[0], rest[1]);
   const anys: any[] = [1, 2, 3];
   delete anys[0];
   const [...anyRest] = anys;
-  console.log(0 in anyRest, anyRest.length);
+  console.log(0 in anyRest, Object.keys(anyRest).length, anyRest.length);
   let tail: number[] = [];
   [, ...tail] = [7, 8, 9];
   console.log(tail.join(), tail.length);
@@ -125,7 +125,7 @@ fn s_contract_array_rest_turns_holes_into_undefined_elements() {
 "##;
     assert_eq!(
         compile_and_run(source, "s_contract_array_rest_holes"),
-        "true 3 undefined 2\ntrue 3\n8,9 2\n1 2,3,4\n"
+        "true 3 3 undefined 2\ntrue 3 3\n8,9 2\n1 2,3,4\n"
     );
 }
 

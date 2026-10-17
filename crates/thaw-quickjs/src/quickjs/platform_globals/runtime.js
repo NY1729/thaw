@@ -10,6 +10,17 @@
   const thawBootstrapAsyncIteratorKey = Symbol.asyncIterator;
   const thawBootstrapPromiseResolve = Promise.resolve.bind(Promise);
   const thawHostErrorPrototype = Error.prototype;
+  const thawNativeErrorConstructors = Object.freeze(Object.assign(Object.create(null), {
+    Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError,
+  }));
+  const thawCreateError = (name, message, baseName) => {
+    const Constructor = thawNativeErrorConstructors[baseName] || thawNativeErrorConstructors.Error;
+    const error = new Constructor(message);
+    if (name !== baseName) {
+      thawBootstrapDefineProperty(error, 'name', { value: name, writable: true, configurable: true });
+    }
+    return error;
+  };
   const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
   // Keep unary plus on opaque values in the QuickJS realm so its ToNumber
   // operation performs ToPrimitive(number) once and rejects BigInt/Symbol.
@@ -40,6 +51,13 @@
   // (`length`/`name`/`prototype`) or that would throw if copied
   // (`arguments`/`caller`, non-configurable on a bound function).
   globalThis.__thaw_storage_value = values => values;
+  thawBootstrapDefineProperty(globalThis, '__thaw_update_dynamic_value', {
+    value: (value, increment) => {
+      let updated = value;
+      const old = increment ? updated++ : updated--;
+      return [old, updated];
+    }, configurable: false, writable: false,
+  });
   globalThis.__thaw_bind_preserving_statics = (fn, receiver) => {
     if (typeof fn !== 'function') return fn;
     const bound = Function.prototype.bind.call(fn, receiver);
@@ -82,6 +100,7 @@
   };
   const thawProjectedReceiverHas = WeakSet.prototype.has;
   const thawProjectedReceiverAdd = WeakSet.prototype.add;
+  const thawProjectedReceiverDelete = WeakSet.prototype.delete;
   const thawSameOrigin = (left, right) => {
     const serial = thawDateApply(thawOriginSerialGet, thawOriginSerials, [left]);
     return serial !== undefined && serial === thawDateApply(thawOriginSerialGet, thawOriginSerials, [right]);
@@ -247,6 +266,7 @@
   const thawGraphNumberIsNaN = Number.isNaN;
   const thawGraphNumberIsInteger = Number.isInteger;
   const thawGraphNumberIsSafeInteger = Number.isSafeInteger;
+  const thawGraphMathFloor = Math.floor;
   const thawGraphString = String;
   const thawGraphTypeError = TypeError;
   const thawGraphParse = JSON.parse;
@@ -462,6 +482,35 @@
   const thawGraphArrayPush = Array.prototype.push;
   const thawGraphArraySlice = Array.prototype.slice;
   const thawGraphArrayJoin = Array.prototype.join;
+  const thawJoinActive = new WeakSet();
+  const thawArrayJoin = function join(separator) {
+    const receiver = this;
+    const isObject = receiver !== null
+      && (typeof receiver === 'object' || typeof receiver === 'function');
+    if (!isObject) return thawDateApply(thawGraphArrayJoin, receiver, arguments);
+    const rawLength = +receiver.length;
+    if (rawLength >= 4294967296) throw new thawGraphTypeError('Invalid array length');
+    const length = rawLength > 0 ? thawGraphMathFloor(rawLength) : 0;
+    const separatorString = separator === undefined ? ',' : `${separator}`;
+    if (thawDateApply(thawProjectedReceiverHas, thawJoinActive, [receiver])) return '';
+    if (length === 0) return '';
+    const chunks = [];
+    thawDateApply(thawProjectedReceiverAdd, thawJoinActive, [receiver]);
+    try {
+      for (let index = 0; index < length; index++) {
+        const value = receiver[index];
+        thawDateApply(thawGraphArrayPush, chunks, [
+          value === null || value === undefined ? '' : `${value}`,
+        ]);
+      }
+      return thawDateApply(thawGraphArrayJoin, chunks, [separatorString]);
+    } finally {
+      thawDateApply(thawProjectedReceiverDelete, thawJoinActive, [receiver]);
+    }
+  };
+  thawBootstrapDefineProperty(thawGraphArrayConstructor.prototype, 'join', {
+    value: thawArrayJoin, writable: true, configurable: true,
+  });
   const thawGraphStringFromCharCode = String.fromCharCode;
   const thawGraphMapSet = Map.prototype.set;
   const thawGraphMapGet = Map.prototype.get;
@@ -566,6 +615,8 @@
     }
   };
   globalThis.__thaw_json_host_enumerate = (value, operation) => {
+    if (operation === 9)
+      return globalThis.__thaw_json_host_property_names(value, 0, 18, 1);
     const nativeCollection = operation >= 4 && operation <= 6 ? thawNativeCollectionState(value) : undefined;
     if (nativeCollection) {
       const keys = nativeCollection.keys();
@@ -2716,10 +2767,13 @@
       cursor += originalLength;
     }
     const chain = raw.slice(1, separator);
-    const name = chain.charCodeAt(0) === 30
-      ? chain.slice(1).split('\u001f')[0] : chain.split('$')[0];
-    return { name, display, original, suffix: body.slice(cursor) };
+    const names = chain.charCodeAt(0) === 30
+      ? chain.slice(1).split('\u001f') : chain.split('$');
+    const name = names[0];
+    const baseName = names.find(segment => thawNativeErrorConstructors[segment]) || 'Error';
+    return { name, baseName, display, original, suffix: body.slice(cursor) };
   };
+  const thawParseErrorFrame = globalThis.__thaw_error_frame_parts;
   // The native `\u0002<cause>` segment (up to the code marker `\u0003`, before the property bag)
   // becomes `error.cause`: a tagged error text is rebuilt as an Error, anything else stays a string.
   const restoreTaggedCause = function (error, meta) {
@@ -2740,10 +2794,13 @@
     return Array.isArray(value) ? value.map(reviveTaggedErrors) : value;
   };
   const thawErrorFromTagged = function (raw) {
-    const frame = globalThis.__thaw_error_frame_parts(raw);
+    const frame = thawParseErrorFrame(raw);
     if (frame) {
-      const error = new Error(frame.original === null ? frame.display : frame.original);
-      error.name = frame.name;
+      const error = thawCreateError(
+        frame.name,
+        frame.original === null ? frame.display : frame.original,
+        frame.baseName,
+      );
       const propertiesIndex = frame.suffix.indexOf('\u0005');
       restoreTaggedCause(error, propertiesIndex >= 0 ? frame.suffix.slice(0, propertiesIndex) : frame.suffix);
       if (propertiesIndex >= 0) {
@@ -2761,21 +2818,23 @@
       raw = raw.slice(0, propertiesIndex);
     }
     let name = 'Error';
+    let baseName = 'Error';
     let message = raw;
     if (raw.charCodeAt(0) === 1) {
       const separator = raw.indexOf('\u0001', 1);
       if (separator > 1) {
         const chain = raw.slice(1, separator);
-        name = chain.charCodeAt(0) === 30
-          ? chain.slice(1).split('\u001f')[0]
-          : chain.split('$')[0];
+        const names = chain.charCodeAt(0) === 30
+          ? chain.slice(1).split('\u001f')
+          : chain.split('$');
+        name = names[0];
+        baseName = names.find(segment => thawNativeErrorConstructors[segment]) || 'Error';
         message = raw.slice(separator + 1);
       }
     }
     const metaText = message;
     message = message.split('\u0004')[0].split('\u0002')[0].split('\u0003')[0];
-    const error = new Error(message);
-    error.name = name;
+    const error = thawCreateError(name, message, baseName);
     restoreTaggedCause(error, metaText);
     if (propertiesJson) {
       try {
@@ -2785,9 +2844,9 @@
     }
     return error;
   };
-  globalThis.__thaw_error_from_tagged = function (raw) {
-    return thawErrorFromTagged(raw);
-  };
+  thawBootstrapDefineProperty(globalThis, '__thaw_error_from_tagged', {
+    value: thawErrorFromTagged, configurable: false, writable: false,
+  });
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
   const nativeDateNow = Date.now.bind(Date);

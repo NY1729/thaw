@@ -680,22 +680,47 @@ impl<'a> FnLowerer<'a> {
 
 }
 
-/// Whether an arrow function's body contains a call, `new` or `await`: the only forms whose
-/// result needs the `JsValue` return hint to stay a live handle.
+/// Whether an arrow's returned expression is a call, `new` or `await`: these
+/// forms may need the `JsValue` return hint to stay a live handle.
 fn arrow_returns_call_result(arrow: &swc_ecma_ast::ArrowExpr) -> bool {
-    struct Finder(bool);
-    impl Visit for Finder {
-        fn visit_call_expr(&mut self, _: &CallExpr) {
-            self.0 = true;
-        }
-        fn visit_new_expr(&mut self, _: &swc_ecma_ast::NewExpr) {
-            self.0 = true;
-        }
-        fn visit_await_expr(&mut self, _: &AwaitExpr) {
-            self.0 = true;
+    fn returned_expression(expr: &Expr) -> bool {
+        match expr {
+            Expr::Call(_) | Expr::New(_) | Expr::Await(_) => true,
+            Expr::Paren(expr) => returned_expression(&expr.expr),
+            Expr::TsAs(expr) => returned_expression(&expr.expr),
+            Expr::TsTypeAssertion(expr) => returned_expression(&expr.expr),
+            Expr::TsNonNull(expr) => returned_expression(&expr.expr),
+            Expr::TsSatisfies(expr) => returned_expression(&expr.expr),
+            Expr::Cond(expr) => {
+                returned_expression(&expr.cons) || returned_expression(&expr.alt)
+            }
+            Expr::Seq(expr) => expr.exprs.last().is_some_and(|expr| returned_expression(expr)),
+            _ => false,
         }
     }
-    let mut finder = Finder(false);
-    arrow.body.visit_with(&mut finder);
-    finder.0
+
+    match arrow.body.as_ref() {
+        swc_ecma_ast::ArrowFunctionBody::Expr(expr) => returned_expression(expr),
+        swc_ecma_ast::ArrowFunctionBody::FunctionBody(body) => {
+            struct ReturnFinder(bool);
+            impl Visit for ReturnFinder {
+                fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
+                    if statement
+                        .arg
+                        .as_deref()
+                        .is_some_and(returned_expression)
+                    {
+                        self.0 = true;
+                    }
+                }
+
+                fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
+                fn visit_arrow_expr(&mut self, _: &swc_ecma_ast::ArrowExpr) {}
+                fn visit_class(&mut self, _: &swc_ecma_ast::Class) {}
+            }
+            let mut finder = ReturnFinder(false);
+            body.visit_with(&mut finder);
+            finder.0
+        }
+    }
 }

@@ -101,6 +101,9 @@ struct FnLowerer<'a> {
     /// see `lower_expr_with_expected_type`'s doc comment for why this
     /// exists and how it stays scoped to exactly one call.
     expected_return_hint: Option<HirType>,
+    /// Source-level expected return type for generic inference. Unlike the
+    /// physical hint above, this is never used to choose a runtime ABI.
+    expected_source_return_hint: Option<HirType>,
     /// Like `expected_return_hint`, but for the *body* of the next arrow
     /// function `lower_arrow` handles, taken the same one-shot way. An
     /// arrow with no return-type annotation otherwise defaults its own

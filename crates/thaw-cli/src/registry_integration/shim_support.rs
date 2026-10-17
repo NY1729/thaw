@@ -631,11 +631,13 @@ type RegistryShims = (
     std::collections::HashMap<String, usize>,
     JitFallbackReasons,
     std::collections::BTreeSet<&'static str>,
+    JitSymbolOrigins,
 );
 /// `package -> the symbol its own `export = X;` assignment names`, for a
 /// bare `import * as X from "pkg"` (`module_graph.rs`).
 type ExternalExportAssignments = std::collections::HashMap<String, String>;
 type JitFallbackReasons = std::collections::HashMap<(String, String), String>;
+type JitSymbolOrigins = std::collections::HashMap<String, (String, String)>;
 
 /// `(package-qualified factory function, package-qualified class)` -- a Fallback factory function
 /// call (real example: dayjs's `dayjs(...)`) that should be tracked as
