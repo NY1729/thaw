@@ -2370,6 +2370,52 @@ fn calls_saved_this_dependent_methods_with_explicit_receivers() {
 }
 
 #[test]
+fn reports_unbound_this_type_errors_matching_node() {
+    let source = r#"
+        class Box {
+            value: number = 1;
+            read(): number { return this.value; }
+            readComputed(): number { return this["value"]; }
+            readBranch(use: boolean): number { if (use) { return this.value; } return 0; }
+            readArrow(): number { const inner: () => number = (): number => this.value; return inner(); }
+            write(next: number): void { this.value = next; }
+            readAny(): number { const self: any = this; return self.value; }
+        }
+        class Other { value: number = 2; }
+        function readUnion(box: Box | Other | undefined): number { return box.value; }
+        function check(label: string, error: Error): void {
+            console.log(label + ":" + error.name + ":" + String(error instanceof TypeError) + ":" + String(error));
+        }
+        function main(): void {
+            const box = new Box();
+            const read = box.read;
+            const readComputed = box.readComputed;
+            const readBranch = box.readBranch;
+            const readArrow = box.readArrow;
+            const write = box.write;
+            const readAny = box.readAny;
+            try { read(); } catch (error) { check("read", error); }
+            try { readComputed(); } catch (error) { check("computed", error); }
+            try { readBranch(true); } catch (error) { check("branch", error); }
+            try { readArrow(); } catch (error) { check("arrow", error); }
+            try { write(2); } catch (error) { check("write", error); }
+            try { readAny(); } catch (error) { check("any", error); }
+            try { readUnion(undefined); } catch (error) { check("union", error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "unbound_this_type_errors"),
+        "read:TypeError:true:TypeError: Cannot read properties of undefined (reading 'value')\n\
+         computed:TypeError:true:TypeError: Cannot read properties of undefined (reading 'value')\n\
+         branch:TypeError:true:TypeError: Cannot read properties of undefined (reading 'value')\n\
+         arrow:TypeError:true:TypeError: Cannot read properties of undefined (reading 'value')\n\
+         write:TypeError:true:TypeError: Cannot set properties of undefined (setting 'value')\n\
+         any:TypeError:true:TypeError: Cannot read properties of undefined (reading 'value')\n\
+         union:TypeError:true:TypeError: Cannot read properties of undefined (reading 'value')\n"
+    );
+}
+
+#[test]
 fn compiles_and_runs_native_class_instance_methods() {
     let source = r#"
         class Counter {

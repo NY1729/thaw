@@ -3344,15 +3344,26 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
                             vec![var.clone()],
                         );
+                        let is_null = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                            vec![var.clone()],
+                        );
                         let get = HirExpr::JsonGet(Box::new(var), prop.sym.to_string());
                         self.wrap_call_argument_bindings(
                             HirExpr::Block(vec![
                                 HirStmt::If(
                                     is_nullish,
-                                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
-                                        "\u{1}TypeError\u{1}Cannot read properties of null (reading '{}')",
-                                        prop.sym
-                                    ))))],
+                                    vec![HirStmt::If(
+                                        is_null,
+                                        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                                            "\u{1}TypeError\u{1}Cannot read properties of null (reading '{}')",
+                                            prop.sym
+                                        ))))],
+                                        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                                            "\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{}')",
+                                            prop.sym
+                                        ))))],
+                                    )],
                                     Vec::new(),
                                 ),
                                 HirStmt::Return(Some(get)),

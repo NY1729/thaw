@@ -474,7 +474,7 @@ impl<'a> FnLowerer<'a> {
                     self.scope.insert(value_name.clone(), value_type.clone());
                     let result = HirExpr::ThrowValue(
                         Box::new(HirExpr::Lit(HirLit::Str(format!(
-                            "Cannot set properties of undefined (setting '{property}')"
+                            "\u{1}TypeError\u{1}Cannot set properties of undefined (setting '{property}')"
                         )))),
                         Box::new(HirExpr::Var(value_name.clone())),
                     );
