@@ -289,8 +289,10 @@ fn registry_add_builds_and_runs_a_real_esm_package_when_enabled() {
         &source,
         r#"import hasFlag from "has-flag";
                 function main(): void {
-                    const present: Json = hasFlag(JSON.parse("[\"--thaw-parser-backed-bundler\"]"));
-                    console.log(Boolean(present));
+                    const argv: string[] = JSON.parse("[\"--thaw-parser-backed-bundler\"]");
+                    const present: Json = hasFlag("--thaw-parser-backed-bundler", argv);
+                    const absent: Json = hasFlag("missing", argv);
+                    console.log(Boolean(present), Boolean(absent));
                 }"#,
     )
     .unwrap();
@@ -301,7 +303,7 @@ fn registry_add_builds_and_runs_a_real_esm_package_when_enabled() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "false\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true false\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
