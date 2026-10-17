@@ -345,3 +345,23 @@ fn native_host_get_prototype_preserves_proxy_exceptions() {
 fn native_private_fields_and_accessors_keep_callback_layout() {
  assert_eq!(compile_and_run(r###"class Counter {#n=1;get value():number{return this.#n;}set value(v:number){this.#n=v;}read():number{return this.#n;}}function main():void {const c=new Counter();const a:any=c;console.log(a.value,a.read(),Object.keys(a).length);a.value=4;console.log(c.read(),a.value);}"###,"native_private_fields_and_accessors_keep_callback_layout"),"1 1 0\n4 4\n");
 }
+
+#[test]
+fn ka_contract_dynamic_storage_1() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: {x: number}[] = []; const a: any = xs; const original: any = new Function("return {x: 1}")(); a[0] = original; console.log(a[0] === original, xs[0] === original); original.x = 7; console.log(xs[0].x); xs[0].x = 9; console.log(original.x); }"##, "ka_contract_dynamic_storage_1"), "true true\n7\n9\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_2() {
+    assert_eq!(compile_and_run(r##"function identity(xs: {x: number}[]): {x: number}[] { return xs; } function main(): void { const xs: {x: number}[] = []; const holder = {xs: identity(xs)}; const read = () => holder.xs; const a: any = read(); const original: any = new Function("return {x: 1}")(); a[0] = original; original.x = 5; console.log(xs[0] === original, holder.xs[0] === original, read()[0].x); }"##, "ka_contract_dynamic_storage_2"), "true true 5\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_3() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: number[][] = []; const a: any = xs; a[0] = a; console.log(a[0] === a, xs[0] === xs, typeof xs[0]); }"##, "ka_contract_dynamic_storage_3"), "true true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_4() {
+    assert_eq!(compile_and_run(r##"class C { x = 1; method(): number { return this.x; } } function main(): void { const xs: C[] = []; const a: any = xs; const plain: any = new Function("return {x: 7}")(); a[0] = plain; console.log(xs[0] === plain, xs[0] instanceof C, typeof xs[0].method); const real = new C(); a[1] = real; console.log(xs[1] === real, xs[1] instanceof C, xs[1].method()); }"##, "ka_contract_dynamic_storage_4"), "true false undefined\ntrue true 1\n");
+}

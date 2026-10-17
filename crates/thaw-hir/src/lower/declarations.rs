@@ -1987,5 +1987,6 @@ fn lower_param(
     if optional {
         ty = optional_parameter_type(ty);
     }
+    let ty = if allow_inference { storage_type(pat.span(), ty) } else { ty };
     Ok(HirParam { name, ty })
 }

@@ -662,6 +662,13 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        if has_dynamic_storage(expr.span()) {
+            match expr {
+                Expr::Array(array) => return self.lower_dynamic_storage_array(array),
+                Expr::Object(object) => return self.lower_dynamic_accessor_object_lit(object, true),
+                _ => {}
+            }
+        }
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
             Expr::Lit(Lit::BigInt(n)) => {
@@ -5093,6 +5100,9 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        if has_dynamic_storage(expr.span()) && matches!(expr, Expr::Array(_) | Expr::Object(_)) {
+            return self.lower_expr(expr);
+        }
         if let Some(expected) = expected {
             let supplied = match expr {
                 Expr::Arrow(arrow) => Some(arrow.params.len()),

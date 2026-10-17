@@ -417,6 +417,7 @@ fn generic_receiver_pattern_from_annotation(
 }
 
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+    let _storage_scope = StorageScope::enter(module)?;
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
     let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
         .map_err(|error| {
@@ -660,6 +661,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         None,
                     )?
                 };
+                let ret = if is_extern { ret } else { storage_return_type(func.span, ret) };
                 let type_predicate = match func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()) {
                     Some(TsType::TsTypePredicate(predicate)) => {
                         let swc_ecma_ast::TsThisTypeOrIdent::Ident(parameter) = &predicate.param_name else {
@@ -1447,6 +1449,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 })
                 .transpose()?
                 .unwrap_or(HirType::Dynamic);
+            let ty = storage_type(binding.id.span, ty);
             global_types.insert(name, ty);
             if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
                 immutable_globals.insert(binding.id.sym.to_string());

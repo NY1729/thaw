@@ -617,6 +617,7 @@ impl<'a> FnLowerer<'a> {
                         )
                     })
                     .transpose()?;
+                let annotated = annotated.map(|ty| storage_type(binding.id.span, ty));
                 let recursive_binding_type = if Self::initializer_callback_references(init, &name)
                     || (annotated.is_some() && Self::initializer_closure_references(init, &name))
                 {

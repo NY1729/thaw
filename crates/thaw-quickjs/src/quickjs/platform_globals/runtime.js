@@ -39,6 +39,7 @@
   // bind` already gives the wrapper its own, correct versions of
   // (`length`/`name`/`prototype`) or that would throw if copied
   // (`arguments`/`caller`, non-configurable on a bound function).
+  globalThis.__thaw_storage_array = values => values;
   globalThis.__thaw_bind_preserving_statics = (fn, receiver) => {
     if (typeof fn !== 'function') return fn;
     const bound = Function.prototype.bind.call(fn, receiver);

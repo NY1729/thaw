@@ -9,6 +9,7 @@ impl StoragePlan {
     fn analyze(module: &Module) -> Result<Self, String> {
         let mut graph = StorageGraph::default();
         module.visit_with(&mut graph);
+        graph.connect_calls();
         let mut pending: Vec<_> = graph.seeds.iter().copied().collect();
         let mut dynamic = graph.seeds;
         while let Some(node) = pending.pop() {
@@ -19,8 +20,17 @@ impl StoragePlan {
                     }
                 }
             }
+            if let Some(callable) = graph.callables.get(&node) {
+                for &target in &callable.escaped {
+                    if dynamic.insert(target) { pending.push(target); }
+                }
+            }
         }
         Ok(Self { dynamic })
+    }
+
+    fn result_is_dynamic(&self, span: Span) -> bool {
+        self.dynamic.contains(&(span.lo.0, 0))
     }
 
     fn is_dynamic(&self, span: Span) -> bool {
@@ -33,17 +43,20 @@ fn storage_key(span: Span) -> (u32, u32) {
 }
 
 fn storage_has_any(ty: &TsType) -> bool {
-    struct Any(bool);
-    impl Visit for Any {
-        fn visit_ts_keyword_type(&mut self, ty: &swc_ecma_ast::TsKeywordType) {
-            self.0 |= ty.kind == TsKeywordTypeKind::TsAnyKeyword;
-        }
-    }
-    let mut any = Any(false);
-    ty.visit_with(&mut any);
-    any.0
+    matches!(ty, TsType::TsKeywordType(keyword)
+        if matches!(keyword.kind, TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword))
 }
 
+struct StorageCallable {
+    params: Vec<Span>,
+    result: (u32, u32),
+    escaped: Vec<(u32, u32)>,
+}
+struct StorageCall {
+    callee: Span,
+    arguments: Vec<Span>,
+    result: Span,
+}
 #[derive(Default)]
 struct StorageGraph {
     edges: HashMap<(u32, u32), Vec<(u32, u32)>>,
@@ -51,6 +64,10 @@ struct StorageGraph {
     scopes: Vec<HashMap<String, Span>>,
     functions: Vec<(Span, usize)>,
     classes: Vec<Span>,
+    callables: HashMap<(u32, u32), StorageCallable>,
+    calls: Vec<StorageCall>,
+    captures: HashSet<((u32, u32), (u32, u32))>,
+    exceptions: Vec<Span>,
 }
 
 impl StorageGraph {
@@ -60,6 +77,51 @@ impl StorageGraph {
         }
         self.edges.entry(storage_key(left)).or_default().push(storage_key(right));
         self.edges.entry(storage_key(right)).or_default().push(storage_key(left));
+    }
+
+    fn contain(&mut self, owner: Span, value: Span) {
+        if !owner.is_dummy() && !value.is_dummy() {
+            self.edges.entry(storage_key(owner)).or_default().push(storage_key(value));
+        }
+    }
+
+    fn link_keys(&mut self, left: (u32, u32), right: (u32, u32)) {
+        self.edges.entry(left).or_default().push(right);
+        self.edges.entry(right).or_default().push(left);
+    }
+    fn connect_calls(&mut self) {
+        let mut links = Vec::new();
+        for call in &self.calls {
+            let mut pending = vec![storage_key(call.callee)];
+            let mut seen = HashSet::new();
+            while let Some(node) = pending.pop() {
+                if !seen.insert(node) { continue; }
+                if let Some(callable) = self.callables.get(&node) {
+                    links.push((storage_key(call.result), callable.result));
+                    for (actual, formal) in call.arguments.iter().zip(&callable.params) {
+                        links.push((storage_key(*actual), storage_key(*formal)));
+                    }
+                }
+                if let Some(neighbors) = self.edges.get(&node) {
+                    pending.extend(neighbors.iter().copied().filter(|next| !self.captures.contains(&(node, *next))));
+                }
+            }
+        }
+        for (left, right) in links { self.link_keys(left, right); }
+    }
+    fn callable(&mut self, span: Span, parameters: &[Pat], result: Option<&TsType>) {
+        let result_node = (span.lo.0, 0);
+        let mut escaped = Vec::new();
+        if result.is_none_or(storage_reference_type) { escaped.push(result_node); }
+        for parameter in parameters {
+            if matches!(parameter, Pat::Ident(binding)
+                if binding.type_ann.as_ref().is_some_and(|ann| storage_reference_type(&ann.type_ann))) {
+                escaped.push(storage_key(parameter.span()));
+            }
+        }
+        self.callables.insert(storage_key(span), StorageCallable {
+            params: parameters.iter().map(Spanned::span).collect(), result: result_node, escaped,
+        });
     }
 
     fn expose(&mut self, span: Span) {
@@ -185,7 +247,9 @@ impl Visit for StorageGraph {
             self.link(identifier.span, binding);
             if let Some(&(function, local_depth)) = self.functions.last() {
                 if depth < local_depth {
-                    self.link(function, binding);
+                    self.contain(function, binding);
+                    self.captures.insert((storage_key(function), storage_key(binding)));
+                    self.captures.insert((storage_key(binding), storage_key(function)));
                 }
             }
         }
@@ -214,10 +278,15 @@ impl Visit for StorageGraph {
     fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
         self.scopes.push(HashMap::new());
         self.functions.push((function.span, self.scopes.len() - 1));
-        self.annotation(function.span, function.return_type.as_deref());
+        self.callable(function.span,
+            &function.params.iter().map(|p| p.pat.clone()).collect::<Vec<_>>(),
+            function.return_type.as_ref().map(|ann| ann.type_ann.as_ref()));
+        if function.return_type.as_ref().is_some_and(|ann| storage_has_any(&ann.type_ann)) {
+            self.seeds.insert((function.span.lo.0, 0));
+        }
         for parameter in &function.params {
             self.pattern(&parameter.pat);
-            self.link(function.span, parameter.pat.span());
+
         }
         if let Some(body) = &function.body { self.hoist_vars(&body.stmts); }
         function.visit_children_with(self);
@@ -228,12 +297,16 @@ impl Visit for StorageGraph {
     fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
         self.scopes.push(HashMap::new());
         self.functions.push((arrow.span, self.scopes.len() - 1));
-        self.annotation(arrow.span, arrow.return_type.as_deref());
+        self.callable(arrow.span, &arrow.params,
+            arrow.return_type.as_ref().map(|ann| ann.type_ann.as_ref()));
+        if arrow.return_type.as_ref().is_some_and(|ann| storage_has_any(&ann.type_ann)) {
+            self.seeds.insert((arrow.span.lo.0, 0));
+        }
         for parameter in &arrow.params {
             self.pattern(parameter);
-            self.link(arrow.span, parameter.span());
+
         }
-        if let ArrowFunctionBody::Expr(body) = arrow.body.as_ref() { self.link(arrow.span, body.span()); }
+        if let ArrowFunctionBody::Expr(body) = arrow.body.as_ref() { self.link_keys((arrow.span.lo.0, 0), storage_key(body.span())); }
         if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_ref() { self.hoist_vars(&body.stmts); }
         arrow.visit_children_with(self);
         self.functions.pop();
@@ -242,9 +315,18 @@ impl Visit for StorageGraph {
 
     fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
         if let (Some(&(function, _)), Some(value)) = (self.functions.last(), &statement.arg) {
-            self.link(function, value.span());
+            self.link_keys((function.lo.0, 0), storage_key(value.span()));
         }
         statement.visit_children_with(self);
+    }
+
+    fn visit_try_stmt(&mut self, statement: &swc_ecma_ast::TryStmt) {
+        let exception = statement.handler.as_ref().and_then(|catch| catch.param.as_ref()).map(Spanned::span);
+        if let Some(exception) = exception { self.exceptions.push(exception); }
+        statement.block.visit_with(self);
+        if exception.is_some() { self.exceptions.pop(); }
+        statement.handler.visit_with(self);
+        statement.finalizer.visit_with(self);
     }
 
     fn visit_catch_clause(&mut self, catch: &swc_ecma_ast::CatchClause) {
@@ -255,7 +337,7 @@ impl Visit for StorageGraph {
     }
 
     fn visit_throw_stmt(&mut self, statement: &swc_ecma_ast::ThrowStmt) {
-        self.expose(statement.arg.span());
+        if let Some(&exception) = self.exceptions.last() { self.link(exception, statement.arg.span()); }
         statement.visit_children_with(self);
     }
 
@@ -283,7 +365,7 @@ impl Visit for StorageGraph {
 
     fn visit_class_prop(&mut self, property: &ClassProp) {
         if let Some(&class) = self.classes.last() {
-            self.link(class, property.span);
+            self.contain(class, property.span);
         }
         if let Some(value) = &property.value { self.link(property.span, value.span()); }
         self.annotation(property.span, property.type_ann.as_deref());
@@ -294,15 +376,15 @@ impl Visit for StorageGraph {
         let span = expression.span();
         match expression {
             Expr::Array(array) => {
-                for element in array.elems.iter().flatten() { self.link(span, element.expr.span()); }
+                for element in array.elems.iter().flatten() { self.contain(span, element.expr.span()); }
             }
             Expr::Object(object) => {
                 for property in &object.props {
                     match property {
-                        PropOrSpread::Spread(spread) => self.link(span, spread.expr.span()),
+                        PropOrSpread::Spread(spread) => self.contain(span, spread.expr.span()),
                         PropOrSpread::Prop(property) => match property.as_ref() {
-                            Prop::KeyValue(property) => self.link(span, property.value.span()),
-                            Prop::Shorthand(identifier) => self.link(span, identifier.span),
+                            Prop::KeyValue(property) => self.contain(span, property.value.span()),
+                            Prop::Shorthand(identifier) => self.contain(span, identifier.span),
                             Prop::Method(method) => self.link(span, method.function.span),
                             Prop::Getter(getter) => self.link(span, getter.span),
                             Prop::Setter(setter) => self.link(span, setter.span),
@@ -318,8 +400,17 @@ impl Visit for StorageGraph {
             }
             Expr::Call(call) => {
                 if let Callee::Expr(callee) = &call.callee {
-                    self.link(span, callee.span());
-                    for argument in &call.args { self.link(callee.span(), argument.expr.span()); }
+                    self.calls.push(StorageCall { callee: callee.span(),
+                        arguments: call.args.iter().map(|arg| arg.expr.span()).collect(), result: span });
+                    if let Expr::Ident(name) = callee.as_ref() {
+                        if dynamic_symbol(name.sym.as_ref()).is_some() {
+                            for argument in &call.args { self.expose(argument.expr.span()); }
+                        }
+                    }
+                    if let Expr::Member(member) = callee.as_ref() {
+                        self.link(span, member.obj.span());
+                        for argument in &call.args { self.contain(member.obj.span(), argument.expr.span()); }
+                    }
                 }
             }
             Expr::New(new) => {
@@ -328,7 +419,7 @@ impl Visit for StorageGraph {
                     if matches!(name.sym.as_ref(), "Proxy" | "Function") && self.lookup(name.sym.as_ref()).is_none()) {
                     self.expose(span);
                 }
-                for argument in new.args.iter().flatten() { self.link(span, argument.expr.span()); }
+                for argument in new.args.iter().flatten() { self.contain(span, argument.expr.span()); }
             }
             Expr::Cond(conditional) => {
                 self.link(span, conditional.cons.span());
@@ -356,4 +447,88 @@ impl Visit for StorageGraph {
         }
         expression.visit_children_with(self);
     }
+}
+
+thread_local! {
+    static ACTIVE_STORAGE_PLAN: RefCell<StoragePlan> = RefCell::new(StoragePlan::default());
+}
+
+struct StorageScope(StoragePlan);
+
+impl StorageScope {
+    fn enter(module: &Module) -> Result<Self, String> {
+        let plan = StoragePlan::analyze(module)?;
+        Ok(Self(ACTIVE_STORAGE_PLAN.with(|active| active.replace(plan))))
+    }
+}
+
+impl Drop for StorageScope {
+    fn drop(&mut self) {
+        ACTIVE_STORAGE_PLAN.with(|active| active.replace(std::mem::take(&mut self.0)));
+    }
+}
+
+fn has_dynamic_storage(span: Span) -> bool {
+    ACTIVE_STORAGE_PLAN.with(|active| active.borrow().is_dynamic(span))
+}
+
+fn storage_type(span: Span, source: HirType) -> HirType {
+    if !has_dynamic_storage(span) { return source; }
+    dynamic_storage_type(source)
+}
+
+fn dynamic_storage_type(source: HirType) -> HirType {
+    match source {
+        HirType::Void | HirType::Dynamic => source,
+        // A native class retains its authenticated identity; its mutable fields
+        // are selected independently before the class layout is allocated.
+        HirType::Object(_) if class_name_from_type(&source).is_some() => source,
+        HirType::Promise(result) => HirType::Promise(Box::new(dynamic_storage_type(*result))),
+        HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
+        | HirType::JsValue => source,
+        _ => HirType::Json,
+    }
+}
+
+impl FnLowerer<'_> {
+    fn lower_dynamic_storage_array(&mut self, array: &swc_ecma_ast::ArrayLit) -> Result<HirExpr, String> {
+        let mut parts = Vec::new();
+        for element in &array.elems {
+            let value = match element {
+                None => HirExpr::Lit(HirLit::ArrayHole),
+                Some(element) => {
+                    let value = self.lower_expr(&element.expr)?;
+                    if element.spread.is_some() {
+                        let value = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+                        parts.push(HirExpr::JsonAsNative(Box::new(value), HirType::Array(Box::new(HirType::Json))));
+                        continue;
+                    }
+                    self.coerce_to_declared_aliasing(&HirType::Json, value)?
+                }
+            };
+            parts.push(HirExpr::TypedClosure(
+                HirType::Array(Box::new(HirType::Json)), Box::new(HirExpr::ArrayLit(vec![value])),
+            ));
+        }
+        let native = HirExpr::ArrayConcat(parts, HirType::Json);
+        let array = self.wrap_native_value_as_json(native, HirType::Array(Box::new(HirType::Json)))?;
+        let arguments = self.wrap_native_value_as_json(HirExpr::ArrayLit(vec![array]), HirType::Array(Box::new(HirType::Json)))?;
+        let live = HirExpr::Call(Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())), vec![
+            HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("__thaw_storage_array".into()))]),
+            arguments, HirExpr::ArrayLit(Vec::new()),
+        ]);
+        Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())), vec![live]))
+    }
+}
+
+fn storage_reference_type(ty: &TsType) -> bool {
+    !matches!(ty, TsType::TsKeywordType(keyword)
+        if !matches!(keyword.kind, TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsObjectKeyword | TsKeywordTypeKind::TsUnknownKeyword))
+        && !matches!(ty, TsType::TsFnOrConstructorType(_))
+}
+fn storage_return_type(span: Span, source: HirType) -> HirType {
+    if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().result_is_dynamic(span)) {
+        dynamic_storage_type(source)
+    } else { source }
 }

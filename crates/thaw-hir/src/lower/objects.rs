@@ -2,6 +2,7 @@ impl<'a> FnLowerer<'a> {
     /// Whether an `any` object literal must be built as one live object: it has a method,
     /// accessor or well-known-symbol key, or a nested object literal that does.
     fn object_literal_needs_live_object(&self, object: &SwcObjectLit) -> bool {
+        if has_dynamic_storage(object.span) { return true; }
         object.props.iter().any(|property| match property {
             PropOrSpread::Prop(property) => match property.as_ref() {
                 Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_) => true,

@@ -121,3 +121,23 @@ fn storage_tracks_constructor_arguments_and_dynamic_builtins() {
         function main(): void { const source: number[] = []; const proxy = new Proxy(source, {}); }
     "#), vec![true, true]);
 }
+
+#[test]
+fn storage_compilation_scope_does_not_leak() {
+    let dynamic = lower("function main(): void { const xs: number[] = []; const exposed: any = xs; }");
+    assert!(matches!(&dynamic.functions[0].body[0], HirStmt::Let(_, HirType::Json, _)));
+    let native = lower("function main(): void { const xs: number[] = []; }");
+    assert!(matches!(&native.functions[0].body[0], HirStmt::Let(_, HirType::Array(element), _) if **element == HirType::F64));
+}
+
+#[test]
+fn storage_does_not_alias_unrelated_function_parameters() {
+    let program = lower(r#"
+        declare function __thaw_typed_js_7765616b<T>(value: T): JsValue;
+        function double(value: number): number { return value * 2; }
+        function main(): void { const reference = __thaw_typed_js_7765616b(double); }
+    "#);
+    let double = program.functions.iter().find(|function| function.name == "double").unwrap();
+    assert_eq!(double.params[0].ty, HirType::F64);
+    assert_eq!(double.ret, HirType::F64);
+}
