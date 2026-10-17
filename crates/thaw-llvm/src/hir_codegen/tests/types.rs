@@ -1,4 +1,51 @@
 #[test]
+fn compiles_nullable_undefined_and_tuple_callable_defaults() {
+    let source = r#"
+        function main(): void {
+            const nullable = (x: number | null = null): number => x ?? 7;
+            const tuple = (x: [number] = [7]): number => x[0];
+            const readonlyTuple = (x: readonly [number] = [7]): number => x[0];
+            const destructured = ([x]: [number] = [7]): number => x;
+            const nullableBound = nullable.bind(null);
+            const tupleBound = tuple.bind(null);
+            const readonlyBound = readonlyTuple.bind(null);
+            const destructuredBound = destructured.bind(null);
+            console.log(nullable(3)); console.log(nullable(null));
+            console.log(nullable()); console.log(nullable(undefined));
+            console.log(nullableBound(3)); console.log(nullableBound(null));
+            console.log(nullableBound()); console.log(nullableBound(undefined));
+            console.log(tuple([3])); console.log(tuple()); console.log(tuple(undefined));
+            console.log(tupleBound([3])); console.log(tupleBound()); console.log(tupleBound(undefined));
+            console.log(readonlyTuple([3])); console.log(readonlyTuple()); console.log(readonlyTuple(undefined));
+            console.log(readonlyBound([3])); console.log(readonlyBound()); console.log(readonlyBound(undefined));
+            console.log(destructured([3])); console.log(destructured()); console.log(destructured(undefined));
+            console.log(destructuredBound([3])); console.log(destructuredBound()); console.log(destructuredBound(undefined));
+            const maybeUndefined = (x: number | undefined = undefined) => x;
+            console.log(maybeUndefined(3)); console.log(maybeUndefined()); console.log(maybeUndefined(undefined));
+            let calls = 0;
+            const fallback = (): number => { calls += 1; return 9; };
+            const lazy = (x: number | null = fallback()): number => x ?? 7;
+            console.log(lazy(3)); console.log(calls);
+            console.log(lazy(null)); console.log(calls);
+            console.log(lazy()); console.log(calls);
+            console.log(lazy(undefined)); console.log(calls);
+            const narrowedUndefined = (x: number | undefined = 1) => x + 1;
+            console.log(narrowedUndefined());
+            const nullableFallback = (): number | null => null;
+            const fallbackNullable = (x: number | null = nullableFallback()): number => x ?? 7;
+            console.log(fallbackNullable()); console.log(fallbackNullable(3));
+            const undefinedFallback = (): number | undefined => undefined;
+            const fallbackUndefined = (x: number | undefined = undefinedFallback()) => x;
+            console.log(fallbackUndefined()); console.log(fallbackUndefined(3));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nullable_undefined_tuple_callable_defaults"),
+        "3\n7\n7\n7\n3\n7\n7\n7\n3\n7\n7\n3\n7\n7\n3\n7\n7\n3\n7\n7\n3\n7\n7\n3\n7\n7\n3\nundefined\nundefined\n3\n0\n7\n0\n9\n1\n9\n2\n2\n7\n3\nundefined\n3\n"
+    );
+}
+
+#[test]
 fn compiles_multi_argument_generic_specializations_end_to_end() {
     let source = r#"
         interface Pair<T, U> {
