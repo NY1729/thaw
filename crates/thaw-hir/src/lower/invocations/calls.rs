@@ -1298,6 +1298,26 @@ impl<'a> FnLowerer<'a> {
             ));
         }
 
+        if let Some(bind) = self.deferred_generic_binds.get(&callee_name).cloned() {
+            let arrow = self.generic_arrows.get(&bind.target).cloned().ok_or_else(|| {
+                format!("generic bound function `{callee_name}` lost its generic template")
+            })?;
+            let leading_actuals = bind.leading_captures.iter()
+                .map(|capture| HirExpr::Var(capture.name.clone()))
+                .collect();
+            let operation = self.generic_non_arrow_names.contains(&bind.target).then(|| {
+                GenericArrowThisOperation {
+                    receiver: (HirExpr::Var(bind.this_capture.name.clone()), bind.this_capture.ty.clone()),
+                    bind: false,
+                    ignored: Vec::new(),
+                    prelowered: None,
+                }
+            });
+            return self.lower_generic_arrow_call_with_leading_actuals(
+                &bind.target, &arrow, call, operation, leading_actuals,
+            );
+        }
+
         if self.scope.get(&callee_name) == Some(&HirType::JsValue) {
             return self.lower_dynamic_value_call(
                 &callee_name,

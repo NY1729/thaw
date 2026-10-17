@@ -283,6 +283,64 @@ impl<'a> FnLowerer<'a> {
         Ok(statements)
     }
 
+    fn deferred_generic_bind_call<'b>(
+        &self,
+        expression: &'b Expr,
+    ) -> Option<(&'b swc_ecma_ast::CallExpr, Symbol)> {
+        let Expr::Call(call) = expression else { return None };
+        let Callee::Expr(callee) = &call.callee else { return None };
+        let Expr::Member(member) = callee.as_ref() else { return None };
+        let Expr::Ident(template) = member.obj.as_ref() else { return None };
+        let MemberProp::Ident(method) = &member.prop else { return None };
+        if method.sym != *"bind" { return None; }
+        let source = self.resolve_binding(template.sym.as_ref());
+        self.generic_arrows.contains_key(&source).then_some((call, source))
+    }
+
+    fn lower_deferred_generic_bind(
+        &mut self,
+        name: &str,
+        call: &swc_ecma_ast::CallExpr,
+        target: Symbol,
+    ) -> Result<Vec<HirStmt>, String> {
+        let mut statements = Vec::new();
+        let (this_value, leading) = match call.args.split_first() {
+            Some((this_arg, leading)) => {
+                if this_arg.spread.is_some() {
+                    return Err("function .bind() cannot spread its thisArg".into());
+                }
+                (self.lower_expr(&this_arg.expr)?, leading)
+            }
+            None => (HirExpr::Lit(HirLit::Undefined), &[][..]),
+        };
+        let this_type = self.infer_expr_type(&this_value)?;
+        let this_name = format!("__thaw_generic_bind_capture_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(this_name.clone(), this_type.clone());
+        statements.push(HirStmt::Let(this_name.clone(), this_type.clone(), this_value));
+        let this_capture = GenericBindCapture { name: this_name, ty: this_type };
+
+        let (values, bindings) =
+            self.lower_native_spread_values_with_snapshots(leading, "function .bind()")?;
+        for (capture_name, ty, value) in bindings {
+            statements.push(HirStmt::Let(capture_name, ty, value));
+        }
+        let mut leading_captures = Vec::with_capacity(values.len());
+        for value in values {
+            let HirExpr::Var(capture_name) = &value else { unreachable!() };
+            let ty = self.infer_expr_type(&value)?;
+            leading_captures.push(GenericBindCapture { name: capture_name.clone(), ty });
+        }
+
+        let bound = self.bind_decl_local(name, HirType::Dynamic, true);
+        self.deferred_generic_binds.insert(bound.clone(), DeferredGenericBind {
+            target,
+            this_capture,
+            leading_captures,
+        });
+        Ok(statements)
+    }
+
     fn lower_var_decl_inner(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
         let mut statements = Vec::new();
         for decl in &var_decl.decls {
@@ -340,6 +398,15 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
+                if binding.type_ann.is_none() {
+                    if let Some((call, target)) = self.deferred_generic_bind_call(init) {
+                        if var_decl.kind != VarDeclKind::Const {
+                            return Err("generic bound function templates currently require an immutable binding".into());
+                        }
+                        statements.extend(self.lower_deferred_generic_bind(&name, call, target)?);
+                        continue;
+                    }
+                }
                 // `const proxy = new Proxy(target, handler)`, when
                 // `target` is a simple identifier already declared
                 // `Object`/`Dictionary`-shaped in this function: retain
@@ -581,6 +648,14 @@ impl<'a> FnLowerer<'a> {
                 }
                 if let (Expr::Ident(identifier), None) = (init, binding.type_ann.as_ref()) {
                     let source_name = self.resolve_binding(identifier.sym.as_ref());
+                    if let Some(bind) = self.deferred_generic_binds.get(&source_name).cloned() {
+                        if var_decl.kind != VarDeclKind::Const {
+                            return Err("generic bound function templates currently require an immutable binding".into());
+                        }
+                        let alias = self.bind_decl_local(&name, HirType::Dynamic, true);
+                        self.deferred_generic_binds.insert(alias, bind);
+                        continue;
+                    }
                     if let Some(arrow) = self.generic_arrows.get(&source_name).cloned() {
                         let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
                         self.generic_arrows.insert(hir_name.clone(), arrow);

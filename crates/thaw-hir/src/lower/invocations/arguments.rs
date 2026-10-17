@@ -30,6 +30,14 @@ impl<'a> FnLowerer<'a> {
         self.lower_native_spread_values_with_expected(arguments, label, &[], None)
     }
 
+    fn lower_native_spread_values_with_snapshots(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, &[], None, false, true)
+    }
+
     fn lower_native_spread_array_values(
         &mut self,
         arguments: &[swc_ecma_ast::ExprOrSpread],
