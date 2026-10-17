@@ -43,6 +43,43 @@ fn calls_optional_function_values_across_typed_boundaries() {
 }
 
 #[test]
+fn recursive_generic_optional_parameters_keep_their_specialized_abi() {
+    let source = r#"
+        function recurseDeclaration<T>(seed: T, value?: T): T | undefined {
+            if (value === undefined) return seed;
+            return recurseDeclaration(seed);
+        }
+        function identity<T>(value?: T): T | undefined { return value; }
+        function collect<T>(seed: T, value?: T, ...rest: T[]): T | undefined {
+            return value === undefined ? seed : value;
+        }
+        function main(): void {
+            const recurseExpression = function recurse<T>(seed: T, value?: T): T | undefined {
+                if (value === undefined) return seed;
+                return recurse(seed);
+            };
+            const recurseUndefined = function recurUndefined<T>(seed: T, value?: T): T | undefined {
+                if (value === undefined) return seed;
+                return recurUndefined(seed, undefined);
+            };
+            console.log(recurseExpression(10));
+            console.log(recurseExpression(10, 2));
+            console.log(recurseDeclaration<number>(20));
+            console.log(recurseDeclaration(20, 2));
+            console.log(recurseUndefined(30, 2));
+            console.log(identity<number>());
+            console.log(identity(40));
+            console.log(collect<number>(50));
+            console.log(collect(50, 2, 3, 4));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "recursive_generic_optional_parameters"),
+        "10\n10\n20\n20\n30\nundefined\n40\n50\n2\n"
+    );
+}
+
+#[test]
 fn combines_optional_and_rest_function_value_abis() {
     let source = r#"
         function main(): void {

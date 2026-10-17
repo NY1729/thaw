@@ -2096,6 +2096,150 @@ fn generic_optional_arrow_keeps_omitted_and_undefined_capable_arguments_optional
 }
 
 #[test]
+fn recursive_generic_function_expression_keeps_an_omitted_optional_argument() {
+    let program = lower(
+        r#"function main(): void {
+            const recurse = function recurse<T>(seed: T, value?: T): T | undefined {
+                if (value === undefined) return recurse(seed, 1);
+                return value;
+            };
+            console.log(recurse(0));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn recursive_generic_function_expression_keeps_optional_after_a_supplied_first_call() {
+    let program = lower(
+        r#"function main(): void {
+            const recurse = function recurse<T>(seed: T, value?: T): T | undefined {
+                if (value === undefined) return value;
+                return recurse(seed);
+            };
+            console.log(recurse(0, 1));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn recursive_generic_function_expression_accepts_explicit_undefined_recursion() {
+    let program = lower(
+        r#"function main(): void {
+            const recurse = function recurse<T>(seed: T, value?: T): T | undefined {
+                if (value === undefined) return value;
+                return recurse(seed, undefined);
+            };
+            console.log(recurse(0, 1));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn recursive_generic_optional_rest_function_keeps_only_fixed_self_parameters() {
+    let program = lower(
+        r#"function main(): void {
+            const recurse = function recurse<T>(seed: T, value?: T, ...rest: T[]): T | undefined {
+                if (value === undefined) return seed;
+                return recurse(seed);
+            };
+            console.log(recurse(0));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn expected_generic_function_expression_keeps_recursive_optional_self_signature() {
+    let program = lower(
+        r#"type Recur = <T>(value?: T) => T | undefined;
+        function main(): void {
+            const recurse: Recur = function recurse<T>(value?: T): T | undefined {
+                if (value === undefined) return value;
+                return recurse(undefined);
+            };
+            console.log(recurse(1));
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn generic_declaration_optional_before_rest_accepts_omission() {
+    let program = lower(
+        r#"function collect<T>(seed: T, value?: T, ...rest: T[]): T | undefined {
+                return value === undefined ? seed : value;
+            }
+            function main(): void {
+                console.log(collect<number>(1));
+                console.log(collect(1, 2, 3, 4));
+            }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("collect__thaw_f64__optional_f64__array_f64"), "{body}");
+    assert!(body.contains("OptionalNone(F64)"), "missing fixed optional ABI slot: {body}");
+    assert!(body.contains("ArrayLit([])"), "missing packed rest ABI slot: {body}");
+}
+
+#[test]
+fn generic_function_declaration_optional_specializations_match_definitions() {
+    let program = lower(
+        r#"function recurse<T>(seed: T, value?: T): T | undefined {
+                if (value === undefined) return value;
+                return recurse(seed);
+            }
+            function main(): void {
+                console.log(recurse<number>(0));
+                console.log(recurse(0, 1));
+            }"#,
+    );
+    let declaration = program.functions.iter()
+        .filter(|function| function.name.starts_with("recurse__thaw_"))
+        .collect::<Vec<_>>();
+    assert!(!declaration.is_empty(), "expected a specialized recurse declaration");
+    assert!(declaration.iter().all(|function| {
+        function.params.get(1).is_some_and(|parameter| {
+            parameter.ty == HirType::Optional(Box::new(HirType::F64))
+        })
+    }), "optional generic parameter must remain undefined-capable in each specialization: {declaration:?}");
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    for function in declaration {
+        assert!(body.contains(&format!("Var(\"{}\")", function.name)),
+            "call sites should reference a declared specialization: {} in {body}", function.name);
+    }
+}
+
+#[test]
+fn generic_function_declaration_nonrecursive_optional_specializations_match_definitions() {
+    let program = lower(
+        r#"function identity<T>(value?: T): T | undefined { return value; }
+            function main(): void {
+                console.log(identity<number>());
+                console.log(identity(1));
+            }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    for function in program.functions.iter().filter(|function| function.name.starts_with("identity__thaw_")) {
+        assert_eq!(function.params[0].ty, HirType::Optional(Box::new(HirType::F64)));
+        assert!(body.contains(&format!("Var(\"{}\")", function.name)),
+            "call sites should reference a declared specialization: {} in {body}", function.name);
+    }
+}
+
+#[test]
+fn generic_function_declaration_still_rejects_omitted_required_arguments() {
+    let module = thaw_parser::parse_typescript(
+        "function identity<T>(value: T): T { return value; } function main(): void { identity<number>(); }",
+    ).unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
 fn generic_function_expression_keeps_receiver_provenance_after_specialization() {
     let program = lower(
         r#"function main(): void {
