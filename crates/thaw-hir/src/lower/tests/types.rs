@@ -45,6 +45,25 @@ fn rejects_an_incompatible_local_callable_default() {
 }
 
 #[test]
+fn lowers_mixed_nullish_and_optional_tuple_callable_defaults() {
+    lower(
+        r#"
+        function main(): void {
+            const nullFallback = (x: number | null | undefined = null) => x;
+            const scalarFallback = (x: number | null | undefined = 3) => x;
+            const maybeFallback = (): number | undefined => undefined;
+            const optionalFallback = (x: number | null | undefined = maybeFallback()) => x;
+            const tuple = (x: [number] | undefined = [7]): number => x[0];
+            const readonlyTuple = (x: readonly [number] | undefined = [7]): number => x[0];
+            const arrayPattern = ([x]: [number] | undefined = [9]): number => x;
+            nullFallback(); scalarFallback(); optionalFallback();
+            tuple(); readonlyTuple(); arrayPattern();
+        }
+        "#,
+    );
+}
+
+#[test]
 fn stringifies_an_unknown_value_through_the_dynamic_host() {
     lower(
         r#"

@@ -495,28 +495,45 @@ impl<'a> FnLowerer<'a> {
                     }
                 });
                 let mut default = self.lower_expr_with_expected_type(&assign.right, contextual_type)?;
-                if let Some(contextual_type) = contextual_type {
-                    if !matches!(self.infer_expr_type(&default)?, HirType::Null | HirType::Undefined)
-                    {
-                        default = self.coerce_to_declared(contextual_type, default)?;
+                let fallback_source_type = self.infer_expr_type(&default)?;
+                let value_context = match (declared_type.as_ref(), &fallback_source_type) {
+                    (Some(HirType::Optional(payload)), HirType::Undefined | HirType::Optional(_) | HirType::Nullish(_)) => {
+                        Some(HirType::Optional(payload.clone()))
                     }
-                    if matches!(contextual_type, HirType::Tuple(_)) {
-                        default = HirExpr::TypedClosure(contextual_type.clone(), Box::new(default));
+                    (Some(HirType::Optional(payload)), _) => Some(payload.as_ref().clone()),
+                    (Some(HirType::Nullish(payload)), HirType::Undefined | HirType::Optional(_) | HirType::Nullish(_)) => {
+                        Some(HirType::Nullish(payload.clone()))
+                    }
+                    (Some(HirType::Nullish(payload)), _) => Some(HirType::Nullable(payload.clone())),
+                    _ => contextual_type.cloned(),
+                };
+                if let Some(value_context) = value_context.as_ref() {
+                    if !matches!(fallback_source_type, HirType::Null | HirType::Undefined) {
+                        default = self.coerce_to_declared(value_context, default)?;
+                    }
+                    if matches!(value_context, HirType::Tuple(_)) {
+                        default = HirExpr::TypedClosure(value_context.clone(), Box::new(default));
                     }
                 }
                 let default_type = self.infer_expr_type(&default)?;
-                let value = self.lower_undefined_default_with_type(value, default, declared_type.clone())?;
-                let binding_type = match declared_type.as_ref() {
-                    Some(HirType::Optional(payload)) if default_type == **payload => {
-                        Some(payload.as_ref().clone())
-                    }
-                    other => other.cloned(),
-                };
-                let value_type = binding_type.unwrap_or(self.infer_expr_type(&value)?);
+                let value = self.lower_undefined_default_with_type(
+                    value,
+                    default,
+                    declared_type.clone(),
+                    Some(fallback_source_type),
+                )?;
+                let value_type = self.infer_expr_type(&value)?;
                 let mut binding_pattern = assign.left.as_ref().clone();
-                if matches!(declared_type, Some(HirType::Optional(_)))
-                    && matches!(value_type, HirType::F64 | HirType::Bool | HirType::Str)
-                {
+                let narrowed_annotation = match declared_type.as_ref() {
+                    Some(HirType::Optional(payload)) => value_type == **payload,
+                    Some(HirType::Nullish(payload)) => matches!(
+                        &value_type,
+                        HirType::Nullable(result_payload) | HirType::Optional(result_payload)
+                            if result_payload == payload
+                    ) || value_type == **payload,
+                    _ => false,
+                };
+                if narrowed_annotation {
                     if let Pat::Ident(binding) = &mut binding_pattern {
                         binding.type_ann = None;
                     }

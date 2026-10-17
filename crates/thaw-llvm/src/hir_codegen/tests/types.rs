@@ -46,6 +46,42 @@ fn compiles_nullable_undefined_and_tuple_callable_defaults() {
 }
 
 #[test]
+fn compiles_mixed_nullish_and_optional_tuple_callable_defaults() {
+    let source = r#"
+        function main(): void {
+            const nullFallback = (x: number | null | undefined = null): string => x === null ? "null" : String(x);
+            const scalarFallback = (x: number | null | undefined = 3): string => x === null ? "null" : String(x);
+            const maybeFallback = (): number | undefined => undefined;
+            const optionalFallback = (x: number | null | undefined = maybeFallback()): string => x === null ? "null" : String(x);
+            const nullBound = nullFallback.bind(null);
+            const scalarBound = scalarFallback.bind(null);
+            const optionalBound = optionalFallback.bind(null);
+            console.log(nullFallback()); console.log(nullFallback(undefined)); console.log(nullFallback(null)); console.log(nullFallback(5));
+            console.log(nullBound()); console.log(nullBound(undefined)); console.log(nullBound(null)); console.log(nullBound(5));
+            console.log(scalarFallback()); console.log(scalarFallback(undefined)); console.log(scalarFallback(null)); console.log(scalarFallback(5));
+            console.log(scalarBound()); console.log(scalarBound(undefined)); console.log(scalarBound(null)); console.log(scalarBound(5));
+            console.log(optionalFallback()); console.log(optionalFallback(undefined)); console.log(optionalFallback(null)); console.log(optionalFallback(5));
+            console.log(optionalBound()); console.log(optionalBound(undefined)); console.log(optionalBound(null)); console.log(optionalBound(5));
+            const tuple = (x: [number] | undefined = [7]): number => x[0];
+            const readonlyTuple = (x: readonly [number] | undefined = [8]): number => x[0];
+            const arrayPattern = ([x]: [number] | undefined = [9]): number => x;
+            const tupleBound = tuple.bind(null); const readonlyBound = readonlyTuple.bind(null);
+            const arrayPatternBound = arrayPattern.bind(null);
+            console.log(tuple()); console.log(tuple(undefined)); console.log(tuple([4]));
+            console.log(tupleBound()); console.log(tupleBound(undefined)); console.log(tupleBound([4]));
+            console.log(readonlyTuple()); console.log(readonlyTuple(undefined)); console.log(readonlyTuple([6]));
+            console.log(readonlyBound()); console.log(readonlyBound(undefined)); console.log(readonlyBound([6]));
+            console.log(arrayPattern()); console.log(arrayPattern(undefined)); console.log(arrayPattern([10]));
+            console.log(arrayPatternBound()); console.log(arrayPatternBound(undefined)); console.log(arrayPatternBound([10]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "mixed_nullish_optional_tuple_callable_defaults"),
+        "null\nnull\nnull\n5\nnull\nnull\nnull\n5\n3\n3\nnull\n5\n3\n3\nnull\n5\nundefined\nundefined\nnull\n5\nundefined\nundefined\nnull\n5\n7\n7\n4\n7\n7\n4\n8\n8\n6\n8\n8\n6\n9\n9\n10\n9\n9\n10\n"
+    );
+}
+
+#[test]
 fn compiles_multi_argument_generic_specializations_end_to_end() {
     let source = r#"
         interface Pair<T, U> {
