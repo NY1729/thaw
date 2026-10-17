@@ -219,9 +219,10 @@ Known gaps against Node semantics:
   within two levels (a scan of at most 256 own data properties). Other results are data
   snapshots: a fresh JavaScript array or object, a result declared `T[] | undefined`, a tuple
   or a `Promise` of an array (`async get()`), and an owned value stored deeper or further down than
-  the scan reaches. Mutating a snapshot does not reach the owner. Classes with writable
-  Map/Set fields or methods accepting Map/Set parameters cannot yet cross into `any`;
-  their native callback argument conversion is unsupported.
+  the scan reaches. Mutating a snapshot does not reach the owner. Native class accessors remain
+  live through `any`, including inherited getters and setters. Map/Set fields and callback parameters
+  accept native views with matching key/value types; JavaScript-owned collections and incompatible
+  native collection types throw `TypeError` rather than being copied into native storage.
 
 ## Examples
 
