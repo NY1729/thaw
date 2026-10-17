@@ -105,6 +105,10 @@ unsafe extern "C" fn udjit_stub_inner_mode() -> f64 {
     *UD_JIT_INNER_MODE.lock().unwrap()
 }
 
+extern "C" fn udjit_stub_error_frame(name: *const std::ffi::c_char, _message: *const std::ffi::c_char) -> *const std::ffi::c_char {
+    name
+}
+
 fn udjit_flat_union_type() -> HirType {
     HirType::Union(vec![HirType::Promise(Box::new(HirType::F64)), HirType::F64])
 }
@@ -839,6 +843,7 @@ fn discarded_native_promise_union_selected_tokens_are_exact_and_closed() {
     let expected_external_calls = BTreeSet::from([
         "thaw_promise_destroy".to_string(),
         "thaw_promise_retain".to_string(),
+        "thaw_error_frame".to_string(),
         "udjit_test_pointer_looking_f64".to_string(),
         "udjit_test_pointer_looking_str".to_string(),
         "udjit_test_token_flat_owned".to_string(),
@@ -870,6 +875,12 @@ fn discarded_native_promise_union_selected_tokens_are_exact_and_closed() {
     assert!(destroy_params[0].is_pointer_type(), "destroy spy must receive the opaque token pointer");
     assert!(destroy.get_type().get_return_type().is_none());
     engine.add_global_mapping(&destroy, udjit_stub_destroy as *const () as usize);
+    let frame = compiler.module.get_function("thaw_error_frame").unwrap();
+    let frame_params = frame.get_type().get_param_types();
+    assert_eq!(frame_params.len(), 2);
+    assert!(frame_params.iter().all(|ty| ty.is_pointer_type()));
+    assert!(frame.get_type().get_return_type().unwrap().is_pointer_type());
+    engine.add_global_mapping(&frame, udjit_stub_error_frame as *const () as usize);
     for (symbol, address) in [
         ("udjit_test_token_flat_owned", udjit_stub_flat_token as *const () as usize),
         ("udjit_test_token_three_tag0_owned", udjit_stub_three_tag0_token as *const () as usize),

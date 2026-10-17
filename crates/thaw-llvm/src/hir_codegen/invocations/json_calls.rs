@@ -21,6 +21,15 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match name {
+            "__thaw_json_decode_native_argument" => {
+                let [HirExpr::TypedClosure(target, value)] = args else {
+                    return Err("checked native argument requires a target type".into());
+                };
+                let outer = std::mem::replace(&mut self.validating_native_argument, true);
+                let result = self.compile_expr(&HirExpr::JsonAsNative(value.clone(), target.clone()));
+                self.validating_native_argument = outer;
+                return result;
+            }
             "JSON.parse" => {
                 let [source] = args else {
                     return Err("JSON.parse expects one argument".into());
@@ -102,8 +111,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_json_error_stack", args, "caught JSON stack");
             }
             "__thaw_json_receiver_string" => {
-                return self.compile_single_arg_call(
-                    "thaw_json_receiver_string", args, "JSON string");
+                let result = self.compile_single_arg_call(
+                    "thaw_json_receiver_string", args, "JSON string")?;
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_receiver_bool" => {
                 let [value] = args else {
@@ -760,6 +772,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Object.assign returned no value")?;
+                self.compile_check_json_host_error(assigned, None)?;
                 let error = self.builder.build_call(
                     self.module.get_function("thaw_json_take_assign_error").unwrap(),
                     &[], "object_assign_error",
@@ -810,7 +823,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "json_array_slice_start",
                     )
                     .map_err(|error| error.to_string())?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_json_array_slice").unwrap(),
@@ -820,7 +833,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_json_array_slice returned no value".into());
+                    .ok_or_else(|| "thaw_json_array_slice returned no value".to_string())?;
+                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
             }
             "__thaw_json_has_own" | "__thaw_json_property_is_enumerable" => {
                 let predicate = if name == "__thaw_json_property_is_enumerable" {

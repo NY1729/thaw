@@ -189,7 +189,7 @@ impl<'a> FnLowerer<'a> {
         for (index, element) in elements.iter().enumerate() {
             if matches!(element, HirType::Undefined | HirType::Null) {
                 let returns = vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
-                    "Cannot read properties of {}",
+                    "\u{1}TypeError\u{1}Cannot read properties of {} (reading '{property}')",
                     if *element == HirType::Null { "null" } else { "undefined" }
                 ))))];
                 if index + 1 == elements.len() {

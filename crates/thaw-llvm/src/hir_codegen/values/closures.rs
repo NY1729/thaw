@@ -512,6 +512,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let parent = self.builder.get_insert_block().ok_or("non-arrow closure needs a parent block")?;
         let ordinary = self.module.add_function(
             &format!("{name}__ordinary"), self.function_type(&visible, ret)?, Some(Linkage::Internal));
+        let ordinary_result = isolated_codegen_scope!(self, {
         let entry = self.context.append_basic_block(ordinary, "entry");
         self.builder.position_at_end(entry);
         let undefined = if *receiver == HirType::JsValue {
@@ -532,7 +533,10 @@ impl<'ctx> HirCompiler<'ctx> {
         if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
         else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
             .ok_or("non-arrow ordinary entry returned no value")?)).map_err(|error| error.to_string())?; }
+        Ok(ordinary)
+        });
         self.builder.position_at_end(parent);
+        let ordinary = ordinary_result?;
         let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name, receiver_access)?;
         Ok((ordinary, explicit))
     }

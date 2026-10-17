@@ -208,6 +208,17 @@ fn infers_a_return_only_generic_type_parameter_from_a_let_annotation() {
     );
 }
 
+#[test]
+fn return_only_generic_source_hint_must_satisfy_its_constraint() {
+    let module = thaw_parser::parse_typescript(
+        r#"declare function makeId<Type extends string>(): Type;
+           function main(): void { const id: number = makeId(); }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("constraint"), "{error}");
+}
+
 /// The same function called with its optional parameter actually
 /// supplied: the argument must still be coerced to the *substituted*
 /// declared type (`Optional(F64)`, not the pre-substitution `Dynamic`

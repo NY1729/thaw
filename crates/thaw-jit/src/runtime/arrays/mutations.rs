@@ -6,7 +6,10 @@ fn dynamic_array_result(tag: u64, result: f64) -> f64 {
     }
     let Some(handle) = ARENA_ALLOC.with(|allocator| {
         allocator.get().map(|alloc| unsafe {
-            alloc(std::mem::size_of::<usize>(), std::mem::align_of::<usize>())
+            alloc(
+                std::mem::size_of::<*mut u8>() * 2,
+                std::mem::align_of::<*mut u8>(),
+            )
         })
     }) else {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
@@ -17,9 +20,9 @@ fn dynamic_array_result(tag: u64, result: f64) -> f64 {
         return 0.0;
     }
     unsafe {
-        handle
-            .cast::<usize>()
-            .write(bits as usize & !ARRAY_RESULT_TAG as usize)
+        let slots = handle.cast::<*const u8>();
+        slots.write((bits as usize & !ARRAY_RESULT_TAG as usize) as *const u8);
+        slots.add(1).write(std::ptr::null());
     };
     dynamic_from_parts(tag as f64, f64::from_bits(handle as usize as u64))
 }

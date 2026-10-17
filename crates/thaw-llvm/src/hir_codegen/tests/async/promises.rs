@@ -1332,11 +1332,16 @@ fn promise_input_allocation_failure_reaches_catch_and_empty_input_skips_allocato
         CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::ptr::null_mut()
     }
+    extern "C" fn inert_error_frame(name: *const std::ffi::c_char, _message: *const std::ffi::c_char) -> *const std::ffi::c_char {
+        name
+    }
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "promise_input_allocation_failure");
     compiler.declare_exception_state();
     let pointer = context.ptr_type(AddressSpace::default());
     let word = context.i64_type();
+    let frame = compiler.module.add_function("thaw_error_frame",
+        pointer.fn_type(&[pointer.into(), pointer.into()], false), None);
     let allocator = compiler.module.add_function("thaw_arena_alloc",
         pointer.fn_type(&[word.into(), word.into()], false), None);
     for (name, words) in [("nonempty", 1), ("empty", 0)] {
@@ -1354,6 +1359,7 @@ fn promise_input_allocation_failure_reaches_catch_and_empty_input_skips_allocato
     compiler.module.verify().unwrap();
     let engine = compiler.module.create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
     engine.add_global_mapping(&allocator, fail_allocation as *const () as usize);
+    engine.add_global_mapping(&frame, inert_error_frame as *const () as usize);
     CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
     type Probe = unsafe extern "C" fn() -> u8;
     unsafe {
@@ -1655,6 +1661,11 @@ fn build_reactive_promotion_probe<'ctx>(
     compiler.module.add_function(
         "thaw_promise_destroy",
         compiler.context.void_type().fn_type(&[pointer.into()], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    compiler.module.add_function(
+        "thaw_error_frame",
+        pointer.fn_type(&[pointer.into(), pointer.into()], false),
         Some(inkwell::module::Linkage::External),
     );
 

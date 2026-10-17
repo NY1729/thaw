@@ -1304,8 +1304,8 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
         assert!(map_get_optional_binding(map_actual, "values"),
             "{name} uses the same genuine Map.get Optional<Json> source route");
         let (_, _, comparison) = one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
-        assert!(!named_call(comparison, "__thaw_json_from_consumed_dynamic"),
-            "{name} remains outside the plain fixed-object projection boundary");
+        assert_eq!(named_call(comparison, "__thaw_json_from_consumed_dynamic"), name == "nominal",
+            "plain classes retain nominal identity through a live view; unsafe plain method receivers stay outside that path");
         if name == "methodOwner" {
             let (owner_binding, owner_actual, _) =
                 one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
@@ -1554,6 +1554,24 @@ fn contextual_rest_callback_preserves_zero_and_fixed_prefix_rest_shapes() {
     assert_eq!(params[0].ty, HirType::Json);
     assert_eq!(params[1].ty, HirType::Array(Box::new(HirType::Json)));
     assert!(format!("{:?}", main.body).contains("FunctionRef(\"rest\""));
+}
+
+#[test]
+fn dynamic_storage_object_literal_keeps_contextual_rest_callback_metadata() {
+    let program = lower(
+        r#"
+        declare function accept(options: { callback?: (...values: string[]) => void }): JsValue;
+        function main(): void {
+            accept({ callback: (...values: string[]) => console.log(values.length) });
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let hir = format!("{:?}", main.body);
+    assert!(
+        hir.contains("CallableFunction([], Inline(0), Some(Str), Void)"),
+        "the escaped callback retains its logical rest marker through object lowering: {hir}"
+    );
 }
 
 #[test]

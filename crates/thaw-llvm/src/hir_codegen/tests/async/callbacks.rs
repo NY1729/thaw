@@ -856,6 +856,8 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
                 throw "fresh JSON constructor lookup cleanup failed";
             }}
             const borrowed: Json = JSON.parse('{{"marker":"borrowed"}}');
+            // JSON.parse adds one intentionally live QuickJS host handle.
+            callDynamicValue(mark, __thaw_json_argument_array());
             let borrowedCaught = 0;
             for (let index = 0; index < 3; index++) {{
                 try {{
@@ -949,4 +951,72 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
     assert!(stdout.contains("original constructor lookup failure"), "{stdout}");
     assert!(stdout.ends_with("true true\n"), "{stdout}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn promise_callbacks_normalize_mixed_json_native_and_void_results() {
+    let source = r#"
+        declare function __thaw_typed_js_7465737452657374(callback: (...values: number[]) => number): number;
+        let callbackFactories = 0;
+        let observed = 0;
+        function namedRest(...values: number[]): number {
+            const escaped: any = values;
+            return values[0] + values[1] + values[2];
+        }
+        function makeRecovery(): (error: string) => any {
+            callbackFactories++;
+            return (error: string): any => {
+                const value: any = 41;
+                return value;
+            };
+        }
+        async function recoverPromise(error: string): Promise<number> {
+            const value: any = 42;
+            return value;
+        }
+        function observe(value: number): void {
+            observed++;
+        }
+        async function main(): Promise<void> {
+            loadScript("globalThis.testRest = callback => callback(1, 2, 3);");
+            const storedRest: (...values: number[]) => number = (...values: number[]): number => {
+                const escaped: any = values;
+                return values[0] + values[1] + values[2];
+            };
+            console.log(__thaw_typed_js_7465737452657374(namedRest));
+            console.log(__thaw_typed_js_7465737452657374(storedRest));
+            const recovered = await Promise.reject<number>("failure").catch(makeRecovery());
+            console.log(recovered, callbackFactories);
+            const recoveredPromise = await Promise.reject<number>("failure")
+                .then(undefined, recoverPromise);
+            console.log(recoveredPromise);
+            const finished = await Promise.resolve(7).then(observe);
+            console.log(finished, observed);
+            const voidMixed = await Promise.reject<number>("mixed").then(
+                (value: number): any => {
+                    const result: any = value;
+                    return result;
+                },
+                (reason: string): void => {
+                    observed++;
+                }
+            );
+            console.log(voidMixed, observed);
+            const forwarded = await Promise.reject<number>("forwarded").catch((error: string): number => {
+                throw error;
+                return 0;
+            }).catch((error: string): any => {
+                const value: any = error;
+                return value;
+            });
+            console.log(forwarded);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(
+            source,
+            "promise_callbacks_normalize_mixed_json_native_and_void_results"
+        ),
+        "6\n6\n41 1\n42\nundefined 1\nundefined 2\nforwarded\n"
+    );
 }

@@ -14,6 +14,14 @@ extern "C" fn udeval_mapped_exception_effect() -> f64 {
 
 extern "C" fn udeval_non_dereferencing_destroy(_token: *mut std::ffi::c_void) {}
 
+extern "C" fn udeval_error_frame(name: *const std::ffi::c_char, _message: *const std::ffi::c_char) -> *const std::ffi::c_char {
+    name
+}
+
+extern "C" fn udeval_error_frame_own(value: *const std::ffi::c_char) -> *const std::ffi::c_char {
+    value
+}
+
 fn udeval_flat_union_type() -> HirType {
     HirType::Union(vec![
         HirType::Promise(Box::new(HirType::F64)),
@@ -634,6 +642,7 @@ fn udeval_run_mapped_exception_effect_probe() {
     }
     let expected_external_calls: std::collections::HashSet<String> = [
         "thaw_promise_destroy".to_string(),
+        "thaw_error_frame_own".to_string(),
         "udeval_mapped_after_throw".to_string(),
     ].into_iter().collect();
     assert_eq!(external_calls, expected_external_calls,
@@ -663,6 +672,14 @@ fn udeval_run_mapped_exception_effect_probe() {
     engine.add_global_mapping(
         &compiler.module.get_function("udeval_mapped_after_throw").unwrap(),
         udeval_mapped_exception_effect as *const () as usize,
+    );
+    engine.add_global_mapping(
+        &compiler.module.get_function("thaw_error_frame").unwrap(),
+        udeval_error_frame as *const () as usize,
+    );
+    engine.add_global_mapping(
+        &compiler.module.get_function("thaw_error_frame_own").unwrap(),
+        udeval_error_frame_own as *const () as usize,
     );
     type VoidProbe = unsafe extern "C" fn();
     unsafe {

@@ -133,6 +133,13 @@ struct HostOperations {
     enumerate: extern "C" fn(u64, u8) -> HostTextResult,
 }
 
+#[derive(Clone, Copy)]
+struct ErrorFactoryOperations {
+    create: extern "C" fn(*const c_char) -> HostHandleResult,
+    lookup: extern "C" fn(*const c_void, *const c_char) -> HostHandleResult,
+    intern: extern "C" fn(*const c_void, *const c_char, u64) -> HostHandleResult,
+}
+
 impl Drop for HostLease {
     fn drop(&mut self) {
         without_typed_decode_scope(|| (self.release)(self.handle));
@@ -143,6 +150,7 @@ type GraphOriginSerials = (u64, HashMap<usize, (u64, GraphOriginRef)>);
 
 thread_local! {
     static HOST_OPERATIONS: Cell<Option<HostOperations>> = const { Cell::new(None) };
+    static ERROR_FACTORY_OPERATIONS: Cell<Option<ErrorFactoryOperations>> = const { Cell::new(None) };
     static HOST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     // `None` is a boundary while a trusted Host/NAPI callback executes.
     // User reentry without its own decode scope must not join the caller's ledger.
@@ -551,6 +559,23 @@ pub extern "C" fn thaw_json_register_host_operations(
             set,
             predicate,
             enumerate,
+        }))
+    });
+}
+
+/// Registers the optional JS Error factory and native-object identity bridge. The standard
+/// library stays usable without QuickJS; when absent, framed errors keep the native JSON fallback.
+#[no_mangle]
+pub extern "C" fn thaw_json_register_error_factory(
+    create: extern "C" fn(*const c_char) -> HostHandleResult,
+    lookup: extern "C" fn(*const c_void, *const c_char) -> HostHandleResult,
+    intern: extern "C" fn(*const c_void, *const c_char, u64) -> HostHandleResult,
+) {
+    ERROR_FACTORY_OPERATIONS.with(|slot| {
+        slot.set(Some(ErrorFactoryOperations {
+            create,
+            lookup,
+            intern,
         }))
     });
 }
@@ -4204,6 +4229,18 @@ pub unsafe extern "C" fn thaw_json_callback_error_tuple(
     // exact alias with the producer-proven native-text channel authorizes a
     // C-string read; tag 7 is specifically the tracked Box<Value> throw path.
     let pending_is_text = !message.is_null() && message == native_text;
+    let native_error_identity =
+        if !native_text.is_null() && thaw_arena::contains_allocation(native_text as usize) {
+            let bytes = unsafe { thaw_arena::NativeStr::from_ptr(native_text) }.to_bytes();
+            let legacy_frame = bytes.first() == Some(&1) && bytes[1..].contains(&1);
+            if thaw_arena::error_wire::parse_tagged(bytes).is_some() || legacy_frame {
+                native_text as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
     let pending = if !pending_is_text {
         if !message.is_null() && thaw_arena::contains_allocation(message as usize) {
             roots.push(thaw_arena::ArenaRoot::new(message as usize));
@@ -4222,6 +4259,7 @@ pub unsafe extern "C" fn thaw_json_callback_error_tuple(
         id: 0,
         pending,
         native_text,
+        native_error_identity,
         object: object as usize,
         native: native as usize,
         aggregate: aggregate as usize,
@@ -4431,6 +4469,86 @@ fn native_snapshot_preserves_text_alias_and_rebuilds_after_arena_reset() {
 
 #[cfg(test)]
 #[test]
+fn native_snapshot_preserves_authenticated_error_frame_identity_across_arena_reset() {
+    std::thread::spawn(|| {
+        thaw_arena::thaw_arena_enable_tracing();
+        let wire = thaw_arena::error_wire::encode_tagged(b"TypeError", b"identity", None)
+            .expect("valid error frame");
+        let original = thaw_arena::arena_string(&wire);
+        let result = unsafe {
+            thaw_json_callback_error_tuple(
+                original,
+                4,
+                0.0,
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                original,
+                std::ptr::null(),
+            )
+        };
+        let token = unsafe { thaw_exception_native_token(result) };
+        assert_ne!(token, 0);
+        let packet = thaw_arena::exception::packet(token).unwrap();
+        assert_eq!(packet.native_error_identity, original as usize);
+        drop(packet);
+
+        let mut snapshot = [0_u64; 9];
+        assert_eq!(
+            unsafe { thaw_exception_native_snapshot(token, snapshot.as_mut_ptr()) },
+            1
+        );
+        assert_eq!(snapshot[6], original as u64);
+        assert_eq!(snapshot[7], original as u64);
+        assert_eq!(
+            unsafe { thaw_arena::NativeStr::from_ptr(snapshot[7] as *const c_char) }.to_bytes(),
+            wire
+        );
+
+        // The packet root keeps the original arena frame valid through reset;
+        // rematerialization retains identity while that packet is still owned.
+        thaw_arena::thaw_arena_reset();
+        snapshot.fill(0);
+        assert_eq!(
+            unsafe { thaw_exception_native_snapshot(token, snapshot.as_mut_ptr()) },
+            1
+        );
+        assert_eq!(snapshot[7], original as u64);
+        assert_eq!(
+            unsafe { thaw_arena::NativeStr::from_ptr(snapshot[7] as *const c_char) }.to_bytes(),
+            wire
+        );
+
+        // Materialize the native catch's ordinary traced owner before releasing
+        // the JS guardian, then ensure that owner alone keeps the frame alive.
+        let cell = thaw_arena::thaw_arena_alloc(
+            std::mem::size_of::<usize>(),
+            std::mem::align_of::<usize>(),
+        )
+        .cast::<usize>();
+        assert!(!cell.is_null());
+        unsafe { cell.write(snapshot[7] as usize) };
+        let capture_root = thaw_arena::ArenaRoot::new(cell as usize);
+        let owned_packet = thaw_arena::take_owned_exception(result).unwrap();
+        drop(owned_packet);
+        unsafe { thaw_arena::destroy_string(result) };
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::contains_allocation(original as usize));
+        assert_eq!(
+            unsafe { thaw_arena::NativeStr::from_ptr(cell.read() as *const c_char) }.to_bytes(),
+            wire
+        );
+        drop(capture_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::contains_allocation(original as usize));
+    })
+    .join()
+    .expect("native error identity remains rooted while its packet is live");
+}
+
+#[cfg(test)]
+#[test]
 fn native_snapshot_object_kept_by_captured_catch_cell_survives_real_reset() {
     // Keep tracing/reset hooks private to this test thread.
     std::thread::spawn(|| {
@@ -4585,6 +4703,12 @@ pub unsafe extern "C" fn thaw_exception_native_snapshot(id: u64, output: *mut u6
         packet.aggregate as u64,
     ];
     let mut aliases = std::collections::HashMap::<usize, usize>::new();
+    if packet.native_text != 0 && packet.native_error_identity != 0 {
+        // The authenticated framed-error pointer is rooted by the packet. Keep
+        // the original native identity when a copied packet field was an exact
+        // alias of that frame, rather than manufacturing a new frame per catch.
+        aliases.insert(packet.native_text, packet.native_error_identity);
+    }
     let mut clones = Vec::<*mut Value>::new();
     for index in [4usize, 5, 6, 7, 8] {
         let source = fields[index] as usize;
@@ -4688,6 +4812,28 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     let Some(kind) = host_query(lease, 0) else {
         return Node::Raw(String::new());
     };
+    if kind == "function" {
+        if HOST_INSPECT_DEPTH.with(Cell::get) >= 4 {
+            return Node::Raw("[Function]".into());
+        }
+        let name = match host_get_property(lease, b"name") {
+            Value::String(name) => name,
+            Value::Wtf8(name) => wtf8_to_string(&name),
+            name => {
+                HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+                let rendered = crate::inspect::inspect(
+                    &inspect_node(&name, stack),
+                    &crate::inspect::InspectOptions::default(),
+                );
+                HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
+                rendered
+            }
+        };
+        return Node::Function {
+            name,
+            kind: crate::inspect::FnKind::Function,
+        };
+    }
     if kind != "object" {
         return host_inspect_text(lease, kind == "string");
     }
@@ -4745,22 +4891,79 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             extra: Vec::new(),
         }
     } else {
-        let entries = host_enumerable_entries(lease)
-            .into_iter()
-            .map(|(key, value)| (wtf8_decode_utf16(&key), inspect_node(&value, stack)))
-            .collect();
-        let ctor = match host_query(lease, 23) {
-            Some(name) if !name.is_empty() => Ctor::Named(name),
-            _ => Ctor::Plain,
-        };
-        Node::Object {
-            id: 0,
-            ctor,
-            entries,
+        let fields: indexmap::IndexMap<Vec<u8>, Value> =
+            host_enumerable_entries(lease).into_iter().collect();
+        if let Some(node) = aggregate_error_inspect_node(0, &fields, stack) {
+            node
+        } else {
+            let entries = ordered_object_fields(&fields)
+                .into_iter()
+                .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
+                .collect();
+            let ctor = match host_query(lease, 23) {
+                Some(name) if !name.is_empty() => Ctor::Named(name),
+                _ => Ctor::Plain,
+            };
+            Node::Object {
+                id: 0,
+                ctor,
+                entries,
+            }
         }
     };
     HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
     node
+}
+
+fn aggregate_error_inspect_node(
+    id: usize,
+    fields: &indexmap::IndexMap<Vec<u8>, Value>,
+    stack: &mut Vec<usize>,
+) -> Option<crate::inspect::Node> {
+    use crate::inspect::{Ctor, Node};
+
+    let field = |name: &str| {
+        fields
+            .get(name.as_bytes())
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let message = field("message")?;
+    if field("name").as_deref() != Some("AggregateError")
+        || !fields
+            .get(b"errors".as_slice())
+            .is_some_and(|errors| unsafe { thaw_json_is_array(errors as *const Value) != 0 })
+    {
+        return None;
+    }
+
+    let header = error_header("AggregateError", &message);
+    let entries: Vec<(Vec<u16>, Node)> = ordered_object_fields(fields)
+        .into_iter()
+        .filter(|(key, _)| {
+            ![b"message".as_slice(), b"name", b"__thaw_class__"].contains(&&key[..])
+                && !key.starts_with(b"__thaw_class_identity_")
+        })
+        .map(|(key, value)| {
+            // `errors`/`cause` are non-enumerable: Node shows them as `[errors]`.
+            let label: Vec<u16> = if key == b"errors".as_slice() || key == b"cause".as_slice() {
+                format!("\u{1}[{}]", String::from_utf8_lossy(key))
+                    .encode_utf16()
+                    .collect()
+            } else {
+                wtf8_decode_utf16(key)
+            };
+            (label, inspect_node(value, stack))
+        })
+        .collect();
+    if id != 0 {
+        stack.pop();
+    }
+    Some(Node::Object {
+        id,
+        ctor: Ctor::Named(header),
+        entries,
+    })
 }
 
 fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
@@ -4883,44 +5086,8 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                         .and_then(Value::as_str)
                         .map(str::to_string)
                 };
-                // A caught `AggregateError` crosses as `{ message, name, errors, .. }`
-                // (see `lower_new_aggregate_error`); print it as Node prints an error with no
-                // stack frames: `[AggregateError: msg] { [errors]: [ .. ] }`.
-                if field("name").as_deref() == Some("AggregateError")
-                    && field("message").is_some()
-                    && fields
-                        .get(b"errors".as_slice())
-                        .is_some_and(|errors| errors.as_array().is_some())
-                {
-                    let header =
-                        error_header("AggregateError", &field("message").unwrap_or_default());
-                    let entries: Vec<(Vec<u16>, Node)> = ordered_object_fields(fields)
-                        .into_iter()
-                        .filter(|(key, _)| {
-                            ![b"message".as_slice(), b"name", b"__thaw_class__"].contains(&&key[..])
-                                && !key.starts_with(b"__thaw_class_identity_")
-                        })
-                        .map(|(key, value)| {
-                            // `errors`/`cause` are non-enumerable: Node shows them as `[errors]`.
-                            let label: Vec<u16> =
-                                if key == b"errors".as_slice() || key == b"cause".as_slice() {
-                                    format!("\u{1}[{}]", String::from_utf8_lossy(key))
-                                        .encode_utf16()
-                                        .collect()
-                                } else {
-                                    wtf8_decode_utf16(key)
-                                };
-                            (label, inspect_node(value, stack))
-                        })
-                        .collect();
-                    if id != 0 {
-                        stack.pop();
-                    }
-                    return Node::Object {
-                        id,
-                        ctor: Ctor::Named(header),
-                        entries,
-                    };
+                if let Some(node) = aggregate_error_inspect_node(id, fields, stack) {
+                    return node;
                 }
                 if class.as_deref() == Some("RegExp") {
                     if let (Some(source), Some(flags)) = (field("source"), field("flags")) {
@@ -7204,8 +7371,13 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
 /// `value` must be null or point to a valid JSON `Value`.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_for_in_keys(value: *const Value) -> *mut u8 {
-    if matches!(unsafe { value.as_ref() }, Some(Value::Host(_))) {
-        return unsafe { thaw_json_keys(value) };
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        return alloc_pointer_array(
+            host_enumerate_values(lease, 9)
+                .iter()
+                .map(|key| native_string_value(key).cast())
+                .collect(),
+        );
     }
     let mut keys: Vec<Vec<u8>> = Vec::new();
     let mut seen_keys = HashSet::new();
@@ -7885,14 +8057,18 @@ pub extern "C" fn thaw_json_receiver_number(value: f64) -> *mut Value {
 
 #[no_mangle]
 pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value {
-    // A framed error string (`\u{1}Name\u{1}message...` or the `\x1eE1:` wire header) that is
-    // widened to `any` (`const err: any = caughtError`) must keep reading as an Error: expose
-    // `name`/`message`/`stack` as properties instead of leaking the raw frame text, plus the
-    // own properties of a framed suffix (`\x02cause`, `\x03code`, `\x05{json bag}`).
+    // A framed error string widened to `any` must keep its Error properties and identity.
     if !value.is_null() {
         let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
-        if let Some(error) = error_value_from_text(value, bytes) {
-            return leak(error);
+        if bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:") {
+            if let Some(error) = error_value_from_text(value, bytes) {
+                return leak(error);
+            }
+            if ERROR_FACTORY_OPERATIONS.with(|slot| slot.get().is_some())
+                && HOST_ERROR.with(|slot| slot.borrow().is_some())
+            {
+                return std::ptr::null_mut();
+            }
         }
     }
     leak(string_value(value))
@@ -7903,6 +8079,9 @@ pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value 
 fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
     if !(bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:")) {
         return None;
+    }
+    if let Some(operations) = ERROR_FACTORY_OPERATIONS.with(|slot| slot.get()) {
+        return error_host_value_from_text(value, operations);
     }
     let (name, message) = unsafe { (thaw_error_name(value), thaw_error_message(value)) };
     if name.is_null() || message.is_null() {
@@ -7933,6 +8112,77 @@ fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
         add_error_suffix_properties(&mut fields, frame.suffix);
     }
     Some(Value::shared_object(fields))
+}
+
+const FRAMED_ERROR_NATIVE_LAYOUT: &[u8] = b"thaw.framed-error.v1\0";
+
+fn host_error_from_result(result: HostHandleResult, operation: &str) -> Option<u64> {
+    if !result.error.is_null() {
+        let message = to_str(result.error);
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        set_host_error(message);
+        return None;
+    }
+    if result.value == 0 {
+        set_host_error(format!("{operation} returned no Error handle"));
+        return None;
+    }
+    Some(result.value)
+}
+
+fn error_host_value_from_text(
+    value: *const c_char,
+    operations: ErrorFactoryOperations,
+) -> Option<Value> {
+    let host_operations = HOST_OPERATIONS.with(|slot| slot.get());
+    let Some(host_operations) = host_operations else {
+        set_host_error("Error factory registered without host operations".into());
+        return None;
+    };
+    let layout = FRAMED_ERROR_NATIVE_LAYOUT.as_ptr().cast();
+    let native_pointer = value.cast::<c_void>();
+    let arena_owned = thaw_arena::contains_allocation(value as usize);
+
+    let handle = if arena_owned {
+        let result = without_typed_decode_scope(|| (operations.lookup)(native_pointer, layout));
+        if !result.error.is_null() {
+            let message = to_str(result.error);
+            unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+            set_host_error(message);
+            return None;
+        }
+        (result.value != 0).then_some(result.value)
+    } else {
+        None
+    };
+    let handle = match handle {
+        Some(handle) => handle,
+        None => {
+            let candidate = host_error_from_result(
+                without_typed_decode_scope(|| (operations.create)(value)),
+                "Error factory",
+            )?;
+            if arena_owned {
+                host_error_from_result(
+                    without_typed_decode_scope(|| {
+                        (operations.intern)(native_pointer, layout, candidate)
+                    }),
+                    "Error interning",
+                )?
+            } else {
+                candidate
+            }
+        }
+    };
+    let value = host_value_from_borrowed_handle(handle);
+    without_typed_decode_scope(|| (host_operations.release)(handle));
+    match value {
+        Some(value @ Value::Host(_)) => Some(value),
+        _ => {
+            set_host_error("Error factory returned a nonobject".into());
+            None
+        }
+    }
 }
 
 /// Own properties carried after the frame: `\x02` cause text, `\x03` code text and
@@ -8637,22 +8887,28 @@ pub extern "C" fn thaw_json_array_assign(target: *mut Value, source: *mut Value)
 pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
     // A live JS array (a nested value of a native `any` wrapper) is read through its host.
     if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
-        let items = host_enumerate_values(lease, 3)
+        // Array rest uses the iterator protocol: unlike Object.values, the array
+        // iterator visits holes and yields `undefined` for them.
+        let items = host_enumerate_values(lease, 7)
             .into_iter()
             .skip(start.max(0) as usize)
             .collect();
         return track_typed_decode_child(leak(Value::shared_array(items)));
     }
-    let copy = Value::shared_array(
-        unsafe { value.as_ref() }
-            .and_then(Value::as_array)
-            .map(|values| values.iter().skip(start.max(0) as usize).cloned().collect())
-            .unwrap_or_default(),
-    );
-    if let (Some(Value::Array(source)), Value::Array(target)) = (unsafe { value.as_ref() }, &copy) {
-        copy_array_holes(source, target, start.max(0) as usize);
-    }
-    track_typed_decode_child(leak(copy))
+    let start = start.max(0) as usize;
+    let values = match unsafe { value.as_ref() } {
+        Some(Value::Array(source)) => (start..shared_array_ref(source).len())
+            .map(|index| {
+                if array_has_index(source, index) {
+                    shared_array_ref(source)[index].clone()
+                } else {
+                    napi_undefined_value()
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    track_typed_decode_child(leak(Value::shared_array(values)))
 }
 
 #[no_mangle]
@@ -8835,10 +9091,10 @@ pub unsafe extern "C" fn thaw_json_object_assign(
     source: *const Value,
 ) -> *mut Value {
     ASSIGN_ERROR.with(|error| error.set(false));
-    if (unsafe { target.as_ref() })
-        .and_then(Value::as_object)
-        .is_none()
-    {
+    if !matches!(
+        unsafe { target.as_ref() },
+        Some(Value::Object(_) | Value::Host(_))
+    ) {
         return target;
     }
     let Some(source) = (unsafe { source.as_ref() }) else {
@@ -8879,6 +9135,29 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framed_error_receiver_keeps_native_only_json_fallback() {
+        let text = thaw_arena::owned_string(b"\x01TypeError\x01native failure");
+        let value = thaw_json_receiver_string(text);
+        assert!(!value.is_null());
+        let Value::Object(fields) = (unsafe { &*value }) else {
+            panic!("native-only framed Error should remain a plain JSON object");
+        };
+        let fields = shared_object_ref(fields);
+        assert_eq!(
+            fields.get(b"name".as_slice()).and_then(Value::as_str),
+            Some("TypeError")
+        );
+        assert_eq!(
+            fields.get(b"message".as_slice()).and_then(Value::as_str),
+            Some("native failure")
+        );
+        unsafe {
+            thaw_json_destroy(value);
+            thaw_arena::destroy_string(text);
+        }
+    }
 
     #[test]
     fn stale_owner_metadata_does_not_clear_reused_allocation_edges() {
@@ -9398,6 +9677,7 @@ mod tests {
         static HOST_ARRAY_TEST_FAIL_INDEX: Cell<i32> = const { Cell::new(-1) };
         static HOST_ARRAY_TEST_GETS: Cell<usize> = const { Cell::new(0) };
         static HOST_ARRAY_TEST_QUERY3: Cell<usize> = const { Cell::new(0) };
+        static HOST_ARRAY_TEST_FUNCTION_QUERY3: Cell<usize> = const { Cell::new(0) };
     }
 
     extern "C" fn host_array_test_retain(_: u64) -> u8 {
@@ -9411,12 +9691,28 @@ mod tests {
     extern "C" fn host_array_test_query(handle: u64, operation: u8) -> HostTextResult {
         if operation == 3 {
             HOST_ARRAY_TEST_QUERY3.with(|count| count.set(count.get() + 1));
+            if handle == 10 {
+                HOST_ARRAY_TEST_FUNCTION_QUERY3.with(|count| count.set(count.get() + 1));
+            }
         }
         let value = match (handle, operation) {
             (6, 0) => b"string".as_slice(),
             (6, 3) => br#""line\n\ud800""#.as_slice(),
             (7, 0) => b"object".as_slice(),
             (7, 3) => br#""custom label""#.as_slice(),
+            (10, 0) => b"function".as_slice(),
+            (12..=14, 0) => b"function".as_slice(),
+            (18, 0) => b"symbol".as_slice(),
+            (18, 3) => br#""Symbol(s)""#.as_slice(),
+            (19, 0) => b"function".as_slice(),
+            (20, 0) => b"function".as_slice(),
+            (15, 0) => b"number".as_slice(),
+            (15, 10) => b"42".as_slice(),
+            (16, 0) => b"object".as_slice(),
+            (16, 7) => b"1".as_slice(),
+            (17, 0) => b"undefined".as_slice(),
+            (11, 0) => b"string".as_slice(),
+            (11, 3) => br#""describe""#.as_slice(),
             (1, 4) => b"1".as_slice(),
             (5, 11) => b"1".as_slice(),
             (8, 22) => b"1".as_slice(),
@@ -9464,10 +9760,16 @@ mod tests {
                 error: thaw_arena::owned_string(b"index getter failed"),
             };
         }
-        let value = match key.as_str() {
-            r#""length""# if handle == 1 || handle == 5 => 2,
-            r#""0""# if handle == 1 || handle == 5 => 3,
-            r#""1""# if handle == 1 || handle == 5 => 4,
+        let value = match (handle, key.as_str()) {
+            (10, r#""name""#) => 11,
+            (12, r#""name""#) => 15,
+            (13, r#""name""#) => 16,
+            (14, r#""name""#) => 17,
+            (19, r#""name""#) => 19,
+            (20, r#""name""#) => 18,
+            (1 | 5, r#""length""#) => 2,
+            (1 | 5, r#""0""#) => 3,
+            (1 | 5, r#""1""#) => 4,
             _ => 0,
         };
         HostHandleResult {
@@ -9496,6 +9798,33 @@ mod tests {
             handle,
             release: host_array_test_release,
         })))
+    }
+
+    #[test]
+    fn host_function_inspection_formats_non_string_names() {
+        std::thread::spawn(|| {
+            install_host_array_test_operations();
+            for (handle, expected) in [
+                (12, "[Function: 42]"),
+                (13, "[Function: null]"),
+                (14, "[Function: undefined]"),
+                (20, "[Function: Symbol(s)]"),
+                (
+                    19,
+                    "[Function: [Function: [Function: [Function: [Function]]]]]",
+                ),
+            ] {
+                let function = host_array_test_value(handle);
+                let text = thaw_json_console_string(function);
+                assert_eq!(read_c_string(text), expected);
+                unsafe {
+                    thaw_cstring_destroy(text.cast_mut());
+                    thaw_json_destroy(function);
+                }
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
@@ -9612,6 +9941,20 @@ mod tests {
                 thaw_json_destroy(custom);
             }
             assert_eq!(HOST_ARRAY_TEST_QUERY3.with(Cell::get), 1);
+
+            HOST_ARRAY_TEST_FUNCTION_QUERY3.with(|count| count.set(0));
+            let function = host_array_test_value(10);
+            let text = thaw_json_console_string(function);
+            assert_eq!(read_c_string(text), "[Function: describe]");
+            unsafe {
+                thaw_cstring_destroy(text.cast_mut());
+                thaw_json_destroy(function);
+            }
+            assert_eq!(
+                HOST_ARRAY_TEST_FUNCTION_QUERY3.with(Cell::get),
+                0,
+                "function inspection should read its name instead of stringifying source"
+            );
         })
         .join()
         .unwrap();
@@ -10888,6 +11231,29 @@ mod tests {
             read_c_string(thaw_json_stringify(target)),
             r#"{"0":"a","1":"b"}"#
         );
+    }
+
+    #[test]
+    fn array_rest_slice_materializes_holes_as_undefined() {
+        let source = parse("[1,2,3]");
+        assert_eq!(thaw_json_object_delete(source, c"0".as_ptr()), 1);
+
+        let rest = thaw_json_array_slice(source, 0);
+        let Some(Value::Array(items)) = (unsafe { rest.as_ref() }) else {
+            panic!("array rest slice should return an array");
+        };
+        assert_eq!(shared_array_ref(items).len(), 3);
+        assert!((0..3).all(|index| array_has_index(items, index)));
+        assert_eq!(
+            unsafe { thaw_json_is_undefined(thaw_json_get(rest, c"0".as_ptr())) },
+            1
+        );
+        assert_eq!(unsafe { thaw_json_keys(rest).cast::<i64>().read() }, 3);
+
+        unsafe {
+            thaw_json_destroy(source);
+            thaw_json_destroy(rest);
+        }
     }
 
     #[test]

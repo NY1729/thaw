@@ -128,6 +128,7 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
         HirType::F64 | HirType::I64 => keyword(TsKeywordTypeKind::TsNumberKeyword),
         HirType::Str => keyword(TsKeywordTypeKind::TsStringKeyword),
         HirType::Bool => keyword(TsKeywordTypeKind::TsBooleanKeyword),
+        HirType::Json => keyword(TsKeywordTypeKind::TsAnyKeyword),
         HirType::Void => keyword(TsKeywordTypeKind::TsVoidKeyword),
         HirType::Undefined => keyword(TsKeywordTypeKind::TsUndefinedKeyword),
         HirType::Null => keyword(TsKeywordTypeKind::TsNullKeyword),

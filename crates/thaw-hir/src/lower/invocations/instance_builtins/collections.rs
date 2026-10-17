@@ -78,6 +78,11 @@ impl<'a> FnLowerer<'a> {
                 if matches!(base_type, HirType::JsValue | HirType::Json) {
                     return Some(base_type);
                 }
+                if let Some(owner) = self.class_instance_accessor_owner(&base_type, field.sym.as_ref()) {
+                    if let Some(signature) = self.signatures.get(&class_getter_symbol(&owner, field.sym.as_ref(), false)) {
+                        return Some(signature.ret.clone());
+                    }
+                }
                 let HirType::Object(fields) = base_type else {
                     return None;
                 };

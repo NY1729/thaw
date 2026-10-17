@@ -474,7 +474,7 @@ impl<'a> FnLowerer<'a> {
                     self.scope.insert(value_name.clone(), value_type.clone());
                     let result = HirExpr::ThrowValue(
                         Box::new(HirExpr::Lit(HirLit::Str(format!(
-                            "Cannot set properties of undefined (setting '{property}')"
+                            "\u{1}TypeError\u{1}Cannot set properties of undefined (setting '{property}')"
                         )))),
                         Box::new(HirExpr::Var(value_name.clone())),
                     );
@@ -911,7 +911,47 @@ impl<'a> FnLowerer<'a> {
                 return Err(format!("cannot assign to constant `{name}`"));
             }
         }
-        let rhs = self.lower_expr(&assign.right)?;
+        let rhs = match (assign.right.as_ref(), &target) {
+            (Expr::Fn(_) | Expr::Arrow(_), Target::Var(name)) => {
+                let contextual = match self.scope.get(name).cloned() {
+                    Some(HirType::Function(params, ret)) => Some((params, ret)),
+                    Some(HirType::CallableFunction(mut params, _, rest, ret)) => {
+                        if let Some(rest) = rest {
+                            params.push(HirType::Array(rest));
+                        }
+                        Some((params, ret))
+                    }
+                    _ => None,
+                };
+                if let Some((params, ret)) = contextual {
+                    let span = match assign.right.as_ref() {
+                        Expr::Fn(function) => function.function.span,
+                        Expr::Arrow(arrow) => arrow.span,
+                        _ => unreachable!(),
+                    };
+                    let preserve_native_return = !is_quickjs_function_value(span)
+                        && !is_quickjs_function_value_slot(span)
+                        && !is_quickjs_function_value_result_slot(span);
+                    let previous = std::mem::replace(
+                        &mut self.stored_arrow_initializer,
+                        preserve_native_return,
+                    );
+                    let lowered = match assign.right.as_ref() {
+                        Expr::Fn(function) => self
+                            .lower_function_expression(function, Some((&params, Some(&ret)))),
+                        Expr::Arrow(arrow) => {
+                            self.lower_contextual_arrow(arrow, &params, Some(&ret))
+                        }
+                        _ => unreachable!(),
+                    };
+                    self.stored_arrow_initializer = previous;
+                    lowered?
+                } else {
+                    self.lower_expr(&assign.right)?
+                }
+            }
+            _ => self.lower_expr(&assign.right)?,
+        };
         let rhs_type = self.infer_expr_type(&rhs)?;
         if let Target::DynamicProperty(object, key) = &target {
             if assign.op != AssignOp::Assign {

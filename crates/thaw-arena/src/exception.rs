@@ -11,6 +11,8 @@ pub struct ExceptionPacket {
     pub id: u64,
     pub pending: usize,
     pub native_text: usize,
+    /// Original arena framed-error pointer, when `native_text` was copied from one.
+    pub native_error_identity: usize,
     pub object: usize,
     pub native: usize,
     pub aggregate: usize,
@@ -97,6 +99,7 @@ mod tests {
             id: 0,
             pending: 11,
             native_text: 12,
+            native_error_identity: 0,
             object: 13,
             native: 14,
             aggregate: 15,

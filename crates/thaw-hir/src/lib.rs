@@ -26,6 +26,6 @@ pub use closure_analysis::*;
 mod lower;
 
 pub use lower::{
-    lower_module, lower_module_with_source_map, normalize_top_level_destructuring, LowerDiagnostic,
-    SourceRange,
+    jit_calls_requiring_dynamic_storage, lower_module, lower_module_with_source_map,
+    normalize_top_level_destructuring, LowerDiagnostic, SourceRange,
 };

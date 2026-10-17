@@ -51,6 +51,7 @@ impl<'a> FnLowerer<'a> {
         self.nullable_narrowings.remove(name);
         self.nullish_narrowings.remove(name);
         self.partial_nullable_narrowings.remove(name);
+        self.json_narrowings.remove(name);
         *self.narrowing_write_versions.entry(name.to_string()).or_default() += 1;
     }
 
@@ -334,6 +335,11 @@ impl<'a> FnLowerer<'a> {
                                     .insert(target.name, (continuing, target.elements));
                             }
                         }
+                    }
+                    if let Some((name, _, Some(continuing_type))) =
+                        self.json_typeof_narrowing(&if_stmt.test)
+                    {
+                        self.json_narrowings.insert(name, continuing_type);
                     }
                 }
             }
@@ -985,7 +991,10 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
-    fn json_typeof_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool)> {
+    fn json_typeof_narrowing(
+        &self,
+        expr: &Expr,
+    ) -> Option<(Symbol, Option<HirType>, Option<HirType>)> {
         let Expr::Bin(binary) = expr else { return None };
         let equal_when_true = match binary.op {
             BinaryOp::EqEqEq | BinaryOp::EqEq => true,
@@ -999,7 +1008,50 @@ impl<'a> FnLowerer<'a> {
             (Expr::Lit(Lit::Str(name)), Expr::Unary(unary)) if unary.op == UnaryOp::TypeOf => {
                 (unary.arg.as_ref(), name.value.to_string_lossy())
             }
-            _ => return None,
+            _ => {
+                let (target, compares_null) = match (binary.left.as_ref(), binary.right.as_ref()) {
+                    (Expr::Ident(target), Expr::Lit(Lit::Null(_)))
+                    | (Expr::Lit(Lit::Null(_)), Expr::Ident(target)) => (target, true),
+                    (Expr::Ident(target), Expr::Ident(undefined))
+                    | (Expr::Ident(undefined), Expr::Ident(target))
+                        if undefined.sym == *"undefined"
+                            && !self.scope.contains_key("undefined") =>
+                    {
+                        (target, false)
+                    }
+                    _ => return None,
+                };
+                let name = self.resolve_binding(target.sym.as_ref());
+                if self.scope.get(&name) != Some(&HirType::Json) {
+                    return None;
+                }
+                let (payload, allows_absence_check) = match self.source_scope.get(&name)? {
+                    HirType::Optional(payload) => (
+                        payload.as_ref(),
+                        !compares_null || matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq),
+                    ),
+                    HirType::Nullable(payload) => (
+                        payload.as_ref(),
+                        compares_null || matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq),
+                    ),
+                    HirType::Nullish(payload) => (
+                        payload.as_ref(),
+                        matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq),
+                    ),
+                    _ => return None,
+                };
+                if !allows_absence_check
+                    || !matches!(payload, HirType::F64 | HirType::Str | HirType::Bool)
+                {
+                    return None;
+                }
+                let (then_type, else_type) = if equal_when_true {
+                    (None, Some(payload.clone()))
+                } else {
+                    (Some(payload.clone()), None)
+                };
+                return Some((name, then_type, else_type));
+            }
         };
         let Expr::Ident(target) = target else {
             return None;
@@ -1014,7 +1066,45 @@ impl<'a> FnLowerer<'a> {
             "boolean" => HirType::Bool,
             _ => return None,
         };
-        Some((name, narrowed, equal_when_true))
+        let mut then_type = None;
+        let mut else_type = None;
+        if equal_when_true {
+            then_type = Some(narrowed.clone());
+        } else {
+            else_type = Some(narrowed.clone());
+        }
+        let source = self
+            .json_narrowings
+            .get(&name)
+            .or_else(|| self.source_scope.get(&name));
+        if let Some(HirType::Union(elements)) = source {
+            let matches = elements
+                .iter()
+                .filter(|element| native_typeof_name(element) == Some(type_name.as_ref()))
+                .collect::<Vec<_>>();
+            let complement = elements
+                .iter()
+                .filter(|element| native_typeof_name(element) != Some(type_name.as_ref()))
+                .collect::<Vec<_>>();
+            if matches.len() == 1 && complement.len() == 1 {
+                let (matched, other) = (matches[0].clone(), complement[0].clone());
+                if equal_when_true {
+                    then_type = Some(matched.clone());
+                    else_type = Some(other.clone());
+                } else {
+                    then_type = Some(other.clone());
+                    else_type = Some(matched.clone());
+                }
+            } else if matches.len() == 1 && complement.len() > 1 {
+                let matched = matches[0].clone();
+                if equal_when_true {
+                    then_type = Some(matched);
+                } else {
+                    else_type = Some(matched);
+                }
+            }
+        }
+        Some((name, then_type, else_type))
     }
 
     fn union_member_equality_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {

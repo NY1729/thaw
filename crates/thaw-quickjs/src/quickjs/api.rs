@@ -15,7 +15,8 @@ fn native_exception_packet_uses_private_error_identity_across_rethrow_and_descri
     let packet_roots = vec![thaw_arena::ArenaRoot::new(rooted as usize)];
     let packet = thaw_arena::exception::register_packet(
         thaw_arena::exception::ExceptionPacket {
-            id: 0, pending: 0, native_text: 0, object: rooted as usize, native: 0, aggregate: 0,
+            id: 0, pending: 0, native_text: 0, native_error_identity: 0,
+            object: rooted as usize, native: 0, aggregate: 0,
             tag: 4, number: 0, bigint: 0, boolean: 0,
             _roots: packet_roots, _owned_bytes: Vec::new(),
             _leases: Vec::new(),
@@ -67,6 +68,138 @@ fn native_exception_packet_uses_private_error_identity_across_rethrow_and_descri
             "collecting the private Error guardian releases the final packet owner");
     });
     }).join().expect("exception carrier arena ownership test");
+}
+
+#[cfg(test)]
+#[test]
+fn tagged_error_factory_preserves_builtin_prototype_and_utf16_code_units() {
+    let framed = thaw_arena::owned_string(b"\x01TypeError\x01a\0\xed\xa0\x80b");
+    let result = thaw_js_error_from_tagged_handle(framed);
+    assert!(result.error.is_null());
+    assert_ne!(result.value, 0);
+    let checks = with_context(|ctx| {
+        let error = value_for_handle(&ctx, result.value).expect("factory handle remains live");
+        ctx.globals().set("__thawTaggedErrorFactoryTest", error)
+            .expect("publish test Error");
+        let checks: String = ctx.eval(
+            "JSON.stringify([__thawTaggedErrorFactoryTest instanceof TypeError, __thawTaggedErrorFactoryTest.message.length, __thawTaggedErrorFactoryTest.message.charCodeAt(1), __thawTaggedErrorFactoryTest.message.charCodeAt(2), __thawTaggedErrorFactoryTest.message.charCodeAt(3)])",
+        ).expect("inspect reconstructed Error");
+        ctx.eval::<(), _>("delete globalThis.__thawTaggedErrorFactoryTest")
+            .expect("remove test Error global");
+        checks
+    });
+    assert_eq!(checks, "[true,4,0,55296,98]");
+    assert_eq!(thaw_js_release_handle(result.value), 1);
+    unsafe { thaw_arena::destroy_string(framed) };
+}
+
+#[cfg(test)]
+#[test]
+fn callback_packet_reuses_interned_framed_error_identity() {
+    unsafe extern "C" {
+        fn thaw_json_callback_error_tuple(
+            message: *const c_char,
+            tag: i64,
+            number: f64,
+            bigint: i64,
+            boolean: u8,
+            object: *const c_void,
+            native: *const c_void,
+            native_text: *const c_char,
+            aggregate: *const c_void,
+        ) -> *const c_char;
+    }
+    let framed_bytes = thaw_arena::error_wire::encode_tagged(
+        b"TypeError", b"a\0\xed\xa0\x80b", None,
+    ).unwrap();
+    thaw_arena::thaw_arena_enable_tracing();
+    let framed = thaw_arena::thaw_arena_alloc(framed_bytes.len() + 1, 1).cast::<c_char>();
+    assert!(!framed.is_null());
+    unsafe {
+        std::ptr::copy_nonoverlapping(framed_bytes.as_ptr(), framed.cast(), framed_bytes.len());
+        *framed.add(framed_bytes.len()) = 0;
+    }
+    let candidate = thaw_js_error_from_tagged_handle(framed);
+    assert!(candidate.error.is_null());
+    let layout = b"thaw.framed-error.v1\0";
+    let canonical = thaw_js_intern_native_object(
+        framed.cast(), layout.as_ptr().cast(), candidate.value,
+    );
+    assert!(canonical.error.is_null(), "{}", to_str(canonical.error));
+    let cached = thaw_js_lookup_native_object(framed.cast(), layout.as_ptr().cast());
+    assert!(cached.error.is_null(), "{}", to_str(cached.error));
+    let initial_same = thaw_js_strict_equal_handles_result(canonical.value, cached.value);
+    assert_eq!(initial_same.value, 1, "initial framed Error cache lookup should return its canonical object");
+    assert_eq!(thaw_js_release_handle(cached.value), 1);
+    let carrier_text = unsafe {
+        thaw_json_callback_error_tuple(
+            framed, 4, 0.0, 0, 0, std::ptr::null(), std::ptr::null(), framed,
+            std::ptr::null(),
+        )
+    };
+    let packet = thaw_arena::take_owned_exception(carrier_text.cast_mut())
+        .expect("callback result carries its authenticated packet");
+    assert_eq!(packet.native_error_identity, framed as usize);
+    assert_ne!(packet.native_text, framed as usize, "packet still owns a copied text view");
+    let reconstructed_handle = with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        install_native_exception_bridge(&ctx).unwrap();
+        let reconstructed = reconstitute_exception_packet(&ctx, "ignored copied display", packet).unwrap();
+        retain_value(&ctx, reconstructed).unwrap()
+    });
+    let same = thaw_js_strict_equal_handles_result(canonical.value, reconstructed_handle);
+    assert!(same.error.is_null(), "{}", to_str(same.error));
+    assert_eq!(same.value, 1, "callback reconstruction keeps canonical Error identity");
+    assert_eq!(thaw_js_release_handle(reconstructed_handle), 1);
+    assert_eq!(thaw_js_release_handle(canonical.value), 1);
+
+    let fresh = thaw_arena::thaw_arena_alloc(framed_bytes.len() + 1, 1).cast::<c_char>();
+    unsafe {
+        std::ptr::copy_nonoverlapping(framed_bytes.as_ptr(), fresh.cast(), framed_bytes.len());
+        *fresh.add(framed_bytes.len()) = 0;
+    }
+    let carrier_text = unsafe {
+        thaw_json_callback_error_tuple(
+            fresh, 4, 0.0, 0, 0, std::ptr::null(), std::ptr::null(), fresh,
+            std::ptr::null(),
+        )
+    };
+    let packet = thaw_arena::take_owned_exception(carrier_text.cast_mut())
+        .expect("uncached callback result carries its authenticated packet");
+    let first_projection = with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        retain_value(&ctx, reconstitute_exception_packet(&ctx, "ignored", packet).unwrap()).unwrap()
+    });
+    let projected = thaw_js_lookup_native_object(fresh.cast(), layout.as_ptr().cast());
+    assert!(projected.error.is_null(), "{}", to_str(projected.error));
+    let same = thaw_js_strict_equal_handles_result(first_projection, projected.value);
+    assert_eq!(same.value, 1, "a callback-first Error is interned for later projections");
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::contains_allocation(fresh as usize), "the canonical Error guardian pins its arena frame");
+    assert_eq!(thaw_js_release_handle(projected.value), 1);
+    assert_eq!(thaw_js_release_handle(first_projection), 1);
+    with_context(|ctx| ctx.run_gc());
+    thaw_arena::thaw_arena_reset();
+}
+
+#[cfg(test)]
+#[test]
+fn finish_with_platform_events_drains_jobs_queued_by_platform_poll() {
+    std::thread::spawn(|| {
+        with_context(|ctx| {
+            ctx.eval::<(), _>(r#"
+                globalThis.__thawPlatformPollSourceResolve = undefined;
+                globalThis.__thawPlatformPollTargetResolve = undefined;
+                const source = new Promise(resolve => __thawPlatformPollSourceResolve = resolve);
+                globalThis.__thawPlatformPollTarget = new Promise(resolve => __thawPlatformPollTargetResolve = resolve);
+                source.then(value => __thawPlatformPollTargetResolve(value));
+                globalThis.__thaw_poll_platform_events = () => __thawPlatformPollSourceResolve(42);
+            "#).unwrap();
+            let promise = ctx.globals().get::<_, rquickjs::Promise>("__thawPlatformPollTarget").unwrap();
+            let result = finish_with_platform_events(&ctx, &promise).unwrap();
+            assert_eq!(result.as_number(), Some(42.0));
+        });
+    }).join().unwrap();
 }
 
 struct NativeExceptionBridge {
@@ -124,8 +257,8 @@ fn install_native_exception_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
       const apply = Reflect.apply;
       const build = globalThis.__thaw_error_from_tagged;
       return [
-        (text, id, guardian) => {
-          const error = build(text);
+        (text, id, guardian, original) => {
+          const error = original || build(text);
           apply(weakMapSet, packets, [error, { id, guardian }]);
           return error;
         },
@@ -179,7 +312,9 @@ fn reconstitute_exception_packet<'js>(
             2 => return Ok(Value::new_number(ctx.clone(), packet.bigint as i64 as f64)),
             3 => return Ok(Value::new_bool(ctx.clone(), packet.boolean != 0)),
             // Tagged `\u{1}Name\u{1}message` text is a native Error, not a string.
-            4 if packet.native_text != 0 && !text.starts_with('\u{1}') => {
+            4 if packet.native_text != 0
+                && packet.native_error_identity == 0
+                && !text.starts_with('\u{1}') => {
                 return Ok(rquickjs::String::from_str(ctx.clone(), text)?.into_value());
             }
             5 => return Ok(Value::new_undefined(ctx.clone())),
@@ -187,6 +322,11 @@ fn reconstitute_exception_packet<'js>(
             _ => {}
         }
     }
+    let canonical_error = if packet.native_error_identity != 0 {
+        Some(packet_error_identity(ctx, packet.native_error_identity as *const c_char)?)
+    } else {
+        None
+    };
     let bridge = ctx.userdata::<NativeExceptionBridge>()
         .ok_or_else(|| rquickjs::Error::new_from_js_message(
             "native exception bridge", "Function", "Exception bridge is unavailable"))?;
@@ -196,7 +336,37 @@ fn reconstitute_exception_packet<'js>(
     let guardian = Function::new(ctx.clone(), move || {
         let _keep_packet_alive = &guardian_packet;
     })?;
-    make.restore(ctx)?.call((text, packet.id.to_string(), guardian))
+    make.restore(ctx)?.call((text, packet.id.to_string(), guardian, canonical_error))
+}
+
+fn packet_error_identity<'js>(ctx: &Ctx<'js>, pointer: *const c_char) -> rquickjs::Result<Value<'js>> {
+    const LAYOUT: &[u8] = b"thaw.framed-error.v1\0";
+    let layout = LAYOUT.as_ptr().cast();
+    let mut handle = thaw_js_lookup_native_object(pointer.cast(), layout);
+    if !handle.error.is_null() {
+        let message = to_str(handle.error);
+        unsafe { thaw_arena::destroy_string(handle.error.cast_mut()) };
+        return Err(rquickjs::Error::new_from_js_message("native Error identity", "pointer", &message));
+    }
+    if handle.value == 0 {
+        let candidate = thaw_js_error_from_tagged_handle(pointer);
+        if !candidate.error.is_null() {
+            let message = to_str(candidate.error);
+            unsafe { thaw_arena::destroy_string(candidate.error.cast_mut()) };
+            return Err(rquickjs::Error::new_from_js_message("native Error identity", "text", &message));
+        }
+        let interned = thaw_js_intern_native_object(pointer.cast(), layout, candidate.value);
+        if !interned.error.is_null() {
+            let message = to_str(interned.error);
+            unsafe { thaw_arena::destroy_string(interned.error.cast_mut()) };
+            return Err(rquickjs::Error::new_from_js_message("native Error identity", "pointer", &message));
+        }
+        handle = interned;
+    }
+    let value = value_for_handle(ctx, handle.value)
+        .map_err(|error| rquickjs::Error::new_from_js_message("native Error identity", "handle", &error.to_string()));
+    let _ = thaw_js_release_handle(handle.value);
+    value
 }
 
 fn owned_exception_error(error: BoundaryError) -> *mut c_char {
@@ -885,7 +1055,8 @@ fn before_graph_decode<'js, T, E>(
     })
 }
 
-fn before_registered_graph_decode<T, E>(
+fn before_registered_graph_decode<'js, T, E>(
+    ctx: &Ctx<'js>,
     wire: *const c_char,
     lookup: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
@@ -893,6 +1064,7 @@ fn before_registered_graph_decode<T, E>(
         // Exact mixed graph wires are already registered by their native
         // producer. Consume that grant on lookup failures before dispatch.
         unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const c_char); }
+        let _active = ActiveNapiContext::enter(ctx);
         unsafe { thaw_json_discard_graph_wire(wire) };
     })
 }
@@ -1126,6 +1298,21 @@ fn finish_with_platform_events<'js>(
         return result;
     }
     loop {
+        // Promise jobs and nextTick callbacks can settle bootstrap promises
+        // without any platform I/O. Drain them before polling, which may
+        // otherwise block waiting for events that cannot be needed.
+        if let Some(result) = promise.result() {
+            mark_js_rejection_consumed(promise.as_value());
+            return result;
+        }
+        if drain_next_tick_queue(ctx)? {
+            continue;
+        }
+        if ctx.execute_pending_job() {
+            poll_napi_bridge(ctx);
+            continue;
+        }
+
         dispatch_pending_process_signal(ctx);
         if let Ok(poll_platform_events) = ctx
             .globals()
@@ -1138,16 +1325,11 @@ fn finish_with_platform_events<'js>(
             mark_js_rejection_consumed(promise.as_value());
             return result;
         }
-        // A nextTick callback may be exactly what resolves `promise` --
-        // loop back to the `promise.result()` check above immediately
-        // rather than falling through to the exhaustion check below,
-        // which would otherwise misreport a just-resolved promise as
-        // deadlocked (`Error::WouldBlock`) whenever nothing else happens
-        // to be scheduled.
         if drain_next_tick_queue(ctx)? {
             continue;
         }
         if ctx.execute_pending_job() {
+            poll_napi_bridge(ctx);
             continue;
         }
 
@@ -1941,6 +2123,39 @@ pub extern "C" fn thaw_js_lookup_native_object(
         let cached: Value = lookup.call((format!("{:x}", pointer as usize), to_str(layout)))
             .map_err(|error| error.to_string())?;
         if cached.is_undefined() { Ok(0) } else { retain_value(&ctx, cached) }
+    });
+    match result {
+        Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
+    }
+}
+
+/// Creates a genuine JavaScript Error from one of the compiler's framed native error strings.
+/// The returned handle is owned by the caller; native text identity is interned separately by
+/// `thaw_js_intern_native_object` only when its pointer belongs to the arena.
+#[no_mangle]
+pub extern "C" fn thaw_js_error_from_tagged_handle(value: *const c_char) -> ThawHandleResult {
+    if value.is_null() {
+        return ThawHandleResult {
+            value: 0,
+            error: owned_exception_error("null framed Error text".into()),
+        };
+    }
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
+        let factory: Function = ctx.globals().get("__thaw_error_from_tagged")
+            .map_err(|_| "QuickJS framed Error factory is unavailable")?;
+        let bytes = unsafe { thaw_arena::NativeStr::from_ptr(value) }.to_bytes();
+        let units_json = serde_json::to_string(&thaw_arena::wtf8_decode_utf16(bytes))
+            .map_err(|error| error.to_string())?;
+        let make_text: Function = ctx.globals().get("__thaw_json_host_utf16_string")
+            .map_err(|_| "QuickJS UTF-16 string helper is unavailable")?;
+        let text: Value = make_text.call((units_json.as_str(),))
+            .map_err(|error| error.to_string())?;
+        let error: Value = factory.call((text,)).map_err(|error| error.to_string())?;
+        if error.as_object().is_none() && error.as_function().is_none() && error.as_proxy().is_none() {
+            return Err("QuickJS framed Error factory returned a nonobject".into());
+        }
+        retain_value(&ctx, error)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
@@ -4628,8 +4843,12 @@ fn set_property_json_result_impl(
         let returned = if graph_result {
             let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
                 .map_err(|error| error.to_string())?;
-            encode.call((value.clone(), 0, false, true))
-                .map_err(|error| error.to_string())?
+            if value.is_object() || value.is_function() || value.is_symbol() {
+                encode.call((value.clone(), 0, true, false, value))
+            } else {
+                encode.call((value, 0, true, false))
+            }
+            .map_err(|error| error.to_string())?
         } else {
             ctx.json_stringify(value.clone())
                 .map_err(|error| error.to_string())?
@@ -5359,14 +5578,14 @@ unsafe fn thaw_js_call_handle_mixed_exact_consuming_impl(
             let args_json_ptr = args_json;
             let args_json = to_str(args_json);
             with_active_or_context(|ctx| {
-                let target = before_registered_graph_decode(args_json_ptr, || {
+                let target = before_registered_graph_decode(&ctx, args_json_ptr, || {
                     Function::from_value(value_for_handle(&ctx, handle)?)
                         .map_err(|_| not_callable_message(&ctx, handle))
                 })?;
                 // The shared graph decoder owns the transferred leases once
                 // invoked. Preserve an original JS throw from that decoder
                 // through the same exact-result lane as a target-call throw.
-                let decode: Function = before_registered_graph_decode(args_json_ptr, || {
+                let decode: Function = before_registered_graph_decode(&ctx, args_json_ptr, || {
                     ctx.globals().get("__thaw_json_graph_decode_owned")
                         .map_err(|error| error.to_string())
                 })?;
@@ -5715,6 +5934,52 @@ fn exact_mixed_pre_dispatch_consumes_registered_graph_grant_once() {
         unsafe { thaw_json_discard_graph_wire(invoke_wire.as_ptr()) };
         EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 5));
     }).join().unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn registered_graph_lookup_failure_releases_live_leases_with_active_context() {
+    std::thread::spawn(|| {
+        forced_root_graph_wire_controls::install_real_host_callbacks();
+        with_context(|ctx| {
+            ctx.eval::<(), _>("globalThis.__preDispatchLease = {};")
+                .expect("install graph lease target");
+        });
+        let handle = thaw_js_get_global(c"__preDispatchLease".as_ptr());
+        assert_ne!(handle, 0);
+        assert_eq!(thaw_js_retain_handle(handle), 1);
+
+        let wire = std::ffi::CString::new(format!(
+            r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{handle}}}],"leases":[{handle}],"napiLeases":[]}}"#
+        ))
+        .unwrap();
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire.as_ptr()) });
+        let empty_direct_handles = [0_u64];
+        let result = unsafe {
+            thaw_js_call_handle_mixed_exact_consuming_result(
+                0,
+                wire.as_ptr(),
+                empty_direct_handles.as_ptr().cast(),
+            )
+        };
+        assert!(!result.error.is_null());
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+
+        // Discarding the registered wire releases its transferred retain once;
+        // the caller's original retain remains available for cleanup.
+        let remaining = with_context(|ctx| {
+            ctx.globals()
+                .get::<_, Array>("__thaw_value_handle_refs")
+                .unwrap()
+                .get::<u64>((handle - 1) as usize)
+                .unwrap()
+        });
+        assert_eq!(remaining, 1);
+        assert_eq!(thaw_js_release_handle(handle), 1);
+        assert_eq!(thaw_js_release_handle(handle), 0);
+    })
+    .join()
+    .expect("pre-dispatch graph cleanup must reuse the active QuickJS context");
 }
 
 #[no_mangle]
@@ -6066,6 +6331,11 @@ mod forced_root_graph_wire_controls {
             predicate: extern "C" fn(u64, *const c_char, u8) -> ThawHandleResult,
             enumerate: extern "C" fn(u64, u8) -> ThawResult,
         );
+        fn thaw_json_register_error_factory(
+            create: extern "C" fn(*const c_char) -> ThawHandleResult,
+            lookup: extern "C" fn(*const c_void, *const c_char) -> ThawHandleResult,
+            intern: extern "C" fn(*const c_void, *const c_char, u64) -> ThawHandleResult,
+        );
         fn thaw_json_graph_decode(source: *const c_char) -> *mut c_void;
         fn thaw_json_discard_graph_wire(source: *const c_char);
         fn thaw_json_take_graph_error() -> u8;
@@ -6082,12 +6352,12 @@ mod forced_root_graph_wire_controls {
         fn thaw_cstring_destroy(value: *mut c_char);
     }
 
-    fn install_real_host_callbacks() {
+    pub(super) fn install_real_host_callbacks() {
         // The result layouts are the api.rs #[repr(C)] ThawHandleResult
         // (u64 plus error pointer) and ThawResult (text plus error pointer),
         // matching thaw-std's HostHandleResult and HostTextResult exactly.
         unsafe {
-            thaw_json_register_host_operations(
+        thaw_json_register_host_operations(
                 thaw_js_retain_handle,
                 thaw_js_release_handle,
                 thaw_js_get_property_json_key_result,
@@ -6095,10 +6365,15 @@ mod forced_root_graph_wire_controls {
                 thaw_js_host_date_set_result,
                 thaw_js_set_property_graph_result,
                 thaw_js_property_predicate_json_key_result,
-                thaw_js_host_enumerate_result,
-            );
-        }
+            thaw_js_host_enumerate_result,
+        );
+        thaw_json_register_error_factory(
+            thaw_js_error_from_tagged_handle,
+            thaw_js_lookup_native_object,
+            thaw_js_intern_native_object,
+        );
     }
+}
 
     fn retain_source(source: &str) -> u64 {
         let handle = with_context(|ctx| {
@@ -6728,8 +7003,15 @@ mod forced_root_graph_wire_controls {
             // The lease holds its own reference; the decoder normally consumes it.
             assert_eq!(thaw_js_release_handle(handle), 1);
             let copy = call("copy");
-            assert!(copy["nodes"][0].get("o").is_some(),
-                "a fresh plain result still crosses as data: {copy}");
+            let copied = copy["nodes"][0]["hdl"].as_u64().expect("fresh object result lease");
+            assert_ne!(copied, receiver);
+            assert_eq!(copy["leases"], serde_json::json!([copied]));
+            with_context(|ctx| {
+                let original = object_for_handle(&ctx, receiver).unwrap();
+                let fresh = object_for_handle(&ctx, copied).unwrap();
+                assert_eq!(original.get::<_, Value>("items").unwrap(), fresh.get::<_, Value>("items").unwrap());
+            });
+            assert_eq!(thaw_js_release_handle(copied), 1);
             release_input(receiver);
         }).join().unwrap();
     }

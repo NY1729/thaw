@@ -1783,10 +1783,15 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(text)
         } else { None };
         let callback_input = if on_rejected { &HirType::Str } else { input };
+        let rejection_text = if on_rejected {
+            Some(rejected_text.expect("rejection text was captured").into_pointer_value())
+        } else {
+            None
+        };
         let value = if !on_rejected && callback_input == &HirType::Void {
             None
-        } else if on_rejected {
-            Some(rejected_text.expect("rejection text was captured"))
+        } else if let Some(text) = rejection_text {
+            Some(text.into())
         } else {
             Some(
                 self.builder
@@ -1814,12 +1819,29 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(value) = value {
             callback_args.push(value.into());
         }
-        let transformed = self
+        let previous_active_rejection = if let Some(text) = rejection_text {
+            let slot = self.active_rejection_text().as_pointer_value();
+            let previous = self
+                .builder
+                .build_load(ptr, slot, "previous_active_rejection_text")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_store(slot, text)
+                .map_err(|error| error.to_string())?;
+            Some(previous)
+        } else {
+            None
+        };
+        let callback_call = self
             .builder
             .build_indirect_call(callback_type, code, &callback_args, "invoke_chain_callback")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic();
+            .map_err(|error| error.to_string())?;
+        if let Some(previous) = previous_active_rejection {
+            self.builder
+                .build_store(self.active_rejection_text().as_pointer_value(), previous)
+                .map_err(|error| error.to_string())?;
+        }
+        let transformed = callback_call.try_as_basic_value().basic();
         if transformed.is_none() && (flatten || output != &HirType::Void) {
             return Err("Promise callback must return a value".into());
         }

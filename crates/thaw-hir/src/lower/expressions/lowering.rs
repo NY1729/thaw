@@ -6,25 +6,38 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_date_parse".into())),
                 vec![if matches!(ty, HirType::StrLiteral(_)) {
                     HirExpr::TypedClosure(HirType::Str, Box::new(value))
-                } else { value }],
+                } else {
+                    value
+                }],
             )),
             HirType::Union(members) => {
-                if members.is_empty() { return Err("Date constructor has an empty union argument".into()); }
+                if members.is_empty() {
+                    return Err("Date constructor has an empty union argument".into());
+                }
                 let name = format!("__thaw_date_union_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
                 let mut result = None;
                 for (index, _) in members.iter().enumerate().rev() {
                     let part = self.lower_date_single_timestamp(HirExpr::UnionValue(
-                        Box::new(HirExpr::Var(name.clone())), index, members.clone(),
+                        Box::new(HirExpr::Var(name.clone())),
+                        index,
+                        members.clone(),
                     ))?;
                     result = Some(match result {
                         None => part,
                         Some(rest) => HirExpr::Conditional(
-                            Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                                Box::new(HirExpr::UnionTag(Box::new(HirExpr::Var(name.clone())), members.clone())),
-                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))))),
-                            Box::new(part), Box::new(rest), HirType::F64,
+                            Box::new(HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    members.clone(),
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            )),
+                            Box::new(part),
+                            Box::new(rest),
+                            HirType::F64,
                         ),
                     });
                 }
@@ -37,28 +50,44 @@ impl<'a> FnLowerer<'a> {
                 let bound = HirExpr::Var(name.clone());
                 let element = payload.as_ref().clone();
                 let present = match &ty {
-                    HirType::Optional(_) => HirExpr::OptionalValue(Box::new(bound.clone()), element.clone()),
-                    HirType::Nullable(_) => HirExpr::NullableValue(Box::new(bound.clone()), element.clone()),
-                    HirType::Nullish(_) => HirExpr::NullishValue(Box::new(bound.clone()), element.clone()),
+                    HirType::Optional(_) => {
+                        HirExpr::OptionalValue(Box::new(bound.clone()), element.clone())
+                    }
+                    HirType::Nullable(_) => {
+                        HirExpr::NullableValue(Box::new(bound.clone()), element.clone())
+                    }
+                    HirType::Nullish(_) => {
+                        HirExpr::NullishValue(Box::new(bound.clone()), element.clone())
+                    }
                     _ => unreachable!(),
                 };
                 let present = self.lower_date_single_timestamp(present)?;
                 let result = match &ty {
                     HirType::Optional(_) => HirExpr::Conditional(
                         Box::new(HirExpr::OptionalIsNone(Box::new(bound), element)),
-                        Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))), Box::new(present), HirType::F64,
+                        Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+                        Box::new(present),
+                        HirType::F64,
                     ),
                     HirType::Nullable(_) => HirExpr::Conditional(
                         Box::new(HirExpr::NullableIsNone(Box::new(bound), element)),
-                        Box::new(HirExpr::Lit(HirLit::F64(0.0))), Box::new(present), HirType::F64,
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        Box::new(present),
+                        HirType::F64,
                     ),
                     HirType::Nullish(_) => HirExpr::Conditional(
-                        Box::new(HirExpr::NullishIsNull(Box::new(bound.clone()), element.clone())),
+                        Box::new(HirExpr::NullishIsNull(
+                            Box::new(bound.clone()),
+                            element.clone(),
+                        )),
                         Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                         Box::new(HirExpr::Conditional(
                             Box::new(HirExpr::NullishIsUndefined(Box::new(bound), element)),
-                            Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))), Box::new(present), HirType::F64,
-                        )), HirType::F64,
+                            Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+                            Box::new(present),
+                            HirType::F64,
+                        )),
+                        HirType::F64,
                     ),
                     _ => unreachable!(),
                 };
@@ -67,8 +96,12 @@ impl<'a> FnLowerer<'a> {
             HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
                 Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
                 vec![
-                    HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                        vec![HirExpr::Lit(HirLit::Str("__thaw_date_from_live_value".into()))]),
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str(
+                            "__thaw_date_from_live_value".into(),
+                        ))],
+                    ),
                     value,
                 ],
             )))),
@@ -77,14 +110,28 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), HirType::Json);
                 let bound = HirExpr::Var(name.clone());
-                let is_string = HirExpr::BinOp(BinOp::EqEqEq,
-                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![bound.clone()])),
-                    Box::new(HirExpr::Lit(HirLit::Str("string".into()))));
-                let parsed = HirExpr::Call(Box::new(HirExpr::Var("__thaw_date_parse".into())),
-                    vec![HirExpr::JsonAsString(Box::new(bound.clone()))]);
-                let clipped = HirExpr::Call(Box::new(HirExpr::Var("__thaw_date_time_clip".into())),
-                    vec![HirExpr::JsonAsNumber(Box::new(bound.clone()))]);
-                let plain = HirExpr::Conditional(Box::new(is_string), Box::new(parsed), Box::new(clipped), HirType::F64);
+                let is_string = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                        vec![bound.clone()],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Str("string".into()))),
+                );
+                let parsed = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_date_parse".into())),
+                    vec![HirExpr::JsonAsString(Box::new(bound.clone()))],
+                );
+                let clipped = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_date_time_clip".into())),
+                    vec![HirExpr::JsonAsNumber(Box::new(bound.clone()))],
+                );
+                let plain = HirExpr::Conditional(
+                    Box::new(is_string),
+                    Box::new(parsed),
+                    Box::new(clipped),
+                    HirType::F64,
+                );
                 let handle_name = format!("__thaw_date_live_handle_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(handle_name.clone(), HirType::I64);
@@ -92,24 +139,46 @@ impl<'a> FnLowerer<'a> {
                 let live = HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
                     vec![
-                        HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                            vec![HirExpr::Lit(HirLit::Str("__thaw_date_from_live_value".into()))]),
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str(
+                                "__thaw_date_from_live_value".into(),
+                            ))],
+                        ),
                         HirExpr::TypedClosure(HirType::JsValue, Box::new(handle.clone())),
                     ],
                 )));
                 let non_live = HirExpr::Conditional(
-                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_date_shape".into())), vec![bound.clone()])),
-                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_date_timestamp".into())), vec![bound.clone()])),
-                    Box::new(plain), HirType::F64,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_date_shape".into())),
+                        vec![bound.clone()],
+                    )),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_date_timestamp".into())),
+                        vec![bound.clone()],
+                    )),
+                    Box::new(plain),
+                    HirType::F64,
                 );
                 let timestamp = self.wrap_call_argument_bindings(
                     HirExpr::Conditional(
-                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                            Box::new(handle), Box::new(HirExpr::Lit(HirLit::I64(0))))),
-                        Box::new(non_live), Box::new(live), HirType::F64,
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(handle),
+                            Box::new(HirExpr::Lit(HirLit::I64(0))),
+                        )),
+                        Box::new(non_live),
+                        Box::new(live),
+                        HirType::F64,
                     ),
-                    &[(handle_name, HirType::I64,
-                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())), vec![bound]))],
+                    &[(
+                        handle_name,
+                        HirType::I64,
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())),
+                            vec![bound],
+                    ),
+                    )],
                 )?;
                 self.wrap_call_argument_bindings(timestamp, &[(name, HirType::Json, value)])
             }
@@ -131,7 +200,7 @@ impl<'a> FnLowerer<'a> {
                     HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(f64::NAN)))),
                 ]);
                 self.wrap_call_argument_bindings(body, &[(name, ty, value)])
-            },
+            }
             _ => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_date_time_clip".into())),
                 vec![self.coerce_primitive_to_number(value)?],
@@ -147,8 +216,14 @@ impl<'a> FnLowerer<'a> {
         let HirType::Function(params, result) = generator_type else {
             return Ok(None);
         };
-        let [HirType::I64, HirType::Str, input, completion, request, forced] =
-            params.as_slice()
+        let [
+            HirType::I64,
+            HirType::Str,
+            input,
+            completion,
+            request,
+            forced,
+        ] = params.as_slice()
         else {
             return Ok(None);
         };
@@ -182,8 +257,16 @@ impl<'a> FnLowerer<'a> {
         let value = format!("__thaw_spread_value_{}", self.next_binding);
         self.next_binding += 1;
         let body = HirExpr::Block(vec![
-            HirStmt::Let(output.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
-            HirStmt::Let(chunk.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(
+                output.clone(),
+                array_type.clone(),
+                HirExpr::ArrayLit(Vec::new()),
+            ),
+            HirStmt::Let(
+                chunk.clone(),
+                array_type.clone(),
+                HirExpr::ArrayLit(Vec::new()),
+            ),
             HirStmt::While(
                 HirExpr::Lit(HirLit::Bool(true)),
                 vec![
@@ -275,8 +358,14 @@ impl<'a> FnLowerer<'a> {
         let HirType::Function(params, result) = generator_type else {
             return Ok(None);
         };
-        let [HirType::I64, HirType::Str, input, completion, request, forced] =
-            params.as_slice()
+        let [
+            HirType::I64,
+            HirType::Str,
+            input,
+            completion,
+            request,
+            forced,
+        ] = params.as_slice()
         else {
             return Ok(None);
         };
@@ -316,8 +405,16 @@ impl<'a> FnLowerer<'a> {
         let value = format!("__thaw_async_spread_value_{}", self.next_binding);
         self.next_binding += 1;
         let body = HirExpr::Block(vec![
-            HirStmt::Let(output.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
-            HirStmt::Let(chunk.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(
+                output.clone(),
+                array_type.clone(),
+                HirExpr::ArrayLit(Vec::new()),
+            ),
+            HirStmt::Let(
+                chunk.clone(),
+                array_type.clone(),
+                HirExpr::ArrayLit(Vec::new()),
+            ),
             HirStmt::While(
                 HirExpr::Lit(HirLit::Bool(true)),
                 vec![
@@ -396,7 +493,9 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         if members.is_empty()
-            || !members.iter().any(|member| matches!(member, HirType::Promise(_)))
+            || !members
+                .iter()
+                .any(|member| matches!(member, HirType::Promise(_)))
         {
             return Ok(None);
         }
@@ -438,10 +537,7 @@ impl<'a> FnLowerer<'a> {
         let output_array_type = HirType::Array(Box::new(resolved));
         let result = HirExpr::ArrayLit(elements);
         Ok(Some((
-            self.wrap_call_argument_bindings(
-                result,
-                &[(source_name, array_type.clone(), array)],
-            )?,
+            self.wrap_call_argument_bindings(result, &[(source_name, array_type.clone(), array)])?,
             output_array_type,
         )))
     }
@@ -491,7 +587,9 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::BinOp(
                     BinOp::Lt,
                     Box::new(HirExpr::Var(index.clone())),
-                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(source_name.clone())))),
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                        source_name.clone(),
+                    )))),
                 ),
                 vec![
                     HirStmt::Let(
@@ -610,7 +708,9 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::BinOp(
                     BinOp::Lt,
                     Box::new(HirExpr::Var(index.clone())),
-                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(source_name.clone())))),
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                        source_name.clone(),
+                    )))),
                 ),
                 vec![
                     HirStmt::Let(
@@ -662,6 +762,20 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        if has_dynamic_storage(expr.span()) {
+            match expr {
+                Expr::Object(object) => {
+                    return self.lower_dynamic_accessor_object_lit(object, true);
+                }
+                Expr::New(new)
+                    if matches!(new.callee.as_ref(), Expr::Ident(name)
+                    if matches!(name.sym.as_ref(), "Array" | "Map" | "Set" | "WeakMap" | "WeakSet")) =>
+                {
+                    return self.lower_dynamic_storage_constructor(new);
+                }
+                _ => {}
+            }
+        }
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
             Expr::Lit(Lit::BigInt(n)) => {
@@ -695,7 +809,10 @@ impl<'a> FnLowerer<'a> {
             Expr::Lit(Lit::Bool(b)) => Ok(HirExpr::Lit(HirLit::Bool(b.value))),
             Expr::Lit(Lit::Null(_)) => Ok(HirExpr::Lit(HirLit::Null)),
             Expr::Lit(Lit::Regex(regex)) => Ok(HirExpr::ObjectLit(vec![
-                ("source".to_string(), HirExpr::Lit(HirLit::Str(regex.exp.to_string()))),
+                (
+                    "source".to_string(),
+                    HirExpr::Lit(HirLit::Str(regex.exp.to_string())),
+                ),
                 (
                     "flags".to_string(),
                     HirExpr::Lit(HirLit::Str(regex.flags.to_string())),
@@ -731,30 +848,56 @@ impl<'a> FnLowerer<'a> {
                         if signature.is_extern {
                             // A monomorphic extern has no function body to point at, so a
                             // value use is a closure forwarding to the call.
-                            let ret = if signature.is_async {
-                                HirType::Promise(Box::new(signature.ret.clone()))
-                            } else {
-                                signature.ret.clone()
+                            let dynamic = dynamic_symbol(&name);
+                            let physical_signature = quickjs_function_source_type(
+                                signature.source_range.0,
+                                HirType::Function(
+                                    signature.params.clone(),
+                                    Box::new(signature.ret.clone()),
+                                ),
+                            );
+                            let (physical_params, call_ret) = match physical_signature {
+                                HirType::Function(params, ret) => (params, *ret),
+                                other => {
+                                    return Err(format!(
+                                        "internal QuickJS function-value ABI is not callable: {other:?}"
+                                    ));
+                                }
                             };
-                            let params = signature.params.iter().enumerate()
+                            let ret = if signature.is_async {
+                                HirType::Promise(Box::new(call_ret.clone()))
+                            } else {
+                                call_ret.clone()
+                            };
+                            let params = physical_params
+                                .iter()
+                                .enumerate()
                                 .map(|(index, ty)| HirParam {
-                                    name: format!("__thaw_extern_arg_{index}"), ty: ty.clone(),
+                                    name: format!("__thaw_extern_arg_{}", self.next_binding + index),
+                                    ty: ty.clone(),
                                 })
                                 .collect::<Vec<_>>();
-                            let arguments = params.iter()
-                                .map(|param| HirExpr::Var(param.name.clone())).collect();
-                            let call = match dynamic_symbol(&name) {
+                            self.next_binding += params.len();
+                            let arguments = params
+                                .iter()
+                                .map(|param| HirExpr::Var(param.name.clone()))
+                                .collect();
+                            let call = match dynamic {
                                 Some((backend, symbol)) => HirExpr::DynamicCall(
                                     DynamicSignature {
-                                        backend, symbol, params: signature.params.clone(),
-                                        ret: signature.ret.clone(),
+                                        backend,
+                                        symbol,
+                                        params: physical_params,
+                                        ret: call_ret,
                                     },
                                     arguments,
                                 ),
                                 None => HirExpr::Call(Box::new(HirExpr::Var(name)), arguments),
                             };
                             return Ok(HirExpr::Lambda(
-                                Vec::new(), params, ret.clone(),
+                                Vec::new(),
+                                params,
+                                ret.clone(),
                                 Box::new(HirExpr::Block(vec![HirStmt::Return(Some(call))])),
                             ));
                         }
@@ -765,11 +908,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         // ponytail: a `this`-using function stays a plain FunctionRef;
                         // FunctionRefThis needs `.bind` lowering and llvm support first.
-                        return Ok(HirExpr::FunctionRef(
-                            name,
-                            signature.params.clone(),
-                            ret,
-                        ));
+                        return Ok(HirExpr::FunctionRef(name, signature.params.clone(), ret));
                     }
                     // A bare class-name reference (not immediately
                     // `new`'d) -- real trigger: `class-transformer`'s
@@ -798,9 +937,11 @@ impl<'a> FnLowerer<'a> {
                     // exists and needs no further change.
                     let constructor = class_constructor_symbol(&name);
                     if let Some(signature) = self.signatures.get(&constructor) {
-                        let result = self.interfaces.get(&name).cloned().ok_or_else(|| {
-                            format!("class `{name}` has no layout")
-                        })?;
+                        let result = self
+                            .interfaces
+                            .get(&name)
+                            .cloned()
+                            .ok_or_else(|| format!("class `{name}` has no layout"))?;
                         // A *decorated* class already has one real, live
                         // "class token" `JsValue` (see `DECORATOR_CLASS_
                         // TOKENS`/`lower_class_decorator_tokens`) -- the
@@ -909,9 +1050,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Var(format!("{name}__thaw_exception_object"))
                     } else {
                         HirExpr::Call(
-                            Box::new(HirExpr::Var(
-                                "__thaw_pending_exception_object".to_string(),
-                            )),
+                            Box::new(HirExpr::Var("__thaw_pending_exception_object".to_string())),
                             Vec::new(),
                         )
                     };
@@ -975,8 +1114,7 @@ impl<'a> FnLowerer<'a> {
                         self.nullish_narrowings
                             .get(&name)
                             .map(|payload| (payload, 2))
-                    })
-                {
+                    }) {
                     Some((payload, 1)) => Ok(HirExpr::NullableValue(
                         Box::new(HirExpr::Var(name)),
                         payload.clone(),
@@ -995,19 +1133,27 @@ impl<'a> FnLowerer<'a> {
                             let value = HirExpr::Var(name);
                             Ok(HirExpr::Block(vec![
                                 HirStmt::If(
-                                    HirExpr::NullishIsNull(Box::new(value.clone()), payload.clone()),
-                                    vec![HirStmt::Return(Some(HirExpr::NullableNone(payload.clone())))],
+                                    HirExpr::NullishIsNull(
+                                        Box::new(value.clone()),
+                                        payload.clone(),
+                                    ),
+                                    vec![HirStmt::Return(Some(HirExpr::NullableNone(
+                                        payload.clone(),
+                                    )))],
                                     Vec::new(),
                                 ),
                                 HirStmt::Return(Some(HirExpr::NullableSome(
-                                    Box::new(HirExpr::NullishValue(Box::new(value), payload.clone())),
+                                    Box::new(HirExpr::NullishValue(
+                                        Box::new(value),
+                                        payload.clone(),
+                                    )),
                                     payload.clone(),
                                 ))),
                             ]))
                         } else {
                             Ok(HirExpr::Var(name))
                         }
-                    },
+                    }
                 }
             }
 
@@ -1024,11 +1170,10 @@ impl<'a> FnLowerer<'a> {
                     let signature = self.signatures.get(&constructor).ok_or_else(|| {
                         format!("static `this` constructor `{constructor}` is not declared")
                     })?;
-                    let result = self
-                        .interfaces
-                        .get(class)
-                        .cloned()
-                        .ok_or_else(|| format!("static `this` class `{class}` has no layout"))?;
+                    let result =
+                        self.interfaces.get(class).cloned().ok_or_else(|| {
+                            format!("static `this` class `{class}` has no layout")
+                        })?;
                     return Ok(HirExpr::FunctionRef(
                         constructor,
                         signature.params.clone(),
@@ -1039,7 +1184,10 @@ impl<'a> FnLowerer<'a> {
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))
                 } else {
-                    Err("`this` is only available inside a native class constructor or method".into())
+                    Err(
+                        "`this` is only available inside a native class constructor or method"
+                            .into(),
+                    )
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
@@ -1064,26 +1212,53 @@ impl<'a> FnLowerer<'a> {
                 {
                     if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
                         let resolved = self.resolve_binding(ident.sym.as_ref());
-                        let target = self.interfaces.get(class.sym.as_ref()).cloned()
-                            .or_else(|| lower_ts_type(&assertion.type_ann,
-                                self.interfaces, self.generic_interfaces).ok());
-                        if self.scope.get(&resolved) == Some(&crate::caught_exception_carrier_type()) {
-                            if let Some(expected_tag) = crate::native_exception_tag(&target.clone().unwrap_or(HirType::Void)) {
+                        let target =
+                            self.interfaces
+                                .get(class.sym.as_ref())
+                                .cloned()
+                                .or_else(|| {
+                                    lower_ts_type(
+                                        &assertion.type_ann,
+                                        self.interfaces,
+                                        self.generic_interfaces,
+                                    )
+                                    .ok()
+                                })
+                                .map(|target| {
+                                    if matches!(target, HirType::Promise(_)) {
+                                        storage_type(assertion.span, target)
+                                    } else {
+                                        target
+                                    }
+                                });
+                        if self.scope.get(&resolved)
+                            == Some(&crate::caught_exception_carrier_type())
+                        {
+                            if let Some(expected_tag) = crate::native_exception_tag(
+                                &target.clone().unwrap_or(HirType::Void),
+                            ) {
                                 let target = target.clone().unwrap();
                                 let layout = crate::native_exception_layout_token(&target).unwrap();
-                                let HirType::Union(members) = crate::caught_exception_carrier_type()
-                                    else { unreachable!() };
+                                let HirType::Union(members) =
+                                    crate::caught_exception_carrier_type()
+                                else {
+                                    unreachable!()
+                                };
                                 let carrier = HirExpr::Var(resolved.clone());
-                                let descriptor = HirExpr::UnionValue(
-                                    Box::new(carrier.clone()), 9, members,
-                                );
+                                let descriptor =
+                                    HirExpr::UnionValue(Box::new(carrier.clone()), 9, members);
                                 let owner = HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_native_exception_owner".into())),
-                                    vec![descriptor, HirExpr::Lit(HirLit::I64(expected_tag as i64)),
-                                        HirExpr::Lit(HirLit::Str(layout))],
+                                    vec![
+                                        descriptor,
+                                        HirExpr::Lit(HirLit::I64(expected_tag as i64)),
+                                        HirExpr::Lit(HirLit::Str(layout)),
+                                    ],
                                 );
                                 let present = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_native_exception_owner_present".into())),
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_native_exception_owner_present".into(),
+                                    )),
                                     vec![owner.clone()],
                                 );
                                 return Ok(HirExpr::Conditional(
@@ -1098,29 +1273,62 @@ impl<'a> FnLowerer<'a> {
                                     target,
                                 ));
                             }
+                            if matches!(&target, Some(HirType::Object(fields))
+                                if has_dynamic_storage(assertion.span)
+                                    && !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_")))
+                            {
+                                return self.caught_carrier_as_json(HirExpr::Var(resolved));
+                            }
                             if let Some(target @ HirType::Object(_)) = target.clone() {
-                                let HirType::Object(target_fields) = &target else { unreachable!() };
-                                let HirType::Union(members) = crate::caught_exception_carrier_type()
-                                    else { unreachable!() };
+                                let HirType::Object(target_fields) = &target else {
+                                    unreachable!()
+                                };
+                                let HirType::Union(members) =
+                                    crate::caught_exception_carrier_type()
+                                else {
+                                    unreachable!()
+                                };
                                 let carrier = HirExpr::Var(resolved);
-                                let native = HirExpr::TypedClosure(target.clone(), Box::new(
-                                    HirExpr::UnionValue(Box::new(carrier.clone()), 6, members.clone()),
-                                ));
+                                let native = HirExpr::TypedClosure(
+                                    target.clone(),
+                                    Box::new(HirExpr::UnionValue(
+                                        Box::new(carrier.clone()),
+                                        6,
+                                        members.clone(),
+                                    )),
+                                );
                                 let checked = HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
-                                    vec![native, HirExpr::Lit(HirLit::Str(
-                                            // An interface/alias target has no nominal identity.
-                                            target_fields.first().and_then(|(name, _)| name.strip_prefix("__thaw_class_identity_\u{1e}"))
-                                                .filter(|ancestry| ancestry.split('\u{1f}').any(|name| name == class.sym.as_ref()))
-                                                .map(|_| class.sym.to_string()).unwrap_or_default())),
+                                    vec![
+                                        native,
                                         HirExpr::Lit(HirLit::Str(
-                                            crate::native_object_layout_token(target_fields))),
+                                            // An interface/alias target has no nominal identity.
+                                            target_fields
+                                                .first()
+                                                .and_then(|(name, _)| {
+                                                    name.strip_prefix(
+                                                        "__thaw_class_identity_\u{1e}",
+                                                    )
+                                                })
+                                                .filter(|ancestry| {
+                                                    ancestry
+                                                        .split('\u{1f}')
+                                                        .any(|name| name == class.sym.as_ref())
+                                                })
+                                                .map(|_| class.sym.to_string())
+                                                .unwrap_or_default(),
+                                        )),
+                                        HirExpr::Lit(HirLit::Str(
+                                            crate::native_object_layout_token(target_fields),
+                                        )),
                                     ],
                                 );
                                 return Ok(HirExpr::Conditional(
-                                    Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                    Box::new(HirExpr::BinOp(
+                                        BinOp::EqEqEq,
                                         Box::new(HirExpr::UnionTag(Box::new(carrier), members)),
-                                        Box::new(HirExpr::Lit(HirLit::F64(6.0))))),
+                                        Box::new(HirExpr::Lit(HirLit::F64(6.0))),
+                                    )),
                                     Box::new(checked),
                                     Box::new(HirExpr::ThrowValue(
                                         Box::new(HirExpr::Lit(HirLit::Str(
@@ -1134,9 +1342,18 @@ impl<'a> FnLowerer<'a> {
                         }
                         if self.scope.get(&resolved) == Some(&HirType::Str) {
                             if let Some(target @ HirType::Object(_)) = target {
+                                let structural = matches!(&target, HirType::Object(fields)
+                                    if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_")));
+                                let promise_catch = self.promise_catch_bindings.contains(&resolved)
+                                    || self.promise_catch_parameter.as_deref().is_some_and(
+                                        |name| self.resolve_binding(name) == resolved,
+                                    );
+                                if structural && (has_dynamic_storage(assertion.span) || promise_catch) {
+                                    let carrier = self.promise_rejection_carrier(&resolved);
+                                    return self.caught_carrier_as_json(carrier);
+                                }
                                 let value = if self.catch_bindings.contains(&resolved) {
-                                    let object_name =
-                                        format!("{resolved}__thaw_exception_object");
+                                    let object_name = format!("{resolved}__thaw_exception_object");
                                     self.scope.insert(object_name.clone(), target.clone());
                                     HirExpr::Var(object_name)
                                 } else {
@@ -1187,14 +1404,17 @@ impl<'a> FnLowerer<'a> {
                             .promise_catch_parameter
                             .as_deref()
                             .is_some_and(|name| self.resolve_binding(name) == resolved);
-                    if self.scope.get(&resolved)
-                        == Some(&crate::caught_exception_carrier_type())
-                    {
+                    if self.scope.get(&resolved) == Some(&crate::caught_exception_carrier_type()) {
                         let target = lower_ts_type(
                             &assertion.type_ann,
                             self.interfaces,
                             self.generic_interfaces,
                         )?;
+                        let target = if matches!(target, HirType::Promise(_)) {
+                            storage_type(assertion.span, target)
+                        } else {
+                            target
+                        };
                         let projection = match &target {
                             HirType::F64 => Some((0, "number")),
                             HirType::I64 => Some((1, "bigint")),
@@ -1203,11 +1423,11 @@ impl<'a> FnLowerer<'a> {
                         };
                         if let Some((native_index, json_type)) = projection {
                             let carrier_type = crate::caught_exception_carrier_type();
-                            let HirType::Union(members) = carrier_type else { unreachable!() };
+                            let HirType::Union(members) = carrier_type else {
+                                unreachable!()
+                            };
                             let carrier = HirExpr::Var(resolved.clone());
-                            let tag = HirExpr::UnionTag(
-                                Box::new(carrier.clone()), members.clone(),
-                            );
+                            let tag = HirExpr::UnionTag(Box::new(carrier.clone()), members.clone());
                             let fail = HirExpr::ThrowValue(
                                 Box::new(HirExpr::Lit(HirLit::Str(format!(
                                     "caught value is not a {json_type}"
@@ -1215,11 +1435,12 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(Self::unreachable_value(&target)?),
                             );
                             let native_value = HirExpr::UnionValue(
-                                Box::new(carrier.clone()), native_index, members.clone(),
+                                Box::new(carrier.clone()),
+                                native_index,
+                                members.clone(),
                             );
-                            let json = HirExpr::UnionValue(
-                                Box::new(carrier.clone()), 7, members.clone(),
-                            );
+                            let json =
+                                HirExpr::UnionValue(Box::new(carrier.clone()), 7, members.clone());
                             let json_typeof = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_typeof".into())),
                                 vec![json.clone()],
@@ -1235,9 +1456,7 @@ impl<'a> FnLowerer<'a> {
                             let projected_json = match &target {
                                 HirType::F64 => HirExpr::JsonAsNumber(Box::new(json.clone())),
                                 HirType::I64 => HirExpr::Call(
-                                    Box::new(HirExpr::Var(
-                                        "__thaw_json_as_bigint_i64".into(),
-                                    )),
+                                    Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())),
                                     vec![json.clone()],
                                 ),
                                 HirType::Bool => HirExpr::JsonAsBool(Box::new(json.clone())),
@@ -1273,14 +1492,17 @@ impl<'a> FnLowerer<'a> {
                             ));
                         }
                     }
-                    if self.catch_bindings.contains(&resolved)
-                        || promise_catch
-                    {
+                    if self.catch_bindings.contains(&resolved) || promise_catch {
                         let target = lower_ts_type(
                             &assertion.type_ann,
                             self.interfaces,
                             self.generic_interfaces,
                         )?;
+                        let target = if matches!(target, HirType::Promise(_)) {
+                            storage_type(assertion.span, target)
+                        } else {
+                            target
+                        };
                         let suffix = match target {
                             HirType::F64 => Some("f64"),
                             HirType::I64 => Some("i64"),
@@ -1302,13 +1524,17 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
-                if let Some(literal) = self.lower_any_asserted_literal(&assertion.expr, &assertion.type_ann, false)? {
+                if let Some(literal) =
+                    self.lower_any_asserted_literal(&assertion.expr, &assertion.type_ann, false)?
+                {
                     return Ok(literal);
                 }
                 self.lower_expr(&assertion.expr)
             }
             Expr::TsTypeAssertion(assertion) => {
-                if let Some(literal) = self.lower_any_asserted_literal(&assertion.expr, &assertion.type_ann, false)? {
+                if let Some(literal) =
+                    self.lower_any_asserted_literal(&assertion.expr, &assertion.type_ann, false)?
+                {
                     return Ok(literal);
                 }
                 self.lower_expr(&assertion.expr)
@@ -1330,10 +1556,7 @@ impl<'a> FnLowerer<'a> {
                     .pop()
                     .ok_or("sequence expression must contain at least one value")?;
                 let result_type = self.infer_expr_type(&last)?;
-                let mut statements = values
-                    .into_iter()
-                    .map(HirStmt::Expr)
-                    .collect::<Vec<_>>();
+                let mut statements = values.into_iter().map(HirStmt::Expr).collect::<Vec<_>>();
                 if result_type == HirType::Void {
                     statements.push(HirStmt::Expr(last));
                 } else {
@@ -1366,9 +1589,7 @@ impl<'a> FnLowerer<'a> {
                 let mut parts = Vec::with_capacity(template.quasis.len() + template.exprs.len());
                 for (index, quasi) in template.quasis.iter().enumerate() {
                     let literal = match quasi.cooked.as_ref() {
-                        Some(cooked) => {
-                            hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes())
-                        }
+                        Some(cooked) => hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes()),
                         None => HirLit::Str(quasi.raw.to_string()),
                     };
                     if !matches!(&literal, HirLit::Str(text) if text.is_empty()) {
@@ -1400,9 +1621,8 @@ impl<'a> FnLowerer<'a> {
                     {
                         if object.sym == *"String" && property.sym == *"raw" {
                             let template = &tagged.tpl;
-                            let mut parts = Vec::with_capacity(
-                                template.quasis.len() + template.exprs.len(),
-                            );
+                            let mut parts =
+                                Vec::with_capacity(template.quasis.len() + template.exprs.len());
                             for (index, quasi) in template.quasis.iter().enumerate() {
                                 let text = quasi.raw.to_string();
                                 if !text.is_empty() {
@@ -1442,9 +1662,7 @@ impl<'a> FnLowerer<'a> {
                     // An invalid escape makes the cooked entry `undefined`; the
                     // array keeps `Array<Str>`'s one-pointer-per-element layout.
                     cooked_strings.push(HirExpr::Lit(match quasi.cooked.as_ref() {
-                        Some(cooked) => {
-                            hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes())
-                        }
+                        Some(cooked) => hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes()),
                         None => HirLit::Undefined,
                     }));
                     raw_strings.push(HirExpr::Lit(HirLit::Str(quasi.raw.to_string())));
@@ -1472,7 +1690,10 @@ impl<'a> FnLowerer<'a> {
                 // A tag that is a dynamic (`any`) value, e.g. a member of one (`o.t`..``), is
                 // called like any dynamic method: `tag(strings, ...values)` with the template
                 // object handed over as a live view (so `.raw` and identity survive).
-                if matches!(self.infer_expr_type(&tag)?, HirType::Json | HirType::JsValue | HirType::Dynamic) {
+                if matches!(
+                    self.infer_expr_type(&tag)?,
+                    HirType::Json | HirType::JsValue | HirType::Dynamic
+                ) {
                     let strings_name = format!("__thaw_template_strings_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(strings_name.clone(), HirType::Json);
@@ -1492,9 +1713,11 @@ impl<'a> FnLowerer<'a> {
                             tagged.span,
                         ))),
                     }];
-                    call_args.extend(template.exprs.iter().map(|expression| swc_ecma_ast::ExprOrSpread {
+                    call_args.extend(template.exprs.iter().map(|expression| {
+                        swc_ecma_ast::ExprOrSpread {
                         spread: None,
                         expr: expression.clone(),
+                        }
                     }));
                     let call = Expr::Call(swc_ecma_ast::CallExpr {
                         span: tagged.span,
@@ -1504,7 +1727,10 @@ impl<'a> FnLowerer<'a> {
                         type_args: None,
                     });
                     let lowered = self.lower_expr(&call)?;
-                    return self.wrap_call_argument_bindings(lowered, &[(strings_name, HirType::Json, strings)]);
+                    return self.wrap_call_argument_bindings(
+                        lowered,
+                        &[(strings_name, HirType::Json, strings)],
+                    );
                 }
                 // A tagged-template call is built directly here rather than
                 // through `lower_call` (`invocations/calls.rs`, which a
@@ -1521,7 +1747,8 @@ impl<'a> FnLowerer<'a> {
                 // named function whose signature declares a rest
                 // parameter.
                 let tag_name = match &tag {
-                    HirExpr::Var(name) | HirExpr::FunctionRef(name, _, _)
+                    HirExpr::Var(name)
+                    | HirExpr::FunctionRef(name, _, _)
                     | HirExpr::FunctionRefThis(name, _, _, _) => Some(name.as_str()),
                     _ => None,
                 };
@@ -1554,7 +1781,8 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     args
                 };
-                let args = if let Some(name) = tag_name {
+                let args =
+                    if let Some(name) = tag_name {
                     match self.signatures.get(name).map(|signature| {
                         (signature.params.len(), signature.native_rest.clone())
                     }) {
@@ -1604,7 +1832,11 @@ impl<'a> FnLowerer<'a> {
                             let temp = format!("__thaw_template_arg_{}", self.next_binding);
                             self.next_binding += 1;
                             self.scope.insert(temp.clone(), argument_type.clone());
-                            extra_statements.push(HirStmt::Let(temp.clone(), argument_type, argument));
+                            extra_statements.push(HirStmt::Let(
+                                temp.clone(),
+                                argument_type,
+                                argument,
+                            ));
                             if kept.len() < cap {
                                 kept.push(HirExpr::Var(temp));
                             }
@@ -1650,7 +1882,10 @@ impl<'a> FnLowerer<'a> {
                 Ok(HirExpr::Call(
                     Box::new(HirExpr::Lambda(
                         captures,
-                        vec![HirParam { name: cooked_name, ty: array_type }],
+                        vec![HirParam {
+                            name: cooked_name,
+                            ty: array_type,
+                        }],
                         call_type,
                         Box::new(body),
                     )),
@@ -1744,10 +1979,7 @@ impl<'a> FnLowerer<'a> {
                                     &bin.left,
                                     Some(&HirType::JsValue),
                                 )?;
-                                return self.dynamic_value_check_by_name(
-                                    class.sym.as_ref(),
-                                    value,
-                                );
+                            return self.dynamic_value_check_by_name(class.sym.as_ref(), value);
                             }
                             // `bin.left` is only ever lowered *inside* a
                             // branch that immediately returns -- `WeakMap`/
@@ -1761,9 +1993,7 @@ impl<'a> FnLowerer<'a> {
                                 if class.sym == *"Date" {
                                     let value = self.lower_expr(&bin.left)?;
                                     return Ok(HirExpr::Call(
-                                        Box::new(HirExpr::Var(
-                                            "__thaw_json_is_date_shape".to_string(),
-                                        )),
+                                    Box::new(HirExpr::Var("__thaw_json_is_date_shape".to_string())),
                                         vec![value],
                                     ));
                                 }
@@ -1776,9 +2006,7 @@ impl<'a> FnLowerer<'a> {
                                 if class.sym == *"Array" {
                                     let value = self.lower_expr(&bin.left)?;
                                     return Ok(HirExpr::Call(
-                                        Box::new(HirExpr::Var(
-                                            "__thaw_json_is_array".to_string(),
-                                        )),
+                                    Box::new(HirExpr::Var("__thaw_json_is_array".to_string())),
                                         vec![value],
                                     ));
                                 }
@@ -1941,18 +2169,29 @@ impl<'a> FnLowerer<'a> {
                     // so ask the live engine instead.
                     if value_type == HirType::JsValue {
                         if let Some(token) = self.decorator_class_token(class.sym.as_ref()) {
-                            return self.dynamic_value_instanceof(
-                                value,
-                                HirExpr::Var(token),
-                            );
+                            return self.dynamic_value_instanceof(value, HirExpr::Var(token));
                         }
                     }
                     // An `any` holding a native class instance projected as a live
                     // host: ask the engine against the class's real counterpart.
-                    if value_type == HirType::Json && !extends_error_family {
-                        if let Some(token) = self.decorator_class_token(class.sym.as_ref()) {
+                    if value_type == HirType::Json {
+                        let dynamic_constructor = self
+                            .decorator_class_token(class.sym.as_ref())
+                            .map(HirExpr::Var)
+                            .or_else(|| {
+                                is_error_family_name(class.sym.as_ref()).then(|| {
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                                        vec![HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                                    )
+                                })
+                            });
+                        if let Some(constructor) = dynamic_constructor {
                             return self.lower_host_instanceof(
-                                value, value_type, HirExpr::Var(token), HirType::JsValue,
+                                value,
+                                value_type,
+                                constructor,
+                                HirType::JsValue,
                             );
                         }
                     }
@@ -1977,8 +2216,7 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
-                        let all_arrays = class.sym == *"Array"
-                            && matching.len() == elements.len();
+                        let all_arrays = class.sym == *"Array" && matching.len() == elements.len();
                         let mut result = HirExpr::Lit(HirLit::Bool(all_arrays));
                         if !all_arrays {
                             for index in matching {
@@ -1997,12 +2235,18 @@ impl<'a> FnLowerer<'a> {
                                     check
                                 } else {
                                     let projected = HirExpr::UnionValue(
-                                        Box::new(HirExpr::Var(name.clone())), index,
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        index,
                                         elements.clone(),
                                     );
                                     let identity = HirExpr::Call(
-                                        Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
-                                        vec![projected, HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_object_has_class_identity".into(),
+                                        )),
+                                        vec![
+                                            projected,
+                                            HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                        ],
                                     );
                                     self.lower_logical_expr(check, identity, true)?
                                 };
@@ -2016,16 +2260,22 @@ impl<'a> FnLowerer<'a> {
                         // prototype identity and keeps ordinary Json/name
                         // lookalikes from matching.
                         if extends_error_family && !all_arrays {
-                            if let Some(index) = elements.iter().position(|element| *element == HirType::Json) {
+                            if let Some(index) = elements
+                                .iter()
+                                .position(|element| *element == HirType::Json)
+                            {
                                 let check = HirExpr::BinOp(
                                     BinOp::EqEqEq,
                                     Box::new(HirExpr::UnionTag(
-                                        Box::new(HirExpr::Var(name.clone())), elements.clone(),
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        elements.clone(),
                                     )),
                                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                                 );
                                 let projected = HirExpr::UnionValue(
-                                    Box::new(HirExpr::Var(name.clone())), index, elements.clone(),
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    index,
+                                    elements.clone(),
                                 );
                                 let class_name = self.coerce_to_declared(
                                     &HirType::Json,
@@ -2053,11 +2303,14 @@ impl<'a> FnLowerer<'a> {
                         // string is never an instance).
                         if extends_error_family && !all_arrays {
                             for (index, element) in elements.iter().enumerate() {
-                                if *element != HirType::Str { continue; }
+                                if *element != HirType::Str {
+                                    continue;
+                                }
                                 let check = HirExpr::BinOp(
                                     BinOp::EqEqEq,
                                     Box::new(HirExpr::UnionTag(
-                                        Box::new(HirExpr::Var(name.clone())), elements.clone(),
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        elements.clone(),
                                     )),
                                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                                 );
@@ -2065,7 +2318,9 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Var("__thaw_error_is_instance".into())),
                                     vec![
                                         HirExpr::UnionValue(
-                                            Box::new(HirExpr::Var(name.clone())), index, elements.clone(),
+                                            Box::new(HirExpr::Var(name.clone())),
+                                            index,
+                                            elements.clone(),
                                         ),
                                         HirExpr::Lit(HirLit::Str(class.sym.to_string())),
                                     ],
@@ -2074,10 +2329,8 @@ impl<'a> FnLowerer<'a> {
                                 result = self.lower_logical_expr(result, check, false)?;
                             }
                         }
-                        return self.wrap_call_argument_bindings(
-                            result,
-                            &[(name, value_type, value)],
-                        );
+                        return self
+                            .wrap_call_argument_bindings(result, &[(name, value_type, value)]);
                     }
                     // Built-in Error objects and subclasses share a physical
                     // prefix, but subtype ancestry lives in the allocation
@@ -2088,12 +2341,13 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(name.clone(), value_type.clone());
                         let query = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
-                            vec![HirExpr::Var(name.clone()),
-                                HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                            vec![
+                                HirExpr::Var(name.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                            ],
                         );
-                        return self.wrap_call_argument_bindings(
-                            query, &[(name, value_type, value)],
-                        );
+                        return self
+                            .wrap_call_argument_bindings(query, &[(name, value_type, value)]);
                     }
                     if extends_error_family && value_type == HirType::Str {
                         let name = format!("__thaw_instanceof_text_{}", self.next_binding);
@@ -2152,8 +2406,9 @@ impl<'a> FnLowerer<'a> {
                             class.sym
                         ));
                     }
-                    let result = native_builtin_match
-                        .unwrap_or_else(|| class_type_has_identity(&value_type, class.sym.as_ref()));
+                    let result = native_builtin_match.unwrap_or_else(|| {
+                        class_type_has_identity(&value_type, class.sym.as_ref())
+                    });
                     if native_builtin_match.is_none() && result {
                         // A physical marker slot is not proof of nominal class
                         // ancestry. The native table is keyed by this object's
@@ -2163,9 +2418,13 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(name.clone(), value_type.clone());
                         let query = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
-                            vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                            vec![
+                                HirExpr::Var(name.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                            ],
                         );
-                        return self.wrap_call_argument_bindings(query, &[(name, value_type, value)]);
+                        return self
+                            .wrap_call_argument_bindings(query, &[(name, value_type, value)]);
                     }
                     let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                     self.next_binding += 1;
@@ -2187,8 +2446,9 @@ impl<'a> FnLowerer<'a> {
                             || (bin.op == BinaryOp::LogicalOr && !*present)
                     })
                     .map(|(name, payload, _, nullable)| (name, payload, nullable));
-                let rhs_union_narrowing = self.union_narrowing(&bin.left).and_then(
-                    |(targets, equal, complement)| {
+                let rhs_union_narrowing =
+                    self.union_narrowing(&bin.left)
+                        .and_then(|(targets, equal, complement)| {
                         let required_truth = match bin.op {
                             BinaryOp::LogicalAnd => true,
                             BinaryOp::LogicalOr => false,
@@ -2214,19 +2474,29 @@ impl<'a> FnLowerer<'a> {
                                 })
                                 .collect::<Vec<_>>(),
                         )
-                    },
-                );
-                let mut rhs = self
-                    .lower_expr_with_union_narrowing(
+                        });
+                let mut rhs = self.lower_expr_with_union_narrowing(
                         &bin.right,
                         rhs_union_narrowing.as_deref(),
                         rhs_narrowing.as_ref(),
                     )?;
-                if matches!(bin.op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
-                    | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Exp
-                    | BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq
-                    | BinaryOp::EqEqEq | BinaryOp::NotEqEq | BinaryOp::EqEq | BinaryOp::NotEq)
-                {
+                if matches!(
+                    bin.op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::Exp
+                        | BinaryOp::Lt
+                        | BinaryOp::Gt
+                        | BinaryOp::LtEq
+                        | BinaryOp::GtEq
+                        | BinaryOp::EqEqEq
+                        | BinaryOp::NotEqEq
+                        | BinaryOp::EqEq
+                        | BinaryOp::NotEq
+                ) {
                     lhs = self.lower_primitive_array_operand(lhs)?;
                     rhs = self.lower_primitive_array_operand(rhs)?;
                 } else if bin.op == BinaryOp::NullishCoalescing {
@@ -2263,7 +2533,10 @@ impl<'a> FnLowerer<'a> {
                     BinaryOp::In => {
                         let mut right_type = self.infer_expr_type(&rhs)?;
                         if let HirType::Union(members) = &right_type {
-                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            if members
+                                .iter()
+                                .all(|member| matches!(member, HirType::Array(_)))
+                            {
                                 (rhs, right_type) =
                                     self.lower_union_array_sequence(rhs, members)?;
                             }
@@ -2330,8 +2603,16 @@ impl<'a> FnLowerer<'a> {
                                 )
                             } else {
                                 let valid = self.lower_logical_expr(
-                                    HirExpr::BinOp(BinOp::GtEq, Box::new(key.clone()), Box::new(HirExpr::Lit(HirLit::F64(0.0)))),
-                                    HirExpr::BinOp(BinOp::Lt, Box::new(key.clone()), Box::new(HirExpr::ArrayLen(Box::new(array.clone())))),
+                                    HirExpr::BinOp(
+                                        BinOp::GtEq,
+                                        Box::new(key.clone()),
+                                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                    ),
+                                    HirExpr::BinOp(
+                                        BinOp::Lt,
+                                        Box::new(key.clone()),
+                                        Box::new(HirExpr::ArrayLen(Box::new(array.clone()))),
+                                    ),
                                     true,
                                 )?;
                                 let valid = self.lower_logical_expr(
@@ -2339,25 +2620,29 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::BinOp(
                                         BinOp::EqEqEq,
                                         Box::new(key.clone()),
-                                        Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_math_trunc".into())), vec![key.clone()])),
+                                        Box::new(HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                                            vec![key.clone()],
+                                        )),
                                     ),
                                     true,
                                 )?;
                                 self.lower_logical_expr(
                                     valid,
-                                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_array_has_index".into())), vec![array, key]),
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                                        vec![array, key],
+                                    ),
                                     true,
                                 )?
                             };
-                            self.wrap_call_argument_bindings(result, &[
-                                (key_name, key_type, lhs),
-                                (array_name, right_type, rhs),
-                            ])?
+                            self.wrap_call_argument_bindings(
+                                result,
+                                &[(key_name, key_type, lhs), (array_name, right_type, rhs)],
+                            )?
                         } else if let HirType::Union(elements) = &right_type {
                             let HirExpr::Lit(HirLit::Str(property)) = lhs else {
-                                return Err(
-                                    "`in` on a union requires a string literal key".into()
-                                );
+                                return Err("`in` on a union requires a string literal key".into());
                             };
                             let matching = elements
                                 .iter()
@@ -2386,10 +2671,7 @@ impl<'a> FnLowerer<'a> {
                                 );
                                 result = self.lower_logical_expr(result, check, false)?;
                             }
-                            self.wrap_call_argument_bindings(
-                                result,
-                                &[(name, right_type, rhs)],
-                            )?
+                            self.wrap_call_argument_bindings(result, &[(name, right_type, rhs)])?
                         } else {
                             let HirType::Object(fields) = right_type else {
                                 return Err("`in` currently requires a fixed-shape object".into());
@@ -2429,11 +2711,7 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
-                        self.lower_logical_expr(
-                            lhs,
-                            rhs,
-                            bin.op == BinaryOp::LogicalAnd,
-                        )?
+                        self.lower_logical_expr(lhs, rhs, bin.op == BinaryOp::LogicalAnd)?
                     }
                     BinaryOp::NullishCoalescing => self.lower_nullish_coalescing(lhs, rhs)?,
                     BinaryOp::Lt => self.lower_relational(lhs, rhs, BinOp::Lt)?,
@@ -2456,8 +2734,13 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
                     BinaryOp::Add
-                        if matches!(self.infer_expr_type(&lhs)?, HirType::Str | HirType::StrLiteral(_))
-                            || matches!(self.infer_expr_type(&rhs)?, HirType::Str | HirType::StrLiteral(_)) =>
+                        if matches!(
+                            self.infer_expr_type(&lhs)?,
+                            HirType::Str | HirType::StrLiteral(_)
+                        ) || matches!(
+                            self.infer_expr_type(&rhs)?,
+                            HirType::Str | HirType::StrLiteral(_)
+                        ) =>
                     {
                         // A guaranteed string result keeps its existing Str
                         // contract, but both raw operands must be evaluated
@@ -2487,10 +2770,12 @@ impl<'a> FnLowerer<'a> {
                     BinaryOp::Add
                         if (self.infer_expr_type(&lhs)? == HirType::JsValue
                             && (self.infer_expr_type(&rhs)? == HirType::Json
-                                || self.infer_expr_type(&rhs)? == HirType::Optional(Box::new(HirType::Json))))
+                                || self.infer_expr_type(&rhs)?
+                                    == HirType::Optional(Box::new(HirType::Json))))
                             || (self.infer_expr_type(&rhs)? == HirType::JsValue
                                 && (self.infer_expr_type(&lhs)? == HirType::Json
-                                    || self.infer_expr_type(&lhs)? == HirType::Optional(Box::new(HirType::Json)))) =>
+                                    || self.infer_expr_type(&lhs)?
+                                        == HirType::Optional(Box::new(HirType::Json)))) =>
                     {
                         self.lower_add_with_live_json(lhs, rhs)?
                     }
@@ -2498,9 +2783,11 @@ impl<'a> FnLowerer<'a> {
                         if self.infer_expr_type(&lhs)? != HirType::JsValue
                             && self.infer_expr_type(&rhs)? != HirType::JsValue
                             && (matches!(self.infer_expr_type(&lhs)?, HirType::Json)
-                                || self.infer_expr_type(&lhs)? == HirType::Optional(Box::new(HirType::Json))
+                                || self.infer_expr_type(&lhs)?
+                                    == HirType::Optional(Box::new(HirType::Json))
                                 || matches!(self.infer_expr_type(&rhs)?, HirType::Json)
-                                || self.infer_expr_type(&rhs)? == HirType::Optional(Box::new(HirType::Json))) =>
+                                || self.infer_expr_type(&rhs)?
+                                    == HirType::Optional(Box::new(HirType::Json))) =>
                     {
                         self.lower_add_with_to_primitive(lhs, rhs)?
                     }
@@ -2508,8 +2795,7 @@ impl<'a> FnLowerer<'a> {
                         if (matches!(
                             self.infer_expr_type(&lhs)?,
                             HirType::JsValue | HirType::Json
-                        )
-                            && self.infer_expr_type(&rhs)? == HirType::F64)
+                        ) && self.infer_expr_type(&rhs)? == HirType::F64)
                             || (self.infer_expr_type(&lhs)? == HirType::F64
                                 && matches!(
                                     self.infer_expr_type(&rhs)?,
@@ -2540,11 +2826,7 @@ impl<'a> FnLowerer<'a> {
                         )?;
                         HirExpr::Call(
                             Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
-                            vec![
-                                callable,
-                                empty_arguments,
-                                HirExpr::ArrayLit(vec![lhs, rhs]),
-                            ],
+                            vec![callable, empty_arguments, HirExpr::ArrayLit(vec![lhs, rhs])],
                         )
                     }
                     BinaryOp::Add
@@ -2578,8 +2860,14 @@ impl<'a> FnLowerer<'a> {
                     other
                         if matches!(self.infer_expr_type(&lhs)?, HirType::Optional(_))
                             || matches!(self.infer_expr_type(&rhs)?, HirType::Optional(_))
-                            || matches!(self.infer_expr_type(&lhs)?, HirType::Nullable(_) | HirType::Nullish(_))
-                            || matches!(self.infer_expr_type(&rhs)?, HirType::Nullable(_) | HirType::Nullish(_)) =>
+                            || matches!(
+                                self.infer_expr_type(&lhs)?,
+                                HirType::Nullable(_) | HirType::Nullish(_)
+                            )
+                            || matches!(
+                                self.infer_expr_type(&rhs)?,
+                                HirType::Nullable(_) | HirType::Nullish(_)
+                            ) =>
                     {
                         HirExpr::BinOp(
                             lower_bin_op(other)?,
@@ -2599,11 +2887,7 @@ impl<'a> FnLowerer<'a> {
                         // result -- see `lower_add_with_to_primitive`.
                         self.lower_add_with_to_primitive(lhs, rhs)?
                     }
-                    other => HirExpr::BinOp(
-                        lower_bin_op(other)?,
-                        Box::new(lhs),
-                        Box::new(rhs),
-                    ),
+                    other => HirExpr::BinOp(lower_bin_op(other)?, Box::new(lhs), Box::new(rhs)),
                 };
                 self.infer_expr_type(&value)?;
                 self.wrap_call_argument_bindings(value, &bindings)
@@ -2634,7 +2918,9 @@ impl<'a> FnLowerer<'a> {
                             }
                             MemberProp::Computed(computed) => self.lower_expr(&computed.expr)?,
                             MemberProp::PrivateName(_) => {
-                                return Err("native `delete` does not support private properties".into())
+                                return Err(
+                                    "native `delete` does not support private properties".into()
+                                );
                             }
                         };
                         return Ok(HirExpr::Call(
@@ -2643,7 +2929,13 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let array_union = match &object_type {
-                        HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))) => Some(members.clone()),
+                        HirType::Union(members)
+                            if members
+                                .iter()
+                                .all(|member| matches!(member, HirType::Array(_))) =>
+                        {
+                            Some(members.clone())
+                        }
                         _ => None,
                     };
                     let (object, object_type) = if let Some(members) = array_union {
@@ -2653,13 +2945,17 @@ impl<'a> FnLowerer<'a> {
                     };
                     if matches!(object_type, HirType::Array(_)) {
                         let key = match &member.prop {
-                            MemberProp::Ident(property) => HirExpr::Lit(HirLit::Str(property.sym.to_string())),
+                            MemberProp::Ident(property) => {
+                                HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                            }
                             MemberProp::Computed(computed) => {
                                 let key = self.lower_expr(&computed.expr)?;
                                 self.coerce_primitive_to_string(key)?
                             }
                             MemberProp::PrivateName(_) => {
-                                return Err("native `delete` does not support private properties".into())
+                                return Err(
+                                    "native `delete` does not support private properties".into()
+                                );
                             }
                         };
                         return Ok(HirExpr::Call(
@@ -2681,13 +2977,18 @@ impl<'a> FnLowerer<'a> {
                             self.coerce_primitive_to_string(key)?
                         }
                         MemberProp::PrivateName(_) => {
-                            return Err("native `delete` does not support private properties".into())
+                            return Err(
+                                "native `delete` does not support private properties".into()
+                            );
                         }
                     };
                     return Ok(HirExpr::JsonDelete(Box::new(object), Box::new(key)));
                 }
                 let value = self.lower_expr(&unary.arg)?;
-                let value = if matches!(unary.op, UnaryOp::TypeOf | UnaryOp::Bang | UnaryOp::Plus | UnaryOp::Minus) {
+                let value = if matches!(
+                    unary.op,
+                    UnaryOp::TypeOf | UnaryOp::Bang | UnaryOp::Plus | UnaryOp::Minus
+                ) {
                     self.lower_primitive_array_operand(value)?
                 } else {
                     value
@@ -2721,17 +3022,18 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("getDynamicValue".into())),
                             vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
                         );
-                        let arguments = self.coerce_to_declared(
-                            &HirType::Json,
-                            HirExpr::ArrayLit(vec![digits]),
-                        )?;
+                        let arguments = self
+                            .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![digits]))?;
                         HirExpr::Call(
                             Box::new(HirExpr::Var("callDynamicValueHandle".into())),
                             vec![constructor, arguments],
                         )
                     }
                     UnaryOp::Minus => {
-                        let value = if matches!(self.infer_expr_type(&value)?, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) {
+                        let value = if matches!(
+                            self.infer_expr_type(&value)?,
+                            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                        ) {
                             self.coerce_primitive_to_number(value)?
                         } else {
                             self.expect_type(&HirType::F64, &value, "unary minus")?;
@@ -2744,9 +3046,15 @@ impl<'a> FnLowerer<'a> {
                     }
                     UnaryOp::Plus => {
                         let value_type = self.infer_expr_type(&value)?;
-                        if matches!(value_type, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Object(_)) {
+                        if matches!(
+                            value_type,
+                            HirType::Optional(_)
+                                | HirType::Nullable(_)
+                                | HirType::Nullish(_)
+                                | HirType::Object(_)
+                        ) {
                             self.coerce_primitive_to_number(value)?
-                        } else if value_type == HirType::JsValue {
+                        } else if matches!(value_type, HirType::Json | HirType::JsValue) {
                             self.dynamic_value_to_number(value, "__thaw_unary_plus")?
                         } else {
                             self.expect_type(&HirType::F64, &value, "unary plus")?;
@@ -2785,14 +3093,12 @@ impl<'a> FnLowerer<'a> {
                         // otherwise be wrong here.
                         if let HirExpr::Var(name) = &value {
                             let promise_catch = self.promise_catch_bindings.contains(name)
-                                || self
-                                    .promise_catch_parameter
-                                    .as_deref()
-                                    .is_some_and(|parameter| {
-                                        self.resolve_binding(parameter) == *name
-                                    });
+                                || self.promise_catch_parameter.as_deref().is_some_and(
+                                    |parameter| self.resolve_binding(parameter) == *name,
+                                );
                             if (self.catch_bindings.contains(name)
-                                && self.scope.get(name) != Some(&crate::caught_exception_carrier_type()))
+                                && self.scope.get(name)
+                                    != Some(&crate::caught_exception_carrier_type()))
                                 || promise_catch
                             {
                                 let tag = if promise_catch {
@@ -2808,9 +3114,7 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Var(tag)
                                 };
                                 return Ok(HirExpr::Call(
-                                    Box::new(HirExpr::Var(
-                                        "__thaw_exception_typeof".to_string(),
-                                    )),
+                                    Box::new(HirExpr::Var("__thaw_exception_typeof".to_string())),
                                     vec![tag],
                                 ));
                             }
@@ -2877,13 +3181,18 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                         if Self::contains_function_value(&operand_type) {
-                            let name = format!("__thaw_typeof_function_tagged_{}", self.next_binding);
+                            let name =
+                                format!("__thaw_typeof_function_tagged_{}", self.next_binding);
                             self.next_binding += 1;
                             self.scope.insert(name.clone(), operand_type.clone());
                             let observed = self.function_observable_typeof(
-                                HirExpr::Var(name.clone()), &operand_type)?;
+                                HirExpr::Var(name.clone()),
+                                &operand_type,
+                            )?;
                             return self.wrap_call_argument_bindings(
-                                observed, &[(name, operand_type, value)]);
+                                observed,
+                                &[(name, operand_type, value)],
+                            );
                         }
                         if operand_type == HirType::Json {
                             return Ok(HirExpr::Call(
@@ -2910,7 +3219,9 @@ impl<'a> FnLowerer<'a> {
                             let bound = HirExpr::Var(parameter.clone());
                             let member_typeof = |index: usize, member: &HirType| {
                                 let projected = HirExpr::UnionValue(
-                                    Box::new(bound.clone()), index, elements.clone(),
+                                    Box::new(bound.clone()),
+                                    index,
+                                    elements.clone(),
                                 );
                                 match member {
                                     HirType::Json => Ok(HirExpr::Call(
@@ -2945,18 +3256,15 @@ impl<'a> FnLowerer<'a> {
                                         )),
                                 }
                             };
-                            let last_index = elements.len().checked_sub(1).ok_or(
-                                "`typeof` cannot inspect an empty union",
-                            )?;
+                            let last_index = elements
+                                .len()
+                                .checked_sub(1)
+                                .ok_or("`typeof` cannot inspect an empty union")?;
                             let mut branches = vec![HirStmt::Return(Some(member_typeof(
-                                last_index, &elements[last_index],
+                                last_index,
+                                &elements[last_index],
                             )?))];
-                            for (index, member) in elements
-                                .iter()
-                                .enumerate()
-                                .rev()
-                                .skip(1)
-                            {
+                            for (index, member) in elements.iter().enumerate().rev().skip(1) {
                                 branches = vec![HirStmt::If(
                                     HirExpr::BinOp(
                                         BinOp::EqEqEq,
@@ -2982,8 +3290,7 @@ impl<'a> FnLowerer<'a> {
                                     "`typeof` nullish payload has no supported runtime category: {payload:?}"
                                 ));
                             };
-                            let parameter =
-                                format!("__thaw_typeof_nullish_{}", self.next_binding);
+                            let parameter = format!("__thaw_typeof_nullish_{}", self.next_binding);
                             self.next_binding += 1;
                             self.scope.insert(parameter.clone(), operand_type.clone());
                             let bound = HirExpr::Var(parameter.clone());
@@ -3017,9 +3324,7 @@ impl<'a> FnLowerer<'a> {
                             HirType::Optional(payload) => {
                                 Some((payload.as_ref(), "undefined", false))
                             }
-                            HirType::Nullable(payload) => {
-                                Some((payload.as_ref(), "object", true))
-                            }
+                            HirType::Nullable(payload) => Some((payload.as_ref(), "object", true)),
                             _ => None,
                         } {
                             let Some(type_name) = native_typeof_name(payload) else {
@@ -3036,11 +3341,22 @@ impl<'a> FnLowerer<'a> {
                             } else {
                                 HirExpr::OptionalIsNone(Box::new(bound), payload.clone())
                             };
-                            let present_typeof = if matches!(payload, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
+                            let present_typeof = if matches!(
+                                payload,
+                                HirType::Function(_, _)
+                                    | HirType::CallableFunction(..)
+                                    | HirType::FunctionWithThis(_, _)
+                            ) {
                                 let present = if nullable {
-                                    HirExpr::NullableValue(Box::new(HirExpr::Var(parameter.clone())), payload.clone())
+                                    HirExpr::NullableValue(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        payload.clone(),
+                                    )
                                 } else {
-                                    HirExpr::OptionalValue(Box::new(HirExpr::Var(parameter.clone())), payload.clone())
+                                    HirExpr::OptionalValue(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        payload.clone(),
+                                    )
                                 };
                                 HirExpr::Conditional(
                                     Box::new(Self::function_pointer_is_undefined(present, payload)),
@@ -3068,9 +3384,17 @@ impl<'a> FnLowerer<'a> {
                                 "`typeof` requires one statically known runtime category, got {operand_type:?}"
                             ));
                         };
-                        if matches!(&operand_type, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
+                            if matches!(
+                                &operand_type,
+                                HirType::Function(_, _)
+                                    | HirType::CallableFunction(..)
+                                    | HirType::FunctionWithThis(_, _)
+                            ) {
                             HirExpr::Conditional(
-                                Box::new(Self::function_pointer_is_undefined(value, &operand_type)),
+                                    Box::new(Self::function_pointer_is_undefined(
+                                        value,
+                                        &operand_type,
+                                    )),
                                 Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
                                 Box::new(HirExpr::Lit(HirLit::Str("function".into()))),
                                 HirType::Str,
@@ -3125,17 +3449,23 @@ impl<'a> FnLowerer<'a> {
             Expr::Cond(conditional) => {
                 let undefined_default_binding = if let Expr::Bin(test) = conditional.test.as_ref() {
                     if test.op == BinaryOp::EqEqEq && !self.scope.contains_key("undefined") {
-                        match (test.left.as_ref(), test.right.as_ref(), conditional.alt.as_ref()) {
-                            (Expr::Ident(value), Expr::Ident(undefined), Expr::Ident(alternate))
-                                if undefined.sym == *"undefined"
-                                    && value.sym == alternate.sym =>
-                            {
+                        match (
+                            test.left.as_ref(),
+                            test.right.as_ref(),
+                            conditional.alt.as_ref(),
+                        ) {
+                            (
+                                Expr::Ident(value),
+                                Expr::Ident(undefined),
+                                Expr::Ident(alternate),
+                            ) if undefined.sym == *"undefined" && value.sym == alternate.sym => {
                                 Some(alternate)
                             }
-                            (Expr::Ident(undefined), Expr::Ident(value), Expr::Ident(alternate))
-                                if undefined.sym == *"undefined"
-                                    && value.sym == alternate.sym =>
-                            {
+                            (
+                                Expr::Ident(undefined),
+                                Expr::Ident(value),
+                                Expr::Ident(alternate),
+                            ) if undefined.sym == *"undefined" && value.sym == alternate.sym => {
                                 Some(alternate)
                             }
                             _ => None,
@@ -3154,7 +3484,9 @@ impl<'a> FnLowerer<'a> {
                 let optional_narrowing = self.optional_undefined_narrowing(&conditional.test);
                 let union_narrowing = self.union_narrowing(&conditional.test);
                 let branch_union = |truth: bool| {
-                    union_narrowing.as_ref().map(|(targets, equal, complement)| {
+                    union_narrowing
+                        .as_ref()
+                        .map(|(targets, equal, complement)| {
                         targets
                             .iter()
                             .map(|target| UnionNarrowingTarget {
@@ -3180,9 +3512,8 @@ impl<'a> FnLowerer<'a> {
                 let branch_optional = |truth: bool| {
                     optional_narrowing.as_ref().and_then(
                         |(name, payload, present_when_true, absence_kind)| {
-                            (truth == *present_when_true).then(|| {
-                                (name.clone(), payload.clone(), *absence_kind)
-                            })
+                            (truth == *present_when_true)
+                                .then(|| (name.clone(), payload.clone(), *absence_kind))
                         },
                     )
                 };
@@ -3195,8 +3526,10 @@ impl<'a> FnLowerer<'a> {
                 let still_valid = |name: &Symbol| {
                     condition_versions.get(name) == self.narrowing_write_versions.get(name)
                 };
-                let consequent_optional = consequent_optional.filter(|(name, _, _)| still_valid(name));
-                let alternate_optional = alternate_optional.filter(|(name, _, _)| still_valid(name));
+                let consequent_optional =
+                    consequent_optional.filter(|(name, _, _)| still_valid(name));
+                let alternate_optional =
+                    alternate_optional.filter(|(name, _, _)| still_valid(name));
                 let saved_narrowings = self.save_narrowings();
                 let mut consequent = self.lower_expr_with_union_narrowing(
                     &conditional.cons,
@@ -3220,9 +3553,15 @@ impl<'a> FnLowerer<'a> {
                     let result = match (&consequent_type, &alternate_type) {
                         // `null | undefined` (a nested `c ? null : undefined`)
                         // joined with a payload is that payload's `Nullish`.
-                        (HirType::Optional(absent), payload) | (payload, HirType::Optional(absent))
+                        (HirType::Optional(absent), payload)
+                        | (payload, HirType::Optional(absent))
                             if **absent == HirType::Null
-                                && !matches!(payload, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) =>
+                                && !matches!(
+                                    payload,
+                                    HirType::Optional(_)
+                                        | HirType::Nullable(_)
+                                        | HirType::Nullish(_)
+                                ) =>
                         {
                             HirType::Nullish(Box::new(payload.clone()))
                         }
@@ -3245,11 +3584,13 @@ impl<'a> FnLowerer<'a> {
                     consequent = self.coerce_to_declared(&result, consequent)?;
                     alternate = self.coerce_to_declared(&result, alternate)?;
                     result
-                } else if matches!(&consequent_type, HirType::Union(members) if members.contains(&alternate_type)) {
+                } else if matches!(&consequent_type, HirType::Union(members) if members.contains(&alternate_type))
+                {
                     // `c ? (d ? A : B) : A`: the plain branch joins the union.
                     alternate = self.coerce_to_declared(&consequent_type, alternate)?;
                     consequent_type
-                } else if matches!(&alternate_type, HirType::Union(members) if members.contains(&consequent_type)) {
+                } else if matches!(&alternate_type, HirType::Union(members) if members.contains(&consequent_type))
+                {
                     consequent = self.coerce_to_declared(&alternate_type, consequent)?;
                     alternate_type
                 } else {
@@ -3281,11 +3622,11 @@ impl<'a> FnLowerer<'a> {
             Expr::Fn(function) => self.lower_function_expression(function, None),
 
             Expr::Array(array_lit) => {
-                if array_lit
-                    .elems
-                    .iter()
-                    .all(|element| element.as_ref().is_none_or(|element| element.spread.is_none()))
-                {
+                if array_lit.elems.iter().all(|element| {
+                    element
+                        .as_ref()
+                        .is_none_or(|element| element.spread.is_none())
+                }) {
                     let values = array_lit
                         .elems
                         .iter()
@@ -3294,6 +3635,20 @@ impl<'a> FnLowerer<'a> {
                             Some(element) => self.lower_expr(&element.expr),
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    if has_dynamic_storage(expr.span()) {
+                        let segments = values
+                            .into_iter()
+                            .map(|value| {
+                                if matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
+                                    Ok(ArrayLitSegment::Hole)
+                                } else {
+                                    let ty = self.infer_expr_type(&value)?;
+                                    Ok(ArrayLitSegment::Value(value, ty))
+                                }
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        return self.lower_dynamic_storage_array(segments);
+                    }
                     let preserve_order = values.iter().any(contains_await);
                     let mut bindings = Vec::new();
                     let values = if preserve_order {
@@ -3332,11 +3687,6 @@ impl<'a> FnLowerer<'a> {
                 // segment is seen first. This is what lets `[0, ...anyArr]`
                 // (a concrete element *before* an `any[]` spread) resolve
                 // the same way `[...anyArr, 0]` already does.
-                enum ArrayLitSegment {
-                    Hole,
-                    Value(HirExpr, HirType),
-                    Spread(HirExpr, HirType),
-                }
                 let mut segments = Vec::with_capacity(array_lit.elems.len());
                 for element in &array_lit.elems {
                     let Some(element) = element else {
@@ -3352,16 +3702,20 @@ impl<'a> FnLowerer<'a> {
                         // a typed array up front.
                         let mut spread_source_type = self.infer_expr_type(&value)?;
                         if let HirType::Union(members) = &spread_source_type {
-                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            if members
+                                .iter()
+                                .all(|member| matches!(member, HirType::Array(_)))
+                            {
                                 let (flattened, flattened_type) =
                                     self.lower_union_array_sequence(value, members)?;
                                 value = flattened;
                                 spread_source_type = flattened_type;
                             }
                         }
-                        if let Some((collected, _)) = self
-                            .collect_generator_for_array_spread(value.clone(), &spread_source_type)?
-                        {
+                        if let Some((collected, _)) = self.collect_generator_for_array_spread(
+                            value.clone(),
+                            &spread_source_type,
+                        )? {
                             value = collected;
                         } else if let HirType::Tuple(elements) = &spread_source_type {
                             // A typed tuple can be a contextual prefix of a longer
@@ -3373,10 +3727,15 @@ impl<'a> FnLowerer<'a> {
                             // decodes element by element, like the `Array<Json>` copy methods use.
                             // A `Map`/`Set` (wrapper or host collection) yields its entries.
                             value = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_map_or_set_entries".to_string())),
+                                Box::new(HirExpr::Var(
+                                    "__thaw_json_map_or_set_entries".to_string(),
+                                )),
                                 vec![value],
                             );
-                            value = self.coerce_to_declared(&HirType::Array(Box::new(HirType::Json)), value)?;
+                            value = self.coerce_to_declared(
+                                &HirType::Array(Box::new(HirType::Json)),
+                                value,
+                            )?;
                         } else if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
@@ -3448,11 +3807,18 @@ impl<'a> FnLowerer<'a> {
                                 ],
                             )],
                         );
-                        segments.push(ArrayLitSegment::Spread(value, spread_element.as_ref().clone()));
+                        segments.push(ArrayLitSegment::Spread(
+                            value,
+                            spread_element.as_ref().clone(),
+                        ));
                     } else {
                         let actual = self.infer_expr_type(&value)?;
                         segments.push(ArrayLitSegment::Value(value, actual));
                     }
+                }
+
+                if has_dynamic_storage(expr.span()) {
+                    return self.lower_dynamic_storage_array(segments);
                 }
 
                 // Phase 2 -- resolve: fold every segment's type into one
@@ -3463,7 +3829,10 @@ impl<'a> FnLowerer<'a> {
                 // type-checked left-to-right before still resolves to the
                 // identical type (that resolution is a special case of this
                 // reduce), so this only widens acceptance, never narrows it.
-                fn widen_array_element_type(existing: HirType, next: HirType) -> Result<HirType, String> {
+                fn widen_array_element_type(
+                    existing: HirType,
+                    next: HirType,
+                ) -> Result<HirType, String> {
                     if existing == next {
                         return Ok(existing);
                     }
@@ -3482,13 +3851,17 @@ impl<'a> FnLowerer<'a> {
                     if existing == HirType::Json || next == HirType::Json {
                         return Ok(HirType::Json);
                     }
-                    Err(format!("array element type {next:?} does not match {existing:?}"))
+                    Err(format!(
+                        "array element type {next:?} does not match {existing:?}"
+                    ))
                 }
                 let mut element_type: Option<HirType> = None;
                 for segment in &segments {
                     let next = match segment {
                         ArrayLitSegment::Hole => continue,
-                        ArrayLitSegment::Value(_, ty) | ArrayLitSegment::Spread(_, ty) => ty.clone(),
+                        ArrayLitSegment::Value(_, ty) | ArrayLitSegment::Spread(_, ty) => {
+                            ty.clone()
+                        }
                     };
                     element_type = Some(match element_type {
                         None => next,
@@ -3510,14 +3883,19 @@ impl<'a> FnLowerer<'a> {
                         }
                         ArrayLitSegment::Spread(mut value, spread_element) => {
                             if !pending.is_empty() {
-                                let values = std::mem::take(&mut pending).into_iter()
-                                    .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
+                                let values = std::mem::take(&mut pending)
+                                    .into_iter()
+                                    .map(|item| {
+                                        if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
                                         Ok(item)
                                     } else {
                                         self.coerce_array_insert_value(item, &element_type)
+                                        }
                                     })
                                     .collect::<Result<Vec<_>, String>>()?;
-                                parts.push(self.lower_native_array_literal(values, element_type.clone())?);
+                                parts.push(
+                                    self.lower_native_array_literal(values, element_type.clone())?,
+                                );
                             }
                             if spread_element != element_type {
                                 // Only reachable when a *later* segment
@@ -3527,10 +3905,8 @@ impl<'a> FnLowerer<'a> {
                                 // left-to-right loop already accepted (it
                                 // required exact equality at the point each
                                 // spread was seen).
-                                let parameter = format!(
-                                    "__thaw_array_lit_spread_widen_{}",
-                                    self.next_binding
-                                );
+                                let parameter =
+                                    format!("__thaw_array_lit_spread_widen_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(parameter.clone(), spread_element.clone());
                                 let converted = self.coerce_to_declared(
@@ -3560,11 +3936,14 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if !pending.is_empty() {
-                    let values = pending.into_iter()
-                        .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
+                    let values = pending
+                        .into_iter()
+                        .map(|item| {
+                            if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
                             Ok(item)
                         } else {
                             self.coerce_array_insert_value(item, &element_type)
+                            }
                         })
                         .collect::<Result<Vec<_>, String>>()?;
                     parts.push(self.lower_native_array_literal(values, element_type.clone())?);
@@ -3621,11 +4000,15 @@ impl<'a> FnLowerer<'a> {
                     base_name
                 } else {
                     self.class_super_instance_accessor_owner(&base_type, &property)
-                        .ok_or_else(|| format!("base class `{base_name}` has no accessor `{property}`"))?
+                        .ok_or_else(|| {
+                            format!("base class `{base_name}` has no accessor `{property}`")
+                        })?
                 };
                 let symbol = class_getter_symbol(&owner, &property, self.class_static_context);
-                if !self.signatures.get(&symbol).is_some_and(|signature|
-                    self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str())) {
+                if !self.signatures.get(&symbol).is_some_and(|signature| {
+                    self.class_static_context
+                        || signature.accessor_owner.as_deref() == Some(owner.as_str())
+                }) {
                     return Err(format!("base class `{owner}` has no getter `{property}`"));
                 }
                 Ok(HirExpr::Call(
@@ -3634,7 +4017,8 @@ impl<'a> FnLowerer<'a> {
                         Vec::new()
                     } else {
                         vec![self.assert_class_accessor_receiver(
-                            HirExpr::Var(self.resolve_binding("this")), &owner,
+                            HirExpr::Var(self.resolve_binding("this")),
+                            &owner,
                         )]
                     },
                 ))
@@ -3753,8 +4137,8 @@ impl<'a> FnLowerer<'a> {
                                 self.coerce_to_declared(&HirType::Json, value)
                             })
                             .collect::<Result<Vec<_>, String>>()?;
-                        let values = self
-                            .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+                        let values =
+                            self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
                         let constructor = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".into())),
                             vec![HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
@@ -3770,9 +4154,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("`new RegExp()` expects one or two arguments".into());
                         }
                         if args.iter().any(|argument| argument.spread.is_some()) {
-                            return Err(
-                                "`new RegExp()` does not support spread arguments".into()
-                            );
+                            return Err("`new RegExp()` does not support spread arguments".into());
                         }
                         let source = self.lower_expr(&args[0].expr)?;
                         let source = self.coerce_primitive_to_string(source)?;
@@ -3802,8 +4184,8 @@ impl<'a> FnLowerer<'a> {
                         // surface separate. Entries live until the request
                         // arena resets; there is no mid-request native GC.
                         let is_weak = matches!(class.sym.as_ref(), "WeakMap" | "WeakSet");
-                        let key_validator: fn(&HirType) -> Result<&'static str, String> =
-                            if is_weak {
+                        let key_validator: fn(&HirType) -> Result<&'static str, String> = if is_weak
+                        {
                                 weak_key_intrinsic_suffix
                             } else {
                                 map_key_intrinsic_suffix
@@ -3837,7 +4219,7 @@ impl<'a> FnLowerer<'a> {
                                     return Err(format!(
                                         "`new {}<K, V>()` requires explicit type arguments",
                                         class.sym
-                                    ))
+                                    ));
                                 }
                             };
                             let Some(argument) = args.first() else {
@@ -3862,24 +4244,34 @@ impl<'a> FnLowerer<'a> {
                             let actual_type = self.infer_expr_type(&entries)?;
                             if !is_weak {
                                 if let HirType::Union(members) = &actual_type {
-                                    if members.iter().all(|member| matches!(member, HirType::Array(_))) {
-                                        let source_name = format!("__thaw_union_map_source_{}", self.next_binding);
+                                    if members
+                                        .iter()
+                                        .all(|member| matches!(member, HirType::Array(_)))
+                                    {
+                                        let source_name = format!(
+                                            "__thaw_union_map_source_{}",
+                                            self.next_binding
+                                        );
                                         self.next_binding += 1;
                                         self.scope.insert(source_name.clone(), actual_type.clone());
                                         let mut branches = Vec::with_capacity(members.len());
                                         for (index, member) in members.iter().enumerate() {
-                                            let HirType::Array(element) = member else { unreachable!() };
+                                            let HirType::Array(element) = member else {
+                                                unreachable!()
+                                            };
                                             let HirType::Tuple(pair) = element.as_ref() else {
                                                 return Err(format!(
                                                     "Map constructor union member must contain [key, value] entries, got {element:?}"
                                                 ));
                                             };
-                                            let [inferred_key, inferred_value] = pair.as_slice() else {
+                                            let [inferred_key, inferred_value] = pair.as_slice()
+                                            else {
                                                 return Err(format!(
                                                     "Map constructor union member must contain [key, value] entries, got {element:?}"
                                                 ));
                                             };
-                                            let (key_type, value_type) = explicit_types.clone().unwrap_or_else(|| {
+                                            let (key_type, value_type) =
+                                                explicit_types.clone().unwrap_or_else(|| {
                                                 (inferred_key.clone(), inferred_value.clone())
                                             });
                                             let map_type = HirType::Map(
@@ -3897,7 +4289,10 @@ impl<'a> FnLowerer<'a> {
                                                 map_type,
                                                 key_validator(&key_type)?,
                                                 key_type,
-                                                Some((inferred_key.clone(), inferred_value.clone())),
+                                                Some((
+                                                    inferred_key.clone(),
+                                                    inferred_value.clone(),
+                                                )),
                                                 true,
                                             )?);
                                         }
@@ -3914,7 +4309,8 @@ impl<'a> FnLowerer<'a> {
                                 }
                             }
                             let explicit_target = explicit_types.is_some();
-                            let (key_type, value_type) = if let Some(types) = explicit_types.clone() {
+                            let (key_type, value_type) = if let Some(types) = explicit_types.clone()
+                            {
                                 types
                             } else {
                                 let HirType::Array(element) = &actual_type else {
@@ -3952,7 +4348,10 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Array(Box::new(target_pair_type.clone()));
                             if is_weak {
                                 if let Some((collected, _)) = self
-                                    .collect_generator_for_array_spread(entries.clone(), &actual_type)?
+                                    .collect_generator_for_array_spread(
+                                        entries.clone(),
+                                        &actual_type,
+                                    )?
                                 {
                                     entries = collected;
                                 }
@@ -4058,12 +4457,12 @@ impl<'a> FnLowerer<'a> {
                                 return Err(format!(
                                     "`new {}<T>()` requires an explicit type argument",
                                     class.sym
-                                ))
+                                ));
                             }
                         };
                         let Some(argument) = args.first() else {
-                            let element_type = explicit_type
-                                .expect("an untyped Set constructor has an argument");
+                            let element_type =
+                                explicit_type.expect("an untyped Set constructor has an argument");
                             key_validator(&element_type)?;
                             let set_type = if is_weak {
                                 HirType::WeakSet(Box::new(element_type))
@@ -4082,13 +4481,19 @@ impl<'a> FnLowerer<'a> {
                         let actual_type = self.infer_expr_type(&iterable)?;
                         if !is_weak {
                             if let HirType::Union(members) = &actual_type {
-                                if members.iter().all(|member| matches!(member, HirType::Array(_))) {
-                                    let source_name = format!("__thaw_union_set_source_{}", self.next_binding);
+                                if members
+                                    .iter()
+                                    .all(|member| matches!(member, HirType::Array(_)))
+                                {
+                                    let source_name =
+                                        format!("__thaw_union_set_source_{}", self.next_binding);
                                     self.next_binding += 1;
                                     self.scope.insert(source_name.clone(), actual_type.clone());
                                     let mut branches = Vec::with_capacity(members.len());
                                     for (index, member) in members.iter().enumerate() {
-                                        let HirType::Array(inferred_element) = member else { unreachable!() };
+                                        let HirType::Array(inferred_element) = member else {
+                                            unreachable!()
+                                        };
                                         let element_type = explicit_type
                                             .clone()
                                             .unwrap_or_else(|| inferred_element.as_ref().clone());
@@ -4139,9 +4544,10 @@ impl<'a> FnLowerer<'a> {
                         };
                         let iterable_type = HirType::Array(Box::new(element_type.clone()));
                         if is_weak {
-                            if let Some((collected, _)) = self
-                                .collect_generator_for_array_spread(iterable.clone(), &actual_type)?
-                            {
+                            if let Some((collected, _)) = self.collect_generator_for_array_spread(
+                                iterable.clone(),
+                                &actual_type,
+                            )? {
                                 iterable = collected;
                             }
                             self.expect_type(
@@ -4162,15 +4568,14 @@ impl<'a> FnLowerer<'a> {
                         }
 
                         let mut source_array_type = actual_type.clone();
-                        if let Some((collected, collected_type)) = self
-                            .collect_generator_for_array_spread(iterable.clone(), &actual_type)?
+                        if let Some((collected, collected_type)) =
+                            self.collect_generator_for_array_spread(iterable.clone(), &actual_type)?
                         {
                             iterable = collected;
                             // The collector reports the element type.
                             source_array_type = HirType::Array(Box::new(collected_type));
                         }
-                        let source_element_type =
-                            if explicit_target
+                        let source_element_type = if explicit_target
                                 && matches!(&iterable, HirExpr::ArrayLit(values) if values.is_empty())
                             {
                                 source_array_type = iterable_type.clone();
@@ -4234,7 +4639,11 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         self.scope.insert(date_name.clone(), date_type.clone());
                         return Ok(HirExpr::Block(vec![
-                            HirStmt::Let(date_name.clone(), date_type.clone(), HirExpr::ClassAlloc(date_type.clone())),
+                            HirStmt::Let(
+                                date_name.clone(),
+                                date_type.clone(),
+                                HirExpr::ClassAlloc(date_type.clone()),
+                            ),
                             HirStmt::Expr(HirExpr::PropAssign(
                                 Box::new(HirExpr::Var(date_name.clone())),
                                 date_type,
@@ -4251,35 +4660,49 @@ impl<'a> FnLowerer<'a> {
                         let args = new_expr.args.clone().unwrap_or_default();
                         let (arguments, mut bindings) =
                             self.lower_error_constructor_arguments(&args, "SuppressedError")?;
-                        let error = arguments.first().cloned()
+                        let error = arguments
+                            .first()
+                            .cloned()
                             .unwrap_or(HirExpr::Lit(HirLit::Undefined));
-                        let suppressed = arguments.get(1).cloned()
+                        let suppressed = arguments
+                            .get(1)
+                            .cloned()
                             .unwrap_or(HirExpr::Lit(HirLit::Undefined));
                         let (message_present, message) = match arguments.get(2) {
                             Some(message) => {
-                                let missing = self.lower_strict_equality(message.clone(),
-                                    HirExpr::Lit(HirLit::Undefined))?;
+                                let missing = self.lower_strict_equality(
+                                    message.clone(),
+                                    HirExpr::Lit(HirLit::Undefined),
+                                )?;
                                 let text = self.coerce_primitive_to_string(message.clone())?;
-                                (HirExpr::Conditional(Box::new(missing.clone()),
+                                (
+                                    HirExpr::Conditional(
+                                        Box::new(missing.clone()),
                                     Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                                    Box::new(HirExpr::Lit(HirLit::Bool(true))), HirType::Bool),
-                                 HirExpr::Conditional(Box::new(missing),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                        HirType::Bool,
+                                    ),
+                                    HirExpr::Conditional(
+                                        Box::new(missing),
                                     Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
-                                    Box::new(text), HirType::Str))
+                                        Box::new(text),
+                                        HirType::Str,
+                                    ),
+                                )
                             }
-                            None => (HirExpr::Lit(HirLit::Bool(false)),
-                                HirExpr::Lit(HirLit::Str(String::new()))),
+                            None => (
+                                HirExpr::Lit(HirLit::Bool(false)),
+                                HirExpr::Lit(HirLit::Str(String::new())),
+                            ),
                         };
-                        let message_name = format!("__thaw_suppressed_message_{}", self.next_binding);
+                        let message_name =
+                            format!("__thaw_suppressed_message_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(message_name.clone(), HirType::Str);
                         bindings.push((message_name.clone(), HirType::Str, message));
                         let marker = "__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error";
                         let fields = vec![
-                            (
-                                marker.to_string(),
-                                HirExpr::Lit(HirLit::Bool(true)),
-                            ),
+                            (marker.to_string(), HirExpr::Lit(HirLit::Bool(true))),
                             ("message".to_string(), HirExpr::Var(message_name)),
                             (
                                 "name".to_string(),
@@ -4288,8 +4711,8 @@ impl<'a> FnLowerer<'a> {
                             ("error".to_string(), error),
                             ("suppressed".to_string(), suppressed),
                         ];
-                        let result = self.lower_trusted_error_fields(fields, message_present,
-                            None)?;
+                        let result =
+                            self.lower_trusted_error_fields(fields, message_present, None)?;
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if class.sym == *"AggregateError" {
@@ -4301,16 +4724,13 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         if args.is_empty() {
-                            return Err(
-                                "`new AggregateError()` expects an errors iterable".into()
-                            );
+                            return Err("`new AggregateError()` expects an errors iterable".into());
                         }
                         let errors = self.lower_expr(&args[0].expr)?;
                         let errors_type = self.infer_expr_type(&errors)?;
                         let errors_name = format!("__thaw_aggregate_errors_{}", self.next_binding);
                         self.next_binding += 1;
-                        self.scope
-                            .insert(errors_name.clone(), errors_type.clone());
+                        self.scope.insert(errors_name.clone(), errors_type.clone());
                         let mut bindings = vec![(errors_name.clone(), errors_type.clone(), errors)];
 
                         let message = if let Some(argument) = args.get(1) {
@@ -4350,128 +4770,213 @@ impl<'a> FnLowerer<'a> {
                         let (message_present, message) = match message {
                             Some(name) => {
                                 let raw = HirExpr::Var(name);
-                                let missing = self.lower_strict_equality(raw.clone(),
-                                    HirExpr::Lit(HirLit::Undefined))?;
+                                let missing = self.lower_strict_equality(
+                                    raw.clone(),
+                                    HirExpr::Lit(HirLit::Undefined),
+                                )?;
                                 let text = self.coerce_primitive_to_string(raw)?;
-                                (HirExpr::Conditional(Box::new(missing.clone()),
+                                (
+                                    HirExpr::Conditional(
+                                        Box::new(missing.clone()),
                                     Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                                    Box::new(HirExpr::Lit(HirLit::Bool(true))), HirType::Bool),
-                                 HirExpr::Conditional(Box::new(missing),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                        HirType::Bool,
+                                    ),
+                                    HirExpr::Conditional(
+                                        Box::new(missing),
                                     Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
-                                    Box::new(text), HirType::Str))
+                                        Box::new(text),
+                                        HirType::Str,
+                                    ),
+                                )
                             }
-                            None => (HirExpr::Lit(HirLit::Bool(false)),
-                                HirExpr::Lit(HirLit::Str(String::new()))),
+                            None => (
+                                HirExpr::Lit(HirLit::Bool(false)),
+                                HirExpr::Lit(HirLit::Str(String::new())),
+                            ),
                         };
-                        let message_name = format!("__thaw_aggregate_message_text_{}", self.next_binding);
+                        let message_name =
+                            format!("__thaw_aggregate_message_text_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(message_name.clone(), HirType::Str);
                         bindings.push((message_name.clone(), HirType::Str, message));
                         let marker = "__thaw_class_identity_\u{1e}AggregateError\u{1f}Error";
                         let mut fields = vec![
-                            (
-                                marker.to_string(),
-                                HirExpr::Lit(HirLit::Bool(true)),
-                            ),
+                            (marker.to_string(), HirExpr::Lit(HirLit::Bool(true))),
                             ("message".to_string(), HirExpr::Var(message_name)),
                             (
                                 "name".to_string(),
                                 HirExpr::Lit(HirLit::Str("AggregateError".to_string())),
                             ),
-                            ("errors".to_string(), self.native_aggregate_errors_as_json(
-                                HirExpr::Var(errors_name), &errors_type,
-                            )?),
+                            (
+                                "errors".to_string(),
+                                self.native_aggregate_errors_as_json(
+                                    HirExpr::Var(errors_name),
+                                    &errors_type,
+                                )?,
+                            ),
                         ];
                         let mut cause_present = None;
                         if let Some((name, options_type)) = options {
                             let source = HirExpr::Var(name);
                             let (source, options_type) = if let Some(live) =
-                                self.native_error_options_live_json(source.clone(), &options_type)? {
+                                self.native_error_options_live_json(source.clone(), &options_type)?
+                            {
                                 // Bind the live Host after message conversion;
                                 // HasProperty and Get(cause) share this value.
-                                let live_name = format!("__thaw_aggregate_live_options_{}",
-                                    self.next_binding);
+                                let live_name =
+                                    format!("__thaw_aggregate_live_options_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(live_name.clone(), HirType::Json);
                                 bindings.push((live_name.clone(), HirType::Json, live));
                                 (HirExpr::Var(live_name), HirType::Json)
-                            } else { (source, options_type) };
+                            } else {
+                                (source, options_type)
+                            };
                             let key = HirExpr::Lit(HirLit::Str("cause".into()));
                             let (present, cause) = match &options_type {
                                 HirType::Object(option_fields) => {
                                     if option_fields.iter().any(|(field, _)| field == "cause") {
-                                        (self.lower_has_own_value(source.clone(), key.clone())?,
-                                         Some(HirExpr::PropAccess(Box::new(source.clone()),
-                                             options_type.clone(), "cause".into())))
+                                        (
+                                            self.lower_has_own_value(source.clone(), key.clone())?,
+                                            Some(HirExpr::PropAccess(
+                                                Box::new(source.clone()),
+                                                options_type.clone(),
+                                                "cause".into(),
+                                            )),
+                                        )
                                     } else if let Some(owner) =
-                                        self.class_instance_accessor_owner(&options_type, "cause") {
+                                        self.class_instance_accessor_owner(&options_type, "cause")
+                                    {
                                         let symbol = class_getter_symbol(&owner, "cause", false);
-                                        let getter = if self.signatures.get(&symbol).is_some_and(|signature|
-                                            signature.accessor_owner.as_deref() == Some(owner.as_str())) {
-                                            HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![
-                                                self.assert_class_accessor_receiver(source.clone(), &owner),
-                                            ])
-                                        } else { HirExpr::Lit(HirLit::Undefined) };
+                                        let getter = if self.signatures.get(&symbol).is_some_and(
+                                            |signature| {
+                                                signature.accessor_owner.as_deref()
+                                                    == Some(owner.as_str())
+                                            },
+                                        ) {
+                                            HirExpr::Call(
+                                                Box::new(HirExpr::Var(symbol)),
+                                                vec![self.assert_class_accessor_receiver(
+                                                    source.clone(),
+                                                    &owner,
+                                                )],
+                                            )
+                                        } else {
+                                            HirExpr::Lit(HirLit::Undefined)
+                                        };
                                         (HirExpr::Lit(HirLit::Bool(true)), Some(getter))
                                     } else {
-                                        let (present, value) = self.native_error_options_cause(
-                                            source.clone(), &options_type,
-                                        )?.ok_or("AggregateError options object lacks cause lookup")?;
+                                        let (present, value) = self
+                                            .native_error_options_cause(
+                                                source.clone(),
+                                                &options_type,
+                                            )?
+                                            .ok_or(
+                                                "AggregateError options object lacks cause lookup",
+                                            )?;
                                         (present, Some(value))
                                     }
                                 }
                                 HirType::Json | HirType::Dictionary(_) => {
-                                    let object_like = HirExpr::Call(Box::new(HirExpr::Var(
-                                        "__thaw_json_is_object_like".into())), vec![source.clone()]);
-                                    let has = HirExpr::Call(Box::new(HirExpr::Var(
-                                        "__thaw_json_has".into())), vec![source.clone(), key.clone()]);
-                                    (HirExpr::Conditional(Box::new(object_like), Box::new(has),
-                                        Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool),
-                                     Some(HirExpr::JsonKey(Box::new(source.clone()), Box::new(key.clone()))))
+                                    let object_like = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_is_object_like".into())),
+                                        vec![source.clone()],
+                                    );
+                                    let has = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_has".into())),
+                                        vec![source.clone(), key.clone()],
+                                    );
+                                    (
+                                        HirExpr::Conditional(
+                                            Box::new(object_like),
+                                            Box::new(has),
+                                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                            HirType::Bool,
+                                        ),
+                                        Some(HirExpr::JsonKey(
+                                            Box::new(source.clone()),
+                                            Box::new(key.clone()),
+                                        )),
+                                    )
                                 }
                                 HirType::JsValue | HirType::Dynamic => {
-                                    let json_name = format!("__thaw_aggregate_options_json_{}", self.next_binding);
+                                    let json_name = format!(
+                                        "__thaw_aggregate_options_json_{}",
+                                        self.next_binding
+                                    );
                                     self.next_binding += 1;
                                     self.scope.insert(json_name.clone(), HirType::Json);
                                     let json_source = if matches!(options_type, HirType::JsValue) {
                                         // Keep the original JS options object and its
                                         // prototype/getter authority; ordinary conversion can
                                         // assimilate a Promise or snapshot the object.
-                                        HirExpr::Call(Box::new(HirExpr::Var(
-                                            "__thaw_exception_json_from_handle".into())),
-                                            vec![source.clone()])
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_exception_json_from_handle".into(),
+                                            )),
+                                            vec![source.clone()],
+                                        )
                                     } else {
                                         self.coerce_to_declared(&HirType::Json, source.clone())?
                                     };
                                     bindings.push((json_name.clone(), HirType::Json, json_source));
                                     let json_source = HirExpr::Var(json_name);
-                                    let object_like = HirExpr::Call(Box::new(HirExpr::Var(
-                                        "__thaw_json_is_object_like".into())), vec![json_source.clone()]);
-                                    let has = HirExpr::Call(Box::new(HirExpr::Var(
-                                        "__thaw_json_has".into())), vec![json_source.clone(), key.clone()]);
-                                    (HirExpr::Conditional(Box::new(object_like), Box::new(has),
-                                        Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool),
-                                     Some(HirExpr::JsonKey(Box::new(json_source), Box::new(key.clone()))))
+                                    let object_like = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_is_object_like".into())),
+                                        vec![json_source.clone()],
+                                    );
+                                    let has = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_has".into())),
+                                        vec![json_source.clone(), key.clone()],
+                                    );
+                                    (
+                                        HirExpr::Conditional(
+                                            Box::new(object_like),
+                                            Box::new(has),
+                                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                            HirType::Bool,
+                                        ),
+                                        Some(HirExpr::JsonKey(
+                                            Box::new(json_source),
+                                            Box::new(key.clone()),
+                                        )),
+                                    )
                                 }
                                 _ => (HirExpr::Lit(HirLit::Bool(false)), None),
                             };
                             if let Some(cause) = cause {
-                                let present_name = format!("__thaw_aggregate_cause_present_{}", self.next_binding);
+                                let present_name =
+                                    format!("__thaw_aggregate_cause_present_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(present_name.clone(), HirType::Bool);
                                 bindings.push((present_name.clone(), HirType::Bool, present));
                                 let visible = self.coerce_to_declared(&HirType::Json, cause)?;
-                                fields.insert(3, ("cause".into(), HirExpr::Conditional(
+                                fields.insert(
+                                    3,
+                                    (
+                                        "cause".into(),
+                                        HirExpr::Conditional(
                                     Box::new(HirExpr::Var(present_name.clone())),
                                     Box::new(visible),
-                                    Box::new(HirExpr::Call(Box::new(HirExpr::Var(
-                                        "__thaw_json_undefined".into())), Vec::new())),
+                                            Box::new(HirExpr::Call(
+                                                Box::new(HirExpr::Var(
+                                                    "__thaw_json_undefined".into(),
+                                                )),
+                                                Vec::new(),
+                                            )),
                                     HirType::Json,
-                                )));
+                                        ),
+                                    ),
+                                );
                                 cause_present = Some(HirExpr::Var(present_name));
                             }
                         }
-                        let result = self.lower_trusted_error_fields(fields, message_present, cause_present)?;
+                        let result = self.lower_trusted_error_fields(
+                            fields,
+                            message_present,
+                            cause_present,
+                        )?;
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if matches!(
@@ -4490,10 +4995,7 @@ impl<'a> FnLowerer<'a> {
                     let constructor = class_constructor_symbol(class.sym.as_ref());
                     if let Some(signature) = self.signatures.get(&constructor) {
                         if signature.abstract_class_constructor {
-                            return Err(format!(
-                                "cannot construct abstract class `{}`",
-                                class.sym
-                            ));
+                            return Err(format!("cannot construct abstract class `{}`", class.sym));
                         }
                         let mut callee = class.clone();
                         callee.sym = constructor.into();
@@ -4551,8 +5053,8 @@ impl<'a> FnLowerer<'a> {
                                     self.coerce_to_declared(&HirType::Json, value)
                                 })
                                 .collect::<Result<Vec<_>, String>>()?;
-                            let values = self
-                                .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+                            let values =
+                                self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
                             let constructor = HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".into())),
                                 vec![HirExpr::Lit(HirLit::Str(qualified))],
@@ -4598,7 +5100,9 @@ impl<'a> FnLowerer<'a> {
                             return Err("`new WeakRef()` does not support spread arguments".into());
                         }
                         let [target] = args else {
-                            return Err("`new WeakRef()` expects exactly one target argument".into());
+                            return Err(
+                                "`new WeakRef()` expects exactly one target argument".into()
+                            );
                         };
                         let target = self.lower_expr(&target.expr)?;
                         return Ok(HirExpr::ArrayLit(vec![target]));
@@ -4853,10 +5357,8 @@ impl<'a> FnLowerer<'a> {
                     };
                     let source_key_type = source_key_type.clone();
                     let source_value_type = source_value_type.clone();
-                    let entry_name = format!(
-                        "__thaw_map_literal_pair_{pair_index}_{}",
-                        self.next_binding
-                    );
+                    let entry_name =
+                        format!("__thaw_map_literal_pair_{pair_index}_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(entry_name.clone(), entry_type.clone());
                     bindings.push((entry_name.clone(), entry_type, entry));
@@ -5004,7 +5506,11 @@ impl<'a> FnLowerer<'a> {
                     allow_json_widening,
                     true,
                 )?;
-                (converted_element, HirExpr::Lit(HirLit::F64(0.0)), Vec::new())
+                (
+                    converted_element,
+                    HirExpr::Lit(HirLit::F64(0.0)),
+                    Vec::new(),
+                )
             };
         loop_body.push(HirStmt::Expr(HirExpr::Call(
             Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
@@ -5023,14 +5529,21 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(
                 map_name.clone(),
                 result_type.clone(),
-                HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_new".to_string())), Vec::new()),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_map_new".to_string())),
+                    Vec::new(),
+                ),
             ),
             HirStmt::Let(
                 length_name.clone(),
                 HirType::F64,
                 HirExpr::ArrayLen(Box::new(var(&source_name))),
             ),
-            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ),
             HirStmt::While(
                 HirExpr::BinOp(
                     BinOp::Lt,
@@ -5093,27 +5606,50 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        let expected_object_fields = expected.and_then(expected_object_fields);
+        if has_dynamic_storage(expr.span()) {
+            self.validate_storage_call_source(expr)?;
+            if let Some(expected) = expected
+                .filter(|ty| !matches!(ty, HirType::Json | HirType::JsValue | HirType::Dynamic))
+            {
+                self.validate_storage_source(expr, expected)?;
+            }
+            if let Expr::Object(object) = expr {
+                if let Some(fields) = expected_object_fields {
+                    return self.lower_dynamic_accessor_object_lit_with_expected_fields(
+                        object,
+                        true,
+                        Some(fields),
+                    );
+                }
+                return self.lower_expr(expr);
+            }
+            if matches!(expr, Expr::Array(_)) {
+                return self.lower_expr(expr);
+            }
+        }
         if let Some(expected) = expected {
             let supplied = match expr {
                 Expr::Arrow(arrow) => Some(arrow.params.len()),
                 Expr::Fn(function) => Some(function.function.params.len()),
                 Expr::Ident(ident) => {
                     let name = self.resolve_binding(ident.sym.as_ref());
-                    (self
-                        .scope
-                        .get(&name)
-                        .is_some_and(|ty| {
-                            matches!(ty, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _))
-                        })
-                        || self.generic_arrows.contains_key(&name)
+                    (self.scope.get(&name).is_some_and(|ty| {
+                        matches!(
+                            ty,
+                            HirType::Function(_, _)
+                                | HirType::CallableFunction(..)
+                                | HirType::FunctionWithThis(_, _)
+                        )
+                    }) || self.generic_arrows.contains_key(&name)
                         || self.generic_named_templates.contains_key(&name)
                         || self.signatures.contains_key(&name))
                     .then_some(usize::MAX)
                 }
                 _ => None,
             };
-            if let Some((params, ret)) = supplied
-                .and_then(|supplied| callback_signature(expected, supplied))
+            if let Some((params, ret)) =
+                supplied.and_then(|supplied| callback_signature(expected, supplied))
             {
                 return self.lower_promise_callback(expr, &params, Some(&ret));
             }
@@ -5146,39 +5682,8 @@ impl<'a> FnLowerer<'a> {
             self.any_object_literal = false;
             return lowered;
         }
-        if let (Expr::Object(object), Some(expected)) = (expr, expected) {
-            let fields = match expected {
-                HirType::Object(fields) => Some(fields.as_slice()),
-                HirType::Optional(payload)
-                | HirType::Nullable(payload)
-                | HirType::Nullish(payload) => match payload.as_ref() {
-                    HirType::Object(fields) => Some(fields.as_slice()),
-                    _ => None,
-                },
-                // A `T | T[]` (or `T | undefined`) parameter -- real:
-                // hapi's `route(route: ServerRoute | ServerRoute[])` --
-                // contextually types an object-literal argument against
-                // its single object member, without which the nested
-                // `handler` callback's parameters get no type and lowering
-                // fails outright. Restricted to exactly one object member:
-                // a discriminated union of several object shapes
-                // (`{ text: string } | { count: number }`) must keep
-                // matching each literal against its own member instead.
-                HirType::Union(elements) => {
-                    let mut objects = elements.iter().filter_map(|element| match element {
-                        HirType::Object(fields) => Some(fields.as_slice()),
-                        _ => None,
-                    });
-                    match (objects.next(), objects.next()) {
-                        (Some(fields), None) => Some(fields),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            if let Some(fields) = fields {
-                return self.lower_object_lit(object, Some(fields));
-            }
+        if let (Expr::Object(object), Some(fields)) = (expr, expected_object_fields) {
+            return self.lower_object_lit(object, Some(fields));
         }
         // `Expr::Await` is included alongside `Expr::Call` -- an awaited
         // expression's own expected type is really about the *resolved*
@@ -5232,11 +5737,16 @@ impl<'a> FnLowerer<'a> {
             // (its element type); any other `{..} as any` keeps its typed lowering.
             Expr::Object(object) if !array_target && object_literal_holds_array(object) => {
                 let lowered = self.lower_expr_with_expected_type(inner, Some(&HirType::Json))?;
-                self.coerce_to_declared_aliasing(&HirType::Json, lowered).map(Some)
+                self.coerce_to_declared_aliasing(&HirType::Json, lowered)
+                    .map(Some)
             }
-            Expr::Array(array) if array.elems.iter().all(|element| {
-                element.as_ref().is_some_and(|element| element.spread.is_none())
-            }) => {
+            Expr::Array(array)
+                if array.elems.iter().all(|element| {
+                    element
+                        .as_ref()
+                        .is_some_and(|element| element.spread.is_none())
+                }) =>
+            {
                 let mut elements = Vec::with_capacity(array.elems.len());
                 for element in array.elems.iter().flatten() {
                     let value = self.lower_expr(&element.expr)?;
@@ -5268,10 +5778,15 @@ fn any_like_assertion_target(ty: &TsType) -> Option<bool> {
     match ty {
         _ if any_keyword(ty) => Some(false),
         TsType::TsArrayType(array) if any_keyword(&array.elem_type) => Some(true),
-        TsType::TsTypeRef(reference) if matches!(&reference.type_name,
+        TsType::TsTypeRef(reference)
+            if matches!(&reference.type_name,
                 swc_ecma_ast::TsEntityName::Ident(name) if name.sym.as_ref() == "Array")
-            && reference.type_params.as_ref().is_some_and(|params|
-                params.params.len() == 1 && any_keyword(&params.params[0])) => Some(true),
+                && reference.type_params.as_ref().is_some_and(|params| {
+                    params.params.len() == 1 && any_keyword(&params.params[0])
+                }) =>
+        {
+            Some(true)
+        }
         TsType::TsParenthesizedType(paren) => any_like_assertion_target(&paren.type_ann),
         _ => None,
     }

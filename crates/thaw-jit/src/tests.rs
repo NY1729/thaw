@@ -85,6 +85,57 @@ mod tests {
         assert!(!call(&null_array, &[f64::from_bits(0), 1.0, 0.0]).error.is_null());
     }
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn array_value_preserves_an_existing_application_handle() {
+        let buffer = [2_u64, 10.0_f64.to_bits(), 20.0_f64.to_bits()];
+        let presence = [2_u64, 1, 1];
+        let data = buffer.as_ptr().cast::<u8>();
+        let mask = presence.as_ptr().cast::<u8>();
+        let handle = [data, mask];
+        let encoded = f64::from_bits((&handle as *const [*const u8; 2]) as usize as u64);
+
+        assert_eq!(array_value(encoded).to_bits(), encoded.to_bits());
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn dynamic_array_result_initializes_application_presence_slot() {
+        unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
+            let output = unsafe { libc::malloc(size.max(16)).cast::<u8>() };
+            if !output.is_null() {
+                unsafe { output.write_bytes(0xa5, size.max(16)) };
+            }
+            output
+        }
+
+        let buffer = unsafe { libc::malloc(16).cast::<u8>() };
+        assert!(!buffer.is_null());
+        unsafe {
+            buffer.cast::<u64>().write(1);
+            buffer.add(8).cast::<f64>().write(7.0);
+        }
+        ARENA_ALLOC.with(|allocator| allocator.set(Some(allocate)));
+        CALL_ERROR.with(|error| error.set(ptr::null()));
+
+        let dynamic = dynamic_array_result(
+            DYNAMIC_NUMBER_ARRAY_TAG,
+            array_result(buffer),
+        );
+        let dynamic_value = dynamic_primitive(dynamic, Some(DYNAMIC_NUMBER_ARRAY_TAG)).unwrap();
+        let handle = dynamic_value.payload as usize as *const *const u8;
+        assert_eq!(unsafe { handle.read() }, buffer);
+        assert!(unsafe { handle.add(1).read() }.is_null());
+
+        DYNAMIC_VALUES.with(|values| values.borrow_mut().remove(&(dynamic.to_bits() as usize)));
+        unsafe {
+            libc::free(handle.cast_mut().cast());
+            libc::free(buffer.cast());
+        }
+        ARENA_ALLOC.with(|allocator| allocator.set(None));
+        CALL_ERROR.with(|error| error.set(ptr::null()));
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }

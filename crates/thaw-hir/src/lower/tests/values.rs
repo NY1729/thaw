@@ -2472,6 +2472,73 @@ fn contextually_types_a_callback_inside_an_object_argument() {
 }
 
 #[test]
+fn dynamic_storage_object_options_keep_contextual_callback_parameters() {
+    let program = lower(
+        r#"
+        interface Options {
+            write?: (chunk: JsValue, encoding: string, done: () => void) => void;
+        }
+        declare function __thaw_typed_js_7772697465(options: Options): void;
+        function main(): void {
+            __thaw_typed_js_7772697465({ write(chunk, encoding, done) {
+                console.log(String(chunk));
+                done();
+            } });
+            __thaw_typed_js_7772697465({ write: (chunk, encoding, done) => {
+                console.log(String(chunk));
+                done();
+            } });
+        }
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap()
+            .body
+    );
+    assert!(
+        body.contains("Function([JsValue, Str, Function([], Void)], Void)"),
+        "the method and arrow parameters retain the contextual signature: {body}"
+    );
+}
+
+#[test]
+fn json_array_join_uses_the_live_method_while_native_array_join_stays_typed() {
+    let program = lower(
+        r#"
+        function main(): void {
+            const dynamic: any = [1, 2];
+            console.log(dynamic.join('-'));
+            console.log(Object.keys(dynamic).toString());
+            const native: number[] = [3, 4];
+            console.log(native.join('-'));
+        }
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap()
+            .body
+    );
+    assert!(
+        body.contains("__thaw_call_selected_dynamic_method"),
+        "a Json array must invoke its live join method: {body}"
+    );
+    assert!(
+        body.contains("__thaw_number_array_join"),
+        "a native number array must retain its typed join path: {body}"
+    );
+}
+
+#[test]
 fn contextually_types_a_callback_in_an_interface_method_call() {
     let module = thaw_parser::parse_typescript(
         r#"

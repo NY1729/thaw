@@ -1,3 +1,94 @@
+fn generic_argument_may_be_undefined(ty: &HirType) -> bool {
+    match ty {
+        HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Void
+        | HirType::Json | HirType::Dynamic | HirType::JsValue => true,
+        HirType::Union(members) => members.iter().any(generic_argument_may_be_undefined),
+        _ => false,
+    }
+}
+
+fn generic_arrow_parameter_is_reassigned(arrow: &swc_ecma_ast::ArrowExpr, index: usize) -> bool {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    let Some(Pat::Ident(binding)) = arrow.params.get(index) else {
+        return true;
+    };
+    fn pattern_writes_name(pattern: &Pat, name: &str) -> bool {
+        if let Pat::Expr(expression) = pattern {
+            return matches!(
+                expression.as_ref(),
+                Expr::Ident(identifier) if identifier.sym.as_ref() == name
+            );
+        }
+        let mut bindings = Vec::new();
+        FnLowerer::collect_pattern_bindings(pattern, &mut bindings);
+        bindings.iter().any(|binding| binding == name)
+    }
+    fn assignment_target_writes_name(target: &swc_ecma_ast::AssignTarget, name: &str) -> bool {
+        match target {
+            swc_ecma_ast::AssignTarget::Simple(
+                swc_ecma_ast::SimpleAssignTarget::Ident(binding),
+            ) => binding.id.sym.as_ref() == name,
+            swc_ecma_ast::AssignTarget::Pat(pattern) => match pattern {
+                swc_ecma_ast::AssignTargetPat::Array(pattern) => {
+                    pattern_writes_name(&Pat::Array(pattern.clone()), name)
+                }
+                swc_ecma_ast::AssignTargetPat::Object(pattern) => {
+                    pattern_writes_name(&Pat::Object(pattern.clone()), name)
+                }
+                swc_ecma_ast::AssignTargetPat::Invalid(_) => false,
+            },
+            _ => false,
+        }
+    }
+    fn for_head_writes_name(head: &swc_ecma_ast::ForHead, name: &str) -> bool {
+        match head {
+            swc_ecma_ast::ForHead::Pat(pattern) => pattern_writes_name(pattern, name),
+            swc_ecma_ast::ForHead::VarDecl(declaration) => declaration
+                .decls
+                .iter()
+                .any(|declarator| pattern_writes_name(&declarator.name, name)),
+            swc_ecma_ast::ForHead::UsingDecl(_) => false,
+        }
+    }
+    struct AssignmentFinder<'a> {
+        name: &'a str,
+        assigned: bool,
+    }
+    impl Visit for AssignmentFinder<'_> {
+        fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+            self.assigned |= assignment_target_writes_name(&assign.left, self.name);
+            assign.visit_children_with(self);
+        }
+
+        fn visit_update_expr(&mut self, update: &swc_ecma_ast::UpdateExpr) {
+            self.assigned |= matches!(
+                update.arg.as_ref(),
+                Expr::Ident(binding)
+                    if binding.sym.as_ref() == self.name
+            );
+            update.visit_children_with(self);
+        }
+
+        fn visit_for_in_stmt(&mut self, statement: &swc_ecma_ast::ForInStmt) {
+            self.assigned |= for_head_writes_name(&statement.left, self.name);
+            statement.visit_children_with(self);
+        }
+
+        fn visit_for_of_stmt(&mut self, statement: &swc_ecma_ast::ForOfStmt) {
+            self.assigned |= for_head_writes_name(&statement.left, self.name);
+            statement.visit_children_with(self);
+        }
+    }
+
+    let mut finder = AssignmentFinder {
+        name: binding.id.sym.as_ref(),
+        assigned: false,
+    };
+    arrow.visit_with(&mut finder);
+    finder.assigned
+}
+
 impl<'a> FnLowerer<'a> {
     /// `n?.a.b(..)` where `n` is an `any` value: a nullish `n` ends the whole chain with
     /// `undefined`. The innermost `?.` root is evaluated once into a temporary, the chain is
@@ -292,9 +383,11 @@ impl<'a> FnLowerer<'a> {
             bindings.push((this_name.clone(), ty.clone(), value.clone()));
         }
         let mut arguments = Vec::new();
+        let mut unspread_arguments = Vec::new();
         for (source, value) in call.args.iter().zip(lowered) {
             if source.spread.is_none() && !preserve_order {
                 arguments.push(value);
+                unspread_arguments.push(true);
                 continue;
             }
             if source.spread.is_some() {
@@ -306,6 +399,7 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(temporary.clone(), ty.clone());
                         bindings.push((temporary.clone(), ty, element));
                         arguments.push(HirExpr::Var(temporary));
+                        unspread_arguments.push(false);
                     }
                     continue;
                 }
@@ -316,6 +410,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 };
                 let elements = elements.clone();
+                unspread_arguments.extend(std::iter::repeat_n(false, elements.len()));
                 let temporary = format!("__thaw_generic_arrow_spread_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(temporary.clone(), source_type.clone());
@@ -335,6 +430,7 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(temporary.clone(), ty.clone());
             bindings.push((temporary.clone(), ty, value));
             arguments.push(HirExpr::Var(temporary));
+            unspread_arguments.push(true);
         }
         bindings.extend(discarded_apply_arguments);
         let signature = self.generic_arrow_signature(arrow)?;
@@ -419,11 +515,24 @@ impl<'a> FnLowerer<'a> {
         let receiver = self.specialized_generic_receiver(name, &signature, &concrete_types)?;
         let concrete = signature.generic_type_params.iter().cloned()
             .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
+        let required_optional_parameters = signature
+            .generic_param_optional
+            .iter()
+            .enumerate()
+            .map(|(index, optional)| {
+                *optional
+                    && unspread_arguments.get(index) == Some(&true)
+                    && parameter_types.get(index).is_some_and(|actual| !generic_argument_may_be_undefined(actual))
+                    && !generic_arrow_parameter_is_reassigned(arrow, index)
+            })
+            .collect::<Vec<_>>();
         let runtime_parameter_types = if bind || has_rest || signature.generic_param_optional.iter().any(|optional| *optional) {
             signature.generic_param_patterns.iter().enumerate()
                 .map(|(index, pattern)| {
                     let ty = instantiate_generic_pattern(pattern, &concrete)?;
-                    Ok(if signature.generic_param_optional[index] { optional_parameter_type(ty) } else { ty })
+                    Ok(if signature.generic_param_optional[index] && !required_optional_parameters[index] {
+                        optional_parameter_type(ty)
+                    } else { ty })
                 })
                 .collect::<Result<Vec<_>, String>>()?
         } else { parameter_types.clone() };
@@ -486,6 +595,13 @@ impl<'a> FnLowerer<'a> {
         let mut specialized_arrow = arrow.clone();
         specialized_arrow.type_params = None;
         specialized_arrow.visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
+        for (index, parameter) in specialized_arrow.params.iter_mut().enumerate() {
+            if required_optional_parameters.get(index) == Some(&true) {
+                if let Pat::Ident(binding) = parameter {
+                    binding.id.optional = false;
+                }
+            }
+        }
         let previous_receiver = std::mem::replace(
             &mut self.non_arrow_receiver,
             receiver,

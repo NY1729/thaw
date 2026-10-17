@@ -1,4 +1,27 @@
 #[test]
+fn lowers_json_member_updates_with_the_dynamic_property_helper() {
+    let program = lower(
+        r#"function pick(): any { return {}; }
+           function key(): string { return "value"; }
+           class Holder { value: any = 4; bump(): any { return this.value++; } }
+           function main(): void {
+               pick().value++;
+               ++pick()[key()];
+               const live: any = getDynamicValue("updateHost");
+               live.value++;
+               new Holder().bump();
+           }"#,
+    );
+    let body = format!(
+        "{:?}",
+        program.functions.iter().map(|function| &function.body).collect::<Vec<_>>()
+    );
+    assert_eq!(body.matches("__thaw_update_dynamic_value").count(), 4, "{body}");
+    assert!(body.contains("getDynamicProperty"), "{body}");
+    assert!(body.contains("__thaw_json_from_consumed_dynamic"), "{body}");
+}
+
+#[test]
 fn rejects_unreadable_or_non_numeric_instance_accessor_updates() {
     for (source, fragment) in [
         ("class Box { get value(): number { return 1; } } function main(): void { ++new Box().value; }", "readonly instance accessor"),
@@ -281,6 +304,186 @@ fn lowers_promise_constructor_then_and_catch_with_contextual_callbacks() {
             HirExpr::PromiseThen(_, _, HirType::F64, HirType::F64, true, false)
         )
     ));
+}
+
+#[test]
+fn callback_validation_uses_source_returns_but_retains_physical_storage_types() {
+    let invalid = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: () => number): void;
+        function bad(): string { const value: any = "wrong"; return value; }
+        function main(): void { __thaw_typed_js_63616c6c(bad); }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&invalid).unwrap_err();
+    assert!(error.contains("Promise callback returns"), "{error}");
+
+    let invalid_stored_arrow = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: () => number): void;
+        function main(): void {
+            const bad = (): string => { const value: any = "wrong"; return value; };
+            __thaw_typed_js_63616c6c(bad);
+        }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&invalid_stored_arrow).unwrap_err();
+    assert!(
+        error.contains("value has type Function([], Str), expected Function([], F64)"),
+        "{error}"
+    );
+
+    let invalid_contextual_arrow = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: () => number): void;
+        function main(): void {
+            __thaw_typed_js_63616c6c((): string => { const value: any = "wrong"; return value; });
+        }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&invalid_contextual_arrow).unwrap_err();
+    assert!(error.contains("declares return type"), "{error}");
+
+    let valid = lower(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: () => number): void;
+        function good(): number { const value: any = 7; return value; }
+        function main(): void { __thaw_typed_js_63616c6c(good); }
+        "#,
+    );
+    let main = valid.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(
+        body.contains("FunctionRef(\"good\", [], Json)"),
+        "typed JavaScript callbacks retain their physical Json result at the boundary: {body}"
+    );
+
+    let contextual = lower(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: () => number): void;
+        function main(): void {
+            __thaw_typed_js_63616c6c((): number => { const value: any = 7; return value; });
+        }
+        "#,
+    );
+    let main = contextual.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(
+        body.contains("Function([], Json)"),
+        "contextual JavaScript callbacks retain their physical Json result: {body}"
+    );
+
+    let invalid_async = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: () => Promise<number>): void;
+        function main(): void {
+            __thaw_typed_js_63616c6c(async (): Promise<string> => {
+                const value: any = "wrong";
+                return value;
+            });
+        }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&invalid_async).unwrap_err();
+    assert!(error.contains("contextual callback declares return type"), "{error}");
+
+    let invalid_parameter = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: (value: number) => number): void;
+        function bad(value: string): number { const result: any = value; return result; }
+        function main(): void { __thaw_typed_js_63616c6c(bad); }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&invalid_parameter).unwrap_err();
+    assert!(error.contains("parameters"), "{error}");
+
+    let promoted_parameter = lower(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: (value: number) => number): void;
+        function good(value: number): number { const result: any = value; return result; }
+        function main(): void { __thaw_typed_js_63616c6c(good); }
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        promoted_parameter
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap()
+            .body
+    );
+    assert!(
+        body.contains("TypedClosure(Function([F64], Json)")
+            || body.contains("Function([F64], Json)"),
+        "the normalized callback retains its supplied physical ABI: {body}"
+    );
+
+    let rest_source = r#"
+        declare function __thaw_typed_js_63616c6c(callback: (...values: number[]) => number): void;
+        function good(...values: number[]): number { const result: any = values[0]; return result; }
+        function main(): void { __thaw_typed_js_63616c6c(good); }
+    "#;
+    lower(rest_source);
+    let invalid_rest = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_63616c6c(callback: (...values: number[]) => number): void;
+        function bad(...values: string[]): number { const result: any = values[0]; return result; }
+        function main(): void { __thaw_typed_js_63616c6c(bad); }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&invalid_rest).unwrap_err();
+    assert!(error.contains("parameters") || error.contains("rest"), "{error}");
+
+    let broad_rejection_parameter = lower(
+        r#"
+        function recover(error: unknown): number {
+            const result: any = 9;
+            return result;
+        }
+        function main(): void {
+            const result = Promise.reject<number>("failure").catch(recover);
+        }
+        "#,
+    );
+    let body = format!(
+        "{:?}",
+        broad_rejection_parameter
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap()
+            .body
+    );
+    assert!(body.contains("PromiseThen") || body.contains("PromiseThenBoth"), "{body}");
+}
+
+#[test]
+fn caught_promise_cast_uses_the_physical_json_payload_type() {
+    let program = lower(
+        r#"
+        function main(): void {
+            const reason: Promise<number> = Promise.resolve(23);
+            try { throw reason; }
+            catch (error) {
+                const preserved = error as Promise<number>;
+                console.log(preserved === reason);
+            }
+        }
+        "#,
+    );
+    let body = format!("{:?}", program.functions);
+    assert!(
+        body.contains("Promise(\n                        Json,")
+            || body.contains("Promise(Json)"),
+        "caught Promise values preserve the physical JSON payload representation: {body}"
+    );
 }
 
 #[test]

@@ -351,10 +351,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(args.as_slice())
             } else { None }
         } else { None };
-        let val = self.compile_expr(pending_rethrow.map(|args| &args[0])
+        let mut val = self.compile_expr(pending_rethrow.map(|args| &args[0])
             .or(trusted_text)
             .or_else(|| snapshot_caught.map(|args| &args[0]))
             .unwrap_or(expr))?.into_pointer_value();
+        if matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
+            val = self.builder.build_call(
+                self.module.get_function("thaw_error_frame_own").unwrap(),
+                &[val.into()], "owned_literal_error_frame",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("thaw_error_frame_own returned no value")?.into_pointer_value();
+        }
         if let Some(args) = pending_rethrow {
             // Snapshot fields belong to this callback parameter, so a handled
             // inner exception cannot replace the original rejection metadata.
