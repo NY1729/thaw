@@ -717,6 +717,98 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn generic_fallback_identity_preserves_promoted_json_object_identity() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-identity-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("identity-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function identity<T>(value: T): T;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.identity = function(value) { return value; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { identity } from "identity-kit";
+function main(): void {
+    const source: { n: number } = { n: 1 };
+    const exposed: any = source;
+    const result = identity(source);
+    result.n = 7;
+    console.log(source.n);
+    console.log(result === source);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "7\ntrue\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generic_fallback_infers_type_from_promoted_callback_return() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-callback-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("extract-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function extract<T extends number>(factory: () => T): T;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.extract = function(factory) { return factory(); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { extract } from "extract-kit";
+function source(): number {
+    const escaped: any = 41;
+    return escaped;
+}
+function main(): void {
+    const result = extract(source);
+    console.log(result + 1);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function whose parameter/return type is `Date`, generic
 /// over it (`<DateType extends Date>`) -- real-world example: date-fns's
 /// `format<DateType extends Date>(date: DateType | number | string,

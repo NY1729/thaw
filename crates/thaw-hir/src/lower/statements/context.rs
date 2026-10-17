@@ -60,6 +60,8 @@ impl<'a> FnLowerer<'a> {
     ) -> Self {
         Self {
             scope: HashMap::new(),
+            source_scope: HashMap::new(),
+            source_ret_type: None,
             immutable_bindings: HashSet::new(),
             function_var_names: HashMap::new(),
             strict_nullable_bindings: HashSet::new(),
@@ -126,6 +128,7 @@ impl<'a> FnLowerer<'a> {
             unbound_this_context: false,
             non_arrow_receiver: None,
             expected_return_hint: None,
+            expected_source_return_hint: None,
             expected_arrow_return_hint: None,
             any_object_literal: false,
             native_iteration_callback: false,

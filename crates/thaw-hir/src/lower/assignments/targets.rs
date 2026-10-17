@@ -8,18 +8,6 @@ impl<'a> FnLowerer<'a> {
         self.lower_expr(expr)
     }
 
-    /// Resolves a computed assignment/update target without confusing the
-    /// pointer-compatible array, object, string and JSON layouts.
-    fn lower_computed_target(
-        &mut self,
-        member: &MemberExpr,
-        computed: &ComputedPropName,
-    ) -> Result<Target, String> {
-        let object = self.lower_json_mutable_chain(&member.obj)?;
-        let object_type = self.infer_expr_type(&object)?;
-        self.lower_computed_target_from_receiver(object, object_type, computed)
-    }
-
     fn lower_computed_target_from_receiver(
         &mut self,
         object: HirExpr,

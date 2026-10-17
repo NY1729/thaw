@@ -93,11 +93,9 @@ async function main(): Promise<void> {
     );
 }
 
-// Thaw-specific: a typed native table cannot hold a key or value of another type, so a mismatched
-// write through the view throws a TypeError (Node would store it). Reads of other types answer
-// absent. The view survives arena resets between timer turns.
+// Escaped collections accept actual JavaScript values and survive arena resets.
 #[test]
-fn ka_contract_map_view_rejects_mismatched_writes_and_survives_arena_resets() {
+fn ka_contract_map_storage_accepts_dynamic_writes_and_survives_arena_resets() {
     let source = r##"async function main(): Promise<void> {
   const m = new Map<number, string>();
   const a: any = m;
@@ -114,8 +112,8 @@ fn ka_contract_map_view_rejects_mismatched_writes_and_survives_arena_resets() {
 }
 "##;
     assert_eq!(
-        compile_and_run(source, "ka_contract_map_view_rejects_mismatched_writes_and_survives_arena_resets"),
-        "true\ntrue\nfalse undefined false 0\n40 40 39 0\n"
+        compile_and_run(source, "ka_contract_map_storage_accepts_dynamic_writes_and_survives_arena_resets"),
+        "stored\nstored\ntrue y true 1\n40 40 39 0\n"
     );
 }
 
@@ -319,7 +317,7 @@ async function main():Promise<void>{const a:any=make();for(let i=0;i<40;i++){awa
 }
 
 #[test]
-fn native_collection_arguments_reject_incompatible_and_unbranded_values() {
+fn native_collection_arguments_keep_dynamic_values_and_reject_fake_receivers() {
  assert_eq!(compile_and_run(r###"class Store {calls=0;use(m:Map<string,number>,s:Set<number>):number {this.calls+=1;m.set("ok",1);s.add(2);return this.calls;}}
 function main():void {const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;
 const wrong=new Map<string,string>();const wrongSet=new Set<string>();const d:any=wrong;const e:any=wrongSet;
@@ -327,7 +325,7 @@ try {a.use(d,c);console.log("accepted wrong map");}catch(error:any){console.log(
 try {a.use(b,e);console.log("accepted wrong set");}catch(error:any){console.log(error instanceof TypeError);}
 const host:any=new Function("return new Map()")();try{a.use(host,c);console.log("accepted host");}catch(error:any){console.log(error instanceof TypeError);}
 const fake:any={"__thaw_js_handle_id__":1};try{a.use(fake,c);console.log("accepted fake");}catch(error:any){console.log(error instanceof TypeError);}
-console.log(store.calls,m.size,s.size);console.log(a.use(b,c),m.get("ok"),s.has(2));}"###,"native_collection_arguments_reject_incompatible_and_unbranded_values"),"true\ntrue\ntrue\ntrue\n0 0 0\n1 1 true\n");
+console.log(store.calls,m.size,s.size);console.log(a.use(b,c),m.get("ok"),s.has(2));}"###,"native_collection_arguments_keep_dynamic_values_and_reject_fake_receivers"),"accepted wrong map\naccepted wrong set\naccepted host\ntrue\n4 1 1\n5 1 true\n");
 }
 
 #[test]
@@ -344,4 +342,164 @@ fn native_host_get_prototype_preserves_proxy_exceptions() {
 #[test]
 fn native_private_fields_and_accessors_keep_callback_layout() {
  assert_eq!(compile_and_run(r###"class Counter {#n=1;get value():number{return this.#n;}set value(v:number){this.#n=v;}read():number{return this.#n;}}function main():void {const c=new Counter();const a:any=c;console.log(a.value,a.read(),Object.keys(a).length);a.value=4;console.log(c.read(),a.value);}"###,"native_private_fields_and_accessors_keep_callback_layout"),"1 1 0\n4 4\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_1() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: {x: number}[] = []; const a: any = xs; const original: any = new Function("return {x: 1}")(); a[0] = original; console.log(a[0] === original, xs[0] === original); original.x = 7; console.log(xs[0].x); xs[0].x = 9; console.log(original.x); }"##, "ka_contract_dynamic_storage_1"), "true true\n7\n9\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_2() {
+    assert_eq!(compile_and_run(r##"function identity(xs: {x: number}[]): {x: number}[] { return xs; } function main(): void { const xs: {x: number}[] = []; const holder = {xs: identity(xs)}; const read = () => holder.xs; const a: any = read(); const original: any = new Function("return {x: 1}")(); a[0] = original; original.x = 5; console.log(xs[0] === original, holder.xs[0] === original, read()[0].x); }"##, "ka_contract_dynamic_storage_2"), "true true 5\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_3() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: number[][] = []; const a: any = xs; a[0] = a; console.log(a[0] === a, xs[0] === xs, typeof xs[0]); }"##, "ka_contract_dynamic_storage_3"), "true true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_storage_4() {
+    assert_eq!(compile_and_run(r##"class C { x = 1; method(): number { return this.x; } } function main(): void { const xs: C[] = []; const a: any = xs; const plain: any = new Function("return {x: 7}")(); a[0] = plain; console.log(xs[0] === plain, xs[0] instanceof C, typeof xs[0].method); const real = new C(); a[1] = real; console.log(xs[1] === real, xs[1] instanceof C, xs[1].method()); }"##, "ka_contract_dynamic_storage_4"), "true false undefined\ntrue true 1\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_1() {
+    assert_eq!(compile_and_run(r##"class Box { value: number = 1; read(): number { return this.value; } } function main(): void { const box = new Box(); const exposed: any = box; const original: any = new Function("return {x: 7}")(); exposed.value = original; console.log(box.read() === original, box.value === original, typeof box.value); }"##, "ka_contract_dynamic_class_storage_1"), "true true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_2() {
+    assert_eq!(compile_and_run(r##"class Factory { last: number[] = []; fresh(): number[] { const result: number[] = [1]; this.last = result; return result; } optional(present: boolean): number[] | undefined { return present ? this.last : undefined; } pair(): [number[], number[]] { return [this.last, this.last]; } async delayed(): Promise<number[]> { await Promise.resolve(); return this.last; } } async function main(): Promise<void> { const factory = new Factory(); const exposed: any = factory; const result: any = exposed.fresh(); console.log(result === factory.last, exposed.optional(true) === result, exposed.optional(false) === undefined); const pair: any = exposed.pair(); console.log(pair[0] === result, pair[1] === result); const delayed: any = await exposed.delayed(); delayed[0] = 9; console.log(delayed === result, factory.last[0]); }"##, "ka_contract_dynamic_class_storage_2"), "true true true\ntrue true\ntrue 9\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_3() {
+    assert_eq!(compile_and_run(r##"class Base { #secret: number = 3; read(): number { return this.#secret; } } class Derived extends Base { get doubled(): number { return this.read() * 2; } } function main(): void { const values: Base[] = []; const exposed: any = values; const real = new Derived(); const plain: any = new Function("return {}")(); exposed[0] = real; exposed[1] = plain; console.log(values[0] === real, values[0] instanceof Base, values[0] instanceof Derived, exposed[0].doubled, values[0].read()); try { exposed[0].read.call(plain); } catch (error) { console.log(error instanceof TypeError); } console.log(values[1] === plain, values[1] instanceof Base, typeof values[1].read); }"##, "ka_contract_dynamic_class_storage_3"), "true true true 6 3\ntrue\ntrue false undefined\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_4() {
+    assert_eq!(compile_and_run(r##"function main(): void { const map = new Map<number, number>(); const set = new Set<number>(); const m: any = map; const s: any = set; const original: any = new Function("return {x: 7}")(); m.set("key", original); s.add(original); console.log(map.size, m.get("key") === original, s.has(original), set.size); original.x = 9; console.log(m.get("key").x); }"##, "ka_contract_dynamic_class_storage_4"), "1 true true 1\n9\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_1() {
+    assert_eq!(compile_and_run(r##"function main(): void { const root: number[][] = []; const first: any = root; let cursor: any = first; for (let i = 0; i < 70; i++) { const next: any = []; cursor[0] = next; cursor = next; } cursor[0] = first; let read: any = root; for (let i = 0; i < 70; i++) read = read[0]; console.log(read === cursor, read[0] === root); const other: number[][] = []; const second: any = other; second[0] = first; first[1] = second; const identity: any = new Function("value", "return value"); console.log(first[1][0] === first, identity(first) === root); }"##, "ka_contract_dynamic_graph_1"), "true true\ntrue true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_2() {
+    assert_eq!(compile_and_run(r##"function main(): void { const root: {next: any} = {next: null}; let cursor: any = root; for (let i = 0; i < 70; i++) { const next: any = {next: null}; cursor.next = next; cursor = next; } cursor.next = root; cursor.value = 7; let read: any = root; for (let i = 0; i < 70; i++) read = read.next; console.log(read === cursor, read.next === root, read.value); }"##, "ka_contract_dynamic_graph_2"), "true true 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_3() {
+    assert_eq!(compile_and_run(r##"async function main(): Promise<void> { const values: {x: number}[] = []; const exposed: any = values; const original: any = new Function("return {x: 1}")(); exposed[0] = original; const fail: any = new Function("value", "throw value"); for (let i = 0; i < 40; i++) { await Promise.resolve(); try { fail(original); } catch (error) { } original.x += 1; } console.log(values[0] === original, exposed[0] === original, values[0].x); }"##, "ka_contract_dynamic_graph_3"), "true true 41\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_4() {
+    assert_eq!(compile_and_run(r##"async function main(): Promise<void> { const original: any = new Function("return {x: 1}")(); const sparse: any[] = [, original]; const exposed: any = sparse; console.log(0 in exposed, 1 in exposed, exposed[1] === original); const copied: any = [...exposed, await Promise.resolve(original)]; console.log(0 in copied, copied[1] === original, copied[2] === original); }"##, "ka_contract_dynamic_graph_4"), "false true true\ntrue true true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_5() {
+    assert_eq!(compile_and_run(r##"function make(xs: {x: number}[]): () => {x: number}[] { return () => xs; } function main(): void { const xs: {x: number}[] = []; const read = make(xs); const exposed: any = read(); const original: any = new Function("return {x: 7}")(); exposed[0] = original; console.log(xs[0] === original, read()[0] === original); }"##, "ka_contract_dynamic_graph_5"), "true true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_6() {
+    assert_eq!(compile_and_run(r##"class Plain { value: number = 1; } function main(): void { const source = new Plain(); const values: Plain[] = []; const exposed: any = values; exposed[0] = source; console.log(values[0] === source, values[0] instanceof Plain); const object: any = new Function("return {value: 2}")(); exposed[1] = object; console.log(values[1] === object, values[1] instanceof Plain); }"##, "ka_contract_dynamic_graph_6"), "true true\ntrue false\n");
+}
+
+#[test]
+fn ka_contract_dynamic_call_arguments_1() {
+    assert_eq!(compile_and_run(r##"class Holder { constructor(value: number[], original: any) { const exposed: any = value; exposed[0] = original; } } function main(): void { const values: number[] = []; const original: any = {x: 7}; const holder = new Holder(values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"##, "ka_contract_dynamic_call_arguments_1"), "true object 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_call_arguments_2() {
+    assert_eq!(compile_and_run(r##"function invoke(callback: any, value: number[], original: any): void { callback(value, original); } function main(): void { const values: number[] = []; const original: any = {x: 7}; const writer: any = new Function("value", "original", "value[0] = original"); invoke(writer, values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"##, "ka_contract_dynamic_call_arguments_2"), "true object 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_1() {
+    assert_eq!(compile_and_run(r##"class C { value = 1; method(): number { return this.value; } } function main(): void { const plain: any = {value: 7}; const value: C = plain; console.log(value === plain, value instanceof C, typeof value.method); }"##, "ka_contract_dynamic_review_1"), "true false undefined\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_2() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: number[] = [1]; const exposed: any = xs || []; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"##, "ka_contract_dynamic_review_2"), "true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_3() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: number[] = [1]; const holder = {xs}; const exposed: any = holder?.xs; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"##, "ka_contract_dynamic_review_3"), "true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_4() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: number[] = [1]; const original: any = {x: 7}; for (const row of [xs]) { const exposed: any = row; exposed[0] = original; } console.log(xs[0] === original, typeof xs[0]); }"##, "ka_contract_dynamic_review_4"), "true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_5() {
+    assert_eq!(compile_and_run(r##"function mutate(...xs: number[][]): void { const exposed: any = xs; exposed[1][0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(first, second); console.log(typeof second[0], second[0].x); }"##, "ka_contract_dynamic_review_5"), "object 1\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_6() {
+    assert_eq!(compile_and_run(r##"function mutate(first: number[], second: number[]): void { const exposed: any = second; exposed[0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(...[first, second]); console.log(typeof second[0], second[0].x); }"##, "ka_contract_dynamic_review_6"), "object 1\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_7() {
+    assert_eq!(compile_and_run(r##"class Base { value: number = 1; read(): number { return this.value; } } class Derived extends Base {} function main(): void { const value = new Derived(); const exposed: any = value; const original: any = {x: 7}; exposed.value = original; console.log(value.value === original, typeof value.value, typeof value.read()); }"##, "ka_contract_dynamic_review_7"), "true object object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_8() {
+    assert_eq!(compile_and_run(r##"type DynamicValue = any; function main(): void { const xs: number[] = [1]; const exposed: DynamicValue = xs; exposed[0] = {x: 7}; console.log(typeof xs[0]); }"##, "ka_contract_dynamic_review_8"), "object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_9() {
+    assert_eq!(compile_and_run(r##"function main(): void { const xs: number[] = [1]; const holder: {slot: any} = {slot: xs}; holder.slot[0] = {x: 7}; console.log(typeof xs[0]); }"##, "ka_contract_dynamic_review_9"), "object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_10() {
+    assert_eq!(compile_and_run(r##"function mutate(values: number[]): void { const exposed: any = values; exposed[0] = {x: 7}; } function main(): void { const values: number[] = []; const callable: any = mutate; callable(values); console.log(typeof values[0]); }"##, "ka_contract_dynamic_review_10"), "object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_11() {
+    assert_eq!(compile_and_run(r##"function cycle(...values: number[][]): any { const exposed: any = values; exposed[0] = exposed; return exposed; } function main(): void { const result: any = cycle([]); console.log(result[0] === result, Array.isArray(result)); }"##, "ka_contract_dynamic_review_11"), "true true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_12() {
+    assert_eq!(compile_and_run(r##"function write(holder: {slot:any}):void{holder.slot[0]={x:7};} function main():void{const xs:number[]=[1];const holder={slot:xs};write(holder);console.log(typeof xs[0],xs[0].x);}"##, "ka_contract_dynamic_review_12"), "object 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_13() {
+    assert_eq!(compile_and_run(r##"function main():void{const xs:number[]=[1];const map=new Map<string,any>();map.set("x",xs);map.get("x")[0]={x:7};console.log(typeof xs[0],xs[0].x);}"##, "ka_contract_dynamic_review_13"), "object 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_14() {
+    assert_eq!(compile_and_run(r##"function mutate(a:number[],b:number[]):void{const exposed:any=b;exposed[0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const args:[number[],number[]]=[a,b];mutate(...args);console.log(typeof b[0],b[0].x);}"##, "ka_contract_dynamic_review_14"), "object 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_15() {
+    assert_eq!(compile_and_run(r##"function mutate(...xs:number[][]):void{const exposed:any=xs;exposed[1][0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const fn:any=mutate;fn(a,b);console.log(typeof b[0],b[0].x);}"##, "ka_contract_dynamic_review_15"), "object 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_review_16() {
+    assert_eq!(compile_and_run(r##"function main():void{const xs:number[]=[1];const holder={slot:undefined as any};holder.slot=xs;holder.slot[0]={x:7};console.log(typeof xs[0],xs[0].x);}"##, "ka_contract_dynamic_review_16"), "object 7\n");
 }

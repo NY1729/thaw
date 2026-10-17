@@ -4153,6 +4153,8 @@ fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() 
             }
             const afterFresh = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
             const borrowed: Json = JSON.parse('{"marker":"borrowed"}');
+            // JSON.parse adds one intentionally live QuickJS host handle.
+            const borrowedBaseline = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
             let borrowedCaught = 0;
             for (let index = 0; index < 3; index++) {
                 try { __thaw_typed_js_616363657074(borrowed, failSecond()); }
@@ -4170,7 +4172,7 @@ fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() 
             __thaw_typed_js_616363657074(sourceValue, innerCaught(sourceValue));
             const accepted = callDynamicValue(acceptedIdentity, __thaw_json_argument_array());
             const afterNested = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
-            console.log(freshCaught === 20, afterFresh === baseline, borrowedCaught === 3, borrowedUsable, afterBorrowed === baseline, nestedCaught === 10, nestedTargetsUntouched, afterNestedFailures === baseline, accepted, afterNested === baseline);
+            console.log(freshCaught === 20, afterFresh === baseline, borrowedCaught === 3, borrowedUsable, afterBorrowed === borrowedBaseline, nestedCaught === 10, nestedTargetsUntouched, afterNestedFailures === borrowedBaseline, accepted, afterNested === borrowedBaseline);
             releaseDynamicValue(sourceValue);
             releaseDynamicValue(refTotal);
             releaseDynamicValue(acceptedIdentity);

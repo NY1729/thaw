@@ -64,3 +64,5 @@ include!("tests/core.rs");
 include!("tests/ffi.rs");
 include!("tests/types.rs");
 include!("tests/values.rs");
+
+include!("tests/storage.rs");

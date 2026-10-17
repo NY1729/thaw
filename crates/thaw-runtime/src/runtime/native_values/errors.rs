@@ -69,6 +69,27 @@ pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// Ensures a literal framed error uses an arena-owned pointer so the optional QuickJS
+/// Error bridge can preserve identity across repeated projections. Unframed strings and
+/// already-owned frames keep their original pointer.
+/// # Safety
+/// `value` must reference a live native string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_char {
+    if value.is_null() || thaw_arena::contains_allocation(value as usize) {
+        return value;
+    }
+    let bytes = unsafe { wtf8_bytes(value) };
+    let framed = thaw_arena::error_wire::parse_tagged(bytes).is_some()
+        || (bytes.first() == Some(&(ERROR_TAG_MARKER as u8))
+            && bytes[1..].contains(&(ERROR_TAG_MARKER as u8)));
+    if framed {
+        arena_wtf8(bytes).map_or(std::ptr::null(), |owned| owned.cast())
+    } else {
+        value
+    }
+}
+
 
 /// Drops a `SuppressedError`'s trailing `.error`/`.suppressed` sub-tags
 /// (and anything after them) so `.message`/`.cause`/`.code`/`.name` read

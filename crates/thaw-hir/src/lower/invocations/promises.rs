@@ -334,10 +334,11 @@ impl<'a> FnLowerer<'a> {
                         };
                         Some((callback, output, flatten))
                     };
-                    let output = fulfilled
+                    let fulfilled_output = fulfilled
                         .as_ref()
                         .map_or_else(|| input.clone(), |(_, output, _)| output.clone());
-                    let rejected_expected = (rejected_throws && fulfilled.is_some()).then(|| output.clone());
+                    let rejected_expected = (rejected_throws && fulfilled.is_some())
+                        .then(|| fulfilled_output.clone());
                     let on_rejected = match early_rejected {
                         Some(done) => done,
                         None => self.lower_promise_rejection_callback(
@@ -354,15 +355,42 @@ impl<'a> FnLowerer<'a> {
                         HirType::Promise(inner) => (inner.as_ref().clone(), true),
                         other => (other.clone(), false),
                     };
-                    if rejected_output != output {
-                        return Err(format!(
-                            "`.then` rejection callback resolves to {rejected_output:?}, expected {output:?}"
-                        ));
-                    }
-                    let flatten_fulfilled = fulfilled.as_ref().is_some_and(|(_, _, flatten)| *flatten);
+                    let output = Self::promise_output_join(&fulfilled_output, &rejected_output)
+                        .ok_or_else(|| format!(
+                            "`.then` handlers resolve to incompatible types {fulfilled_output:?} and {rejected_output:?}"
+                        ))?;
+                    let fulfilled = match fulfilled {
+                        Some((callback, callback_output, flatten)) => {
+                            let callback = if callback_output == output {
+                                callback
+                            } else {
+                                self.adapt_promise_callback_output(
+                                    callback,
+                                    &fulfilled_params,
+                                    &output,
+                                )?
+                            };
+                            Some((callback, flatten))
+                        }
+                        None if input != output => Some((
+                            self.identity_promise_callback(&input, &output)?,
+                            false,
+                        )),
+                        None => None,
+                    };
+                    let on_rejected = if rejected_output == output {
+                        on_rejected
+                    } else {
+                        self.adapt_promise_callback_output(
+                            on_rejected,
+                            &[HirType::Str],
+                            &output,
+                        )?
+                    };
+                    let flatten_fulfilled = fulfilled.as_ref().is_some_and(|(_, flatten)| *flatten);
                     return Ok(HirExpr::PromiseThenBoth(
                         Box::new(source),
-                        fulfilled.map(|(callback, _, _)| Box::new(callback)),
+                        fulfilled.map(|(callback, _)| Box::new(callback)),
                         Box::new(on_rejected),
                         input,
                         output,
@@ -433,10 +461,31 @@ impl<'a> FnLowerer<'a> {
                         output => (output.clone(), false),
                     };
                     if on_rejected && output != *input {
-                        return Err(format!(
-                            "`.catch` callback resolves to {output:?}, expected {:?}",
-                            input
-                        ));
+                        let common = Self::promise_output_join(input.as_ref(), &output)
+                            .ok_or_else(|| format!(
+                                "`.catch` callback resolves to {output:?}, incompatible with {:?}",
+                                input
+                            ))?;
+                        let callback = if output == common {
+                            callback
+                        } else {
+                            self.adapt_promise_callback_output(
+                                callback,
+                                &[HirType::Str],
+                                &common,
+                            )?
+                        };
+                        let fulfilled = self.identity_promise_callback(input.as_ref(), &common)?;
+                        let result = HirExpr::PromiseThenBoth(
+                            Box::new(source),
+                            Some(Box::new(fulfilled)),
+                            Box::new(callback),
+                            input.as_ref().clone(),
+                            common,
+                            false,
+                            flatten,
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let result = HirExpr::PromiseThen(
                         Box::new(source),

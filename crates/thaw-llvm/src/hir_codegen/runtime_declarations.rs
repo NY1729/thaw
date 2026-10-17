@@ -423,6 +423,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_register_error_factory",
+            self.context.void_type().fn_type(&[
+                i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_take_host_error",
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
@@ -1797,6 +1804,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_error_frame_own",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_error_property",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
@@ -1902,6 +1914,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         for name in [
             "thaw_object_set_class_identity",
+            "thaw_object_copy_class_identity",
             "thaw_object_has_class_identity",
             "thaw_object_hide_marker",
             "thaw_object_reveal_marker",
@@ -2827,6 +2840,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_lookup_native_object",
             handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_error_from_tagged_handle",
+            handle_result_type.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

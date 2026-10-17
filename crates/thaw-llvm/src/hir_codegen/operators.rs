@@ -65,6 +65,11 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn expr_hir_type(&self, expr: &HirExpr) -> Option<HirType> {
         match expr {
+            HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_object_copy_class_identity") => Some(HirType::Bool),
+            HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_json_decode_native_argument") => {
+                match args.as_slice() { [HirExpr::TypedClosure(target, _)] => Some(target.clone()), _ => None }
+            }
+
             HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
             HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))

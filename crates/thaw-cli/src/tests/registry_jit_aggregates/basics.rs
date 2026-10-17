@@ -579,7 +579,7 @@ fn dictionary_get_nullish_fallback_preserves_missing_presence_in_jit() {
 }
 
 #[test]
-fn dictionary_nullish_operations_throw_catchable_type_errors_in_jit() {
+fn dictionary_nullish_operations_fall_back_for_dynamic_record_values() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-dictionary-nullish-{}",
         std::process::id()
@@ -606,7 +606,7 @@ fn dictionary_nullish_operations_throw_catchable_type_errors_in_jit() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));

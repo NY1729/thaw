@@ -33,9 +33,23 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    // 0 = present, 1 = undefined, 2 = null. Inspect both operands once an
-    // equality pair contains a Function leaf: the *other* operand may itself
-    // be an absent Optional<number>, Union, or dynamic value.
+    fn contains_tagged_reference_value(ty: &HirType) -> bool {
+        match ty {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                Self::strict_reference_type(payload) || Self::contains_tagged_reference_value(payload)
+            }
+            HirType::Union(values) => values.iter().any(Self::contains_tagged_reference_value),
+            _ => false,
+        }
+    }
+
+    fn has_tagged_identity_value(ty: &HirType) -> bool {
+        Self::contains_function_value(ty) || Self::contains_tagged_reference_value(ty)
+    }
+
+    // 0 = present, 1 = undefined, 2 = null. Inspect both operands when an
+    // equality pair needs tagged-presence handling: the other operand may
+    // itself be absent, while present native references still compare by identity.
     pub(crate) fn function_observable_absence(&mut self, value: HirExpr, ty: &HirType) -> HirExpr {
         let number = |n| HirExpr::Lit(HirLit::F64(n));
         let choose = |test, yes, no| HirExpr::Conditional(
@@ -1634,8 +1648,8 @@ impl<'a> FnLowerer<'a> {
             };
             (left, right, left_type, right_type)
         };
-        let tagged_function_pair = Self::contains_function_value(&lhs_type)
-            || Self::contains_function_value(&rhs_type);
+        let tagged_function_pair = Self::has_tagged_identity_value(&lhs_type)
+            || Self::has_tagged_identity_value(&rhs_type);
         let left_for_observable_absence = left.clone();
         let right_for_observable_absence = right.clone();
         let base = if let Some(identity) = caught_identity {
@@ -1681,8 +1695,8 @@ impl<'a> FnLowerer<'a> {
         } else {
             HirExpr::Lit(HirLit::Bool(false))
         };
-        let result = if Self::contains_function_value(&lhs_type)
-            || Self::contains_function_value(&rhs_type) {
+        let result = if Self::has_tagged_identity_value(&lhs_type)
+            || Self::has_tagged_identity_value(&rhs_type) {
             let left_status_name = format!("__thaw_strict_left_status_{}", self.next_binding);
             self.next_binding += 1;
             let right_status_name = format!("__thaw_strict_right_status_{}", self.next_binding);

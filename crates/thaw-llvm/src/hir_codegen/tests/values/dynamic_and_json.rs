@@ -2102,6 +2102,20 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
             block.starts_with(block_prefix) && line.contains(call)
         })
     }
+    fn call_block(ir: &str, call: &str) -> String {
+        let mut block = String::new();
+        for line in ir.lines() {
+            if !line.chars().next().is_some_and(char::is_whitespace) {
+                if let Some((label, _)) = line.split_once(':') {
+                    block = label.to_string();
+                }
+            }
+            if line.contains(call) {
+                return block;
+            }
+        }
+        panic!("missing call {call}: {ir}");
+    }
     fn tracked_root_id(ir: &str, owned: &str) -> String {
         let argument = format!("@thaw_json_track_arena_owned_root(ptr {owned})");
         let roots: Vec<_> = ir
@@ -2224,22 +2238,66 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
             produced == "dynamic_number_array_result",
         );
     }
-    // The top-level typed-result Union is also an owned JSON wrapper.
+    // A promoted top-level Union stays arena-owned through storage and console use.
+    // Only invalid graph decoding directly destroys its temporary root.
     let top_level = ir(r#"
         declare function __thaw_typed_js_746f70556e696f6e(): number | string;
         function main(): void { const value = __thaw_typed_js_746f70556e696f6e(); console.log(value); }
     "#);
     let top_level_owned = typed_result_decode_ids(&top_level, "@thaw_json_graph_decode(");
     assert_eq!(top_level_owned.len(), 1, "{top_level}");
-    let union_loaded = top_level.lines().position(|line| line.contains("dynamic_union_value = load"))
-        .expect(&top_level);
-    assert_transferred_root_destroy(
-        &top_level,
-        &top_level_owned[0],
-        "quickjs_graph_invalid",
-        union_loaded,
-        false,
+    let decoded = &top_level_owned[0];
+    let tracked = tracked_root_id(&top_level, decoded);
+    let decode_destroys = destroy_sites(&top_level, decoded);
+    assert_eq!(decode_destroys.len(), 1, "decoded root {decoded}: {top_level}");
+    assert!(
+        decode_destroys[0].1.starts_with("quickjs_graph_invalid"),
+        "decoded root {decoded}: {top_level}"
     );
+    let scope_own = format!("@thaw_json_typed_decode_scope_own(ptr {tracked})");
+    assert!(top_level.lines().any(|line| line.contains(&scope_own)), "{top_level}");
+    let scope_block = call_block(&top_level, &scope_own);
+    assert!(
+        block_has_call(&top_level, &scope_block, "@thaw_json_typed_decode_scope_end(i8 2)"),
+        "tracked root {tracked} is not retained through its successful scope: {top_level}"
+    );
+    assert!(
+        destroy_sites(&top_level, &tracked).is_empty(),
+        "live top-level Json root {tracked} must remain arena-owned: {top_level}"
+    );
+    let root_store = format!("store ptr {tracked}, ptr %value_cell");
+    assert!(top_level.lines().any(|line| line.contains(&root_store)), "{top_level}");
+    let value_load = top_level
+        .lines()
+        .find(|line| line.contains(" = load ptr, ptr %value_cell"))
+        .and_then(|line| line.split_once(" = ").map(|(name, _)| name.trim()))
+        .expect(&top_level);
+    assert!(
+        top_level.lines().any(|line| {
+            line.contains("@thaw_json_console_string(ptr ")
+                && line.contains(&format!("@thaw_json_console_string(ptr {value_load})"))
+        }),
+        "console did not use the retained top-level Json root: {top_level}"
+    );
+    let arena_registration = top_level
+        .lines()
+        .position(|line| line.contains(&format!("@thaw_json_track_arena_owned_root(ptr {decoded})")))
+        .expect(&top_level);
+    let scope_own_index = top_level
+        .lines()
+        .position(|line| line.contains(&scope_own))
+        .expect(&top_level);
+    let host_failure = top_level
+        .lines()
+        .enumerate()
+        .find(|(index, line)| {
+            *index > arena_registration
+                && *index < scope_own_index
+                && line.trim_start().starts_with("json_host_failed")
+        })
+        .map(|(index, _)| index)
+        .expect(&top_level);
+    assert!(arena_registration < host_failure && host_failure < scope_own_index, "{top_level}");
 }
 
 /// Native values crossed into `any` or a typed QuickJS call must retain

@@ -158,6 +158,23 @@ pub unsafe extern "C" fn thaw_object_set_class_identity(
 
 #[no_mangle]
 /// # Safety
+/// Both pointers are opaque identities; `target` names a compiler-owned object.
+pub unsafe extern "C" fn thaw_object_copy_class_identity(source: *const u8, target: *const u8) -> bool {
+    if source.is_null() || target.is_null() { return false; }
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        let Some((ancestry, markers)) = stored.get(&(source as usize))
+            .and_then(|metadata| metadata.ancestry.clone().map(|ancestry| (ancestry, metadata.hidden_markers.clone()))) else { return false };
+        let metadata = stored.entry(target as usize).or_default();
+        metadata.ancestry = Some(ancestry);
+        metadata.hidden_markers.extend(markers);
+        true
+    })
+}
+
+#[no_mangle]
+/// # Safety
 /// `expected` must be a valid NUL-terminated class name. `object` is used
 /// only as an identity; no unverified receiver pointer is dereferenced.
 pub unsafe extern "C" fn thaw_object_has_class_identity(
@@ -1102,5 +1119,25 @@ mod full_native_own_key_tests {
             thaw_arena::thaw_arena_reset();
             assert!(thaw_arena::was_reclaimed(key as usize));
         }).join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod copied_class_identity_tests {
+    use super::*;
+
+    #[test]
+    fn class_identity_copy_preserves_only_authenticated_source_brands() {
+        let source = thaw_arena::thaw_arena_alloc(16, 8);
+        let target = thaw_arena::thaw_arena_alloc(16, 8);
+        let plain = thaw_arena::thaw_arena_alloc(16, 8);
+        let marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}Leaf\u{1f}Base").unwrap();
+        let leaf = c"Leaf"; let base = c"Base";
+        assert!(unsafe { thaw_object_set_class_identity(source, marker.as_ptr()) });
+        assert!(unsafe { thaw_object_copy_class_identity(source, target) });
+        assert!(unsafe { thaw_object_has_class_identity(target, leaf.as_ptr()) });
+        assert!(unsafe { thaw_object_has_class_identity(target, base.as_ptr()) });
+        assert!(!unsafe { thaw_object_copy_class_identity(plain, plain) });
+        assert!(!unsafe { thaw_object_has_class_identity(plain, leaf.as_ptr()) });
     }
 }

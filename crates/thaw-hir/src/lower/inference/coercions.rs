@@ -369,6 +369,38 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        if let HirType::Promise(target) = declared {
+            if target.as_ref() == &HirType::Json {
+                if let HirType::Promise(source) = self.infer_expr_type(&value)? {
+                    if source.as_ref() != target.as_ref() {
+                        let (params, body) = if source.as_ref() == &HirType::Void {
+                            (Vec::new(), self.coerce_to_declared_aliasing(
+                                &HirType::Json, HirExpr::Lit(HirLit::Undefined),
+                            )?)
+                        } else {
+                            let parameter = format!("__thaw_promise_json_value_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let previous = self.scope.insert(parameter.clone(), source.as_ref().clone());
+                            let body = self.coerce_to_declared_aliasing(
+                                &HirType::Json, HirExpr::Var(parameter.clone()),
+                            );
+                            match previous {
+                                Some(previous) => { self.scope.insert(parameter.clone(), previous); }
+                                None => { self.scope.remove(&parameter); }
+                            }
+                            (vec![HirParam { name: parameter, ty: source.as_ref().clone() }], body?)
+                        };
+                        let callback = HirExpr::Lambda(
+                            Vec::new(), params, HirType::Json, Box::new(body),
+                        );
+                        return Ok(HirExpr::PromiseThen(
+                            Box::new(value), Box::new(callback), source.as_ref().clone(),
+                            HirType::Json, false, false,
+                        ));
+                    }
+                }
+            }
+        }
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
@@ -766,6 +798,9 @@ impl<'a> FnLowerer<'a> {
         }
         if *declared == HirType::Json {
             let actual = self.infer_expr_type(&value)?;
+            if matches!(&actual, HirType::Array(element) if matches!(element.as_ref(), HirType::Promise(_))) {
+                return Err("cannot coerce a native Promise array to a dynamic (any) value".into());
+            }
             // A `Dictionary` is physically the same boxed Json object (element writes already
             // encode to Json), so crossing into `any` is an alias: wrapping it in a temporary
             // object would hand its box to an owning setter and free it with the temporary.

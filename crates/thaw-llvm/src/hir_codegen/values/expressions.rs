@@ -38,12 +38,22 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn compile_throw_builtin_error(&mut self, kind: &str, message: &str) -> Result<(), String> {
-        let tagged = format!("\u{1}{kind}\u{1}{message}");
-        let value = self
+        let name = self
             .builder
-            .build_global_string_ptr(&tagged, "synthetic_type_error")
+            .build_global_string_ptr(kind, "synthetic_error_name")
             .map_err(|error| error.to_string())?
             .as_pointer_value();
+        let message = self
+            .builder
+            .build_global_string_ptr(message, "synthetic_error_message")
+            .map_err(|error| error.to_string())?
+            .as_pointer_value();
+        let value = self.builder.build_call(
+            self.module.get_function("thaw_error_frame").unwrap(),
+            &[name.into(), message.into()],
+            "synthetic_error_frame",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_error_frame returned no value")?.into_pointer_value();
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), value)
             .map_err(|error| error.to_string())?;

@@ -79,6 +79,54 @@ fn join_uses_default_comma_for_explicit_undefined_separator() {
 }
 
 #[test]
+fn json_member_update_mutates_the_original_native_json_value() {
+    let source = r#"
+        let keyCalls = 0;
+        function key(): string { keyCalls++; return "value"; }
+        class Holder { value: any = 4; }
+        function main(): void {
+            const o = JSON.parse('{"n":1}');
+            const old = o.n++;
+            console.log(old, o.n);
+            const holder = new Holder();
+            const fixedOld = holder.value++;
+            console.log(fixedOld, holder.value);
+
+            loadScript("globalThis.updateHost = { _value: 7n, reads: 0, writes: 0, get value() { this.reads++; return this._value; }, set value(next) { this.writes++; this._value = next; } };");
+            const host: any = getDynamicValue("updateHost");
+            const hostOld: any = host[key()]++;
+            const hostNew: any = ++host[key()];
+            console.log(String(hostOld), String(hostNew), String(host.value), Number(getDynamicValue("updateHost").reads), Number(getDynamicValue("updateHost").writes), keyCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_member_update_native_json"),
+        "1 2\n4 5\n7 9 9 3 2 2\n"
+    );
+}
+
+#[test]
+fn json_member_update_throws_after_evaluating_a_primitive_computed_key() {
+    let source = r#"
+        let keyCalls = 0;
+        function key(): string { keyCalls++; return "n"; }
+        function update(value: any, label: string): void {
+            try { value[key()]++; }
+            catch (error: any) { console.log(label, error.message); }
+        }
+        function main(): void {
+            update(JSON.parse("null"), "null");
+            update(undefined, "undefined");
+            console.log(keyCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_member_update_nullish_computed_key"),
+        "null Cannot read properties of null (reading 'n')\nundefined Cannot read properties of undefined (reading 'n')\n2\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_join() {
     let source = r#"
         function separator(): string {

@@ -1,58 +1,211 @@
 impl<'a> FnLowerer<'a> {
-    /// `o.n++` / `--o.n` on an `any` (Json) member, as `o.n = Number(o.n) + 1` (the postfix value
-    /// is the numeric old value, `(o.n = Number(o.n) + 1) - 1`). Only for a receiver that is cheap and
-    /// pure to evaluate twice.
+    /// Preserve JavaScript's property-update semantics for an `any` (Json) member.
     fn lower_json_member_update(
         &mut self,
         update: &swc_ecma_ast::UpdateExpr,
-        member: &MemberExpr,
+        target: Target,
     ) -> Result<HirExpr, String> {
-        fn pure_receiver(expr: &Expr) -> bool {
-            match expr {
-                Expr::Ident(_) | Expr::This(_) => true,
-                Expr::Member(member) => {
-                    pure_receiver(&member.obj)
-                        && matches!(&member.prop, MemberProp::Ident(_))
-                }
-                Expr::Paren(paren) => pure_receiver(&paren.expr),
-                _ => false,
+        let mut bindings = Vec::new();
+        let (target, guard_nullish) = match target {
+            Target::Dictionary(object, key, HirType::Json) => {
+                let object_name = format!("__thaw_update_json_object_{}", self.next_binding);
+                self.next_binding += 1;
+                let object_type = self.infer_expr_type(&object)?;
+                let guard_nullish = object_type == HirType::Json;
+                self.scope.insert(object_name.clone(), object_type.clone());
+                bindings.push((object_name.clone(), object_type, object));
+
+                let key_name = format!("__thaw_update_json_key_{}", self.next_binding);
+                self.next_binding += 1;
+                let key_type = self.infer_expr_type(&key)?;
+                self.scope.insert(key_name.clone(), key_type.clone());
+                bindings.push((key_name.clone(), key_type, *key));
+                (
+                    Target::Dictionary(
+                        HirExpr::Var(object_name),
+                        Box::new(HirExpr::Var(key_name)),
+                        HirType::Json,
+                    ),
+                    guard_nullish,
+                )
             }
-        }
-        if !pure_receiver(&member.obj) {
-            return Err("cannot apply ++/-- to a member of a computed `any` receiver".into());
-        }
-        let span = update.span;
-        let number = |value: f64| {
-            Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number { span, value, raw: None })))
+            Target::JsonIndex(object, index) => {
+                let object_name = format!("__thaw_update_json_object_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(object_name.clone(), HirType::Json);
+                bindings.push((object_name.clone(), HirType::Json, object));
+
+                let index_name = format!("__thaw_update_json_index_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(index_name.clone(), HirType::F64);
+                bindings.push((index_name.clone(), HirType::F64, *index));
+                (
+                    Target::JsonIndex(
+                        HirExpr::Var(object_name),
+                        Box::new(HirExpr::Var(index_name)),
+                    ),
+                    true,
+                )
+            }
+            Target::DynamicProperty(object, key) => {
+                let object_name = format!("__thaw_update_dynamic_object_{}", self.next_binding);
+                self.next_binding += 1;
+                let object_type = self.infer_expr_type(&object)?;
+                self.scope.insert(object_name.clone(), object_type.clone());
+                bindings.push((object_name.clone(), object_type, object));
+
+                let key_name = format!("__thaw_update_dynamic_key_{}", self.next_binding);
+                self.next_binding += 1;
+                let key_type = self.infer_expr_type(&key)?;
+                self.scope.insert(key_name.clone(), key_type.clone());
+                bindings.push((key_name.clone(), key_type, *key));
+                (
+                    Target::DynamicProperty(
+                        HirExpr::Var(object_name),
+                        Box::new(HirExpr::Var(key_name)),
+                    ),
+                    false,
+                )
+            }
+            Target::Prop(object, object_type, field) => {
+                let is_json_field = matches!(
+                    &object_type,
+                    HirType::Object(fields)
+                        if fields.iter().any(|(name, ty)| name == &field && ty == &HirType::Json)
+                );
+                if !is_json_field {
+                    return Err("unsupported JSON update target".into());
+                }
+                let object_name = format!("__thaw_update_object_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(object_name.clone(), object_type.clone());
+                bindings.push((object_name.clone(), object_type.clone(), object));
+                (
+                    Target::Prop(HirExpr::Var(object_name), object_type, field),
+                    false,
+                )
+            }
+            _ => return Err("unsupported JSON update target".into()),
         };
-        let (add, undo) = match update.op {
-            swc_ecma_ast::UpdateOp::PlusPlus => (swc_ecma_ast::BinaryOp::Add, swc_ecma_ast::BinaryOp::Sub),
-            swc_ecma_ast::UpdateOp::MinusMinus => (swc_ecma_ast::BinaryOp::Sub, swc_ecma_ast::BinaryOp::Add),
+        let current = match &target {
+            Target::DynamicProperty(object, key) => {
+                let value = HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicProperty".into())),
+                    vec![object.clone(), key.as_ref().clone()],
+                );
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                    vec![value],
+                )
+            }
+            _ => self.lower_assignment_target_read(&target)?,
         };
-        let current = Box::new(Expr::Call(swc_ecma_ast::CallExpr {
-            span,
-            ctxt: Default::default(),
-            callee: Callee::Expr(Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("Number".into(), span)))),
-            args: vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(Expr::Member(member.clone())) }],
-            type_args: None,
-        }));
-        let assignment = Box::new(Expr::Assign(swc_ecma_ast::AssignExpr {
-            span,
-            op: swc_ecma_ast::AssignOp::Assign,
-            left: AssignTarget::Simple(SimpleAssignTarget::Member(member.clone())),
-            right: Box::new(Expr::Bin(swc_ecma_ast::BinExpr { span, op: add, left: current, right: number(1.0) })),
-        }));
-        let rewritten = if update.prefix {
-            *assignment
+        let current = self.coerce_to_declared_aliasing(&HirType::Json, current)?;
+        let increment = self.coerce_to_declared_aliasing(
+            &HirType::Json,
+            HirExpr::Lit(HirLit::Bool(update.op == swc_ecma_ast::UpdateOp::PlusPlus)),
+        )?;
+        let args = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(vec![current, increment]),
+            HirType::Array(Box::new(HirType::Json)),
+        )?;
+        let updated_pair_name = format!("__thaw_update_json_pair_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(updated_pair_name.clone(), HirType::Json);
+        let update_helper = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(
+                "__thaw_update_dynamic_value".into(),
+            ))],
+        );
+        let updated_pair_handle = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+            vec![
+                update_helper,
+                args,
+            ],
+        );
+        let updated_pair = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+            vec![updated_pair_handle],
+        );
+        let pair_binding = (updated_pair_name.clone(), HirType::Json, updated_pair);
+        let pair = HirExpr::Var(updated_pair_name);
+        let old = HirExpr::JsonIndex(
+            Box::new(pair.clone()),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        );
+        let updated = HirExpr::JsonIndex(
+            Box::new(pair),
+            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+        );
+        let write = match &target {
+            Target::DynamicProperty(object, key) => HirExpr::Call(
+                Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
+                vec![object.clone(), key.as_ref().clone(), updated.clone()],
+            ),
+            _ => self.lower_assignment_target_write(target.clone(), updated.clone())?,
+        };
+        let result = HirExpr::Block(vec![
+            HirStmt::Expr(write),
+            HirStmt::Return(Some(if update.prefix { updated } else { old })),
+        ]);
+        let result = if guard_nullish {
+            let object = match &target {
+                Target::Dictionary(object, _, _) | Target::JsonIndex(object, _) => object.clone(),
+                _ => unreachable!(),
+            };
+            let key = match &target {
+                Target::Dictionary(_, key, _) => key.as_ref().clone(),
+                Target::JsonIndex(_, index) => index.as_ref().clone(),
+                _ => unreachable!(),
+            };
+            let key = self.coerce_primitive_to_string(key)?;
+            let type_error = |kind: &str| {
+                let concat = |left, right| {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                        vec![left, right],
+                    )
+                };
+                let message = concat(
+                    concat(
+                        HirExpr::Lit(HirLit::Str(format!(
+                        "\u{1}TypeError\u{1}Cannot read properties of {kind} (reading '",
+                    ))),
+                        key.clone(),
+                    ),
+                    HirExpr::Lit(HirLit::Str("')".into())),
+                );
+                HirStmt::Throw(message)
+            };
+            let is_nullish = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![object.clone()],
+            );
+            let is_null = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                vec![object],
+            );
+            HirExpr::Block(vec![
+                HirStmt::If(
+                    is_nullish,
+                    vec![HirStmt::If(
+                        is_null,
+                        vec![type_error("null")],
+                        vec![type_error("undefined")],
+                    )],
+                    Vec::new(),
+                ),
+                HirStmt::Return(Some(self.wrap_call_argument_bindings(
+                    result,
+                    &[pair_binding],
+                )?)),
+            ])
         } else {
-            Expr::Bin(swc_ecma_ast::BinExpr {
-                span,
-                op: undo,
-                left: Box::new(Expr::Paren(swc_ecma_ast::ParenExpr { span, expr: assignment })),
-                right: number(1.0),
-            })
+            self.wrap_call_argument_bindings(result, &[pair_binding])?
         };
-        self.lower_expr(&rewritten)
+        self.wrap_call_argument_bindings(result, &bindings)
     }
 }
 
@@ -364,7 +517,13 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         match &member.prop {
                             MemberProp::Computed(computed) => {
-                                self.lower_computed_target(member, computed)?
+                                let object = self.lower_json_mutable_chain(&member.obj)?;
+                                let object_type = self.infer_expr_type(&object)?;
+                                self.lower_computed_target_from_receiver(
+                                    object,
+                                    object_type,
+                                    computed,
+                                )?
                             }
                             MemberProp::Ident(prop) => {
                                 let object = self.lower_expr(&member.obj)?;
@@ -372,7 +531,7 @@ impl<'a> FnLowerer<'a> {
                                 match &object_type {
                                     HirType::Object(fields)
                                         if fields.iter().any(|(name, ty)| {
-                                            name == prop.sym.as_str() && *ty == HirType::F64
+                                            name == prop.sym.as_str() && matches!(ty, HirType::F64 | HirType::Json)
                                         }) =>
                                     {
                                         Target::Prop(object, object_type, prop.sym.to_string())
@@ -396,7 +555,11 @@ impl<'a> FnLowerer<'a> {
                                             ))),
                                         )
                                     }
-                                    HirType::Json => return self.lower_json_member_update(update, member),
+                                    HirType::Json => Target::Dictionary(
+                                        object,
+                                        Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                        HirType::Json,
+                                    ),
                                     _ => {
                                         return Err(format!(
                                             "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -411,7 +574,13 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     match &member.prop {
                         MemberProp::Computed(computed) => {
-                            self.lower_computed_target(member, computed)?
+                            let object = self.lower_json_mutable_chain(&member.obj)?;
+                            let object_type = self.infer_expr_type(&object)?;
+                            self.lower_computed_target_from_receiver(
+                                object,
+                                object_type,
+                                computed,
+                            )?
                         }
                         MemberProp::Ident(prop) => {
                             let object = self.lower_expr(&member.obj)?;
@@ -419,7 +588,7 @@ impl<'a> FnLowerer<'a> {
                             match &object_type {
                                 HirType::Object(fields)
                                     if fields.iter().any(|(name, ty)| {
-                                        name == prop.sym.as_str() && *ty == HirType::F64
+                                        name == prop.sym.as_str() && matches!(ty, HirType::F64 | HirType::Json)
                                     }) =>
                                 {
                                     Target::Prop(object, object_type, prop.sym.to_string())
@@ -437,7 +606,11 @@ impl<'a> FnLowerer<'a> {
                                     object,
                                     Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                                 ),
-                                HirType::Json => return self.lower_json_member_update(update, member),
+                                HirType::Json => Target::Dictionary(
+                                    object,
+                                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                    HirType::Json,
+                                ),
                                 _ => {
                                     return Err(format!(
                                 "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -502,54 +675,23 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        let has_json_update_target = match &target {
+            Target::JsonIndex(..)
+            | Target::Dictionary(_, _, HirType::Json)
+            | Target::DynamicProperty(..) => true,
+            Target::Prop(_, HirType::Object(fields), field) => fields
+                .iter()
+                .any(|(name, ty)| name == field && ty == &HirType::Json),
+            _ => false,
+        };
+        if has_json_update_target {
+            return self.lower_json_member_update(update, target);
+        }
         let op = match update.op {
             UpdateOp::PlusPlus => BinOp::Add,
             UpdateOp::MinusMinus => BinOp::Sub,
         };
         let one = HirExpr::Lit(HirLit::F64(1.0));
-        if let Target::DynamicProperty(object, key) = target {
-            let object_name = format!("__thaw_update_dynamic_object_{}", self.next_binding);
-            self.next_binding += 1;
-            let key_name = format!("__thaw_update_dynamic_key_{}", self.next_binding);
-            self.next_binding += 1;
-            let old_name = format!("__thaw_update_dynamic_old_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(object_name.clone(), HirType::JsValue);
-            let key_type = self.infer_expr_type(&key)?;
-            self.scope.insert(key_name.clone(), key_type.clone());
-            self.scope.insert(old_name.clone(), HirType::F64);
-
-            let current = HirExpr::Call(
-                Box::new(HirExpr::Var("getDynamicProperty".into())),
-                vec![
-                    HirExpr::Var(object_name.clone()),
-                    HirExpr::Var(key_name.clone()),
-                ],
-            );
-            let current = self.coerce_to_declared(&HirType::F64, current)?;
-            let old = HirExpr::Var(old_name.clone());
-            let updated = HirExpr::BinOp(op, Box::new(old.clone()), Box::new(one));
-            let encoded = self.coerce_to_declared(&HirType::Json, updated.clone())?;
-            let result = HirExpr::Block(vec![
-                HirStmt::Expr(HirExpr::Call(
-                    Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
-                    vec![
-                        HirExpr::Var(object_name.clone()),
-                        HirExpr::Var(key_name.clone()),
-                        encoded,
-                    ],
-                )),
-                HirStmt::Return(Some(if update.prefix { updated } else { old })),
-            ]);
-            return self.wrap_call_argument_bindings(
-                result,
-                &[
-                    (object_name, HirType::JsValue, object),
-                    (key_name, key_type, *key),
-                    (old_name, HirType::F64, current),
-                ],
-            );
-        }
         let current = self.lower_assignment_target_read(&target)?;
         // An array element read is `T | undefined`; `undefined++` is NaN, so coerce it.
         let current = if matches!(&target, Target::Index(..))

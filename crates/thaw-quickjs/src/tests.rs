@@ -61,6 +61,127 @@ fn host_query_callable_slot_does_not_collide_with_number_conversion() {
     );
 }
 
+#[test]
+fn host_for_in_enumeration_filters_symbols_and_shadowed_keys() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+        globalThis.hostForInKeys = function() {
+          const prototype = { inherited: 1, shared: 2 };
+          const value = Object.create(prototype);
+          value.own = 3;
+          Object.defineProperty(value, 'shared', { value: 4, enumerable: false });
+          value[Symbol('hidden')] = 5;
+          const graph = JSON.parse(__thaw_json_host_enumerate(value, 9));
+          return __thaw_json_graph_decode(graph).join(',');
+        };
+    "#
+            ),
+            1
+        );
+        assert_eq!(call("hostForInKeys", "[]"), r#""own,inherited""#);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn array_join_handles_recursive_arrays_and_preserves_recursive_coercion_order() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+        globalThis.cyclicArrayJoinCases = function() {
+          const self = [];
+          self[0] = self;
+          self[1] = 'end';
+          const selfJoined = self.join('|');
+
+          const left = [];
+          const right = [];
+          left.push(right, 'L');
+          right.push(left, 'R');
+          const mutualJoined = left.join('|');
+
+          const separatorReentry = [1, 2];
+          let nestedSeparatorJoin;
+          const separatorOuterJoin = separatorReentry.join({
+            toString() { nestedSeparatorJoin = separatorReentry.join(); return '-'; },
+          });
+
+          let lengthReentryReads = 0, nestedLengthJoin;
+          let lengthReentry;
+          lengthReentry = new Proxy({ 0: 'value' }, {
+            get(target, key, receiver) {
+              if (key === 'length') {
+                lengthReentryReads++;
+                if (lengthReentryReads === 1)
+                  nestedLengthJoin = Array.prototype.join.call(lengthReentry);
+                return 1;
+              }
+              return Reflect.get(target, key, receiver);
+            },
+          });
+          const lengthOuterJoin = Array.prototype.join.call(lengthReentry, '|');
+
+          let lengthReads = 0, separatorReads = 0;
+          let recursive;
+          const separator = { toString() { separatorReads++; return '|'; } };
+          recursive = new Proxy({}, {
+            get(target, key, receiver) {
+              if (key === 'length') { lengthReads++; return 1; }
+              if (key === '0') return recursive;
+              return Reflect.get(target, key, receiver);
+            },
+          });
+          recursive.toString = () => Array.prototype.join.call(recursive, separator);
+          const recursiveJoined = Array.prototype.join.call(recursive, separator);
+
+          let boundReads = 0, skippedSeparatorReads = 0;
+          let tooLong;
+          const skippedSeparator = { toString() { skippedSeparatorReads++; return '|'; } };
+          tooLong = new Proxy({}, {
+            get(target, key, receiver) {
+              if (key === 'length') { boundReads++; return boundReads === 1 ? 1 : 4294967296; }
+              if (key === '0') return tooLong;
+              return Reflect.get(target, key, receiver);
+            },
+          });
+          tooLong.toString = () => Array.prototype.join.call(tooLong, skippedSeparator);
+          let boundError;
+          try { Array.prototype.join.call(tooLong); }
+          catch (error) { boundError = error.name + ':' + error.message; }
+
+          let getterReads = 0;
+          const retry = [];
+          Object.defineProperty(retry, '0', { get() {
+            getterReads++;
+            if (getterReads === 1) throw new Error('first pass');
+            return retry;
+          } });
+          retry.length = 1;
+          try { retry.join('|'); } catch (_) {}
+          const retryJoined = retry.join('|');
+          return [selfJoined, mutualJoined, separatorOuterJoin, nestedSeparatorJoin,
+                  lengthOuterJoin, nestedLengthJoin, lengthReentryReads,
+                  recursiveJoined, lengthReads,
+                  separatorReads, boundError, boundReads, skippedSeparatorReads,
+                  getterReads, retryJoined];
+        };
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("cyclicArrayJoinCases", "[]"),
+            r#"["|end",",R|L","1-2","1,2","value","value",2,"",2,2,"TypeError:Invalid array length",2,0,2,""]"#,
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 fn load(source: &str) -> u8 {
     let source = CString::new(source).unwrap();
     thaw_js_load(source.as_ptr())
@@ -596,6 +717,11 @@ fn install_error_boundary_host_operations() {
             predicate: extern "C" fn(u64, *const std::ffi::c_char, u8) -> ThawHandleResult,
             enumerate: extern "C" fn(u64, u8) -> ThawResult,
         );
+        fn thaw_json_register_error_factory(
+            create: extern "C" fn(*const c_char) -> ThawHandleResult,
+            lookup: extern "C" fn(*const c_void, *const c_char) -> ThawHandleResult,
+            intern: extern "C" fn(*const c_void, *const c_char, u64) -> ThawHandleResult,
+        );
     }
     unsafe {
         thaw_json_register_host_operations(
@@ -607,6 +733,11 @@ fn install_error_boundary_host_operations() {
             thaw_js_set_property_graph_result,
             thaw_js_property_predicate_json_key_result,
             thaw_js_host_enumerate_result,
+        );
+        thaw_json_register_error_factory(
+            thaw_js_error_from_tagged_handle,
+            thaw_js_lookup_native_object,
+            thaw_js_intern_native_object,
         );
     }
 }
@@ -3232,6 +3363,92 @@ fn framed_error_rebuilds_original_message_and_keeps_display_separate() {
     );
     assert_eq!(call("framedErrorRoundTrip", "[]"),
         "[\"show\\u0002me\",\"raw\\u0003x\",\"Error\",\"raw\\u0003x\",418,\"raw\\u0003x\",\"\",\"a\\u0002b\"]");
+}
+
+#[test]
+fn framed_tagged_errors_use_captured_builtin_prototypes() {
+    assert_eq!(
+        load(
+            r#"
+      const originalTypeError = TypeError;
+      globalThis.TypeError = function ReplacedTypeError() {};
+      function checkCapturedErrorFactory() {
+        const error = __thaw_error_from_tagged('\u0001TypeError\u0001boom');
+        globalThis.TypeError = originalTypeError;
+        const lookalike = { name: 'TypeError', message: 'boom' };
+        return [error instanceof originalTypeError, error instanceof Error,
+                error.name, error.message, lookalike instanceof Error];
+      }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("checkCapturedErrorFactory", "[]"),
+        r#"[true,true,"TypeError","boom",false]"#,
+    );
+}
+
+#[test]
+fn framed_error_json_projection_preserves_identity_and_separates_equal_throws() {
+    std::thread::spawn(|| {
+        thaw_arena::thaw_arena_enable_tracing();
+        assert_eq!(load("globalThis.__thawErrorLookalike = { name: 'TypeError', message: 'boom' };"), 1);
+        install_error_boundary_host_operations();
+        unsafe extern "C" {
+            fn thaw_json_receiver_string(value: *const c_char) -> *mut c_void;
+            fn thaw_json_borrowed_handle_id(value: *const c_void) -> u64;
+            fn thaw_json_strict_equal(left: *const c_void, right: *const c_void) -> u8;
+            fn thaw_json_destroy(value: *mut c_void);
+        }
+
+        let first_text = thaw_arena::arena_string(b"\x01TypeError\x01boom");
+        let second_text = thaw_arena::arena_string(b"\x01TypeError\x01boom");
+        let utf16_text = thaw_arena::arena_string(b"\x01TypeError\x01\xed\xa0\x80\0tail");
+        assert!(thaw_arena::contains_allocation(first_text as usize));
+        assert!(thaw_arena::contains_allocation(second_text as usize));
+        assert!(thaw_arena::contains_allocation(utf16_text as usize));
+        let first = unsafe { thaw_json_receiver_string(first_text.cast()) };
+        let same = unsafe { thaw_json_receiver_string(first_text.cast()) };
+        let distinct = unsafe { thaw_json_receiver_string(second_text.cast()) };
+        let utf16_error = unsafe { thaw_json_receiver_string(utf16_text.cast()) };
+        assert!(!first.is_null() && !same.is_null() && !distinct.is_null() && !utf16_error.is_null());
+        assert_eq!(unsafe { thaw_json_strict_equal(first, same) }, 1);
+        assert_eq!(unsafe { thaw_json_strict_equal(first, distinct) }, 0);
+
+        let handle = unsafe { thaw_json_borrowed_handle_id(first) };
+        let utf16_handle = unsafe { thaw_json_borrowed_handle_id(utf16_error) };
+        let js_checks = with_context(|ctx| {
+            let error = value_for_handle(&ctx, handle).expect("projected Error handle remains live");
+            ctx.globals().set("__thawProjectedTypeError", error).unwrap();
+            let checks: String = ctx.eval(
+                "JSON.stringify([__thawProjectedTypeError instanceof TypeError, __thawErrorLookalike instanceof Error, __thawErrorLookalike.name, __thawErrorLookalike.message])",
+            ).unwrap();
+            ctx.eval::<(), _>("delete globalThis.__thawProjectedTypeError; delete globalThis.__thawErrorLookalike")
+                .unwrap();
+            checks
+        });
+        assert_eq!(js_checks, "[true,false,\"TypeError\",\"boom\"]");
+        let utf16_checks = with_context(|ctx| {
+            let error = value_for_handle(&ctx, utf16_handle).expect("projected UTF-16 Error remains live");
+            ctx.globals().set("__thawProjectedUtf16Error", error).unwrap();
+            let checks: String = ctx.eval(
+                "JSON.stringify([__thawProjectedUtf16Error instanceof TypeError, __thawProjectedUtf16Error.message.length, __thawProjectedUtf16Error.message.charCodeAt(0), __thawProjectedUtf16Error.message.charCodeAt(1)])",
+            ).unwrap();
+            ctx.eval::<(), _>("delete globalThis.__thawProjectedUtf16Error")
+                .unwrap();
+            checks
+        });
+        assert_eq!(utf16_checks, "[true,6,55296,0]");
+        unsafe {
+            thaw_json_destroy(first);
+            thaw_json_destroy(same);
+            thaw_json_destroy(distinct);
+            thaw_json_destroy(utf16_error);
+        }
+    })
+    .join()
+    .unwrap();
 }
 
 #[test]
@@ -12675,6 +12892,73 @@ fn private_graph_property_setter_runs_before_result_encoding() {
 }
 
 #[test]
+fn private_graph_property_assignment_result_preserves_bigint_and_object_identity() {
+    assert_eq!(
+        load(
+            r#"
+        globalThis.graphAssignmentTarget = {};
+        globalThis.graphAssignmentOrder = '';
+        globalThis.graphAssignmentValue = {
+          toJSON() { graphAssignmentOrder += 'J'; return { projected: true }; }
+        };
+        globalThis.checkGraphAssignment = () =>
+          [graphAssignmentTarget.field === graphAssignmentValue, graphAssignmentOrder];
+    "#
+        ),
+        1
+    );
+    let target = thaw_js_get_global(c"graphAssignmentTarget".as_ptr());
+    let value = thaw_js_get_global(c"graphAssignmentValue".as_ptr());
+    assert_eq!(thaw_js_retain_handle(value), 1);
+
+    let bigint_args =
+        CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"bi":"9007199254740993"}]}]}"#).unwrap();
+    let bigint_result =
+        thaw_js_set_property_json_graph_result(target, c"bigint".as_ptr(), bigint_args.as_ptr());
+    assert!(bigint_result.error.is_null());
+    let bigint_wire = unsafe { CStr::from_ptr(bigint_result.value) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        bigint_wire.contains(r#""bi":"9007199254740993""#),
+        "{bigint_wire}"
+    );
+    unsafe { thaw_arena::destroy_string(bigint_result.value.cast_mut()) };
+
+    let object_args = CString::new(format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{value}}}],"leases":[{value}]}}"#
+    ))
+    .unwrap();
+    let object_result =
+        thaw_js_set_property_json_graph_result(target, c"field".as_ptr(), object_args.as_ptr());
+    assert!(
+        object_result.error.is_null(),
+        "{}",
+        if object_result.error.is_null() {
+            "".to_string()
+        } else {
+            unsafe { CStr::from_ptr(object_result.error) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    );
+    let object_wire = unsafe { CStr::from_ptr(object_result.value) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        object_wire.contains(&format!(r#""hdl":{value}"#)),
+        "{object_wire}"
+    );
+    assert_eq!(call("checkGraphAssignment", "[]"), r#"[true,""]"#);
+    unsafe { thaw_arena::destroy_string(object_result.value.cast_mut()) };
+    with_context(|ctx| release_unconsumed_graph_leases(&ctx, &object_wire));
+
+    assert_eq!(thaw_js_release_handle(value), 1);
+    assert_eq!(thaw_js_release_handle(value), 0);
+    assert_eq!(thaw_js_release_handle(target), 1);
+}
+
+#[test]
 fn private_graph_arguments_release_input_leases_after_success() {
     assert_eq!(load("globalThis.leaseInput = {}; globalThis.acceptLeaseInput = value => value === leaseInput;"), 1);
     let input = thaw_js_get_global(c"leaseInput".as_ptr());
@@ -15712,6 +15996,41 @@ fn failed_module_initialization_does_not_poison_the_next_load() {
 }
 
 #[test]
+fn module_ready_jobs_run_before_platform_polling() {
+    let (loaded, order, polls) = std::thread::spawn(|| {
+        let loaded = load(
+            r#"
+            globalThis.__moduleReadyOrder = [];
+            globalThis.__moduleReadyPolls = 0;
+            globalThis.__thaw_poll_platform_events = () => {
+              __moduleReadyPolls++;
+              __moduleReadyOrder.push('io');
+            };
+            globalThis.__thaw_module_ready = Promise.resolve().then(() => {
+              __moduleReadyOrder.push('module');
+            });
+            "#,
+        );
+        with_context(|ctx| {
+            let order = ctx
+                .eval::<String, _>("JSON.stringify(__moduleReadyOrder)")
+                .unwrap();
+            let polls = ctx.globals().get::<_, i32>("__moduleReadyPolls").unwrap();
+            (loaded, order, polls)
+        })
+    })
+    .join()
+    .expect("module ready job test context");
+
+    assert_eq!(loaded, 1);
+    assert_eq!(order, r#"["module"]"#);
+    assert_eq!(
+        polls, 0,
+        "settling module readiness must not poll platform I/O"
+    );
+}
+
+#[test]
 fn host_net_functions_reject_ports_outside_the_u16_range() {
     assert_eq!(
         load(
@@ -16194,4 +16513,85 @@ fn iterator_predicates_release_rejected_reference_values() {
     });
     drop(context);
     runtime.run_gc();
+}
+
+#[test]
+fn dynamic_result_graph_leases_return_to_baseline_after_success_and_exception() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&["__storageLeaseValue", "__storageLeaseOwner"]);
+    assert_eq!(
+        load(
+            r#"
+        globalThis.__storageLeaseValue = {};
+        __storageLeaseValue.self = __storageLeaseValue;
+        globalThis.__storageLeaseOwner = {
+            get() { return __storageLeaseValue; },
+            fail(value) { if (value !== __storageLeaseValue) throw 'wrong identity'; throw 'expected'; }
+        };
+    "#
+        ),
+        1
+    );
+    let value = guard.handle(thaw_js_get_global(c"__storageLeaseValue".as_ptr()));
+    let owner = guard.handle(thaw_js_get_global(c"__storageLeaseOwner".as_ptr()));
+    assert_eq!(error_boundary_registry_state(value), (1, true));
+    for _ in 0..40 {
+        let result = thaw_js_call_method_graph_result(
+            owner,
+            c"get".as_ptr(),
+            c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr(),
+        );
+        assert!(result.error.is_null());
+        let retained = guard.capture_handle_result(thaw_js_retain_graph_result(result.value));
+        unsafe {
+            thaw_arena::destroy_string(result.value.cast_mut());
+        }
+        assert!(retained.error.is_null());
+        assert_eq!(retained.value, value);
+        assert_eq!(error_boundary_registry_state(value), (2, true));
+        guard.release_handle(retained.value);
+        assert_eq!(error_boundary_registry_state(value), (1, true));
+        assert_eq!(thaw_js_retain_handle(value), 1);
+        let arguments = CString::new(format!(r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{value}}}],"leases":[{value}]}}"#)).unwrap();
+        let failed = thaw_js_call_method_handle_graph_args_result(
+            owner,
+            c"fail".as_ptr(),
+            arguments.as_ptr(),
+            false,
+        );
+        assert_eq!(failed.value, 0);
+        assert!(!failed.error.is_null());
+        unsafe {
+            thaw_arena::destroy_string(failed.error.cast_mut());
+        }
+        assert_eq!(error_boundary_registry_state(value), (1, true));
+    }
+    guard.finish();
+}
+
+#[test]
+fn live_graph_callback_mask_retains_primitive_handles() {
+    assert_eq!(
+        load(
+            r#"
+        function inspectLiveGraphPrimitiveMask() {
+            const values = [1, 'x', false, null, undefined, 1n];
+            const graph = JSON.parse(__thaw_json_graph_encode_js(values.slice(), 63, true));
+            try {
+                return graph.nodes[0].a.map((token, index) => {
+                    const node = graph.nodes[token.r];
+                    return !!node && node.hdl > 0 && Object.is(__thaw_value_handles[node.hdl - 1], values[index]);
+                });
+            } finally {
+                for (const handle of graph.leases) __thaw_release_dynamic_value(handle);
+            }
+        }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectLiveGraphPrimitiveMask", "[]"),
+        "[true,true,true,true,true,true]"
+    );
 }

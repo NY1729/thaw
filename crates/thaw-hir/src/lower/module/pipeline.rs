@@ -176,6 +176,15 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
+    let normalized = normalize_module_for_lowering(module)?;
+    let mut program = lower_normalized_module(&normalized)?;
+    // `HirType::Bytes` is a lowering-time distinction only; nothing past
+    // here knows it, so collapse it to its physical `Array(F64)`.
+    erase_bytes(&mut program);
+    Ok(program)
+}
+
+fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
@@ -185,12 +194,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
-    let normalized = specialize_named_promise_rejection_callbacks(&normalized)?;
-    let mut program = lower_normalized_module(&normalized)?;
-    // `HirType::Bytes` is a lowering-time distinction only; nothing past
-    // here knows it, so collapse it to its physical `Array(F64)`.
-    erase_bytes(&mut program);
-    Ok(program)
+    specialize_named_promise_rejection_callbacks(&normalized)
 }
 
 const PROMISE_REJECTION_CALLBACK_SUFFIX: &str = "__thaw_promise_rejection";
@@ -417,6 +421,7 @@ fn generic_receiver_pattern_from_annotation(
 }
 
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+    let _storage_scope = StorageScope::enter(module)?;
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
     let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
         .map_err(|error| {
@@ -447,6 +452,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             ));
         }
     }
+    let native_interfaces = if module.body.iter().any(|item| matches!(item,
+        ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration)))
+            if declaration.function.body.is_none() && dynamic_symbol(declaration.ident.sym.as_ref()).is_none())) {
+        let _native_layout = StorageScope::suspend();
+        let mut native = interfaces.clone();
+        collect_native_classes(module, &mut native, &generic_interfaces)?;
+        Some(native)
+    } else { None };
     let class_decls = collect_native_classes(module, &mut interfaces, &generic_interfaces)?;
     if let Some(specialized) =
         specialize_generic_class_methods(module, &interfaces, &generic_interfaces)?
@@ -466,6 +479,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 let name = fn_decl.ident.sym.to_string();
                 let func = &fn_decl.function;
                 let is_extern = func.body.is_none();
+                let annotation_interfaces = if is_extern && dynamic_symbol(&name).is_none() {
+                    native_interfaces.as_ref().unwrap_or(&interfaces)
+                } else { &interfaces };
                 if is_extern && func.is_async {
                     return Err(format!("ambient function `{name}` cannot be async"));
                 }
@@ -516,7 +532,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 .and_then(|ann| generic_type_pattern(
                                     &ann.type_ann,
                                     substitutions,
-                                    &interfaces,
+                                    annotation_interfaces,
                                     &generic_interfaces,
                                     &mut Vec::new(),
                                 )),
@@ -532,7 +548,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     generic_type_pattern(
                                         &ann.type_ann,
                                         substitutions,
-                                        &interfaces,
+                                        annotation_interfaces,
                                         &generic_interfaces,
                                         &mut Vec::new(),
                                     )
@@ -552,7 +568,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_type_pattern(
                             &ann.type_ann,
                             substitutions,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                             &mut Vec::new(),
                         )
@@ -570,7 +586,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         let ty = resolve_ts_type_with_substitution(
                             &annotation.type_ann,
                             &type_substitution,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                             &mut Vec::new(),
                         )?;
@@ -593,7 +609,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     .map(|p| {
                         lower_param(
                             &p.pat,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                             !is_extern,
                             &type_substitution,
@@ -601,6 +617,19 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .map(|p| p.ty)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let quickjs_function_value = is_extern
+                    && ordinary_quickjs_typed_symbol(&name).is_some()
+                    && func.type_params.as_ref().is_none_or(|params| params.params.is_empty())
+                    && func.this_param.is_none()
+                    && func.params.iter().all(|parameter| {
+                        !matches!(parameter.pat, Pat::Rest(_))
+                            && !matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
+                    });
+                if quickjs_function_value {
+                    for (parameter, ty) in func.params.iter().take(fixed_param_count).zip(&params) {
+                        remember_storage_source(storage_key(parameter.pat.span()), ty);
+                    }
+                }
                 if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
                     // The rejection reason is a string; a leading rest parameter
                     // receives it as a one-element array.
@@ -618,7 +647,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     let receiver_type = resolve_ts_type_with_substitution(
                         &annotation.type_ann,
                         &type_substitution,
-                        &interfaces,
+                        annotation_interfaces,
                         &generic_interfaces,
                         &mut Vec::new(),
                     )?;
@@ -627,7 +656,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern = Some(generic_receiver_pattern_from_annotation(
                             &annotation.type_ann,
                             substitutions,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                         ));
                     }
@@ -641,7 +670,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         func.is_async,
                         &func.return_type,
                         &name,
-                        &interfaces,
+                        annotation_interfaces,
                         &generic_interfaces,
                         &type_substitution,
                     )?
@@ -654,12 +683,16 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         func.is_async,
                         &func.return_type,
                         &name,
-                        &interfaces,
+                        annotation_interfaces,
                         &generic_interfaces,
                         &type_substitution,
                         None,
                     )?
                 };
+                if quickjs_function_value {
+                    remember_storage_source((func.span.lo.0, 0), &ret);
+                }
+                let ret = if is_extern { ret } else { storage_return_type(func.span, ret) };
                 let type_predicate = match func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()) {
                     Some(TsType::TsTypePredicate(predicate)) => {
                         let swc_ecma_ast::TsThisTypeOrIdent::Ident(parameter) = &predicate.param_name else {
@@ -678,7 +711,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_type_pattern(
                                 &target.type_ann,
                                 substitutions,
-                                &interfaces,
+                                annotation_interfaces,
                                 &generic_interfaces,
                                 &mut Vec::new(),
                             )?
@@ -686,7 +719,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             GenericTypePattern::Concrete(resolve_ts_type_with_substitution(
                                 &target.type_ann,
                                 &type_substitution,
-                                &interfaces,
+                                annotation_interfaces,
                                 &generic_interfaces,
                                 &mut Vec::new(),
                             )?)
@@ -805,7 +838,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|parameter| parameter.ty)
+                                .map(|lowered| storage_parameter_type(&class_constructor_param_pattern(parameter), lowered.ty))
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -960,7 +993,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|parameter| parameter.ty)
+                                .map(|lowered| storage_parameter_type(&parameter.pat, lowered.ty))
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     );
@@ -1013,6 +1046,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             interfaces.get(name.as_str()),
                         )?
                     };
+                    let ret = storage_return_type(method.function.span, ret);
                     let symbol = match method.kind {
                         MethodKind::Getter => {
                             class_getter_symbol(&name, &method_name, method.is_static)
@@ -1447,6 +1481,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 })
                 .transpose()?
                 .unwrap_or(HirType::Dynamic);
+            let ty = storage_type(binding.id.span, ty);
             global_types.insert(name, ty);
             if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
                 immutable_globals.insert(binding.id.sym.to_string());

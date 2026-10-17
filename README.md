@@ -178,20 +178,19 @@ all Node built-ins, and all npm packages are not guaranteed. Third-party
 packages and native add-ons remain subject to their own platform and license
 requirements.
 
+Arrays, records and collections exposed through `any` use dynamic storage from
+allocation. JavaScript-owned values retain reference identity when written through an
+alias, including plain objects in class-annotated arrays, self references and deep graphs.
+Native classes retain their actual class and private-field brands. Fresh, optional, tuple,
+callable and async method results preserve dynamically represented references across awaits.
+Programs whose values remain native keep their unboxed storage. Public native FFI layouts
+stay fixed; incompatible dynamic arguments throw `TypeError` before native code is invoked.
+Native array and record returns are copied into owned internal storage when dynamic storage
+is required; later dynamic writes do not change the original foreign memory. Class annotations
+do not give an unbranded foreign object a native class brand.
+
 Known gaps against Node semantics:
 
-- A value typed `any` that aliases a statically typed native array (`T[]`) is a live view.
-  A native array or record written into it is stored as that same object. A native `any`/JSON
-  array of numbers, strings or booleans, or an `any`/JSON object whose fields are such values,
-  stays linked to the typed slot it was written into (`v[0] = j; j.push(1)` is visible as
-  `nat[0]`, and typed writes are visible through `j`); this holds at every nesting level
-  (`number[][][]`, records with array or record fields). Values owned by the JS realm (objects
-  returned by npm packages, and arrays or objects inside an `any` object literal, which are real
-  JS values) are stored as a native copy, because a native element slot cannot hold a JavaScript
-  reference and QuickJS cannot redirect existing references: the original object and the stored
-  element do not alias afterwards, and a plain object written into a class array (`C[]`)
-  becomes a `C` with the object's fields. Declare the array `any[]` to keep references; run with
-  `THAW_WARN_COPY=1` to get a one-time note on stderr the first time such a copy happens.
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
 - A bare call of a `this`-using function expression with a simple unconditional property
   access reports Node's property-specific `TypeError`, including reads in an assignment's RHS.
@@ -199,30 +198,8 @@ Known gaps against Node semantics:
   object-literal methods still report `TypeError: Incompatible function receiver`.
 - Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
   functions are still snapshots.
-- A `new Map()`/`new Set()` written in an `any` literal (a field, a nested field or an array
-  element) is a real collection that `get`/`set`/`add`/`has`/`delete`/`forEach`, spread and
-  `console.log` handle. A native `Map`/`Set` variable that becomes `any` (`const a: any = existing`,
-  `{ m: existing }`, `[existing]`, an argument or return of a user function) is a live view: both sides
-  see every change and `a === existing` holds. A view serves keys of type `number`, `string` or `any`
-  and values of type `number`, `string`, `boolean` or `any` (arrays, objects and dictionaries read back
-  live but are read-only through the view); storing another type through it throws a `TypeError`.
-  Iterators (`keys`, `values`, `entries`, `for..of`) and `forEach` observe additions, deletions and
-  updates during traversal. Iterator helpers preserve lazy state and reference identity through
-  chained calls, and close their sources on early return or failure. Collections with statically typed object keys, or whose values are
-  themselves Maps or Sets, stay snapshots.
-- An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
-  self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
-  element becomes `NaN`, and nesting deeper than 32 levels is stored as a plain copy.
-- Supported native method results preserve their identity even when freshly allocated
-  (`v.inner.get().push(x)`, `o.cfg().x = 1`): a native array, class instance or supported Map/Set a class method
-  hands back (declared as `T[]`, a class type or a collection type), and a JavaScript object stored in the receiver
-  within two levels (a scan of at most 256 own data properties). Other results are data
-  snapshots: a fresh JavaScript array or object, a result declared `T[] | undefined`, a tuple
-  or a `Promise` of an array (`async get()`), and an owned value stored deeper or further down than
-  the scan reaches. Mutating a snapshot does not reach the owner. Native class accessors remain
-  live through `any`, including inherited getters and setters. Map/Set fields and callback parameters
-  accept native views with matching key/value types; JavaScript-owned collections and incompatible
-  native collection types throw `TypeError` rather than being copied into native storage.
+- Native FFI collection parameters require an authenticated native collection with compatible
+  key and value types. A JavaScript-owned collection is rejected at that boundary.
 
 ## Examples
 

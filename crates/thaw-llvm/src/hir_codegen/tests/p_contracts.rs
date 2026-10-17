@@ -72,3 +72,36 @@ async function main(): Promise<void> {
         "AggregateError All promises were rejected true\n4 f1 b 7 null\n5\nAggregateError 0\n"
     );
 }
+
+
+#[test]
+fn p_contract_dynamic_promise_payload_conversion_runs_once_and_forwards_rejection() {
+    let source = r####"
+let calls = 0;
+async function producer(): Promise<number> {
+  calls++;
+  await Promise.resolve();
+  return 42;
+}
+function wrapper(): Promise<number> { return producer(); }
+async function rejectingProducer(): Promise<number> {
+  await Promise.resolve();
+  throw new Error('forwarded rejection');
+}
+function rejectingWrapper(): Promise<number> { return rejectingProducer(); }
+async function main(): Promise<void> {
+  const exposed: any = wrapper;
+  const exposedRejecting: any = rejectingWrapper;
+  const pending = wrapper();
+  const first = pending;
+  const second = pending;
+  console.log(first === second, await first, calls);
+  try { await rejectingWrapper(); }
+  catch (error: any) { console.log(error.message, calls); }
+}
+"####;
+    assert_eq!(
+        compile_and_run(source, "p_contract_dynamic_promise_payload_conversion_runs_once_and_forwards_rejection"),
+        "true 42 1\nforwarded rejection 1\n"
+    );
+}

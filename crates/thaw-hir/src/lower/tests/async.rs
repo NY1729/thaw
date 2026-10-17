@@ -482,11 +482,11 @@ fn lowers_fetch_and_json_parse_field_access() {
                             Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
                             vec![HirExpr::Var(receiver.into())],
                         ),
-                        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            format!(
-                                "\u{1}TypeError\u{1}Cannot read properties of null (reading '{field}')"
-                            ),
-                        )))],
+                        vec![HirStmt::If(
+                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_null".into())), vec![HirExpr::Var(receiver.into())]),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!("\u{1}TypeError\u{1}Cannot read properties of null (reading '{field}')"))))],
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!("\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{field}')"))))],
+                        )],
                         Vec::new(),
                     ),
                     HirStmt::Return(Some(HirExpr::JsonGet(

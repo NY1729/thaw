@@ -58,15 +58,9 @@ impl<'ctx> HirCompiler<'ctx> {
         )
     }
 
-    /// Normalizes an `HirType::Array` value returned across the residual
-    /// JIT boundary into the app's `{buffer, presence}` handle. thaw-jit
-    /// represents an array as *either* a tagged raw buffer
-    /// (`buffer | ARRAY_RESULT_TAG`, tag bit `1`) *or* a handle cell
-    /// holding the buffer pointer -- see thaw-jit's `array_data`. App
-    /// array values are always handles, so both forms are unwrapped to
-    /// the raw `[length][elem...]` buffer and re-wrapped here; passing a
-    /// tagged buffer (or JIT handle) straight through made app presence
-    /// checks dereference the array length as a mask pointer.
+    /// Converts a tagged raw JIT buffer into the app's `{buffer, presence}`
+    /// handle. An untagged value is already an app-compatible handle and
+    /// must pass through unchanged to preserve array identity.
     fn compile_jit_array_result(
         &mut self,
         bits: IntValue<'ctx>,
@@ -101,18 +95,15 @@ impl<'ctx> HirCompiler<'ctx> {
         let function = self.current_function();
         let tagged_bb = self.context.append_basic_block(function, "jit_array_tagged");
         let handle_bb = self.context.append_basic_block(function, "jit_array_handle");
+        let reuse_bb = self.context.append_basic_block(function, "jit_array_reuse_handle");
+        let null_bb = self.context.append_basic_block(function, "jit_array_null_handle");
         let merge_bb = self.context.append_basic_block(function, "jit_array_merge");
         self.builder.build_conditional_branch(tagged, tagged_bb, handle_bb).map_err(|error| error.to_string())?;
         self.builder.position_at_end(tagged_bb);
+        let tagged_handle = self.compile_array_wrap(tagged_buffer)?;
+        let tagged_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
         self.builder.position_at_end(handle_bb);
-        let guard = self
-            .builder
-            .build_alloca(i64_type, "jit_array_null_guard")
-            .map_err(|error| error.to_string())?;
-        self.builder
-            .build_store(guard, i64_type.const_zero())
-            .map_err(|error| error.to_string())?;
         let is_null = self
             .builder
             .build_int_compare(
@@ -122,25 +113,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 "jit_array_is_null",
             )
             .map_err(|error| error.to_string())?;
-        let handle_pointer = self
+        self.builder
+            .build_conditional_branch(is_null, null_bb, reuse_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(reuse_bb);
+        let original_handle = self
             .builder
-            .build_select(
-                is_null,
-                guard,
-                self.builder
-                    .build_int_to_ptr(bits, ptr_type, "jit_array_handle")
-                    .map_err(|error| error.to_string())?,
-                "jit_array_handle_pointer",
-            )
-            .map_err(|error| error.to_string())?
-            .into_pointer_value();
-        let handle_buffer = self.compile_array_data(handle_pointer)?;
+            .build_int_to_ptr(bits, ptr_type, "jit_array_original_handle")
+            .map_err(|error| error.to_string())?;
+        let reuse_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(null_bb);
+        let null_handle = self.compile_array_wrap(ptr_type.const_null())?;
+        let null_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
         self.builder.position_at_end(merge_bb);
-        let buffer = self.builder.build_phi(ptr_type, "jit_array_buffer").map_err(|error| error.to_string())?;
-        buffer.add_incoming(&[(&tagged_buffer, tagged_bb), (&handle_buffer, handle_bb)]);
-        let buffer = buffer.as_basic_value().into_pointer_value();
-        self.compile_array_wrap(buffer)
+        let result = self.builder.build_phi(ptr_type, "jit_array_result_handle").map_err(|error| error.to_string())?;
+        result.add_incoming(&[
+            (&tagged_handle, tagged_end),
+            (&original_handle, reuse_end),
+            (&null_handle, null_end),
+        ]);
+        Ok(result.as_basic_value().into_pointer_value())
     }
 
     /// Loads the current raw `[length][elem...]` buffer pointer out of an

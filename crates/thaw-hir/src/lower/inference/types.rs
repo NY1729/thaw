@@ -729,6 +729,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Bool, include_non_enumerable, "full object keys mode")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
+                    "__thaw_object_copy_class_identity" => {
+                        let [source, target] = args.as_slice() else { return Err("class identity copy expects two objects".into()) };
+                        if !matches!(self.infer_expr_type(source)?, HirType::Object(_)) { return Err("class identity copy source must be an object".into()) }
+                        let target = self.infer_expr_type(target)?;
+                        if !matches!(target, HirType::Object(_)) { return Err("class identity copy target must be an object".into()) }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_object_hide_marker" | "__thaw_object_set_class_identity" => {
                         let [object, marker] = args.as_slice() else {
                             return Err("object marker registration expects an object and a marker".into());
@@ -1648,6 +1655,31 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "@@thaw_caught_exception_from_tuple" => {
+                        let expected = [
+                            HirType::Str,
+                            HirType::Object(Vec::new()),
+                            HirType::NativeException,
+                            HirType::I64,
+                            HirType::F64,
+                            HirType::I64,
+                            HirType::Bool,
+                        ];
+                        if args.len() != expected.len() {
+                            return Err(format!("{name} expects seven saved exception fields"));
+                        }
+                        for (argument, expected) in args.iter().zip(&expected) {
+                            self.expect_type(expected, argument, name)?;
+                        }
+                        return Ok(crate::caught_exception_carrier_type());
+                    }
+                    "@@thaw_is_active_rejection_text" => {
+                        let [text] = args.as_slice() else {
+                            return Err("active rejection text check expects one string".into());
+                        };
+                        self.expect_type(&HirType::Str, text, name)?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_native_exception_tag" => {
                         if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
                             return Err("native exception category requires its descriptor".into());
@@ -2485,6 +2517,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Json, value, "owned catch JSON root")?;
                         return Ok(HirType::Json);
+                    }
+                    "__thaw_json_decode_native_argument" => {
+                        let [HirExpr::TypedClosure(target, value)] = args.as_slice() else {
+                            return Err("checked native argument needs its target type".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "checked native argument")?;
+                        return Ok(target.clone());
                     }
                     "__thaw_json_host_from_dynamic" => {
                         let [value] = args.as_slice() else {

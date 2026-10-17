@@ -92,6 +92,28 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
         .map(|symbol| (backend, symbol))
 }
 
+fn is_ordinary_quickjs_symbol(backend: DynamicBackend, symbol: &str) -> bool {
+    backend == DynamicBackend::QuickJs
+        && ![
+            "$getter$",
+            "$setter$",
+            "$method$",
+            "$methodvoid$",
+            "$staticgetter$",
+            "$staticsetter$",
+            "$staticmethod$",
+            "$staticmethodvoid$",
+            "$new$",
+        ]
+        .iter()
+        .any(|prefix| symbol.starts_with(prefix))
+}
+
+fn ordinary_quickjs_typed_symbol(name: &str) -> Option<String> {
+    let (backend, symbol) = dynamic_symbol(name)?;
+    is_ordinary_quickjs_symbol(backend, &symbol).then_some(symbol)
+}
+
 /// Signature info needed to type calls to other top-level functions during
 /// lowering, collected in a pre-pass over the whole module before any
 /// function body is lowered (so forward references and mutual calls work).
@@ -444,6 +466,7 @@ include!("lower/control_flow.rs");
 include!("lower/bytes_erasure.rs");
 
 include!("lower/context.rs");
+include!("lower/storage.rs");
 include!("lower/calls.rs");
 
 impl<'a> FnLowerer<'a> {}

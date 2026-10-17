@@ -495,6 +495,35 @@ fn compiles_generic_function_type_alias_arrows() {
 }
 
 #[test]
+fn generic_optional_arrow_preserves_present_and_absent_argument_values() {
+    let source = r#"
+        type OptionalIdentity = <T>(value?: T) => T | undefined;
+        function main(): void {
+            const identity: OptionalIdentity = <T>(value?: T): T | undefined => value;
+            console.log(identity(41));
+            console.log(identity<number>());
+            const maybe: number | undefined = undefined;
+            console.log(identity(maybe));
+            const destructured: OptionalIdentity = <T>(value?: T): T | undefined => {
+                [value] = [undefined];
+                return value;
+            };
+            console.log(destructured(41));
+            const iterated: OptionalIdentity = <T>(value?: T): T | undefined => {
+                const values: (number | undefined)[] = [undefined];
+                for (value of values) {}
+                return value;
+            };
+            console.log(iterated(41));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_optional_arrow_values"),
+        "41\nundefined\nundefined\nundefined\nundefined\n"
+    );
+}
+
+#[test]
 fn compiles_inline_generic_function_type_arrows() {
     let source = r#"
         function named<T>(value: T): T { return value; }
