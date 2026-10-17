@@ -3168,12 +3168,29 @@ impl<'a> FnLowerer<'a> {
                 }
                 Ok(ty.clone())
             },
-            HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
-                HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>
-                    Ok(HirType::FunctionWithThis(Box::new(params[0].ty.clone()), Box::new(
-                        HirType::Function(params[1..].iter().map(|param| param.ty.clone()).collect(), Box::new(ret.clone()))))),
-                _ => self.infer_expr_type(closure),
-            },
+            HirExpr::NonArrowFunction(closure) => {
+                let (callable_type, inner) = match closure.as_ref() {
+                    HirExpr::TypedClosure(ty, inner) => (Some(ty), inner.as_ref()),
+                    other => (None, other),
+                };
+                match inner {
+                    HirExpr::Lambda(_, params, ret, _)
+                        if params.first().is_some_and(|param| param.name == "__thaw_this") =>
+                    {
+                        let visible_type = callable_type.cloned().unwrap_or_else(|| {
+                            HirType::Function(
+                                params[1..].iter().map(|param| param.ty.clone()).collect(),
+                                Box::new(ret.clone()),
+                            )
+                        });
+                        Ok(HirType::FunctionWithThis(
+                            Box::new(params[0].ty.clone()),
+                            Box::new(visible_type),
+                        ))
+                    }
+                    _ => self.infer_expr_type(closure),
+                }
+            }
             HirExpr::Lambda(_, params, ret, _) => Ok(HirType::Function(
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),

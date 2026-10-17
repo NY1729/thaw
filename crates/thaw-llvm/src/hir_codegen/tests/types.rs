@@ -543,6 +543,155 @@ fn generic_optional_bound_arrow_accepts_explicit_type_arguments() {
 }
 
 #[test]
+fn bound_non_generic_optional_arrow_accepts_omitted_argument() {
+    let source = r#"
+        function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            const later = plain.bind(null);
+            console.log(later());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_non_generic_optional_arrow"), "undefined\n");
+}
+
+#[test]
+fn bound_optional_rest_arrow_packs_call_time_values() {
+    let source = r#"
+        function main(): void {
+            const f = (first?: number, ...rest: number[]): number => rest.length + (first ?? 0);
+            const g = f.bind(null);
+            console.log(g());
+            console.log(g(3, 4, 5));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_optional_rest_arrow"), "0\n5\n");
+}
+
+#[test]
+fn bound_named_optional_rest_and_fixed_functions_keep_call_shapes() {
+    let source = r#"
+        function optionalRest(first?: number, ...rest: number[]): number {
+            return rest.length + (first ?? 0);
+        }
+        function add(left: number, right: number): number { return left + right; }
+        function main(): void {
+            const packed = optionalRest.bind(null);
+            console.log(packed());
+            console.log(packed(3, 4, 5));
+            const addFive = add.bind(null, 5);
+            console.log(addFive(2));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_named_optional_rest"), "0\n5\n7\n");
+}
+
+#[test]
+fn bound_named_optional_and_default_functions_accept_omitted_arguments() {
+    let source = r#"
+        function plain(value?: number): number | undefined { return value; }
+        function defaulted(value: number = 7): number { return value; }
+        function main(): void {
+            const later = plain.bind(null);
+            const laterDefault = defaulted.bind(null);
+            console.log(later());
+            console.log(laterDefault());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_named_omissions"), "undefined\n7\n");
+}
+
+#[test]
+fn bound_default_parameters_evaluate_at_each_invocation() {
+    let source = r#"
+        let calls = 0;
+        const f = (value: number = ++calls): number => value;
+        const g = f.bind(null);
+        function main(): void {
+            console.log(calls);
+            console.log(g());
+            console.log(g());
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_default_invocation_timing"), "0\n1\n2\n2\n");
+}
+
+#[test]
+fn bound_named_default_uses_omission_adapter_lazily() {
+    let source = r#"
+        let calls = 0;
+        function defaulted(value: number = ++calls): number { return value; }
+        function main(): void {
+            const bound = defaulted.bind(null);
+            console.log(calls);
+            console.log(bound());
+            console.log(bound());
+            console.log(bound(9));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_named_default_lazy"), "0\n1\n2\n9\n2\n");
+}
+
+#[test]
+fn bound_leading_argument_effect_runs_once_before_repeated_calls() {
+    let source = r#"
+        let calls = 0;
+        function next(): number { calls++; return 4; }
+        function add(first: number, later?: number): number { return first + (later ?? 0); }
+        function main(): void {
+            const bound = add.bind(null, next());
+            console.log(calls);
+            console.log(bound());
+            console.log(bound(3));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_leading_argument_once"), "1\n4\n7\n1\n");
+}
+
+#[test]
+fn required_callback_context_calls_defaulted_arrow_with_supplied_value() {
+    let source = r#"
+        function invoke(cb: (value: number) => number): number { return cb(9); }
+        function main(): void {
+            console.log(invoke((value: number = 5): number => value));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "required_callback_default_control"), "9\n");
+}
+
+#[test]
+fn required_callback_context_calls_defaulted_stored_arrow_and_function_expression() {
+    let source = r#"
+        function invoke(cb: (value: number) => number): number { return cb(9); }
+        function main(): void {
+            const local = (value: number = 5): number => value;
+            const typed: (value: number) => number = (value: number = 5): number => value;
+            console.log(invoke(local));
+            console.log(invoke(typed));
+            console.log(invoke(function(value: number = 5): number { return value; }));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "required_callback_default_stored_and_fn"), "9\n9\n9\n");
+}
+
+#[test]
+fn bound_optional_function_expression_keeps_this_receiver() {
+    let source = r#"
+        function main(): void {
+            const f = function(this: { value: number }, arg?: number): number {
+                return arg === undefined ? this.value : arg;
+            };
+            const g = f.bind({ value: 7 });
+            console.log(g());
+            console.log(g(3));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_optional_function_expression_this"), "7\n3\n");
+}
+
+#[test]
 fn generic_arrow_bind_defers_specialization_until_direct_call() {
     let source = r#"
         function main(): void {

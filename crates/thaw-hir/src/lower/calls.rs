@@ -892,6 +892,42 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::Block(statements))
     }
 
+    fn logical_function_ref_type(
+        &self,
+        symbol: &str,
+        physical_params: &[HirType],
+        ret: &HirType,
+    ) -> HirType {
+        let Some(signature) = self.signatures.get(symbol) else {
+            return HirType::Function(physical_params.to_vec(), Box::new(ret.clone()));
+        };
+        if !signature.generic_type_params.is_empty() {
+            return HirType::Function(physical_params.to_vec(), Box::new(ret.clone()));
+        }
+        let rest = signature.native_rest.clone();
+        if rest.as_ref().is_some_and(|element| {
+            physical_params.last() != Some(&HirType::Array(Box::new(element.clone())))
+        }) {
+            return HirType::Function(physical_params.to_vec(), Box::new(ret.clone()));
+        }
+        let fixed_count = physical_params.len().saturating_sub(usize::from(rest.is_some()));
+        let mut optional = HirOptionalMask::default();
+        let mut fixed = physical_params[..fixed_count].to_vec();
+        for (index, parameter) in fixed.iter_mut().enumerate() {
+            let mut singleton = HirOptionalMask::default();
+            singleton.insert(index);
+            if self.signatures.contains_key(&omitted_parameter_symbol(symbol, &singleton)) {
+                optional.insert(index);
+                *parameter = optional_parameter_type(parameter.clone());
+            }
+        }
+        if optional.is_empty() && rest.is_none() {
+            HirType::Function(physical_params.to_vec(), Box::new(ret.clone()))
+        } else {
+            HirType::CallableFunction(fixed, optional, rest.map(Box::new), Box::new(ret.clone()))
+        }
+    }
+
     fn lower_function_bind(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
         let Callee::Expr(callee) = &call.callee else {
             return Ok(None);
@@ -902,31 +938,21 @@ impl<'a> FnLowerer<'a> {
         if member_property_name(&operation.prop).as_deref() != Some("bind") {
             return Ok(None);
         }
-        let target = self.lower_expr(&operation.obj)?;
+        let mut target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
         let (target_type, declared_receiver) = match target_type {
             HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
             other => (other, None),
         };
-        // A declared function with a `...rest` parameter is a plain `Function` value whose
-        // last parameter is the rest array; `.bind` must see it as a rest-aware callable so
-        // the bound leading arguments are packed into that array instead of being coerced
-        // against `Array<T>`.
+        // Named declarations need omission metadata for `.bind`; rest declarations also
+        // expose a packed final array that `.bind` must treat as a rest-aware callable.
         let target_type = match (&target, &target_type) {
-            (HirExpr::FunctionRef(name, _, _), HirType::Function(params, ret)) => {
-                match self.signatures.get(name).and_then(|signature| signature.native_rest.clone()) {
-                    Some(element)
-                        if params.last() == Some(&HirType::Array(Box::new(element.clone()))) =>
-                    {
-                        HirType::CallableFunction(
-                            params[..params.len() - 1].to_vec(),
-                            HirOptionalMask::default(),
-                            Some(Box::new(element)),
-                            ret.clone(),
-                        )
-                    }
-                    _ => target_type,
+            (HirExpr::FunctionRef(name, physical_params, ret), HirType::Function(_, _)) => {
+                let logical = self.logical_function_ref_type(name, physical_params, ret);
+                if matches!(logical, HirType::CallableFunction(_, ref optional, _, _) if !optional.is_empty()) {
+                    target = self.coerce_to_declared(&logical, target)?;
                 }
+                logical
             }
             _ => target_type,
         };
