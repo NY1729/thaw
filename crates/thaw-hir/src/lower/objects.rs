@@ -4112,6 +4112,7 @@ impl<'a> FnLowerer<'a> {
         // nested field is a class instance that carries methods.
         let carries_methods = class_name_from_type(ty).is_some()
             && (!self.class_instance_projected_methods(ty).is_empty()
+                || !self.class_instance_projected_accessors(ty).is_empty()
                 || fields.iter().any(|(name, field)| !is_hidden_accessor_field(name)
                     && matches!(field, HirType::Object(_))
                     && self.class_instance_supports_live_methods(field)));
@@ -4264,6 +4265,10 @@ impl<'a> FnLowerer<'a> {
         source_type: &HirType,
         this_name: &str,
     ) -> Result<HirExpr, String> {
+        if Self::native_collection_view_supported(&read_type) {
+            read = self.lower_native_collection_as_dynamic_view(read, &read_type)?;
+            read_type = HirType::JsValue;
+        }
         let original_read_type = read_type.clone();
         let (adapted_read, adapted_type) = self.adapt_callable_result_for_live_projection(
             read, read_type.clone(),
@@ -4313,6 +4318,27 @@ impl<'a> FnLowerer<'a> {
         methods
     }
 
+    fn class_instance_projected_accessors(
+        &self,
+        ty: &HirType,
+    ) -> Vec<(String, Option<Symbol>, Option<Symbol>)> {
+        let properties = self.signatures.iter().filter_map(|(symbol, signature)| {
+            let owner = signature.accessor_owner.as_deref()?;
+            symbol.strip_prefix(&class_getter_symbol(owner, "", false))
+                .or_else(|| symbol.strip_prefix(&class_setter_symbol(owner, "", false)))
+                .map(str::to_string)
+        }).collect::<std::collections::BTreeSet<_>>();
+        properties.into_iter().filter_map(|property| {
+            let owner = self.class_instance_accessor_owner(ty, &property)?;
+            let owned = |symbol: Symbol| self.signatures.get(&symbol)
+                .is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .then_some(symbol);
+            let getter = owned(class_getter_symbol(&owner, &property, false));
+            let setter = owned(class_setter_symbol(&owner, &property, false));
+            Some((property, getter, setter))
+        }).collect()
+    }
+
     fn lower_fixed_object_as_dynamic_accessor_object(
         &mut self,
         value: HirExpr,
@@ -4330,6 +4356,9 @@ impl<'a> FnLowerer<'a> {
         } else {
             Vec::new()
         };
+        let proto_accessors = if class_methods {
+            self.class_instance_projected_accessors(&source_type)
+        } else { Vec::new() };
         // Private slots stay hidden, but `#x in value` still needs to see them.
         let private_slots = if class_methods {
             fields.iter()
@@ -4354,7 +4383,7 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let methods_name = format!("__thaw_dynamic_methods_{}", self.next_binding);
         self.next_binding += 1;
-        self.scope.insert(methods_name.clone(), HirType::Array(Box::new(HirType::Bool)));
+        self.scope.insert(methods_name.clone(), HirType::Array(Box::new(HirType::Str)));
         self.scope.insert(keys_name.clone(), HirType::Array(Box::new(HirType::Str)));
         self.scope.insert(readable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
         self.scope.insert(writable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
@@ -4455,7 +4484,7 @@ impl<'a> FnLowerer<'a> {
                 append(&readable_name, HirExpr::Lit(HirLit::Bool(!setter_only))),
                 append(&writable_name, HirExpr::Lit(HirLit::Bool(writable))),
                 append(&accessor_name, HirExpr::Lit(HirLit::Bool(has_getter || has_setter))),
-                append(&methods_name, HirExpr::Lit(HirLit::Bool(is_method))),
+                append(&methods_name, HirExpr::Lit(HirLit::Str(if is_method { "method" } else { "" }.into()))),
             ]));
             callback_actions.push((index, vec![
                 append(&callbacks_name, getter),
@@ -4549,7 +4578,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::ArrayLit(Vec::new())),
             HirStmt::Let(callbacks_name.clone(), HirType::Array(Box::new(HirType::JsValue)),
                 HirExpr::ArrayLit(Vec::new())),
-            HirStmt::Let(methods_name.clone(), HirType::Array(Box::new(HirType::Bool)),
+            HirStmt::Let(methods_name.clone(), HirType::Array(Box::new(HirType::Str)),
                 HirExpr::ArrayLit(Vec::new())),
         ]);
         body.extend(self.lower_ordered_fixed_field_statements(
@@ -4559,13 +4588,33 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("__thaw_array_push".into())),
             vec![HirExpr::Var(array.to_string()), value],
         ));
-        for property in proto_methods.iter().map(|(property, _)| property).chain(&private_slots) {
+        for property in proto_methods.iter().map(|(property, _)| property) {
             body.extend([
                 push(&keys_name, HirExpr::Lit(HirLit::Str(property.clone()))),
                 push(&readable_name, HirExpr::Lit(HirLit::Bool(true))),
                 push(&writable_name, HirExpr::Lit(HirLit::Bool(false))),
                 push(&accessor_name, HirExpr::Lit(HirLit::Bool(false))),
-                push(&methods_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&methods_name, HirExpr::Lit(HirLit::Str("method".into()))),
+            ]);
+        }
+        for (property, getter, setter) in &proto_accessors {
+            body.extend([
+                push(&keys_name, HirExpr::Lit(HirLit::Str(property.clone()))),
+                push(&readable_name, HirExpr::Lit(HirLit::Bool(getter.is_some()))),
+                push(&writable_name, HirExpr::Lit(HirLit::Bool(setter.is_some()))),
+                push(&accessor_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&methods_name, HirExpr::Lit(HirLit::Str(self.signatures[
+                    getter.as_ref().or(setter.as_ref()).unwrap()
+                ].accessor_owner.clone().unwrap()))),
+            ]);
+        }
+        for property in &private_slots {
+            body.extend([
+                push(&keys_name, HirExpr::Lit(HirLit::Str(property.clone()))),
+                push(&readable_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&writable_name, HirExpr::Lit(HirLit::Bool(false))),
+                push(&accessor_name, HirExpr::Lit(HirLit::Bool(false))),
+                push(&methods_name, HirExpr::Lit(HirLit::Str("method".into()))),
             ]);
         }
         // One entry past the last key: the wrapper is a live reference to a native owner
@@ -4703,6 +4752,36 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("getDynamicValue".into())),
                 vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
             )));
+        }
+        for (_, getter, setter) in &proto_accessors {
+            for symbol in [getter, setter] {
+                let callback = if let Some(symbol) = symbol {
+                    let signature = self.signatures[symbol].clone();
+                    let mut params = vec![HirParam { name: this_name.into(), ty: source_type.clone() }];
+                    let mut args = vec![HirExpr::Var(this_name.into())];
+                    for (index, ty) in signature.params.iter().skip(1).enumerate() {
+                        let name = format!("__thaw_accessor_arg_{}_{}", self.next_binding, index);
+                        self.scope.insert(name.clone(), ty.clone());
+                        args.push(HirExpr::Var(name.clone()));
+                        params.push(HirParam { name, ty: ty.clone() });
+                    }
+                    self.next_binding += 1;
+                    let call = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), args);
+                    let (result, result_type) = if signature.ret == HirType::Void {
+                        (call, HirType::Void)
+                    } else {
+                        (self.coerce_to_declared_aliasing(&HirType::Json, call)?, HirType::Json)
+                    };
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_register_native_method_callback_graph".into())),
+                        vec![HirExpr::Lambda(Vec::new(), params, result_type, Box::new(result))],
+                    )
+                } else {
+                    HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("undefined".into()))])
+                };
+                body.push(push(&callbacks_name, callback));
+            }
         }
         for _ in &private_slots {
             for _ in 0..2 {

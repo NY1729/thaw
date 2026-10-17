@@ -180,7 +180,7 @@ fn lower_top_level_initializers(
                     // leave the token's storage permanently zero (an
                     // invalid `JsValue` handle) the moment anything reads
                     // it.
-                    let token_value = match class_value_js_script(declaration) {
+                    let token_value = match class_value_js_script(declaration, value_referenced_classes) {
                         Some((global, script)) => {
                             // Register one native bridge per instance method
                             // before evaluating the class, so the generated
@@ -188,9 +188,9 @@ fn lower_top_level_initializers(
                             // these globals) can reach the native
                             // implementations -- including the native
                             // functions those bodies call.
-                            for (property, _kind, symbol) in class_bridgeable_members(declaration) {
+                            for (property, kind, symbol) in class_bridgeable_members(declaration) {
                                 let bridge = class_method_bridge_expr(&mut lowerer, &symbol)?;
-                                let name = class_method_bridge_name(class_name, &property);
+                                let name = class_method_bridge_name(class_name, &property, kind);
                                 steps.push(HirInitStep::Statement(HirStmt::Expr(HirExpr::Call(
                                     Box::new(HirExpr::Var("setDynamicProperty".to_string())),
                                     vec![
@@ -486,8 +486,13 @@ fn strip_class_decorators(class: &mut swc_ecma_ast::Class) {
 
 /// The realm global a bridged method's generated JavaScript body calls to
 /// reach the real native implementation (see `class_method_bridge_expr`).
-fn class_method_bridge_name(class_name: &str, property: &str) -> String {
-    format!("__thaw_method_bridge_{class_name}_{property}")
+fn class_method_bridge_name(class_name: &str, property: &str, kind: swc_ecma_ast::MethodKind) -> String {
+    let kind = match kind {
+        swc_ecma_ast::MethodKind::Method => "method",
+        swc_ecma_ast::MethodKind::Getter => "getter",
+        swc_ecma_ast::MethodKind::Setter => "setter",
+    };
+    format!("__thaw_method_bridge_{class_name}_{kind}_{property}")
 }
 
 /// The instance methods/getters/setters of a class that get a native bridge
@@ -536,6 +541,8 @@ fn bridge_field_comparable(ty: &HirType) -> bool {
             | HirType::Array(_)
             | HirType::Tuple(_)
             | HirType::Dictionary(_)
+            | HirType::Map(..)
+            | HirType::Set(_)
             | HirType::Function(_, _)
             | HirType::CallableFunction(_, _, _, _)
             // Tagged-absence wrappers and unions compare through the
@@ -629,9 +636,12 @@ fn class_method_bridge_expr(
                 receiver_type.clone(),
                 field.clone(),
             );
-            let Ok(encoded) = lowerer.coerce_to_declared(&HirType::Json, current.clone()) else {
-                continue;
+            let encoded = if FnLowerer::native_collection_view_supported(field_type) {
+                lowerer.coerce_to_declared_aliasing(&HirType::Json, current.clone())
+            } else {
+                lowerer.coerce_to_declared(&HirType::Json, current.clone())
             };
+            let Ok(encoded) = encoded else { continue };
             let write_back = HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("setDynamicPropertyJson".to_string())),
                 vec![
@@ -681,17 +691,22 @@ fn class_method_bridge_expr(
         ));
     }
     stmts.extend(post_stmts);
-    stmts.push(HirStmt::Return(if signature.ret == HirType::Void {
-        None
+    let (result, result_type) = if signature.ret == HirType::Void {
+        (None, HirType::Void)
+    } else if FnLowerer::native_collection_view_supported(&signature.ret) {
+        (Some(lowerer.lower_native_collection_as_dynamic_view(
+            HirExpr::Var(result_name), &signature.ret,
+        )?), HirType::JsValue)
     } else {
-        Some(HirExpr::Var(result_name))
-    }));
+        (Some(HirExpr::Var(result_name)), signature.ret.clone())
+    };
+    stmts.push(HirStmt::Return(result));
 
     let body = HirExpr::Block(stmts);
-    let lambda = HirExpr::Lambda(Vec::new(), params.clone(), signature.ret.clone(), Box::new(body));
+    let lambda = HirExpr::Lambda(Vec::new(), params.clone(), result_type.clone(), Box::new(body));
     let callback_type = HirType::Function(
         params.iter().map(|param| param.ty.clone()).collect(),
-        Box::new(signature.ret.clone()),
+        Box::new(result_type),
     );
     Ok(HirExpr::Call(
         Box::new(HirExpr::Var("registerNativeCallback".to_string())),
@@ -780,7 +795,7 @@ fn rewrite_instance_methods_to_bridges(class: &mut swc_ecma_ast::Class, class_na
         let Ok(property) = class_property_name(&method.key) else {
             continue;
         };
-        let bridge = class_method_bridge_name(class_name, &property);
+        let bridge = class_method_bridge_name(class_name, &property, method.kind);
         method.function.body = Some(method_delegate_body(&bridge, method.kind));
     }
 }
@@ -827,9 +842,25 @@ fn display_class_name(class_name: &str) -> &str {
 /// stripped, for evaluation by QuickJS. Decorators are dropped (applied
 /// natively instead). Returns `None` if the class can't be codegen'd, in
 /// which case the caller falls back to a `new Function()` token.
-fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String> {
+fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>) -> Option<String> {
     let mut class = declaration.class.clone();
     strip_class_decorators(&mut class);
+    if let Some(Expr::Ident(base)) = class.super_class.as_deref().filter(|base|
+        matches!(base, Expr::Ident(base) if class_tokens.contains(base.sym.as_ref()))) {
+        let global = format!("__thaw_class_value_{}", base.sym);
+        class.super_class = Some(Box::new(Expr::Member(swc_ecma_ast::MemberExpr {
+            span: swc_common::DUMMY_SP,
+            obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                "globalThis".into(), swc_common::DUMMY_SP,
+            ))),
+            prop: MemberProp::Computed(swc_ecma_ast::ComputedPropName {
+                span: swc_common::DUMMY_SP,
+                expr: Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                    span: swc_common::DUMMY_SP, value: global.into(), raw: None,
+                }))),
+            }),
+        })));
+    }
     // Static blocks run once, natively, at module initialization; the JS copy must not repeat them.
     class.body.retain(|member| !matches!(member, ClassMember::StaticBlock(_)));
     rewrite_instance_methods_to_bridges(&mut class, declaration.ident.sym.as_ref());
@@ -878,8 +909,8 @@ fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String
 /// that calls a native-only function (an import, another compiled function)
 /// will fail when invoked dynamically -- only `this`/built-in logic works.
 /// Static `instance.method()` still uses the native method, unaffected.
-fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl) -> Option<(String, String)> {
-    let source = class_value_js_source(declaration)?;
+fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>) -> Option<(String, String)> {
+    let source = class_value_js_source(declaration, class_tokens)?;
     let class_name = declaration.ident.sym.as_ref();
     let display = display_class_name(class_name);
     let global = format!("__thaw_class_value_{class_name}");
