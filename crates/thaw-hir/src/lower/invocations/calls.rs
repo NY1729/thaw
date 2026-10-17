@@ -3,6 +3,11 @@ impl<'a> FnLowerer<'a> {
         is_ordinary_quickjs_symbol(backend, symbol)
     }
 
+    fn is_quickjs_instance_typed_method(backend: DynamicBackend, symbol: &str) -> bool {
+        backend == DynamicBackend::QuickJs
+            && (symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$"))
+    }
+
     fn is_napi_constructor_typed_call(
         backend: DynamicBackend,
         symbol: &str,
@@ -1837,6 +1842,8 @@ impl<'a> FnLowerer<'a> {
         let mut argument_bindings = Vec::new();
         let mut lowered_arguments = Vec::new();
         let mut forwarded_rest_array = false;
+        let mut method_argument_sources_aligned =
+            call.args.iter().all(|argument| argument.spread.is_none());
         let mut lowered = Vec::with_capacity(call.args.len());
         let generic_placeholder = signature
             .as_ref()
@@ -2325,6 +2332,7 @@ impl<'a> FnLowerer<'a> {
                 if !omitted_mask.is_empty() {
                     let wrapper = omitted_parameter_symbol(&callee_name, &omitted_mask);
                     if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                        method_argument_sources_aligned = false;
                         lowered_arguments = lowered_arguments
                             .into_iter()
                             .enumerate()
@@ -2341,6 +2349,7 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some((element, values)) = native_rest_values {
+            method_argument_sources_aligned = false;
             let packed = if element == HirType::Dynamic {
                 let expected = signature
                     .as_ref()
@@ -2444,6 +2453,13 @@ impl<'a> FnLowerer<'a> {
                     Self::is_ordinary_quickjs_typed_call(backend, &symbol)
                 })
         });
+        let quickjs_instance_typed_method = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && method_argument_sources_aligned
+                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
+                    Self::is_quickjs_instance_typed_method(backend, &symbol)
+                })
+        });
         let napi_constructor_typed_call = signature.as_ref().is_some_and(|signature| {
             signature.is_extern
                 && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
@@ -2469,6 +2485,16 @@ impl<'a> FnLowerer<'a> {
                     Some(declared) => {
                         let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
                         let actual = self.infer_expr_type(&value)?;
+                        let live_method_json_argument = quickjs_instance_typed_method
+                            && i > 0
+                            && actual == HirType::Json
+                            && call
+                                .args
+                                .get(i)
+                                .is_some_and(|argument| has_dynamic_storage(argument.expr.span()));
+                        if live_method_json_argument {
+                            self.validate_storage_source(&call.args[i].expr, declared)?;
+                        }
                         let class_object =
                             direct_quickjs_typed_call && class_name_from_type(&actual).is_some();
                         let is_generated_wrapper =
@@ -2511,7 +2537,8 @@ impl<'a> FnLowerer<'a> {
                                     format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                                 })?;
                         }
-                        let value = if promoted_typed_callback
+                        let value = if live_method_json_argument
+                            || promoted_typed_callback
                             || direct_quickjs_typed_call && actual == HirType::Json
                         {
                             Ok(value)
@@ -2796,7 +2823,11 @@ impl<'a> FnLowerer<'a> {
                 };
                 let direct_quickjs_typed_call =
                     Self::is_ordinary_quickjs_typed_call(backend, &symbol);
-                let ret = if direct_quickjs_typed_call && generic_types.is_some() {
+                let quickjs_instance_typed_method = method_argument_sources_aligned
+                    && Self::is_quickjs_instance_typed_method(backend, &symbol);
+                let ret = if direct_quickjs_typed_call
+                    && (generic_types.is_some() || matches!(&ret, HirType::Union(_)))
+                {
                     storage_type(call.span, ret)
                 } else {
                     ret
@@ -2830,6 +2861,16 @@ impl<'a> FnLowerer<'a> {
                         let value = args.next().expect("fixed_count <= args.len()");
                         let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
                         let actual = self.infer_expr_type(&value)?;
+                        let live_method_json_argument = quickjs_instance_typed_method
+                            && i > 0
+                            && actual == HirType::Json
+                            && call.args.get(i).is_some_and(|argument| {
+                                argument.spread.is_none()
+                                    && has_dynamic_storage(argument.expr.span())
+                            });
+                        if live_method_json_argument {
+                            self.validate_storage_source(&call.args[i].expr, declared)?;
+                        }
                         let class_object =
                             direct_quickjs_typed_call && class_name_from_type(&actual).is_some();
                         let promoted_typed_callback = direct_quickjs_typed_call
@@ -2854,7 +2895,7 @@ impl<'a> FnLowerer<'a> {
                                     format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                                 })?;
                         }
-                        let value = if promoted_typed_callback {
+                        let value = if live_method_json_argument || promoted_typed_callback {
                             Ok(value)
                         } else if class_object {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
@@ -2892,7 +2933,7 @@ impl<'a> FnLowerer<'a> {
                     .collect::<Result<Vec<_>, String>>()?;
                 coerced_args.extend(args);
                 let args = coerced_args;
-                let params = if direct_quickjs_typed_call {
+                let params = if direct_quickjs_typed_call || quickjs_instance_typed_method {
                     params
                         .into_iter()
                         .enumerate()
@@ -2901,10 +2942,20 @@ impl<'a> FnLowerer<'a> {
                                 .get(i)
                                 .map(|value| self.infer_expr_type(value))
                                 .transpose()?;
-                            if actual == Some(HirType::Json)
-                                || actual.as_ref().is_some_and(|actual| {
+                            let live_method_json_argument = quickjs_instance_typed_method
+                            && i > 0
+                            && actual == Some(HirType::Json)
+                                && call
+                                    .args
+                                    .get(i)
+                                    .is_some_and(|argument| has_dynamic_storage(argument.expr.span()));
+                            if live_method_json_argument {
+                                Ok(HirType::Json)
+                            } else if direct_quickjs_typed_call
+                                && (actual == Some(HirType::Json)
+                                    || actual.as_ref().is_some_and(|actual| {
                                     typed_callback_storage_return_matches(actual, &declared)
-                                })
+                                    }))
                             {
                                 Ok(actual.expect("checked as Some"))
                             } else {

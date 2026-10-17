@@ -950,6 +950,103 @@ fn storage_handoff_narrowed_union_calls_validate_the_active_member() {
 }
 
 #[test]
+fn storage_handoff_union_source_validation_keeps_contextual_route_handlers() {
+    let valid_source = r#"
+        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
+        type Options = { auth?: boolean | string } | undefined;
+        type Route = {
+            method: string;
+            path: string;
+            handler: Handler;
+            vhost: string | string[] | undefined;
+            options: Options;
+            rules?: any;
+        };
+        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
+        function main(): void {
+            __thaw_typed_js_726f757465({
+                method: "GET",
+                path: "/",
+                handler: (request, h) => h.response(request.path),
+            });
+        }
+        "#;
+    assert_eq!(storage_allocations(valid_source), vec![true]);
+    let valid = thaw_parser::parse_typescript(valid_source).unwrap();
+    lower_module(&valid).unwrap();
+
+    let wrong_scalar = thaw_parser::parse_typescript(
+        r#"
+        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
+        type Options = { auth?: boolean | string } | undefined;
+        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: Options; rules?: any };
+        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
+        function main(): void {
+            __thaw_typed_js_726f757465({ method: 7, path: "/", handler: (request, h) => h.response(request.path) });
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&wrong_scalar).is_err());
+
+    let wrong_handler = thaw_parser::parse_typescript(
+        r#"
+        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
+        type Options = { auth?: boolean | string } | undefined;
+        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: Options; rules?: any };
+        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
+        function main(): void {
+            __thaw_typed_js_726f757465({ method: "GET", path: "/", handler: 7 });
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&wrong_handler).is_err());
+
+    let missing_required = thaw_parser::parse_typescript(
+        r#"
+        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
+        type Options = { auth?: boolean | string } | undefined;
+        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: Options; rules?: any };
+        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
+        function main(): void {
+            __thaw_typed_js_726f757465({ method: "GET", handler: (request, h) => h.response(request.path) });
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&missing_required).is_err());
+}
+
+#[test]
+fn storage_handoff_quickjs_method_keeps_live_json_argument_and_receiver_abi() {
+    let program = lower(
+        r#"
+        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
+        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: ({ auth?: boolean | string }) | undefined; rules?: any };
+        declare function __thaw_typed_js_246d6574686f64766f69642453657276657224726f757465246f7665726c6f61643024617269747931(receiver: JsValue, route: Route | Route[]): void;
+        function main(receiver: JsValue): void {
+            __thaw_typed_js_246d6574686f64766f69642453657276657224726f757465246f7665726c6f61643024617269747931(receiver, {
+                method: "GET",
+                path: "/",
+                handler: (request, h) => h.response(request.path),
+            });
+        }
+    "#,
+    );
+    let hir = format!("{program:#?}");
+    assert!(
+        hir.contains("symbol: \"$methodvoid$Server$route$overload0$arity1\",")
+            && hir.contains("JsValue,\n                                Json,"),
+        "the nonreceiver live route argument should use the Json handle ABI while the receiver stays JsValue: {hir}"
+    );
+    assert!(
+        hir.contains("Var(\n                                \"receiver\","),
+        "the typed method receiver should be retained: {hir}"
+    );
+}
+
+#[test]
 fn storage_handoff_all_settled_keeps_native_promise_arrays() {
     for source in [
         r#"async function f(n: number): Promise<number> { return n; } async function main(): Promise<void> { const ps = [f(1), f(2)]; const settled = await Promise.allSettled(ps); settled.map((value: any) => value.status); }"#,

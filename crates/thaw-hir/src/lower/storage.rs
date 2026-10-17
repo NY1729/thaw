@@ -1608,6 +1608,14 @@ impl FnLowerer<'_> {
             || matches!((&source, expected), (HirExpr::ArrayLit(elements), HirType::Array(_)) if elements.is_empty()) {
             return Ok(());
         }
+        if let HirType::Union(members) = expected {
+            for member in members {
+                if self.validate_storage_source_type(member, source.clone()).is_ok() {
+                    return Ok(());
+                }
+            }
+            return self.coerce_to_declared(expected, source).map(|_| ());
+        }
         if let (HirType::Array(expected), HirExpr::ArrayLit(values)) = (expected, &source) {
             for value in values {
                 if !matches!(value, HirExpr::Lit(HirLit::ArrayHole)) { self.validate_storage_source_type(expected, value.clone())?; }
@@ -1618,16 +1626,17 @@ impl FnLowerer<'_> {
             return self.validate_storage_source_type(expected, HirExpr::TypedClosure(*actual, Box::new(HirExpr::Lit(HirLit::Undefined))));
         }
         if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, self.infer_expr_type(&source)?) {
-            if expected_fields.iter().all(|(name, _)| actual_fields.iter().any(|(actual, _)| actual == name)) {
-                for (name, expected) in expected_fields {
-                    let actual = actual_fields.iter().find(|(actual, _)| actual == name).unwrap().1.clone();
+            for (name, expected_field) in expected_fields {
+                if let Some((_, actual)) = actual_fields.iter().find(|(actual, _)| actual == name) {
                     let value = if let HirExpr::ObjectLit(fields) = &source {
                         fields.iter().find(|(field, _)| field == name).map(|(_, value)| value.clone())
-                    } else { None }.unwrap_or_else(|| HirExpr::TypedClosure(actual, Box::new(HirExpr::Lit(HirLit::Undefined))));
-                    self.validate_storage_source_type(expected, value)?;
+                    } else { None }.unwrap_or_else(|| HirExpr::TypedClosure(actual.clone(), Box::new(HirExpr::Lit(HirLit::Undefined))));
+                    self.validate_storage_source_type(expected_field, value)?;
+                } else if omitted_parameter_value(expected_field).is_err() {
+                    return self.coerce_to_declared(expected, source).map(|_| ());
                 }
-                return Ok(());
             }
+            return Ok(());
         }
         self.coerce_to_declared(expected, source).map(|_| ())
     }

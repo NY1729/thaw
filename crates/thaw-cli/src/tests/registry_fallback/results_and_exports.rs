@@ -1530,6 +1530,50 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn overloaded_fallback_wrapper_preserves_promise_union_and_async_result() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-overloaded-promise-union-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("asyncish-overload");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function render(template: string, async: true): Promise<string>;\n\
+         export declare function render(template: string, async?: false): string;\n\
+         export declare function render(template: string, async?: boolean): string | Promise<string>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { render: function(_template, async) { return async ? Promise.resolve('async rendered') : 'rendered'; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { render } from "asyncish-overload";
+async function main(): Promise<void> {
+    console.log(render("template"));
+    console.log(await render("template", true));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "rendered\nasync rendered\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function is declared with several overloads, the least
 /// specific of which returns a union of two *callable* types differing
 /// only in their own return type -- real example: ejs's own `compile`,
