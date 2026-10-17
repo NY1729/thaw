@@ -207,7 +207,8 @@ Known gaps against Node semantics:
   and values of type `number`, `string`, `boolean` or `any` (arrays, objects and dictionaries read back
   live but are read-only through the view); storing another type through it throws a `TypeError`.
   Iterators (`keys`, `values`, `entries`, `for..of`) and `forEach` observe additions, deletions and
-  updates during traversal. Collections with statically typed object keys, or whose values are
+  updates during traversal. Iterator helpers preserve lazy state and reference identity through
+  chained calls, and close their sources on early return or failure. Collections with statically typed object keys, or whose values are
   themselves Maps or Sets, stay snapshots.
 - An `any`/JSON array that contains itself no longer crashes: `String`, `join` and `+` render the
   self reference as an empty string like Node. Written into a typed slot (`number[][]`) the self
