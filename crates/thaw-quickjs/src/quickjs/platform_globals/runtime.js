@@ -552,6 +552,7 @@
       case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
       case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
       case 23: return thawGraphApply(thawClassProjectionGet, thawClassProjectionNames, [value]) ?? '';
+      case 25: return thawGraphString(thawGraphApply(thawOriginSerialGet, thawOriginSerials, [value]) ?? 0);
       case 24: {
         const native = thawNativeCollectionState(value);
         if (native) return native.isMap ? 'map' : 'set';
