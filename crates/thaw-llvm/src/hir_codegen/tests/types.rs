@@ -555,6 +555,37 @@ fn bound_non_generic_optional_arrow_accepts_omitted_argument() {
 }
 
 #[test]
+fn bound_optional_rest_arrow_packs_call_time_values() {
+    let source = r#"
+        function main(): void {
+            const f = (first?: number, ...rest: number[]): number => rest.length + (first ?? 0);
+            const g = f.bind(null);
+            console.log(g());
+            console.log(g(3, 4, 5));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_optional_rest_arrow"), "0\n5\n");
+}
+
+#[test]
+fn bound_named_optional_rest_and_fixed_functions_keep_call_shapes() {
+    let source = r#"
+        function optionalRest(first?: number, ...rest: number[]): number {
+            return rest.length + (first ?? 0);
+        }
+        function add(left: number, right: number): number { return left + right; }
+        function main(): void {
+            const packed = optionalRest.bind(null);
+            console.log(packed());
+            console.log(packed(3, 4, 5));
+            const addFive = add.bind(null, 5);
+            console.log(addFive(2));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_named_optional_rest"), "0\n5\n7\n");
+}
+
+#[test]
 fn bound_named_optional_and_default_functions_accept_omitted_arguments() {
     let source = r#"
         function plain(value?: number): number | undefined { return value; }

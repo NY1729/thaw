@@ -2142,6 +2142,49 @@ fn non_generic_optional_arrow_bind_keeps_omittable_parameter() {
 }
 
 #[test]
+fn non_generic_optional_arrow_bind_shifts_mask_and_keeps_rest_shape() {
+    let program = lower(
+        r#"function main(): void {
+            const optional = (value?: number): number | undefined => value;
+            const noBound = optional.bind(null);
+            const prefix = (first: number, later?: string): string | undefined => later;
+            const shifted = prefix.bind(null, 1);
+            const boundOptional = prefix.bind(null, 1, "fixed");
+            const optionalRest = (first?: number, ...rest: number[]): number => rest.length;
+            const packed = optionalRest.bind(null);
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let callable = |name: &str| {
+        main.body.iter().find_map(|statement| match statement {
+            HirStmt::Let(found, HirType::CallableFunction(params, optional, rest, _), _)
+                if found == name => Some((params, optional, rest)),
+            _ => None,
+        }).unwrap_or_else(|| panic!("bound callable `{name}` missing from HIR: {:#?}", main.body))
+    };
+
+    let (params, mask, rest) = callable("noBound");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::F64))]);
+    assert!(mask.contains(0));
+    assert!(rest.is_none());
+
+    let (params, mask, rest) = callable("shifted");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::Str))]);
+    assert!(mask.contains(0), "original optional bit 1 must shift to bound bit 0");
+    assert!(rest.is_none());
+
+    let (params, mask, rest) = callable("boundOptional");
+    assert!(params.is_empty(), "binding the optional slot leaves no fixed parameters");
+    assert!(mask.is_empty());
+    assert!(rest.is_none());
+
+    let (params, mask, rest) = callable("packed");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::F64))]);
+    assert!(mask.contains(0));
+    assert_eq!(rest.as_deref(), Some(&HirType::F64));
+}
+
+#[test]
 fn non_generic_optional_arrow_direct_call_keeps_omittable_parameter() {
     let program = lower(
         r#"function main(): void {
