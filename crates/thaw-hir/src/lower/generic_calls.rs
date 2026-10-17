@@ -358,6 +358,19 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
         operation: Option<GenericArrowThisOperation>,
     ) -> Result<HirExpr, String> {
+        self.lower_generic_arrow_call_with_leading_actuals(
+            name, arrow, call, operation, Vec::new(),
+        )
+    }
+
+    fn lower_generic_arrow_call_with_leading_actuals(
+        &mut self,
+        name: &str,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        call: &CallExpr,
+        operation: Option<GenericArrowThisOperation>,
+        leading_actuals: Vec<HirExpr>,
+    ) -> Result<HirExpr, String> {
         let (this_argument, bind, discarded_apply_arguments, prelowered_arguments) =
             match operation {
                 Some(operation) => (Some(operation.receiver), operation.bind,
@@ -382,12 +395,12 @@ impl<'a> FnLowerer<'a> {
         if let (Some((value, ty)), Some(this_name)) = (&this_argument, &this_name) {
             bindings.push((this_name.clone(), ty.clone(), value.clone()));
         }
-        let mut arguments = Vec::new();
-        let mut unspread_arguments = Vec::new();
+        let mut arguments = leading_actuals;
+        let mut may_narrow_optional = vec![false; arguments.len()];
         for (source, value) in call.args.iter().zip(lowered) {
             if source.spread.is_none() && !preserve_order {
                 arguments.push(value);
-                unspread_arguments.push(true);
+                may_narrow_optional.push(true);
                 continue;
             }
             if source.spread.is_some() {
@@ -399,7 +412,7 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(temporary.clone(), ty.clone());
                         bindings.push((temporary.clone(), ty, element));
                         arguments.push(HirExpr::Var(temporary));
-                        unspread_arguments.push(false);
+                        may_narrow_optional.push(false);
                     }
                     continue;
                 }
@@ -410,7 +423,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 };
                 let elements = elements.clone();
-                unspread_arguments.extend(std::iter::repeat_n(false, elements.len()));
+                may_narrow_optional.extend(std::iter::repeat_n(false, elements.len()));
                 let temporary = format!("__thaw_generic_arrow_spread_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(temporary.clone(), source_type.clone());
@@ -430,7 +443,7 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(temporary.clone(), ty.clone());
             bindings.push((temporary.clone(), ty, value));
             arguments.push(HirExpr::Var(temporary));
-            unspread_arguments.push(true);
+            may_narrow_optional.push(true);
         }
         bindings.extend(discarded_apply_arguments);
         let signature = self.generic_arrow_signature(arrow)?;
@@ -523,7 +536,7 @@ impl<'a> FnLowerer<'a> {
             .map(|(index, optional)| {
                 *optional
                     && recursive.is_none()
-                    && unspread_arguments.get(index) == Some(&true)
+                    && may_narrow_optional.get(index) == Some(&true)
                     && parameter_types.get(index).is_some_and(|actual| !generic_argument_may_be_undefined(actual))
                     && !generic_arrow_parameter_is_reassigned(arrow, index)
             })

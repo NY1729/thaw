@@ -821,6 +821,11 @@ impl<'a> FnLowerer<'a> {
             ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
+                if self.deferred_generic_binds.contains_key(&name) {
+                    return Err(format!(
+                        "generic bound function `{name}` needs a call-site specialization before it can be used as a value"
+                    ));
+                }
                 // A read of a `new Proxy(target, handler)`'s own `target`
                 // identifier, redirected to re-read the live QuickJS
                 // handle a `set` trap's mutation actually reaches (see
@@ -2894,6 +2899,14 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Unary(unary) => {
+                if unary.op == UnaryOp::TypeOf {
+                    if let Expr::Ident(identifier) = unary.arg.as_ref() {
+                        let name = self.resolve_binding(identifier.sym.as_ref());
+                        if self.deferred_generic_binds.contains_key(&name) {
+                            return Ok(HirExpr::Lit(HirLit::Str("function".into())));
+                        }
+                    }
+                }
                 // Implicit-return normalization inserts a dummy-span `void 0`
                 // to avoid resolving a user binding named `undefined`. Only
                 // that synthetic no-effect form is an Undefined HIR value;

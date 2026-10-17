@@ -1,4 +1,17 @@
 #[derive(Clone)]
+struct GenericBindCapture {
+    name: Symbol,
+    ty: HirType,
+}
+
+#[derive(Clone)]
+struct DeferredGenericBind {
+    target: Symbol,
+    this_capture: GenericBindCapture,
+    leading_captures: Vec<GenericBindCapture>,
+}
+
+#[derive(Clone)]
 struct NarrowingSnapshot {
     optional: HashMap<Symbol, HirType>,
     nullable: HashMap<Symbol, HirType>,
@@ -73,6 +86,7 @@ struct FnLowerer<'a> {
     generic_non_arrow_receiver_templates: HashMap<Symbol, Box<TsType>>,
     generic_arrow_self_names: HashMap<Symbol, Symbol>,
     generic_named_templates: HashMap<Symbol, Symbol>,
+    deferred_generic_binds: HashMap<Symbol, DeferredGenericBind>,
     native_method_values: HashMap<Symbol, NativeMethodValue>,
     native_class_aliases: HashMap<Symbol, HirType>,
     member_receiver_bindings: HashSet<Symbol>,
