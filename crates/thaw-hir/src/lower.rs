@@ -444,6 +444,7 @@ include!("lower/control_flow.rs");
 include!("lower/bytes_erasure.rs");
 
 include!("lower/context.rs");
+include!("lower/storage.rs");
 include!("lower/calls.rs");
 
 impl<'a> FnLowerer<'a> {}
