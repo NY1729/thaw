@@ -6728,8 +6728,15 @@ mod forced_root_graph_wire_controls {
             // The lease holds its own reference; the decoder normally consumes it.
             assert_eq!(thaw_js_release_handle(handle), 1);
             let copy = call("copy");
-            assert!(copy["nodes"][0].get("o").is_some(),
-                "a fresh plain result still crosses as data: {copy}");
+            let copied = copy["nodes"][0]["hdl"].as_u64().expect("fresh object result lease");
+            assert_ne!(copied, receiver);
+            assert_eq!(copy["leases"], serde_json::json!([copied]));
+            with_context(|ctx| {
+                let original = object_for_handle(&ctx, receiver).unwrap();
+                let fresh = object_for_handle(&ctx, copied).unwrap();
+                assert_eq!(original.get::<_, Value>("items").unwrap(), fresh.get::<_, Value>("items").unwrap());
+            });
+            assert_eq!(thaw_js_release_handle(copied), 1);
             release_input(receiver);
         }).join().unwrap();
     }

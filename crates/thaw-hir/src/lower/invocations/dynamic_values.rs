@@ -53,7 +53,7 @@ impl<'a> FnLowerer<'a> {
         let values = self.dynamic_call_args_json(args)?;
         Ok(HirExpr::Call(
             Box::new(HirExpr::Var(
-                if matches!(expected, Some(HirType::JsValue | HirType::Dynamic)) {
+                if matches!(expected, None | Some(HirType::Json | HirType::JsValue | HirType::Dynamic)) {
                     "callDynamicValueHandle"
                 } else {
                     "callDynamicValue"

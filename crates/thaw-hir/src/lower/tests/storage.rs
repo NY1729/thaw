@@ -149,3 +149,14 @@ fn storage_tracks_returned_callable_aliases() {
         function main(): void { const source: number[] = []; const read = make(source); const exposed: any = read(); }
     "#), vec![true]);
 }
+
+#[test]
+fn storage_returned_callable_keeps_dynamic_signature() {
+    let program = lower(r#"
+        function make(xs: number[]): () => number[] { return () => xs; }
+        function main(): void { const source: number[] = []; const read = make(source); const exposed: any = read(); }
+    "#);
+    let make = program.functions.iter().find(|function| function.name == "make").unwrap();
+    assert_eq!(make.params[0].ty, HirType::Json);
+    assert_eq!(make.ret, HirType::Function(Vec::new(), Box::new(HirType::Json)));
+}

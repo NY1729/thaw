@@ -385,3 +385,33 @@ fn ka_contract_dynamic_class_storage_3() {
 fn ka_contract_dynamic_class_storage_4() {
     assert_eq!(compile_and_run(r##"function main(): void { const map = new Map<number, number>(); const set = new Set<number>(); const m: any = map; const s: any = set; const original: any = new Function("return {x: 7}")(); m.set("key", original); s.add(original); console.log(map.size, m.get("key") === original, s.has(original), set.size); original.x = 9; console.log(m.get("key").x); }"##, "ka_contract_dynamic_class_storage_4"), "1 true true 1\n9\n");
 }
+
+#[test]
+fn ka_contract_dynamic_graph_1() {
+    assert_eq!(compile_and_run(r##"function main(): void { const root: number[][] = []; const first: any = root; let cursor: any = first; for (let i = 0; i < 70; i++) { const next: any = []; cursor[0] = next; cursor = next; } cursor[0] = first; let read: any = root; for (let i = 0; i < 70; i++) read = read[0]; console.log(read === cursor, read[0] === root); const other: number[][] = []; const second: any = other; second[0] = first; first[1] = second; const identity: any = new Function("value", "return value"); console.log(first[1][0] === first, identity(first) === root); }"##, "ka_contract_dynamic_graph_1"), "true true\ntrue true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_2() {
+    assert_eq!(compile_and_run(r##"function main(): void { const root: {next: any} = {next: null}; let cursor: any = root; for (let i = 0; i < 70; i++) { const next: any = {next: null}; cursor.next = next; cursor = next; } cursor.next = root; cursor.value = 7; let read: any = root; for (let i = 0; i < 70; i++) read = read.next; console.log(read === cursor, read.next === root, read.value); }"##, "ka_contract_dynamic_graph_2"), "true true 7\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_3() {
+    assert_eq!(compile_and_run(r##"async function main(): Promise<void> { const values: {x: number}[] = []; const exposed: any = values; const original: any = new Function("return {x: 1}")(); exposed[0] = original; const fail: any = new Function("value", "throw value"); for (let i = 0; i < 40; i++) { await Promise.resolve(); try { fail(original); } catch (error) { } original.x += 1; } console.log(values[0] === original, exposed[0] === original, values[0].x); }"##, "ka_contract_dynamic_graph_3"), "true true 41\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_4() {
+    assert_eq!(compile_and_run(r##"async function main(): Promise<void> { const original: any = new Function("return {x: 1}")(); const sparse: any[] = [, original]; const exposed: any = sparse; console.log(0 in exposed, 1 in exposed, exposed[1] === original); const copied: any = [...exposed, await Promise.resolve(original)]; console.log(0 in copied, copied[1] === original, copied[2] === original); }"##, "ka_contract_dynamic_graph_4"), "false true true\ntrue true true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_5() {
+    assert_eq!(compile_and_run(r##"function make(xs: {x: number}[]): () => {x: number}[] { return () => xs; } function main(): void { const xs: {x: number}[] = []; const read = make(xs); const exposed: any = read(); const original: any = new Function("return {x: 7}")(); exposed[0] = original; console.log(xs[0] === original, read()[0] === original); }"##, "ka_contract_dynamic_graph_5"), "true true\n");
+}
+
+#[test]
+fn ka_contract_dynamic_graph_6() {
+    assert_eq!(compile_and_run(r##"class Plain { value: number = 1; } function main(): void { const source = new Plain(); const values: Plain[] = []; const exposed: any = values; exposed[0] = source; console.log(values[0] === source, values[0] instanceof Plain); const object: any = new Function("return {value: 2}")(); exposed[1] = object; console.log(values[1] === object, values[1] instanceof Plain); }"##, "ka_contract_dynamic_graph_6"), "true true\ntrue false\n");
+}

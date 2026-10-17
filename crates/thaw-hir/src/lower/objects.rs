@@ -4109,18 +4109,11 @@ impl<'a> FnLowerer<'a> {
                     ancestry.split('\u{1f}').any(|class| names.contains(class))
                 }))
         });
-        // A class without methods of its own still needs the live view when a
-        // nested field is a class instance that carries methods.
-        let carries_methods = class_name_from_type(ty).is_some()
-            && (!self.class_instance_projected_methods(ty).is_empty()
-                || !self.class_instance_projected_accessors(ty).is_empty()
-                || fields.iter().any(|(name, field)| !is_hidden_accessor_field(name)
-                    && matches!(field, HirType::Object(_))
-                    && self.class_instance_supports_live_methods(field)));
+        let carries_identity = class_name_from_type(ty).is_some();
         // A decorated instance's `constructor` must stay the registered class token, which the
         // live view's prototype provides; only values handed to ambient/npm code keep the snapshot.
         (!decorated || self.alias_native_arrays)
-            && carries_methods
+            && carries_identity
             && fields.iter()
                 .filter(|(name, _)| !name.starts_with("__thaw_class_identity_\u{1e}")
                     && !is_hidden_accessor_field(name))

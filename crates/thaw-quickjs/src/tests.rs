@@ -16195,3 +16195,57 @@ fn iterator_predicates_release_rejected_reference_values() {
     drop(context);
     runtime.run_gc();
 }
+
+#[test]
+fn dynamic_result_graph_leases_return_to_baseline_after_success_and_exception() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&["__storageLeaseValue", "__storageLeaseOwner"]);
+    assert_eq!(
+        load(
+            r#"
+        globalThis.__storageLeaseValue = {};
+        __storageLeaseValue.self = __storageLeaseValue;
+        globalThis.__storageLeaseOwner = {
+            get() { return __storageLeaseValue; },
+            fail(value) { if (value !== __storageLeaseValue) throw 'wrong identity'; throw 'expected'; }
+        };
+    "#
+        ),
+        1
+    );
+    let value = guard.handle(thaw_js_get_global(c"__storageLeaseValue".as_ptr()));
+    let owner = guard.handle(thaw_js_get_global(c"__storageLeaseOwner".as_ptr()));
+    assert_eq!(error_boundary_registry_state(value), (1, true));
+    for _ in 0..40 {
+        let result = thaw_js_call_method_graph_result(
+            owner,
+            c"get".as_ptr(),
+            c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr(),
+        );
+        assert!(result.error.is_null());
+        let retained = guard.capture_handle_result(thaw_js_retain_graph_result(result.value));
+        unsafe {
+            thaw_arena::destroy_string(result.value.cast_mut());
+        }
+        assert!(retained.error.is_null());
+        assert_eq!(retained.value, value);
+        assert_eq!(error_boundary_registry_state(value), (2, true));
+        guard.release_handle(retained.value);
+        assert_eq!(error_boundary_registry_state(value), (1, true));
+        assert_eq!(thaw_js_retain_handle(value), 1);
+        let arguments = CString::new(format!(r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{value}}}],"leases":[{value}]}}"#)).unwrap();
+        let failed = thaw_js_call_method_handle_graph_args_result(
+            owner,
+            c"fail".as_ptr(),
+            arguments.as_ptr(),
+            false,
+        );
+        assert_eq!(failed.value, 0);
+        assert!(!failed.error.is_null());
+        unsafe {
+            thaw_arena::destroy_string(failed.error.cast_mut());
+        }
+        assert_eq!(error_boundary_registry_state(value), (1, true));
+    }
+    guard.finish();
+}

@@ -117,6 +117,9 @@ impl StorageGraph {
     }
     fn callable(&mut self, span: Span, parameters: &[Pat], result: Option<&TsType>) {
         let result_node = (span.lo.0, 0);
+        let callable_node = storage_key(span);
+        self.edges.entry(result_node).or_default().push(callable_node);
+        self.captures.insert((result_node, callable_node));
         let mut escaped = Vec::new();
         if result.is_none_or(storage_reference_type) { escaped.push(result_node); }
         for parameter in parameters {
