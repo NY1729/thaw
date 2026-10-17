@@ -468,11 +468,60 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Assign(assign) => {
-                let default = self.lower_expr(&assign.right)?;
+                let declared_type = if parameter_has_explicit_type_annotation(&assign.left) {
+                    Some(
+                        lower_param(
+                            &assign.left,
+                            self.interfaces,
+                            self.generic_interfaces,
+                            false,
+                            &HashMap::new(),
+                        )?
+                        .ty,
+                    )
+                } else {
+                    None
+                };
+                let contextual_type = declared_type.as_ref().map(|ty| {
+                    if matches!(&*assign.right, Expr::Array(_)) {
+                        match ty {
+                            HirType::Optional(inner)
+                            | HirType::Nullable(inner)
+                            | HirType::Nullish(inner) => inner.as_ref(),
+                            _ => ty,
+                        }
+                    } else {
+                        ty
+                    }
+                });
+                let mut default = self.lower_expr_with_expected_type(&assign.right, contextual_type)?;
+                if let Some(contextual_type) = contextual_type {
+                    if !matches!(self.infer_expr_type(&default)?, HirType::Null | HirType::Undefined)
+                    {
+                        default = self.coerce_to_declared(contextual_type, default)?;
+                    }
+                    if matches!(contextual_type, HirType::Tuple(_)) {
+                        default = HirExpr::TypedClosure(contextual_type.clone(), Box::new(default));
+                    }
+                }
                 let default_type = self.infer_expr_type(&default)?;
-                let value = self.lower_undefined_default(value, default)?;
-                let value_type = self.infer_expr_type(&value)?;
-                self.lower_binding_pattern_impl(&assign.left, value, &value_type, statements, immutable)?;
+                let value = self.lower_undefined_default_with_type(value, default, declared_type.clone())?;
+                let binding_type = match declared_type.as_ref() {
+                    Some(HirType::Optional(payload)) if default_type == **payload => {
+                        Some(payload.as_ref().clone())
+                    }
+                    other => other.cloned(),
+                };
+                let value_type = binding_type.unwrap_or(self.infer_expr_type(&value)?);
+                let mut binding_pattern = assign.left.as_ref().clone();
+                if matches!(declared_type, Some(HirType::Optional(_)))
+                    && matches!(value_type, HirType::F64 | HirType::Bool | HirType::Str)
+                {
+                    if let Pat::Ident(binding) = &mut binding_pattern {
+                        binding.type_ann = None;
+                    }
+                }
+                self.lower_binding_pattern_impl(&binding_pattern, value, &value_type, statements, immutable)?;
                 if let Pat::Ident(binding) = assign.left.as_ref() {
                     self.destructuring_default_types
                         .insert(self.resolve_binding(binding.id.sym.as_ref()), default_type);

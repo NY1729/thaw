@@ -614,6 +614,15 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_undefined_default(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        self.lower_undefined_default_with_type(lhs, rhs, None)
+    }
+
+    fn lower_undefined_default_with_type(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        declared_type: Option<HirType>,
+    ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         if lhs_type == HirType::Undefined {
             let name = format!("__thaw_default_undefined_{}", self.next_binding);
@@ -689,6 +698,36 @@ impl<'a> FnLowerer<'a> {
             )]);
             return self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)]);
         }
+        if let Some(HirType::Optional(payload)) = declared_type.as_ref() {
+            let rhs_type = self.infer_expr_type(&rhs)?;
+            if matches!(lhs_type, HirType::Optional(_))
+                && (rhs_type == HirType::Undefined || matches!(rhs_type, HirType::Optional(_)))
+            {
+                let fallback = if rhs_type == HirType::Undefined {
+                    HirExpr::OptionalNone(payload.as_ref().clone())
+                } else {
+                    self.coerce_to_declared(
+                        &HirType::Optional(Box::new(payload.as_ref().clone())),
+                        rhs,
+                    )?
+                };
+                let name = format!("__thaw_default_left_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), lhs_type.clone());
+                let left = HirExpr::Var(name.clone());
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(fallback))],
+                    vec![HirStmt::Return(Some(HirExpr::OptionalSome(
+                        Box::new(HirExpr::OptionalValue(
+                            Box::new(left), payload.as_ref().clone(),
+                        )),
+                        payload.as_ref().clone(),
+                    )))],
+                )]);
+                return self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)]);
+            }
+        }
         match lhs_type.clone() {
             HirType::Optional(payload) => {
                 // A strict type check here rejected a plain-typed default
@@ -715,8 +754,67 @@ impl<'a> FnLowerer<'a> {
                 self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
             }
             HirType::Nullish(payload) => {
-                let rhs = self.coerce_to_declared(payload.as_ref(), rhs)?;
-                let result_type = HirType::Nullable(payload.clone());
+                let rhs_type = self.infer_expr_type(&rhs)?;
+                if declared_type == Some(HirType::Nullable(payload.clone())) {
+                    let fallback = if rhs_type == HirType::Null {
+                        HirExpr::NullableNone(payload.as_ref().clone())
+                    } else if matches!(rhs_type, HirType::Nullable(_) | HirType::Optional(_)) {
+                        self.coerce_to_declared(&HirType::Nullable(payload.clone()), rhs)?
+                    } else if rhs_type == HirType::Undefined {
+                        return Err(format!("value has type {rhs_type:?}, expected Nullable({payload:?})"));
+                    } else {
+                        HirExpr::NullableSome(
+                            Box::new(self.coerce_to_declared(payload.as_ref(), rhs)?),
+                            payload.as_ref().clone(),
+                        )
+                    };
+                    let name = format!("__thaw_default_left_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), lhs_type.clone());
+                    let left = HirExpr::Var(name.clone());
+                    let result = HirExpr::Block(vec![
+                        HirStmt::If(
+                            HirExpr::NullishIsUndefined(Box::new(left.clone()), payload.as_ref().clone()),
+                            vec![HirStmt::Return(Some(fallback))],
+                            Vec::new(),
+                        ),
+                        HirStmt::If(
+                            HirExpr::NullishIsNull(Box::new(left.clone()), payload.as_ref().clone()),
+                            vec![HirStmt::Return(Some(HirExpr::NullableNone(payload.as_ref().clone())))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::NullableSome(
+                            Box::new(HirExpr::NullishValue(Box::new(left), payload.as_ref().clone())),
+                            payload.as_ref().clone(),
+                        ))),
+                    ]);
+                    let result = self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])?;
+                    self.expect_type(
+                        &HirType::Nullable(payload.clone()),
+                        &result,
+                        "destructuring default result",
+                    )?;
+                    return Ok(result);
+                }
+                let (result_type, fallback) = if rhs_type == HirType::Null {
+                    (
+                        HirType::Nullable(payload.clone()),
+                        HirExpr::NullableNone(payload.as_ref().clone()),
+                    )
+                } else if rhs_type == HirType::Undefined {
+                    (
+                        HirType::Nullish(payload.clone()),
+                        HirExpr::NullishUndefined(payload.as_ref().clone()),
+                    )
+                } else {
+                    (
+                        HirType::Nullable(payload.clone()),
+                        HirExpr::NullableSome(
+                            Box::new(self.coerce_to_declared(payload.as_ref(), rhs)?),
+                            payload.as_ref().clone(),
+                        ),
+                    )
+                };
                 let name = format!("__thaw_default_left_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), lhs_type.clone());
@@ -727,26 +825,26 @@ impl<'a> FnLowerer<'a> {
                             Box::new(left.clone()),
                             payload.as_ref().clone(),
                         ),
-                        vec![HirStmt::Return(Some(HirExpr::NullableSome(
-                            Box::new(rhs),
-                            payload.as_ref().clone(),
-                        )))],
+                        vec![HirStmt::Return(Some(fallback.clone()))],
                         Vec::new(),
                     ),
                     HirStmt::If(
                         HirExpr::NullishIsNull(Box::new(left.clone()), payload.as_ref().clone()),
-                        vec![HirStmt::Return(Some(HirExpr::NullableNone(
-                            payload.as_ref().clone(),
-                        )))],
+                        vec![HirStmt::Return(Some(if result_type == HirType::Nullish(payload.clone()) {
+                            HirExpr::NullishNull(payload.as_ref().clone())
+                        } else {
+                            HirExpr::NullableNone(payload.as_ref().clone())
+                        }))],
                         Vec::new(),
                     ),
-                    HirStmt::Return(Some(HirExpr::NullableSome(
-                        Box::new(HirExpr::NullishValue(
-                            Box::new(left),
+                    HirStmt::Return(Some(if result_type == HirType::Nullish(payload.clone()) {
+                        left
+                    } else {
+                        HirExpr::NullableSome(
+                            Box::new(HirExpr::NullishValue(Box::new(left), payload.as_ref().clone())),
                             payload.as_ref().clone(),
-                        )),
-                        payload.as_ref().clone(),
-                    ))),
+                        )
+                    })),
                 ]);
                 let result = self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])?;
                 self.expect_type(&result_type, &result, "destructuring default result")?;
