@@ -662,6 +662,21 @@ fn required_callback_context_calls_defaulted_arrow_with_supplied_value() {
 }
 
 #[test]
+fn required_callback_context_calls_defaulted_stored_arrow_and_function_expression() {
+    let source = r#"
+        function invoke(cb: (value: number) => number): number { return cb(9); }
+        function main(): void {
+            const local = (value: number = 5): number => value;
+            const typed: (value: number) => number = (value: number = 5): number => value;
+            console.log(invoke(local));
+            console.log(invoke(typed));
+            console.log(invoke(function(value: number = 5): number { return value; }));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "required_callback_default_stored_and_fn"), "9\n9\n9\n");
+}
+
+#[test]
 fn bound_optional_function_expression_keeps_this_receiver() {
     let source = r#"
         function main(): void {

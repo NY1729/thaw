@@ -2251,6 +2251,17 @@ fn required_callback_context_keeps_defaulted_arrow_parameter_required() {
 }
 
 #[test]
+fn required_callback_context_rejects_incompatible_defaulted_parameter() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const invalid: (value: number) => number = (value: string = "x"): number => 1;
+        }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
 fn local_default_callable_can_be_called_and_bound_without_its_argument() {
     lower(
         r#"function main(): void {
