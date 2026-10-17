@@ -5104,8 +5104,12 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if has_dynamic_storage(expr.span()) && matches!(expr, Expr::Array(_) | Expr::Object(_)) {
-            return self.lower_expr(expr);
+        if has_dynamic_storage(expr.span()) {
+            self.validate_storage_call_source(expr)?;
+            if let Some(expected) = expected.filter(|ty| !matches!(ty, HirType::Json | HirType::JsValue | HirType::Dynamic)) {
+                self.validate_storage_source(expr, expected)?;
+            }
+            if matches!(expr, Expr::Array(_) | Expr::Object(_)) { return self.lower_expr(expr); }
         }
         if let Some(expected) = expected {
             let supplied = match expr {

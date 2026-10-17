@@ -617,6 +617,11 @@ impl<'a> FnLowerer<'a> {
                         )
                     })
                     .transpose()?;
+                let source_annotation = annotated.clone();
+                let source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
+                if has_dynamic_storage(binding.id.span) || has_dynamic_storage(init.span()) {
+                    if let Some(source) = &source_annotation { self.validate_storage_source(init, source)?; }
+                }
                 let annotated = annotated.map(|ty| storage_type(binding.id.span, ty));
                 let recursive_binding_type = if Self::initializer_callback_references(init, &name)
                     || (annotated.is_some() && Self::initializer_closure_references(init, &name))
@@ -882,6 +887,7 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     self.bind_decl_local(&name, storage_type.clone(), var_decl.kind == VarDeclKind::Const)
                 };
+                if let Some(source) = source_annotation.or(source_hint) { self.source_scope.insert(hir_name.clone(), source); }
                 if let Some(value) = static_string {
                     self.static_string_bindings.insert(hir_name.clone(), value);
                 }

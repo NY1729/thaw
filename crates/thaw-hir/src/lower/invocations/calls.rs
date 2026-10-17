@@ -1909,7 +1909,7 @@ impl<'a> FnLowerer<'a> {
                         _ => None,
                 })
             });
-            let mut value = if let Some((params, ret)) = contextual_function {
+            let mut value = if let Some(value) = self.lower_literal_call_spread(argument)? { value } else if let Some((params, ret)) = contextual_function {
                 if matches!(
                     argument.expr.as_ref(),
                     Expr::Arrow(_) | Expr::Fn(_) | Expr::Ident(_)
@@ -1967,6 +1967,7 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             };
+            value = self.lower_storage_call_spread(argument, value)?;
             if let Some((physical_params, fixed_prefix, rest_element)) = known_actual_rest.take() {
                 if physical_params.len() != fixed_prefix + 1
                     || physical_params.get(fixed_prefix)
@@ -2343,6 +2344,8 @@ impl<'a> FnLowerer<'a> {
                             && signature.as_ref().is_some_and(|sig| !sig.is_extern);
                         let value = if user_function {
                             self.coerce_primitive_array_argument_aliasing(value, declared)
+                        } else if signature.as_ref().is_some_and(|sig| sig.is_extern) && dynamic_symbol(&callee_name).is_none() {
+                            self.coerce_native_ffi_argument(value, declared)
                         } else {
                             self.coerce_primitive_array_argument(value, declared)
                         }.map_err(|error| {
@@ -2705,7 +2708,7 @@ impl<'a> FnLowerer<'a> {
                 .enumerate()
                 .map(|(i, declared)| {
                     let value = args.next().expect("fixed_count <= args.len()");
-                    self.coerce_primitive_array_argument(value, declared).map_err(|error| {
+                    self.coerce_native_ffi_argument(value, declared).map_err(|error| {
                         format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                     })
                 })
@@ -2729,6 +2732,7 @@ impl<'a> FnLowerer<'a> {
                 aggregate_return_layout: None,
             };
             let result = HirExpr::FfiCall(Box::new(ffi_signature), args);
+            let result = self.adapt_native_ffi_result(result, call.span)?;
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 

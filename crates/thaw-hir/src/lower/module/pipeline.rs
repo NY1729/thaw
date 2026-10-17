@@ -448,6 +448,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             ));
         }
     }
+    let native_interfaces = if module.body.iter().any(|item| matches!(item,
+        ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration)))
+            if declaration.function.body.is_none() && dynamic_symbol(declaration.ident.sym.as_ref()).is_none())) {
+        let _native_layout = StorageScope::suspend();
+        let mut native = interfaces.clone();
+        collect_native_classes(module, &mut native, &generic_interfaces)?;
+        Some(native)
+    } else { None };
     let class_decls = collect_native_classes(module, &mut interfaces, &generic_interfaces)?;
     if let Some(specialized) =
         specialize_generic_class_methods(module, &interfaces, &generic_interfaces)?
@@ -467,6 +475,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 let name = fn_decl.ident.sym.to_string();
                 let func = &fn_decl.function;
                 let is_extern = func.body.is_none();
+                let annotation_interfaces = if is_extern && dynamic_symbol(&name).is_none() {
+                    native_interfaces.as_ref().unwrap_or(&interfaces)
+                } else { &interfaces };
                 if is_extern && func.is_async {
                     return Err(format!("ambient function `{name}` cannot be async"));
                 }
@@ -517,7 +528,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 .and_then(|ann| generic_type_pattern(
                                     &ann.type_ann,
                                     substitutions,
-                                    &interfaces,
+                                    annotation_interfaces,
                                     &generic_interfaces,
                                     &mut Vec::new(),
                                 )),
@@ -533,7 +544,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     generic_type_pattern(
                                         &ann.type_ann,
                                         substitutions,
-                                        &interfaces,
+                                        annotation_interfaces,
                                         &generic_interfaces,
                                         &mut Vec::new(),
                                     )
@@ -553,7 +564,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_type_pattern(
                             &ann.type_ann,
                             substitutions,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                             &mut Vec::new(),
                         )
@@ -571,7 +582,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         let ty = resolve_ts_type_with_substitution(
                             &annotation.type_ann,
                             &type_substitution,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                             &mut Vec::new(),
                         )?;
@@ -594,7 +605,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     .map(|p| {
                         lower_param(
                             &p.pat,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                             !is_extern,
                             &type_substitution,
@@ -619,7 +630,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     let receiver_type = resolve_ts_type_with_substitution(
                         &annotation.type_ann,
                         &type_substitution,
-                        &interfaces,
+                        annotation_interfaces,
                         &generic_interfaces,
                         &mut Vec::new(),
                     )?;
@@ -628,7 +639,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern = Some(generic_receiver_pattern_from_annotation(
                             &annotation.type_ann,
                             substitutions,
-                            &interfaces,
+                            annotation_interfaces,
                             &generic_interfaces,
                         ));
                     }
@@ -642,7 +653,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         func.is_async,
                         &func.return_type,
                         &name,
-                        &interfaces,
+                        annotation_interfaces,
                         &generic_interfaces,
                         &type_substitution,
                     )?
@@ -655,7 +666,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         func.is_async,
                         &func.return_type,
                         &name,
-                        &interfaces,
+                        annotation_interfaces,
                         &generic_interfaces,
                         &type_substitution,
                         None,
@@ -680,7 +691,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_type_pattern(
                                 &target.type_ann,
                                 substitutions,
-                                &interfaces,
+                                annotation_interfaces,
                                 &generic_interfaces,
                                 &mut Vec::new(),
                             )?
@@ -688,7 +699,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             GenericTypePattern::Concrete(resolve_ts_type_with_substitution(
                                 &target.type_ann,
                                 &type_substitution,
-                                &interfaces,
+                                annotation_interfaces,
                                 &generic_interfaces,
                                 &mut Vec::new(),
                             )?)
@@ -807,7 +818,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|parameter| parameter.ty)
+                                .map(|lowered| storage_parameter_type(&class_constructor_param_pattern(parameter), lowered.ty))
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -962,7 +973,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|parameter| parameter.ty)
+                                .map(|lowered| storage_parameter_type(&parameter.pat, lowered.ty))
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     );

@@ -1,4 +1,27 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_literal_call_spread(&mut self, argument: &swc_ecma_ast::ExprOrSpread) -> Result<Option<HirExpr>, String> {
+        if argument.spread.is_none() { return Ok(None); }
+        let Expr::Array(array) = argument.expr.as_ref() else { return Ok(None) };
+        if array.elems.iter().flatten().any(|element| element.spread.is_some()) { return Ok(None); }
+        // The temporary spread container is unobservable; preserve its elements and evaluation order.
+        let values = array.elems.iter().map(|element| match element {
+            Some(element) => self.lower_expr(&element.expr),
+            None => Ok(HirExpr::Lit(HirLit::ArrayHole)),
+        }).collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(HirExpr::ArrayLit(values)))
+    }
+
+    fn lower_storage_call_spread(&mut self, argument: &swc_ecma_ast::ExprOrSpread, value: HirExpr) -> Result<HirExpr, String> {
+        if argument.spread.is_some() && self.infer_expr_type(&value)? == HirType::Json {
+            if let Some(source) = self.source_value_hint(&argument.expr) {
+                if let HirType::Tuple(elements) = self.infer_expr_type(&source)? {
+                    return Ok(HirExpr::JsonAsNative(Box::new(value), HirType::Tuple(vec![HirType::Json; elements.len()])));
+                }
+            }
+        }
+        Ok(value)
+    }
+
     fn lower_native_spread_values(
         &mut self,
         arguments: &[swc_ecma_ast::ExprOrSpread],
@@ -46,10 +69,12 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .enumerate()
             .map(|(index, argument)| {
-                self.lower_expr_with_expected_type(
+                if let Some(value) = self.lower_literal_call_spread(argument)? { return Ok(value); }
+                let value = self.lower_expr_with_expected_type(
                     &argument.expr,
                     expected.get(index).or(rest),
-                )
+                )?;
+                self.lower_storage_call_spread(argument, value)
             })
             .collect::<Result<Vec<_>, _>>()?;
         // Every argument must be evaluated before wrappers can omit it or reuse it.

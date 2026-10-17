@@ -10,6 +10,8 @@ struct NarrowingSnapshot {
 /// Lowers one function body while retaining its typed lexical scope.
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
+    source_scope: HashMap<Symbol, HirType>,
+    source_ret_type: Option<HirType>,
     immutable_bindings: HashSet<Symbol>,
     /// `var` names already declared in the current function, mapped to the
     /// HIR binding they own; a redeclaration reuses that binding.

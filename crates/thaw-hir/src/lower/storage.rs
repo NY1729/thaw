@@ -3,6 +3,9 @@ use swc_common::{Span, Spanned};
 #[derive(Default)]
 struct StoragePlan {
     dynamic: HashSet<(u32, u32)>,
+    source_types: HashMap<(u32, u32), HirType>,
+    source_conflicts: HashSet<(u32, u32)>,
+    argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
 }
 
 impl StoragePlan {
@@ -26,7 +29,7 @@ impl StoragePlan {
                 }
             }
         }
-        Ok(Self { dynamic })
+        Ok(Self { dynamic, source_types: HashMap::new(), source_conflicts: HashSet::new(), argument_parameters: graph.argument_parameters })
     }
 
     fn result_is_dynamic(&self, span: Span) -> bool {
@@ -49,19 +52,32 @@ fn storage_has_any(ty: &TsType) -> bool {
 
 struct StorageCallable {
     params: Vec<Span>,
+    rest: bool,
     result: (u32, u32),
     escaped: Vec<(u32, u32)>,
 }
 struct StorageCall {
     callee: Span,
-    arguments: Vec<Span>,
+    arguments: Vec<(Span, bool)>,
     result: Span,
+    source_function: Option<(u32, u32)>,
 }
+type StorageAlias = (Span, Vec<Symbol>, Box<TsType>);
+
 #[derive(Default)]
 struct StorageGraph {
     edges: HashMap<(u32, u32), Vec<(u32, u32)>>,
+    argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     seeds: HashSet<(u32, u32)>,
     scopes: Vec<HashMap<String, Span>>,
+    aliases: Vec<HashMap<Symbol, StorageAlias>>,
+    class_types: Vec<HashMap<Symbol, Span>>,
+    native_results: HashMap<(u32, u32), Span>,
+    source_functions: HashMap<(u32, u32), (u32, u32)>,
+    source_methods: HashMap<(u32, u32, Symbol, bool), (u32, u32)>,
+    source_parents: HashMap<(u32, u32), (u32, u32)>,
+    source_constructors: HashMap<(u32, u32), (u32, u32)>,
+    annotations: HashMap<(u32, u32), Box<TsType>>,
     functions: Vec<(Span, usize)>,
     classes: Vec<Span>,
     callables: HashMap<(u32, u32), StorageCallable>,
@@ -71,6 +87,182 @@ struct StorageGraph {
 }
 
 impl StorageGraph {
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+        self.aliases.push(HashMap::new());
+        self.class_types.push(HashMap::new());
+    }
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        self.aliases.pop();
+        self.class_types.pop();
+    }
+    fn resolve_annotation(&self, source: &TsType) -> Box<TsType> {
+        struct Resolve<'g> { graph: &'g StorageGraph, active: HashSet<(u32, u32)> }
+        impl VisitMut for Resolve<'_> {
+            fn visit_mut_ts_type(&mut self, ty: &mut TsType) {
+                if let TsType::TsTypeRef(reference) = ty {
+                    if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                        if let Some((span, parameters, target)) = self.graph.aliases.iter().rev().find_map(|scope| scope.get(name.sym.as_ref())) {
+                            let key = storage_key(*span);
+                            if !self.active.insert(key) { return; }
+                            let substitutions = parameters.iter().cloned().zip(reference.type_params.iter().flat_map(|args| args.params.iter().cloned())).collect();
+                            let mut target = target.clone();
+                            target.visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
+                            target.visit_mut_with(self);
+                            *ty = *target;
+                            self.active.remove(&key);
+                            return;
+                        }
+                    }
+                }
+                ty.visit_mut_children_with(self);
+            }
+        }
+        let mut resolved = Box::new(source.clone());
+        resolved.visit_mut_with(&mut Resolve { graph: self, active: HashSet::new() });
+        resolved
+    }
+
+    fn source_constructor(&self, expression: &Expr) -> Option<(u32, u32)> {
+        let Expr::Ident(name) = expression else { return None };
+        let mut class = storage_key(self.class_types.iter().rev().find_map(|scope| scope.get(name.sym.as_ref()).copied())?);
+        let mut seen = HashSet::new();
+        while seen.insert(class) {
+            if let Some(constructor) = self.source_constructors.get(&class) { return Some(*constructor); }
+            class = *self.source_parents.get(&class)?;
+        }
+        None
+    }
+
+    fn source_callable(&self, expression: &Expr) -> Option<(u32, u32)> {
+        match expression {
+            Expr::Ident(name) => self.lookup(name.sym.as_ref()).and_then(|(binding, _)| self.source_functions.get(&storage_key(binding)).copied()),
+            Expr::Paren(value) => self.source_callable(&value.expr),
+            Expr::Arrow(value) => Some(storage_key(value.span)),
+            Expr::Fn(value) => Some(storage_key(value.function.span)),
+            Expr::Member(member) => {
+                let MemberProp::Ident(method) = &member.prop else { return None };
+                let (class, is_static) = if matches!(member.obj.as_ref(), Expr::This(_)) {
+                    (*self.classes.last()?, false)
+                } else if let Some(annotation) = self.source_annotation(&member.obj) {
+                    (self.annotated_class(&annotation)?, false)
+                } else if let Expr::Ident(name) = member.obj.as_ref() {
+                    (self.class_types.iter().rev().find_map(|scope| scope.get(name.sym.as_ref()).copied())?, true)
+                } else { return None };
+                let mut class = storage_key(class);
+                let mut seen = HashSet::new();
+                while seen.insert(class) {
+                    if let Some(function) = self.source_methods.get(&(class.0, class.1, method.sym.to_string(), is_static)) { return Some(*function); }
+                    class = *self.source_parents.get(&class)?;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn source_annotation(&self, expression: &Expr) -> Option<Box<TsType>> {
+        match expression {
+            Expr::Ident(name) => self.lookup(name.sym.as_ref()).and_then(|(span, _)| self.annotations.get(&storage_key(span)).cloned()),
+            Expr::Paren(value) => self.source_annotation(&value.expr),
+            Expr::TsAs(value) => Some(self.resolve_annotation(&value.type_ann)),
+            Expr::TsTypeAssertion(value) => Some(self.resolve_annotation(&value.type_ann)),
+            Expr::New(value) => {
+                let Expr::Ident(name) = value.callee.as_ref() else { return None };
+                Some(Box::new(TsType::TsTypeRef(swc_ecma_ast::TsTypeRef { span: value.span,
+                    type_name: swc_ecma_ast::TsEntityName::Ident(name.clone()), type_params: value.type_args.clone() })))
+            }
+            Expr::Object(object) => {
+                let members = object.props.iter().filter_map(|property| {
+                    let PropOrSpread::Prop(property) = property else { return None };
+                    let (key, value) = match property.as_ref() {
+                        Prop::KeyValue(property) => {
+                            let PropName::Ident(key) = &property.key else { return None };
+                            (Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(key.sym.clone(), key.span)), property.value.clone())
+                        }
+                        Prop::Shorthand(name) => (Expr::Ident(name.clone()), Box::new(Expr::Ident(name.clone()))),
+                        _ => return None,
+                    };
+                    Some(swc_ecma_ast::TsTypeElement::TsPropertySignature(swc_ecma_ast::TsPropertySignature {
+                        span: object.span, readonly: false, key: Box::new(key), computed: false, optional: false,
+                        type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn { span: object.span, type_ann: self.source_annotation(&value)? })),
+                    }))
+                }).collect();
+                Some(Box::new(TsType::TsTypeLit(swc_ecma_ast::TsTypeLit { span: object.span, members })))
+            }
+            Expr::Member(member) => {
+                let owner = self.source_annotation(&member.obj)?;
+                if storage_has_any(&owner) { return Some(owner); }
+                match owner.as_ref() {
+                    TsType::TsTypeLit(object) => {
+                        let MemberProp::Ident(name) = &member.prop else { return None };
+                        object.members.iter().find_map(|property| {
+                            let swc_ecma_ast::TsTypeElement::TsPropertySignature(property) = property else { return None };
+                            matches!(property.key.as_ref(), Expr::Ident(key) if key.sym == name.sym)
+                                .then(|| property.type_ann.as_ref().map(|ann| ann.type_ann.clone())).flatten()
+                        })
+                    }
+                    TsType::TsArrayType(array) if matches!(member.prop, MemberProp::Computed(_)) => Some(array.elem_type.clone()),
+                    _ => None,
+                }
+            }
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else { return None };
+                let Expr::Member(member) = callee.as_ref() else { return None };
+                let MemberProp::Ident(method) = &member.prop else { return None };
+                let owner = self.source_annotation(&member.obj)?;
+                let TsType::TsTypeRef(reference) = owner.as_ref() else { return None };
+                let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else { return None };
+                if matches!(name.sym.as_ref(), "Map" | "WeakMap") && method.sym == "get" {
+                    reference.type_params.as_ref()?.params.get(1).cloned()
+                } else { None }
+            }
+            _ => None,
+        }
+    }
+
+    fn annotated_class(&self, annotation: &TsType) -> Option<Span> {
+        let annotation = self.resolve_annotation(annotation);
+        let TsType::TsTypeRef(reference) = annotation.as_ref() else { return None };
+        let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else { return None };
+        self.class_types.iter().rev().find_map(|scope| scope.get(name.sym.as_ref()).copied())
+    }
+
+    fn annotated_value(&mut self, annotation: &TsType, value: &Expr) {
+        let annotation = self.resolve_annotation(annotation);
+        if storage_has_any(&annotation) { self.expose(value.span()); return; }
+        match (annotation.as_ref(), value) {
+            (TsType::TsArrayType(array), Expr::Array(values)) => {
+                for value in values.elems.iter().flatten() { self.annotated_value(&array.elem_type, &value.expr); }
+            }
+            (TsType::TsTupleType(tuple), Expr::Array(values)) => {
+                for (slot, value) in tuple.elem_types.iter().zip(&values.elems) {
+                    if let Some(value) = value { self.annotated_value(&slot.ty, &value.expr); }
+                }
+            }
+            (TsType::TsTypeLit(record), Expr::Object(object)) => {
+                for member in &record.members {
+                    let swc_ecma_ast::TsTypeElement::TsPropertySignature(field) = member else { continue };
+                    let Some(annotation) = &field.type_ann else { continue };
+                    let name = match field.key.as_ref() {
+                        Expr::Ident(name) => name.sym.to_string(),
+                        Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
+                        _ => continue,
+                    };
+                    for property in &object.props {
+                        let PropOrSpread::Prop(property) = property else { continue };
+                        match property.as_ref() {
+                            Prop::KeyValue(property) if class_property_name(&property.key).ok().as_ref() == Some(&name) => self.annotated_value(&annotation.type_ann, &property.value),
+                            Prop::Shorthand(identifier) if identifier.sym == name => self.annotated_value(&annotation.type_ann, &Expr::Ident(identifier.clone())),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     fn link(&mut self, left: Span, right: Span) {
         if left.is_dummy() || right.is_dummy() || left == right {
             return;
@@ -91,6 +283,7 @@ impl StorageGraph {
     }
     fn connect_calls(&mut self) {
         let mut connected = HashSet::new();
+        let mut native_connected = HashSet::new();
         loop {
             let mut links = Vec::new();
             for (index, call) in self.calls.iter().enumerate() {
@@ -98,11 +291,24 @@ impl StorageGraph {
                 let mut seen = HashSet::new();
                 while let Some(node) = pending.pop() {
                     if !seen.insert(node) { continue; }
+                    if let Some(class) = self.native_results.get(&node) {
+                        if native_connected.insert((index, node)) { links.push((storage_key(call.result), storage_key(*class))); }
+                    }
                     if let Some(callable) = self.callables.get(&node) {
                         if connected.insert((index, node)) {
                             links.push((storage_key(call.result), callable.result));
-                            for (actual, formal) in call.arguments.iter().zip(&callable.params) {
-                                links.push((storage_key(*actual), storage_key(*formal)));
+                            let mut spread_seen = false;
+                            for (position, &(actual, spread)) in call.arguments.iter().enumerate() {
+                                if spread || spread_seen {
+                                    let start = if spread_seen { 0 } else { position.min(callable.params.len()) };
+                                    for formal in &callable.params[start..] { links.push((storage_key(actual), storage_key(*formal))); }
+                                    spread_seen = true;
+                                } else if let Some(formal) = callable.params.get(position).or_else(|| callable.rest.then(|| callable.params.last()).flatten()) {
+                                    links.push((storage_key(actual), storage_key(*formal)));
+                                    if call.source_function == Some(node) && position < callable.params.len() - usize::from(callable.rest) {
+                                        self.argument_parameters.entry(storage_key(actual)).or_default().insert(storage_key(*formal));
+                                    }
+                                }
                             }
                         }
                     }
@@ -114,6 +320,13 @@ impl StorageGraph {
             if links.is_empty() { break; }
             for (left, right) in links { self.link_keys(left, right); }
         }
+        let unresolved: Vec<_> = self.calls.iter().enumerate()
+            .filter(|(index, _)| !connected.iter().any(|(call, _)| call == index))
+            .map(|(_, call)| (call.callee, call.result, call.arguments.clone())).collect();
+        for (callee, result, arguments) in unresolved {
+            self.contain(callee, result);
+            for (argument, _) in arguments { self.contain(callee, argument); }
+        }
     }
     fn callable(&mut self, span: Span, parameters: &[Pat], result: Option<&TsType>) {
         let result_node = (span.lo.0, 0);
@@ -122,14 +335,21 @@ impl StorageGraph {
         self.captures.insert((result_node, callable_node));
         let mut escaped = Vec::new();
         if result.is_none_or(storage_reference_type) { escaped.push(result_node); }
-        for parameter in parameters {
-            if matches!(parameter, Pat::Ident(binding)
-                if binding.type_ann.as_ref().is_some_and(|ann| storage_reference_type(&ann.type_ann))) {
-                escaped.push(storage_key(parameter.span()));
+        fn reference_parameter(parameter: &Pat) -> bool {
+            match parameter {
+                Pat::Ident(binding) => binding.type_ann.as_ref().is_none_or(|ann| storage_reference_type(&ann.type_ann)),
+                Pat::Assign(default) => reference_parameter(&default.left),
+                Pat::Rest(_) | Pat::Array(_) | Pat::Object(_) => true,
+                _ => false,
             }
         }
+        for parameter in parameters {
+            if reference_parameter(parameter) { escaped.push(storage_key(parameter.span())); }
+        }
         self.callables.insert(storage_key(span), StorageCallable {
-            params: parameters.iter().map(Spanned::span).collect(), result: result_node, escaped,
+            params: parameters.iter().map(Spanned::span).collect(),
+            rest: parameters.last().is_some_and(|parameter| matches!(parameter, Pat::Rest(_))),
+            result: result_node, escaped,
         });
     }
 
@@ -178,8 +398,38 @@ impl StorageGraph {
             Decl::Var(variable) => {
                 for declaration in &variable.decls { self.pattern(&declaration.name); }
             }
-            Decl::Fn(function) => self.bind(&function.ident),
-            Decl::Class(class) => self.bind(&class.ident),
+            Decl::Fn(function) => {
+                self.bind(&function.ident);
+                if function.function.body.is_some() { self.source_functions.insert(storage_key(function.ident.span), storage_key(function.function.span)); }
+            },
+            Decl::Class(class) => {
+                self.bind(&class.ident);
+                self.class_types.last_mut().unwrap().insert(class.ident.sym.to_string(), class.class.span);
+                let key = storage_key(class.class.span);
+                if let Some(base) = class.class.super_class.as_ref().and_then(|base| {
+                    let Expr::Ident(base) = base.as_ref() else { return None };
+                    self.class_types.iter().rev().find_map(|scope| scope.get(base.sym.as_ref()).copied())
+                }) { self.source_parents.insert(key, storage_key(base)); }
+                for member in &class.class.body {
+                    if let ClassMember::Constructor(constructor) = member { self.source_constructors.insert(key, storage_key(constructor.span)); }
+                    if let ClassMember::Method(method) = member {
+                        if method.kind == swc_ecma_ast::MethodKind::Method {
+                            if let Ok(name) = class_property_name(&method.key) {
+                                self.source_methods.insert((key.0, key.1, name, method.is_static), storage_key(method.function.span));
+                            }
+                        }
+                    }
+                }
+            }
+            Decl::TsTypeAlias(alias) => {
+                self.aliases.last_mut().unwrap().insert(alias.id.sym.to_string(), (alias.span,
+                    alias.type_params.iter().flat_map(|params| params.params.iter().map(|param| param.name.sym.to_string())).collect(), alias.type_ann.clone()));
+            }
+            Decl::TsInterface(interface) => {
+                self.aliases.last_mut().unwrap().insert(interface.id.sym.to_string(), (interface.span,
+                    interface.type_params.iter().flat_map(|params| params.params.iter().map(|param| param.name.sym.to_string())).collect(),
+                    Box::new(TsType::TsTypeLit(swc_ecma_ast::TsTypeLit { span: interface.body.span, members: interface.body.body.clone() }))));
+            }
             _ => {}
         }
     }
@@ -213,15 +463,18 @@ impl StorageGraph {
     }
 
     fn annotation(&mut self, span: Span, annotation: Option<&swc_ecma_ast::TsTypeAnn>) {
-        if annotation.is_some_and(|annotation| storage_has_any(&annotation.type_ann)) {
-            self.expose(span);
+        if let Some(annotation) = annotation {
+            let annotation = self.resolve_annotation(&annotation.type_ann);
+            if storage_has_any(&annotation) { self.expose(span); }
+            if let Some(class) = self.annotated_class(&annotation) { self.link(span, class); }
+            self.annotations.insert(storage_key(span), annotation);
         }
     }
 }
 
 impl Visit for StorageGraph {
     fn visit_module(&mut self, module: &Module) {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         for item in &module.body {
             match item {
                 ModuleItem::Stmt(Stmt::Decl(declaration)) => self.declare(declaration),
@@ -230,25 +483,83 @@ impl Visit for StorageGraph {
             }
         }
         module.visit_children_with(self);
-        self.scopes.pop();
+        self.pop_scope();
     }
 
     fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         for statement in &block.stmts {
             if let Stmt::Decl(declaration) = statement { self.declare(declaration); }
         }
         block.visit_children_with(self);
-        self.scopes.pop();
+        self.pop_scope();
     }
 
     fn visit_function_body(&mut self, body: &swc_ecma_ast::FunctionBody) {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         for statement in &body.stmts {
             if let Stmt::Decl(declaration) = statement { self.declare(declaration); }
         }
         body.visit_children_with(self);
-        self.scopes.pop();
+        self.pop_scope();
+    }
+
+    fn visit_for_stmt(&mut self, statement: &swc_ecma_ast::ForStmt) {
+        self.push_scope();
+        statement.visit_children_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_for_in_stmt(&mut self, statement: &swc_ecma_ast::ForInStmt) {
+        self.push_scope();
+        statement.visit_children_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_for_of_stmt(&mut self, statement: &swc_ecma_ast::ForOfStmt) {
+        self.push_scope();
+        match &statement.left {
+            swc_ecma_ast::ForHead::VarDecl(declaration) => {
+                for binding in &declaration.decls { self.link(binding.name.span(), statement.right.span()); }
+            }
+            swc_ecma_ast::ForHead::Pat(pattern) => self.link(pattern.span(), statement.right.span()),
+            _ => {}
+        }
+        statement.visit_children_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_switch_stmt(&mut self, statement: &swc_ecma_ast::SwitchStmt) {
+        statement.discriminant.visit_with(self);
+        self.push_scope();
+        for case in &statement.cases {
+            for statement in &case.cons {
+                if let Stmt::Decl(declaration) = statement { self.declare(declaration); }
+            }
+        }
+        for case in &statement.cases { case.visit_with(self); }
+        self.pop_scope();
+    }
+
+    fn visit_fn_expr(&mut self, expression: &swc_ecma_ast::FnExpr) {
+        self.push_scope();
+        if let Some(identifier) = &expression.ident {
+            self.bind(identifier);
+            self.link(identifier.span, expression.function.span);
+        }
+        expression.function.visit_with(self);
+        self.pop_scope();
+    }
+
+    fn visit_assign_pat(&mut self, pattern: &swc_ecma_ast::AssignPat) {
+        self.link(pattern.span, pattern.left.span());
+        self.link(pattern.span, pattern.right.span());
+        pattern.visit_children_with(self);
+    }
+
+    fn visit_assign_pat_prop(&mut self, property: &swc_ecma_ast::AssignPatProp) {
+        if let Some(value) = &property.value { self.link(property.key.id.span, value.span()); }
+        property.visit_children_with(self);
     }
 
     fn visit_ident(&mut self, identifier: &swc_ecma_ast::Ident) {
@@ -264,9 +575,24 @@ impl Visit for StorageGraph {
         }
     }
 
+    fn visit_member_expr(&mut self, member: &MemberExpr) {
+        if self.source_annotation(&Expr::Member(member.clone())).is_some_and(|ty| storage_has_any(&ty)) { self.expose(member.span); }
+        self.link(member.span, member.obj.span());
+        member.visit_children_with(self);
+    }
+
     fn visit_var_declarator(&mut self, declaration: &swc_ecma_ast::VarDeclarator) {
         self.pattern(&declaration.name);
-        if let Some(init) = &declaration.init { self.link(declaration.name.span(), init.span()); }
+        if let Some(init) = &declaration.init {
+            self.link(declaration.name.span(), init.span());
+            if let Pat::Ident(binding) = &declaration.name {
+                if binding.type_ann.as_ref().is_none_or(|ann| !storage_has_any(&self.resolve_annotation(&ann.type_ann))) {
+                    if let Some(function) = self.source_callable(init) { self.source_functions.insert(storage_key(binding.id.span), function); }
+                }
+                if let Some(annotation) = &binding.type_ann { self.annotated_value(&annotation.type_ann, init); }
+                else if let Some(annotation) = self.source_annotation(init) { if storage_has_any(&annotation) { self.expose(binding.id.span); } self.annotations.insert(storage_key(binding.id.span), annotation); }
+            }
+        }
         declaration.visit_children_with(self);
     }
 
@@ -278,6 +604,11 @@ impl Visit for StorageGraph {
 
     fn visit_fn_decl(&mut self, declaration: &FnDecl) {
         self.link(declaration.ident.span, declaration.function.span);
+        if declaration.function.body.is_none() {
+            if let Some(class) = declaration.function.return_type.as_ref().and_then(|annotation| self.annotated_class(&annotation.type_ann)) {
+                self.native_results.insert(storage_key(declaration.ident.span), class);
+            }
+        }
         if declaration.function.body.is_none() && dynamic_symbol(declaration.ident.sym.as_ref()).is_some() {
             self.expose(declaration.ident.span);
         }
@@ -285,12 +616,14 @@ impl Visit for StorageGraph {
     }
 
     fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         self.functions.push((function.span, self.scopes.len() - 1));
-        self.callable(function.span,
-            &function.params.iter().map(|p| p.pat.clone()).collect::<Vec<_>>(),
-            function.return_type.as_ref().map(|ann| ann.type_ann.as_ref()));
-        if function.return_type.as_ref().is_some_and(|ann| storage_has_any(&ann.type_ann)) {
+        if function.body.is_some() {
+            self.callable(function.span,
+                &function.params.iter().map(|p| p.pat.clone()).collect::<Vec<_>>(),
+                function.return_type.as_ref().map(|ann| ann.type_ann.as_ref()));
+        }
+        if function.return_type.as_ref().is_some_and(|ann| storage_has_any(&self.resolve_annotation(&ann.type_ann))) {
             self.seeds.insert((function.span.lo.0, 0));
         }
         for parameter in &function.params {
@@ -300,15 +633,15 @@ impl Visit for StorageGraph {
         if let Some(body) = &function.body { self.hoist_vars(&body.stmts); }
         function.visit_children_with(self);
         self.functions.pop();
-        self.scopes.pop();
+        self.pop_scope();
     }
 
     fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         self.functions.push((arrow.span, self.scopes.len() - 1));
         self.callable(arrow.span, &arrow.params,
             arrow.return_type.as_ref().map(|ann| ann.type_ann.as_ref()));
-        if arrow.return_type.as_ref().is_some_and(|ann| storage_has_any(&ann.type_ann)) {
+        if arrow.return_type.as_ref().is_some_and(|ann| storage_has_any(&self.resolve_annotation(&ann.type_ann))) {
             self.seeds.insert((arrow.span.lo.0, 0));
         }
         for parameter in &arrow.params {
@@ -319,7 +652,7 @@ impl Visit for StorageGraph {
         if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_ref() { self.hoist_vars(&body.stmts); }
         arrow.visit_children_with(self);
         self.functions.pop();
-        self.scopes.pop();
+        self.pop_scope();
     }
 
     fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
@@ -339,10 +672,10 @@ impl Visit for StorageGraph {
     }
 
     fn visit_catch_clause(&mut self, catch: &swc_ecma_ast::CatchClause) {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         if let Some(parameter) = &catch.param { self.pattern(parameter); }
         catch.visit_children_with(self);
-        self.scopes.pop();
+        self.pop_scope();
     }
 
     fn visit_throw_stmt(&mut self, statement: &swc_ecma_ast::ThrowStmt) {
@@ -362,9 +695,23 @@ impl Visit for StorageGraph {
 
     fn visit_class_decl(&mut self, declaration: &ClassDecl) {
         self.link(declaration.ident.span, declaration.class.span);
+        if let Some(base) = &declaration.class.super_class { self.contain(declaration.class.span, base.span()); }
         self.classes.push(declaration.class.span);
         declaration.visit_children_with(self);
         self.classes.pop();
+    }
+
+    fn visit_constructor(&mut self, constructor: &swc_ecma_ast::Constructor) {
+        if let Some(&class) = self.classes.last() { self.link(class, constructor.span); }
+        let parameters: Vec<_> = constructor.params.iter().map(class_constructor_param_pattern).collect();
+        self.push_scope();
+        self.functions.push((constructor.span, self.scopes.len() - 1));
+        self.callable(constructor.span, &parameters, None);
+        for parameter in &parameters { self.pattern(parameter); }
+        if let Some(body) = &constructor.body { self.hoist_vars(&body.stmts); }
+        constructor.visit_children_with(self);
+        self.functions.pop();
+        self.pop_scope();
     }
 
     fn visit_class_method(&mut self, method: &ClassMethod) {
@@ -402,7 +749,6 @@ impl Visit for StorageGraph {
                     }
                 }
             }
-            Expr::Member(member) => self.link(span, member.obj.span()),
             Expr::Assign(assign) => {
                 self.link(span, assign.left.span());
                 self.link(span, assign.right.span());
@@ -410,7 +756,8 @@ impl Visit for StorageGraph {
             Expr::Call(call) => {
                 if let Callee::Expr(callee) = &call.callee {
                     self.calls.push(StorageCall { callee: callee.span(),
-                        arguments: call.args.iter().map(|arg| arg.expr.span()).collect(), result: span });
+                        arguments: call.args.iter().map(|arg| (arg.expr.span(), arg.spread.is_some())).collect(), result: span,
+                        source_function: self.source_callable(callee) });
                     if let Expr::Ident(name) = callee.as_ref() {
                         if dynamic_symbol(name.sym.as_ref()).is_some() {
                             for argument in &call.args { self.expose(argument.expr.span()); }
@@ -424,12 +771,26 @@ impl Visit for StorageGraph {
             }
             Expr::New(new) => {
                 self.link(span, new.callee.span());
+                self.calls.push(StorageCall { callee: new.callee.span(),
+                    arguments: new.args.iter().flatten().map(|argument| (argument.expr.span(), argument.spread.is_some())).collect(), result: span, source_function: self.source_constructor(&new.callee) });
                 if matches!(new.callee.as_ref(), Expr::Ident(name)
                     if matches!(name.sym.as_ref(), "Proxy" | "Function") && self.lookup(name.sym.as_ref()).is_none()) {
                     self.expose(span);
                 }
                 for argument in new.args.iter().flatten() { self.contain(span, argument.expr.span()); }
             }
+            Expr::Bin(binary) if matches!(binary.op, swc_ecma_ast::BinaryOp::LogicalOr
+                | swc_ecma_ast::BinaryOp::LogicalAnd | swc_ecma_ast::BinaryOp::NullishCoalescing) => {
+                self.link(span, binary.left.span());
+                self.link(span, binary.right.span());
+            }
+            Expr::OptChain(chain) => match chain.base.as_ref() {
+                swc_ecma_ast::OptChainBase::Member(member) => self.link(span, member.span),
+                swc_ecma_ast::OptChainBase::Call(call) => {
+                    self.calls.push(StorageCall { callee: call.callee.span(),
+                        arguments: call.args.iter().map(|argument| (argument.expr.span(), argument.spread.is_some())).collect(), result: span, source_function: None });
+                }
+            },
             Expr::Cond(conditional) => {
                 self.link(span, conditional.cons.span());
                 self.link(span, conditional.alt.span());
@@ -437,11 +798,11 @@ impl Visit for StorageGraph {
             Expr::Paren(parenthesized) => self.link(span, parenthesized.expr.span()),
             Expr::TsAs(assertion) => {
                 self.link(span, assertion.expr.span());
-                if storage_has_any(&assertion.type_ann) { self.expose(span); }
+                if storage_has_any(&self.resolve_annotation(&assertion.type_ann)) { self.expose(span); }
             }
             Expr::TsTypeAssertion(assertion) => {
                 self.link(span, assertion.expr.span());
-                if storage_has_any(&assertion.type_ann) { self.expose(span); }
+                if storage_has_any(&self.resolve_annotation(&assertion.type_ann)) { self.expose(span); }
             }
             Expr::TsNonNull(assertion) => self.link(span, assertion.expr.span()),
             Expr::Await(awaited) => self.link(span, awaited.arg.span()),
@@ -465,6 +826,10 @@ thread_local! {
 struct StorageScope(StoragePlan);
 
 impl StorageScope {
+    fn suspend() -> Self {
+        Self(ACTIVE_STORAGE_PLAN.with(|active| active.replace(StoragePlan::default())))
+    }
+
     fn enter(module: &Module) -> Result<Self, String> {
         let plan = StoragePlan::analyze(module)?;
         Ok(Self(ACTIVE_STORAGE_PLAN.with(|active| active.replace(plan))))
@@ -481,7 +846,25 @@ fn has_dynamic_storage(span: Span) -> bool {
     ACTIVE_STORAGE_PLAN.with(|active| active.borrow().is_dynamic(span))
 }
 
+fn storage_source_type(span: Span) -> Option<HirType> {
+    if span.is_dummy() { return None; }
+    ACTIVE_STORAGE_PLAN.with(|active| { let active = active.borrow();
+        (!active.source_conflicts.contains(&storage_key(span))).then(|| active.source_types.get(&storage_key(span)).cloned()).flatten()
+    })
+}
+fn remember_storage_source(key: (u32, u32), source: &HirType) {
+    if key.0 == 0 { return; }
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        let mut active = active.borrow_mut();
+        match active.source_types.get(&key) {
+            None | Some(HirType::Dynamic) => { active.source_types.insert(key, source.clone()); }
+            Some(previous) if previous != source && *source != HirType::Dynamic => { active.source_conflicts.insert(key); }
+            _ => {}
+        }
+    });
+}
 fn storage_type(span: Span, source: HirType) -> HirType {
+    remember_storage_source(storage_key(span), &source);
     if !has_dynamic_storage(span) { return source; }
     dynamic_storage_type(source)
 }
@@ -489,9 +872,6 @@ fn storage_type(span: Span, source: HirType) -> HirType {
 fn dynamic_storage_type(source: HirType) -> HirType {
     match source {
         HirType::Void | HirType::Dynamic => source,
-        // A native class retains its authenticated identity; its mutable fields
-        // are selected independently before the class layout is allocated.
-        HirType::Object(_) if class_name_from_type(&source).is_some() => source,
         HirType::Promise(result) => HirType::Promise(Box::new(dynamic_storage_type(*result))),
         HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
         | HirType::JsValue => source,
@@ -509,6 +889,7 @@ impl FnLowerer<'_> {
                     let value = self.lower_expr(&element.expr)?;
                     if element.spread.is_some() {
                         let value = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+                        let value = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_map_or_set_entries".into())), vec![value]);
                         parts.push(HirExpr::JsonAsNative(Box::new(value), HirType::Array(Box::new(HirType::Json))));
                         continue;
                     }
@@ -521,10 +902,14 @@ impl FnLowerer<'_> {
         }
         let native = HirExpr::ArrayConcat(parts, HirType::Json);
         let array = self.wrap_native_value_as_json(native, HirType::Array(Box::new(HirType::Json)))?;
-        let arguments = self.wrap_native_value_as_json(HirExpr::ArrayLit(vec![array]), HirType::Array(Box::new(HirType::Json)))?;
+        self.retain_dynamic_storage_value(array)
+    }
+
+    fn retain_dynamic_storage_value(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let arguments = self.wrap_native_value_as_json(HirExpr::ArrayLit(vec![value]), HirType::Array(Box::new(HirType::Json)))?;
         let live = HirExpr::Call(Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())), vec![
             HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str("__thaw_storage_array".into()))]),
+                vec![HirExpr::Lit(HirLit::Str("__thaw_storage_value".into()))]),
             arguments, HirExpr::ArrayLit(Vec::new()),
         ]);
         Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())), vec![live]))
@@ -536,7 +921,20 @@ fn storage_reference_type(ty: &TsType) -> bool {
         if !matches!(keyword.kind, TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsObjectKeyword | TsKeywordTypeKind::TsUnknownKeyword))
         && !matches!(ty, TsType::TsFnOrConstructorType(_))
 }
+fn storage_parameter_type(pattern: &Pat, source: HirType) -> HirType {
+    remember_storage_source(storage_key(pattern.span()), &source);
+    if matches!(pattern, Pat::Rest(_)) && has_dynamic_storage(pattern.span()) {
+        return HirType::Array(Box::new(HirType::Json));
+    }
+    if matches!(pattern, Pat::Ident(binding) if binding.id.optional) {
+        if let HirType::Optional(payload) = source {
+            return HirType::Optional(Box::new(storage_type(pattern.span(), *payload)));
+        }
+    }
+    storage_type(pattern.span(), source)
+}
 fn storage_return_type(span: Span, source: HirType) -> HirType {
+    remember_storage_source((span.lo.0, 0), &source);
     if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().result_is_dynamic(span)) {
         if matches!(source, HirType::Function(..) | HirType::CallableFunction(..)) {
             HirType::Dynamic
@@ -563,5 +961,234 @@ impl FnLowerer<'_> {
             HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())), vec![HirExpr::Lit(HirLit::Str(name.sym.to_string()))]), arguments,
         ]);
         Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())), vec![value]))
+    }
+}
+
+impl FnLowerer<'_> {
+    fn coerce_native_ffi_argument(&mut self, value: HirExpr, declared: &HirType) -> Result<HirExpr, String> {
+        fn contains_dynamic(ty: &HirType) -> bool {
+            match ty {
+                HirType::Json | HirType::JsValue | HirType::Dictionary(_) => true,
+                HirType::Object(fields) => fields.iter().any(|(_, ty)| contains_dynamic(ty)),
+                HirType::Array(inner) | HirType::Optional(inner) | HirType::Nullable(inner)
+                | HirType::Nullish(inner) => contains_dynamic(inner),
+                _ => false,
+            }
+        }
+        let actual = self.infer_expr_type(&value)?;
+        if actual != *declared && !matches!(declared, HirType::Json | HirType::JsValue | HirType::Dictionary(_))
+            && contains_dynamic(&actual) {
+            let json = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+            return Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_decode_native_argument".into())),
+                vec![HirExpr::TypedClosure(declared.clone(), Box::new(json))]));
+        }
+        self.coerce_primitive_array_argument(value, declared)
+    }
+}
+
+impl FnLowerer<'_> {
+    fn source_value_hint(&self, expression: &Expr) -> Option<HirExpr> {
+        fn uncertain(ty: &HirType) -> bool {
+            match ty {
+                HirType::Json | HirType::JsValue | HirType::Dynamic | HirType::Dictionary(_) => true,
+                HirType::Object(fields) => fields.iter().any(|(_, ty)| uncertain(ty)),
+                HirType::Array(ty) | HirType::Optional(ty) | HirType::Nullable(ty) | HirType::Nullish(ty) => uncertain(ty),
+                HirType::Tuple(types) | HirType::Union(types) => types.iter().any(uncertain),
+                _ => false,
+            }
+        }
+        let typed = |ty| HirExpr::TypedClosure(if uncertain(&ty) { HirType::Json } else { ty }, Box::new(HirExpr::Lit(HirLit::Undefined)));
+        match expression {
+            Expr::Lit(Lit::Num(value)) => Some(HirExpr::Lit(HirLit::F64(value.value))),
+            Expr::Lit(Lit::Str(value)) => Some(HirExpr::Lit(HirLit::Str(value.value.to_string_lossy().into_owned()))),
+            Expr::Lit(Lit::Bool(value)) => Some(HirExpr::Lit(HirLit::Bool(value.value))),
+            Expr::Lit(Lit::Null(_)) => Some(HirExpr::Lit(HirLit::Null)),
+            Expr::Lit(Lit::BigInt(value)) => value.value.to_string().parse().ok().map(|value| HirExpr::Lit(HirLit::I64(value))),
+            Expr::Ident(identifier) => {
+                let name = self.resolve_binding(identifier.sym.as_ref());
+                self.source_scope.get(&name).or_else(|| self.scope.get(&name)).cloned().map(typed)
+            }
+            Expr::This(_) => {
+                let name = self.resolve_binding("this");
+                self.source_scope.get(&name).or_else(|| self.scope.get(&name)).cloned().map(typed)
+            }
+            Expr::Paren(value) => self.source_value_hint(&value.expr),
+            Expr::TsNonNull(value) => self.source_value_hint(&value.expr),
+            Expr::TsAs(value) => lower_ts_type(&value.type_ann, self.interfaces, self.generic_interfaces).ok().map(typed),
+            Expr::TsTypeAssertion(value) => lower_ts_type(&value.type_ann, self.interfaces, self.generic_interfaces).ok().map(typed),
+            Expr::Array(array) if array.elems.iter().flatten().all(|element| element.spread.is_none()) => {
+                Some(HirExpr::ArrayLit(array.elems.iter().map(|element| match element {
+                    None => HirExpr::Lit(HirLit::ArrayHole),
+                    Some(element) => self.source_value_hint(&element.expr).unwrap_or_else(|| typed(HirType::Json)),
+                }).collect()))
+            }
+            Expr::Object(object) => {
+                let mut fields = Vec::new();
+                for property in &object.props {
+                    let PropOrSpread::Prop(property) = property else { return None };
+                    match property.as_ref() {
+                        Prop::KeyValue(property) => fields.push((class_property_name(&property.key).ok()?, self.source_value_hint(&property.value).unwrap_or_else(|| typed(HirType::Json)))),
+                        Prop::Shorthand(identifier) => fields.push((identifier.sym.to_string(), self.source_value_hint(&Expr::Ident(identifier.clone())).unwrap_or_else(|| typed(HirType::Json)))),
+                        _ => return None,
+                    }
+                }
+                Some(HirExpr::ObjectLit(fields))
+            }
+            Expr::Member(member) => {
+                let owner = self.source_value_hint(&member.obj)?;
+                let ty = self.infer_expr_type(&owner).ok()?;
+                match (&ty, &member.prop) {
+                    (HirType::Object(fields), MemberProp::Ident(property)) => fields.iter().find(|(name, _)| name == property.sym.as_ref()).map(|(_, ty)| typed(ty.clone())),
+                    (HirType::Array(element), MemberProp::Computed(_)) => Some(typed(*element.clone())),
+                    (HirType::Json | HirType::JsValue, _) => Some(typed(HirType::Json)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn validate_storage_source_type(&mut self, expected: &HirType, source: HirExpr) -> Result<(), String> {
+        if matches!(self.infer_expr_type(&source)?, HirType::Json | HirType::JsValue | HirType::Dynamic)
+            || matches!((&source, expected), (HirExpr::ArrayLit(elements), HirType::Array(_)) if elements.is_empty()) {
+            return Ok(());
+        }
+        if let (HirType::Array(expected), HirExpr::ArrayLit(values)) = (expected, &source) {
+            for value in values {
+                if !matches!(value, HirExpr::Lit(HirLit::ArrayHole)) { self.validate_storage_source_type(expected, value.clone())?; }
+            }
+            return Ok(());
+        }
+        if let (HirType::Array(expected), HirType::Array(actual)) = (expected, self.infer_expr_type(&source)?) {
+            return self.validate_storage_source_type(expected, HirExpr::TypedClosure(*actual, Box::new(HirExpr::Lit(HirLit::Undefined))));
+        }
+        if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, self.infer_expr_type(&source)?) {
+            if expected_fields.iter().all(|(name, _)| actual_fields.iter().any(|(actual, _)| actual == name)) {
+                for (name, expected) in expected_fields {
+                    let actual = actual_fields.iter().find(|(actual, _)| actual == name).unwrap().1.clone();
+                    let value = if let HirExpr::ObjectLit(fields) = &source {
+                        fields.iter().find(|(field, _)| field == name).map(|(_, value)| value.clone())
+                    } else { None }.unwrap_or_else(|| HirExpr::TypedClosure(actual, Box::new(HirExpr::Lit(HirLit::Undefined))));
+                    self.validate_storage_source_type(expected, value)?;
+                }
+                return Ok(());
+            }
+        }
+        self.coerce_to_declared(expected, source).map(|_| ())
+    }
+
+    fn validate_storage_source(&mut self, expression: &Expr, expected: &HirType) -> Result<(), String> {
+        if matches!(expected, HirType::Json | HirType::JsValue | HirType::Dynamic | HirType::Void) { return Ok(()); }
+        if let Some(source) = self.source_value_hint(expression) {
+            self.validate_storage_source_type(expected, source)?;
+        }
+        Ok(())
+    }
+
+    fn validate_storage_call_source(&mut self, expression: &Expr) -> Result<(), String> {
+        let expected = ACTIVE_STORAGE_PLAN.with(|active| {
+            let active = active.borrow();
+            let parameters = active.argument_parameters.get(&storage_key(expression.span()))?;
+            let mut candidates = parameters.iter().filter(|parameter| !active.source_conflicts.contains(parameter)).filter_map(|parameter| active.source_types.get(parameter));
+            let expected = candidates.next()?.clone();
+            candidates.all(|candidate| *candidate == expected).then_some(expected)
+        });
+        if let Some(expected) = expected { self.validate_storage_source(expression, &expected)?; }
+        Ok(())
+    }
+}
+
+impl FnLowerer<'_> {
+    fn remember_source_parameter(&mut self, name: &str, pattern: &Pat) {
+        if let Some(source) = storage_source_type(pattern.span()) { self.source_scope.insert(name.to_string(), source); }
+    }
+    fn remember_source_return(&mut self, span: Span) {
+        self.source_ret_type = if span.is_dummy() { None } else { ACTIVE_STORAGE_PLAN.with(|active| {
+            let active = active.borrow(); let key = (span.lo.0, 0);
+            (!active.source_conflicts.contains(&key)).then(|| active.source_types.get(&key).cloned()).flatten()
+        }) };
+    }
+}
+
+impl FnLowerer<'_> {
+    fn adapt_native_ffi_result(&mut self, value: HirExpr, span: Span) -> Result<HirExpr, String> {
+        let source = self.infer_expr_type(&value)?;
+        let layout_changed = class_name_from_type(&source).and_then(|class| self.interfaces.get(class)).is_some_and(|target| *target != source);
+        if !has_dynamic_storage(span) && !layout_changed { return Ok(value); }
+        self.dynamic_native_ffi_result(value, &source)
+    }
+
+    fn dynamic_native_ffi_result(&mut self, value: HirExpr, source: &HirType) -> Result<HirExpr, String> {
+        let name = format!("__thaw_ffi_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), source.clone());
+        let current = HirExpr::Var(name.clone());
+        let result = match source {
+            HirType::Array(element) => {
+                let item = format!("__thaw_ffi_element_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(item.clone(), *element.clone());
+                let body = self.dynamic_native_ffi_result(HirExpr::Var(item.clone()), element)?;
+                let callback = HirExpr::Lambda(Vec::new(), vec![HirParam { name: item, ty: *element.clone() }], HirType::Json, Box::new(body));
+                let mapped = self.lower_array_map(current, source.clone(), *element.clone(), *element.clone(), callback, None)?;
+                let json = self.wrap_native_value_as_json(mapped, HirType::Array(Box::new(HirType::Json)))?;
+                self.retain_dynamic_storage_value(json)?
+            }
+            HirType::Tuple(elements) => {
+                let mut values = Vec::new();
+                for (index, element) in elements.iter().enumerate() {
+                    let child = HirExpr::TypedIndex(Box::new(current.clone()), Box::new(HirExpr::Lit(HirLit::F64(index as f64))), element.clone());
+                    values.push(self.dynamic_native_ffi_result(child, element)?);
+                }
+                let json = self.wrap_native_value_as_json(HirExpr::ArrayLit(values), HirType::Array(Box::new(HirType::Json)))?;
+                self.retain_dynamic_storage_value(json)?
+            }
+            HirType::Object(fields) => {
+                if let Some(target) = class_name_from_type(source).and_then(|class| self.interfaces.get(class)).cloned() {
+                    let HirType::Object(target_fields) = &target else { unreachable!() };
+                    let mut values = Vec::new();
+                    for (field, expected) in target_fields {
+                        let actual = fields.iter().find(|(name, _)| name == field).map(|(_, ty)| ty).ok_or("native return is missing an internal class field")?;
+                        let child = HirExpr::PropAccess(Box::new(current.clone()), source.clone(), field.clone());
+                        let child = if *expected == HirType::Json { self.dynamic_native_ffi_result(child, actual)? } else { self.coerce_to_declared(expected, child)? };
+                        values.push((field.clone(), child));
+                    }
+                    let target_name = format!("__thaw_ffi_internal_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(target_name.clone(), target.clone());
+                    let projected = self.coerce_to_declared_aliasing(&HirType::Json, HirExpr::Var(target_name.clone()))?;
+                    let public_fields: Vec<_> = target_fields.iter().filter(|(field, _)|
+                        !field.starts_with("__thaw_class_identity_\u{1e}") && !field.starts_with("__thaw_private_") && !is_hidden_accessor_field(field)).cloned().collect();
+                    let plain_values = public_fields.iter().map(|(field, _)| (field.clone(), HirExpr::PropAccess(Box::new(HirExpr::Var(target_name.clone())), target.clone(), field.clone()))).collect();
+                    let plain = self.wrap_native_value_as_json(HirExpr::ObjectLit(plain_values), HirType::Object(public_fields))?;
+                    let plain = self.retain_dynamic_storage_value(plain)?;
+                    let authentic = HirExpr::Call(Box::new(HirExpr::Var("__thaw_object_copy_class_identity".into())), vec![current, HirExpr::Var(target_name.clone())]);
+                    HirExpr::Block(vec![
+                        HirStmt::Let(target_name, target.clone(), HirExpr::TypedClosure(target, Box::new(HirExpr::ObjectLit(values)))),
+                        HirStmt::Return(Some(HirExpr::Conditional(Box::new(authentic), Box::new(projected), Box::new(plain), HirType::Json))),
+                    ])
+                } else {
+                    let mut values = Vec::new();
+                    for (field, ty) in fields {
+                        let child = HirExpr::PropAccess(Box::new(current.clone()), source.clone(), field.clone());
+                        values.push((field.clone(), self.dynamic_native_ffi_result(child, ty)?));
+                    }
+                    let ty = HirType::Object(fields.iter().map(|(name, _)| (name.clone(), HirType::Json)).collect());
+                    let json = self.wrap_native_value_as_json(HirExpr::ObjectLit(values), ty)?;
+                    self.retain_dynamic_storage_value(json)?
+                }
+            }
+            HirType::Optional(payload) => HirExpr::Conditional(
+                Box::new(HirExpr::OptionalIsNone(Box::new(current.clone()), *payload.clone())),
+                Box::new(self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?),
+                Box::new(self.dynamic_native_ffi_result(HirExpr::OptionalValue(Box::new(current), *payload.clone()), payload)?), HirType::Json),
+            HirType::Nullable(payload) => HirExpr::Conditional(
+                Box::new(HirExpr::NullableIsNone(Box::new(current.clone()), *payload.clone())),
+                Box::new(self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Null))?),
+                Box::new(self.dynamic_native_ffi_result(HirExpr::NullableValue(Box::new(current), *payload.clone()), payload)?), HirType::Json),
+            HirType::JsValue => HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_borrowed_dynamic".into())), vec![current]),
+            _ => self.coerce_to_declared_aliasing(&HirType::Json, current)?,
+        };
+        self.wrap_call_argument_bindings(result, &[(name, source.clone(), value)])
     }
 }

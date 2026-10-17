@@ -202,6 +202,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("full object keys query returned no value")?.into_pointer_value();
                 return Ok(self.compile_array_wrap(raw_keys)?.into());
             }
+            "__thaw_object_copy_class_identity" => {
+                let [source, target] = args else { return Err("class identity copy expects two objects".into()) };
+                let source = self.compile_expr(source)?.into_pointer_value();
+                let target = self.compile_expr(target)?.into_pointer_value();
+                let authenticated = self.builder.build_call(self.module.get_function("thaw_object_copy_class_identity").unwrap(),
+                    &[source.into(), target.into()], "copy_actual_class_identity").map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic().ok_or("class identity copy returned no authentication result")?;
+                return Ok(authenticated);
+            }
             "__thaw_object_set_class_identity" => {
                 let [object, marker] = args else {
                     return Err("object class identity registration expects two operands".into());

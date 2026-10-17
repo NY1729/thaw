@@ -481,6 +481,7 @@ pub struct HirCompiler<'ctx> {
     /// handle has no meaning and should be rejected instead (console.log
     /// formatting, a `Dictionary` literal, an N-API call).
     compiling_quickjs_dynamic_arguments: bool,
+    validating_native_argument: bool,
     /// Fresh native scalar handles and projection ledgers owned by active typed
     /// dynamic-call argument scopes.
     fresh_event_key_argument_scopes: Vec<FreshEventKeyArgumentScope<'ctx>>,
@@ -779,6 +780,7 @@ impl<'ctx> HirCompiler<'ctx> {
             tracks_object_integrity: false,
             tracks_owned_json_roots: false,
             compiling_quickjs_dynamic_arguments: false,
+            validating_native_argument: false,
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,
             owned_json_discard_frames: Vec::new(),

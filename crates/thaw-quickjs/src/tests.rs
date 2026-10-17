@@ -16249,3 +16249,30 @@ fn dynamic_result_graph_leases_return_to_baseline_after_success_and_exception() 
     }
     guard.finish();
 }
+
+#[test]
+fn live_graph_callback_mask_retains_primitive_handles() {
+    assert_eq!(
+        load(
+            r#"
+        function inspectLiveGraphPrimitiveMask() {
+            const values = [1, 'x', false, null, undefined, 1n];
+            const graph = JSON.parse(__thaw_json_graph_encode_js(values.slice(), 63, true));
+            try {
+                return graph.nodes[0].a.map((token, index) => {
+                    const node = graph.nodes[token.r];
+                    return !!node && node.hdl > 0 && Object.is(__thaw_value_handles[node.hdl - 1], values[index]);
+                });
+            } finally {
+                for (const handle of graph.leases) __thaw_release_dynamic_value(handle);
+            }
+        }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectLiveGraphPrimitiveMask", "[]"),
+        "[true,true,true,true,true,true]"
+    );
+}

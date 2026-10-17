@@ -2614,3 +2614,101 @@ fn nested_ffi_tuples_use_their_full_storage_layout() {
     }
     assert_eq!(HirCompiler::ffi_aggregate_storage_layout(&object, FfiAggregateAbi::Internal), (8, 8));
 }
+
+#[test]
+fn ffi_dynamic_storage_validates_before_invoking_native() {
+    let source = r#"
+        class Native { value: number = 1; }
+        declare function native_storage_sum(values: number[]): number;
+        declare function native_storage_class(value: Native): number;
+        declare function native_storage_record(value: {value: number}): number;
+        declare function native_storage_bigint(value: bigint): number;
+        declare function native_storage_collection(value: Map<string, number>): number;
+        declare function native_storage_make(): Native;
+        declare function native_storage_values(): number[];
+        declare function native_storage_source_value(): number;
+        declare function native_storage_source_element(): number;
+        declare function native_storage_calls(): number;
+        function main(): void {
+            const values: number[] = [1, 2]; const exposed: any = values;
+            console.log(native_storage_sum(values), native_storage_calls());
+            const original: any = new Function("return {x: 7}")(); exposed[0] = original;
+            try { native_storage_sum(values); console.log("accepted array"); }
+            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
+            const instance = new Native(); const view: any = instance; view.value = 7;
+            console.log(native_storage_class(instance), native_storage_calls());
+            view.value = original;
+            try { native_storage_class(instance); console.log("accepted field"); }
+            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
+            const impostor: any = new Function("return {value: 7}")();
+            try { native_storage_class(impostor); console.log("accepted brand"); }
+            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
+            const getter: any = new Function("return {reads: 0, get value() { this.reads++; return this.reads === 1 ? 8 : {}; }}")();
+            console.log(native_storage_record(getter), getter.reads, native_storage_calls());
+            const bigint: any = 9n;
+            console.log(native_storage_bigint(bigint), native_storage_calls());
+            try { native_storage_bigint(original); console.log("accepted bigint"); }
+            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
+            const collection = new Map<string, number>(); collection.set("a", 1);
+            console.log(native_storage_collection(collection), native_storage_calls());
+            const foreign: any = new Function("return new Map([[1, 'bad']])")();
+            try { native_storage_collection(foreign); console.log("accepted collection"); }
+            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
+            console.log(exposed[0] === original, view.value === original, foreign.get(1));
+            const returned: Native = native_storage_make(); const returnedView: any = returned;
+            console.log(returned.value, returned instanceof Native, native_storage_calls());
+            returnedView.value = original;
+            console.log(returned.value === original, native_storage_source_value(), native_storage_calls());
+            const returnedValues: number[] = native_storage_values(); const valuesView: any = returnedValues;
+            console.log(returnedValues[0], native_storage_calls()); valuesView[0] = original;
+            console.log(returnedValues[0] === original, typeof returnedValues[0], native_storage_source_element());
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let mut program = thaw_hir::lower_module(&module).unwrap();
+    thaw_hir::set_ffi_string_abi(&mut program, "native_storage_values", vec![],
+        thaw_hir::FfiStringAbi::NullTerminated, thaw_hir::FfiCallingConvention::C,
+        thaw_hir::FfiAggregateAbi::Portable).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "ffi_dynamic_storage");
+    compiler.compile_program(&program).unwrap();
+    let dir = std::env::temp_dir().join(format!("thaw-ffi-dynamic-storage-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let object = dir.join("program.o");
+    let native = dir.join("native.c");
+    let native_object = dir.join("native.o");
+    let executable = dir.join("program");
+    compiler.write_object_file(&object).unwrap();
+    std::fs::write(&native, r#"
+        #include <stdint.h>
+        static int calls;
+        double native_storage_sum(const double *values, int64_t length) {
+            calls++; double total = 0; for (int64_t i = 0; i < length; i++) total += values[i]; return total;
+        }
+        double native_storage_class(uint8_t identity, double value) { (void)identity; calls++; return value; }
+        double native_storage_record(double value) { calls++; return value; }
+        double native_storage_bigint(int64_t value) { calls++; return (double)value; }
+        double native_storage_collection(void *value) { (void)value; calls++; return 1; }
+        typedef struct { uint8_t identity; double value; } NativeStorageObject;
+        static NativeStorageObject returned_object = {1, 11};
+        static double returned_values[] = {1, 2};
+        typedef struct { double *data; int64_t length; } NativeStorageValues;
+        void *native_storage_make(void) { calls++; return &returned_object; }
+        NativeStorageValues native_storage_values(void) { calls++; return (NativeStorageValues){returned_values, 2}; }
+        double native_storage_source_value(void) { return returned_object.value; }
+        double native_storage_source_element(void) { return returned_values[0]; }
+        double native_storage_calls(void) { return calls; }
+    "#).unwrap();
+    assert!(cc_command().arg("-c").arg(&native).arg("-o").arg(&native_object).status().unwrap().success());
+    let arena = build_staticlib("thaw-arena");
+    let std_lib = build_staticlib("thaw-std");
+    let runtime = build_staticlib("thaw-runtime");
+    let quickjs = build_staticlib("thaw-quickjs");
+    assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
+        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
+        .arg("-o").arg(&executable).status().unwrap().success());
+    let output = Command::new(&executable).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\ntrue 1\n7 2\ntrue 2\ntrue 2\n8 1 3\n9 4\ntrue 4\n1 5\ntrue 5\ntrue true bad\n11 false 6\ntrue 11 6\n1 7\ntrue object 1\n");
+    std::fs::remove_dir_all(dir).unwrap();
+}

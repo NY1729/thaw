@@ -60,6 +60,8 @@ impl<'a> FnLowerer<'a> {
     ) -> Self {
         Self {
             scope: HashMap::new(),
+            source_scope: HashMap::new(),
+            source_ret_type: None,
             immutable_bindings: HashSet::new(),
             function_var_names: HashMap::new(),
             strict_nullable_bindings: HashSet::new(),

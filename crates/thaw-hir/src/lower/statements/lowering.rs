@@ -1400,6 +1400,9 @@ impl<'a> FnLowerer<'a> {
                         // dispatch and silently snapshotting the live
                         // `Response` into JSON instead of returning it live.
                         let ret_type = self.ret_type.clone();
+                        if let Some(source) = self.source_ret_type.clone().filter(|source| *source != ret_type) {
+                            self.validate_storage_source(arg, &source)?;
+                        }
                         let value = self.lower_expr_with_expected_type(arg, Some(&ret_type))?;
                         if self.ret_type == HirType::Void {
                             if self.infer_expr_type(&value)? != HirType::Void {

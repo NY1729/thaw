@@ -21,6 +21,15 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match name {
+            "__thaw_json_decode_native_argument" => {
+                let [HirExpr::TypedClosure(target, value)] = args else {
+                    return Err("checked native argument requires a target type".into());
+                };
+                let outer = std::mem::replace(&mut self.validating_native_argument, true);
+                let result = self.compile_expr(&HirExpr::JsonAsNative(value.clone(), target.clone()));
+                self.validating_native_argument = outer;
+                return result;
+            }
             "JSON.parse" => {
                 let [source] = args else {
                     return Err("JSON.parse expects one argument".into());

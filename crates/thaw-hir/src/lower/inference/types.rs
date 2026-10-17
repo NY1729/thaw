@@ -729,6 +729,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Bool, include_non_enumerable, "full object keys mode")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
+                    "__thaw_object_copy_class_identity" => {
+                        let [source, target] = args.as_slice() else { return Err("class identity copy expects two objects".into()) };
+                        if !matches!(self.infer_expr_type(source)?, HirType::Object(_)) { return Err("class identity copy source must be an object".into()) }
+                        let target = self.infer_expr_type(target)?;
+                        if !matches!(target, HirType::Object(_)) { return Err("class identity copy target must be an object".into()) }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_object_hide_marker" | "__thaw_object_set_class_identity" => {
                         let [object, marker] = args.as_slice() else {
                             return Err("object marker registration expects an object and a marker".into());
@@ -2485,6 +2492,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Json, value, "owned catch JSON root")?;
                         return Ok(HirType::Json);
+                    }
+                    "__thaw_json_decode_native_argument" => {
+                        let [HirExpr::TypedClosure(target, value)] = args.as_slice() else {
+                            return Err("checked native argument needs its target type".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "checked native argument")?;
+                        return Ok(target.clone());
                     }
                     "__thaw_json_host_from_dynamic" => {
                         let [value] = args.as_slice() else {

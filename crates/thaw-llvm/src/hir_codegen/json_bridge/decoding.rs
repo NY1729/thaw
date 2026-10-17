@@ -1,4 +1,50 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_validate_native_argument(&mut self, json: BasicValueEnum<'ctx>, ty: &HirType) -> Result<(), String> {
+        if !self.validating_native_argument { return Ok(()); }
+        let valid = match ty {
+            HirType::F64 | HirType::I64 | HirType::Str | HirType::Bool | HirType::Object(_) => {
+                let kind = self.compile_json_as_value(json, "thaw_json_typeof")?.into_pointer_value();
+                let expected = match ty { HirType::F64 => "number", HirType::I64 => "bigint", HirType::Str => "string", HirType::Bool => "boolean", _ => "object" };
+                let mut valid = self.compile_typeof_matches(kind, expected)?;
+                if let HirType::Object(fields) = ty {
+                    let null = self.compile_json_is_null_value(json)?;
+                    let present = self.builder.build_not(null, "native_argument_not_null").map_err(|error| error.to_string())?;
+                    valid = self.builder.build_and(valid, present, "native_argument_object").map_err(|error| error.to_string())?;
+                    if let Some(class) = fields.first().and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}")) {
+                        self.uses_quickjs = true;
+                        self.uses_quickjs_handles = true;
+                        let (pointer, present) = self.query_native_receiver(json.into_pointer_value(), "")?;
+                        let pointer = self.builder.build_int_to_ptr(pointer, self.context.ptr_type(AddressSpace::default()), "native_argument_class_owner")
+                            .map_err(|error| error.to_string())?;
+                        let class = class.split('\u{1f}').next().unwrap();
+                        let class = self.builder.build_global_string_ptr(class, "native_argument_class").map_err(|error| error.to_string())?;
+                        let branded = self.builder.build_call(self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                            &[pointer.into(), class.as_pointer_value().into()], "native_argument_brand")
+                            .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("class brand result")?.into_int_value();
+                        let branded = self.builder.build_and(branded, present, "native_argument_authenticated").map_err(|error| error.to_string())?;
+                        valid = self.builder.build_and(valid, branded, "native_argument_class_valid").map_err(|error| error.to_string())?;
+                    }
+                }
+                valid
+            }
+            HirType::Array(_) | HirType::Tuple(_) => {
+                let array = self.compile_json_as_value(json, "thaw_json_is_array")?.into_int_value();
+                self.builder.build_int_compare(IntPredicate::NE, array, array.get_type().const_zero(), "native_argument_is_array")
+                    .map_err(|error| error.to_string())?
+            }
+            _ => return Ok(()),
+        };
+        self.compile_check_json_host_error(json, None)?;
+        let function = self.current_function();
+        let accepted = self.context.append_basic_block(function, "native_argument_valid");
+        let rejected = self.context.append_basic_block(function, "native_argument_invalid");
+        self.builder.build_conditional_branch(valid, accepted, rejected).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected);
+        self.compile_throw_type_error("Value is incompatible with the native argument type")?;
+        self.builder.position_at_end(accepted);
+        Ok(())
+    }
+
     fn compile_json_to_native_object_argument(
         &mut self, json: PointerValue<'ctx>, ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
@@ -110,6 +156,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             return Ok(object.into());
         }
+        self.compile_validate_native_argument(json, ty)?;
         let object = self
             .builder
             .build_call(
@@ -129,6 +176,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap()
             .into_pointer_value();
         for (index, (name, field_ty)) in fields.iter().enumerate() {
+            if self.validating_native_argument && name.starts_with("__thaw_class_identity_\u{1e}") {
+                let pointer = self.compile_field_ptr_from_pointer(object, fields, index)?;
+                self.builder.build_store(pointer, self.context.bool_type().const_int(1, false)).map_err(|error| error.to_string())?;
+                continue;
+            }
             let key = self
                 .builder
                 .build_global_string_ptr(name, "dynamic_result_key")
@@ -188,6 +240,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
+            HirType::F64 | HirType::I64 | HirType::Str | HirType::Bool => self.compile_json_value_to_native(json, ty),
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
             HirType::Map(..) | HirType::Set(_) => self.compile_json_to_native_collection(json, ty),
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
@@ -246,8 +299,14 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_validate_native_argument(json, ty)?;
         match ty {
             HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
+            HirType::I64 => {
+                let value = self.compile_json_as_value(json, "thaw_json_as_bigint_i64")?;
+                self.compile_check_json_host_error(json, None)?;
+                Ok(value)
+            }
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json | HirType::Dictionary(_) => Ok(json),
@@ -608,6 +667,7 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         element: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_validate_native_argument(json, &HirType::Array(Box::new(element.clone())))?;
         let i64_type = self.context.i64_type();
         let length = self
             .builder
@@ -699,6 +759,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_index returned no value")?;
         self.compile_check_json_host_error(element_json, Some("thaw_json_destroy"))?;
+        self.compile_validate_native_argument(element_json, element)?;
         let value = match element {
             HirType::F64 => self.compile_json_as_value(element_json, "thaw_json_as_number")?,
             HirType::Str => self.compile_json_as_value(element_json, "thaw_json_as_string")?,
@@ -778,6 +839,7 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         elements: &[HirType],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_validate_native_argument(json, &HirType::Tuple(elements.to_vec()))?;
         let i64_type = self.context.i64_type();
         let element_bytes = tuple_element_storage_bytes(elements)?;
         let size = checked_array_offset(element_bytes, elements.len())?;
@@ -817,6 +879,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("thaw_json_index returned no tuple element")?;
             self.compile_check_json_host_error(element_json, Some("thaw_json_destroy"))?;
+            self.compile_validate_native_argument(element_json, element)?;
             let value = match element {
                 HirType::F64 => {
                     self.compile_json_as_value(element_json, "thaw_json_as_number")?

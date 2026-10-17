@@ -4109,7 +4109,7 @@ impl<'a> FnLowerer<'a> {
                     ancestry.split('\u{1f}').any(|class| names.contains(class))
                 }))
         });
-        let carries_identity = class_name_from_type(ty).is_some();
+        let carries_identity = class_name_from_type(ty).is_some() && *ty != date_object_type();
         // A decorated instance's `constructor` must stay the registered class token, which the
         // live view's prototype provides; only values handed to ambient/npm code keep the snapshot.
         (!decorated || self.alias_native_arrays)

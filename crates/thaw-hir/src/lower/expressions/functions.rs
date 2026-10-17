@@ -8,7 +8,11 @@ impl<'a> FnLowerer<'a> {
         let source_continue_depths = std::mem::take(&mut self.source_continue_depths);
         let labels = std::mem::take(&mut self.labels);
         let function_var_names = std::mem::take(&mut self.function_var_names);
+        let source_return = self.source_ret_type.take();
+        let source_scope = self.source_scope.clone();
         let result = lower(self);
+        self.source_ret_type = source_return;
+        self.source_scope = source_scope;
         self.function_var_names = function_var_names;
         self.loop_depth = loop_depth;
         self.source_break_depths = source_break_depths;
@@ -245,7 +249,7 @@ impl<'a> FnLowerer<'a> {
                     self.generic_interfaces,
                     false,
                     &HashMap::new(),
-                )
+                ).map(|mut lowered| { lowered.ty = storage_parameter_type(param, lowered.ty); lowered })
             })
             .collect::<Result<Vec<_>, _>>()?;
         if arrow.is_generator {
@@ -259,12 +263,15 @@ impl<'a> FnLowerer<'a> {
 
         let declared_return = declared_return.map(|ty| storage_return_type(arrow.span, ty));
         let saved_scope = self.scope.clone();
+        let saved_source_scope = self.source_scope.clone();
+        let saved_source_return = self.source_ret_type.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = self.with_function_control_flow(|lowerer| {
+            lowerer.remember_source_return(arrow.span);
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
             if let Some(receiver) = &receiver {
                 lowerer.class_static_context = false;
@@ -299,6 +306,7 @@ impl<'a> FnLowerer<'a> {
                     param.ty.clone()
                 };
                 let name = lowerer.bind_local(&param.name, ty.clone());
+                lowerer.remember_source_parameter(&name, pattern);
                 lowerer.mark_array_parameter(&name, &ty);
                 if lowerer.promise_catch_parameter.as_ref() == Some(&param.name) {
                     lowerer.promise_catch_bindings.insert(name.clone());
@@ -351,6 +359,9 @@ impl<'a> FnLowerer<'a> {
                     // to the untyped JSON-snapshot path the exact same
                     // way.
                     let ret_type = lowerer.ret_type.clone();
+                    if let Some(source) = lowerer.source_ret_type.clone().filter(|source| *source != ret_type) {
+                        lowerer.validate_storage_source(expr, &source)?;
+                    }
                     let mut expression = lowerer.lower_expr_with_expected_type(expr, Some(&ret_type))?;
                     if declared_return.is_none() && !arrow.is_async {
                         expression = lowerer.lower_inferred_array_literal(expression)?;
@@ -544,6 +555,8 @@ impl<'a> FnLowerer<'a> {
             ))
         });
         self.scope = saved_scope;
+        self.source_scope = saved_source_scope;
+        self.source_ret_type = saved_source_return;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
@@ -577,6 +590,8 @@ impl<'a> FnLowerer<'a> {
             )?,
         };
         let saved_scope = self.scope.clone();
+        let saved_source_scope = self.source_scope.clone();
+        let saved_source_return = self.source_ret_type.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
@@ -649,6 +664,8 @@ impl<'a> FnLowerer<'a> {
         });
         let inferred_return = self.ret_type.clone();
         self.scope = saved_scope;
+        self.source_scope = saved_source_scope;
+        self.source_ret_type = saved_source_return;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
@@ -1070,6 +1087,8 @@ impl<'a> FnLowerer<'a> {
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
         let saved_scope = self.scope.clone();
+        let saved_source_scope = self.source_scope.clone();
+        let saved_source_return = self.source_ret_type.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
@@ -1324,6 +1343,8 @@ impl<'a> FnLowerer<'a> {
             Ok(HirExpr::Lambda(captures, params, ret, Box::new(body)))
         });
         self.scope = saved_scope;
+        self.source_scope = saved_source_scope;
+        self.source_ret_type = saved_source_return;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;

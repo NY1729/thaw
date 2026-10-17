@@ -295,6 +295,7 @@ impl<'a> FnLowerer<'a> {
     /// `?.`/`?:`/`||`/`??`/`&&` forms of those. A wrong guess is harmless: the caller lowers
     /// the receiver once and re-checks its real type.
     fn json_receiver_candidate(&self, expr: &Expr) -> bool {
+        if matches!(expr, Expr::Array(_) | Expr::Object(_) | Expr::Call(_) | Expr::OptChain(_)) && has_dynamic_storage(expr.span()) { return true; }
         if let Some(ty) = self.peek_type_without_lowering(expr) {
             return ty == HirType::Json;
         }

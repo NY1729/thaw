@@ -25,7 +25,7 @@ fn collect_native_classes<'a>(
                     false,
                     &substitution,
                 )
-                .map(|param| param.ty)
+                .map(|parameter| storage_parameter_type(&param.pat, parameter.ty))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let optional = method

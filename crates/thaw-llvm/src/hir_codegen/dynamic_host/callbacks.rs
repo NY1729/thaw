@@ -2007,7 +2007,8 @@ impl<'ctx> HirCompiler<'ctx> {
         // Callback failures can carry tracked Box<Value> payloads across a
         // JavaScript Error carrier. Start tracing before module initialization
         // so the packet lease can preserve the existing arena owner graph.
-        let graph_mode = graph_mode || json_callback_result_wants_graph(ret);
+        let graph_mode = graph_mode || json_callback_result_wants_graph(ret)
+            || (has_rest && params.last().is_some_and(json_callback_result_wants_graph));
         self.tracks_owned_json_roots = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
             .map_err(|error| error.to_string())?;

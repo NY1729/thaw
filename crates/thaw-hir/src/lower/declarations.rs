@@ -424,6 +424,9 @@ fn lower_class_constructor(
             .push(parameter.name.clone());
     }
 
+    for (pattern, parameter) in source_params.iter().map(class_constructor_param_pattern).zip(&params) {
+        lowerer.remember_source_parameter(&parameter.name, &pattern);
+    }
     let mut own_initializers = Vec::new();
     for member in &declaration.class.body {
         let ClassMember::ClassProp(property) = member else {
@@ -442,6 +445,9 @@ fn lower_class_constructor(
             .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
         let value = match property.value.as_deref() {
             Some(initializer) => {
+                if let Some(source) = storage_source_type(property.span).filter(|source| has_dynamic_storage(property.span) && *source != expected) {
+                    lowerer.validate_storage_source(initializer, &source)?;
+                }
                 let value = lowerer.lower_expr(initializer)?;
                 Some(lowerer.coerce_to_declared(&expected, value)?)
             }
@@ -871,6 +877,10 @@ fn lower_class_methods(
             None,
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        lowerer.remember_source_return(method.function.span);
+        for (pattern, parameter) in method.function.params.iter().map(|parameter| &parameter.pat).zip(params.iter().skip(receiver_offset)) {
+            lowerer.remember_source_parameter(&parameter.name, pattern);
+        }
         lowerer.class_static_context = method.is_static;
         lowerer.class_context = Some(class_name.clone());
         if let Some(base) = &declaration.class.super_class {
@@ -1187,8 +1197,10 @@ fn lower_fn_decl(
             .push("__thaw_this".into());
     }
     let runtime_params = &params[usize::from(func.this_param.is_some())..];
+    lowerer.remember_source_return(func.span);
     let promise_rejection_callback = name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX);
     for (index, (source, param)) in func.params.iter().zip(runtime_params).enumerate() {
+        lowerer.remember_source_parameter(&param.name, &source.pat);
         lowerer.mark_array_parameter(&param.name, &param.ty);
         lowerer.mark_declared_nullable_parameter(&param.name, &param.ty);
         lowerer.immutable_bindings.remove(&param.name);
@@ -1920,13 +1932,18 @@ fn lower_param(
             Pat::Object(pattern) => pattern.type_ann = rest.type_ann.clone(),
             _ => {}
         }
-        return lower_param(
+        let mut parameter = lower_param(
             &argument,
             interfaces,
             generic_interfaces,
             allow_inference,
             type_substitution,
-        );
+        )?;
+        if let Some(source) = storage_source_type(argument.span()) { remember_storage_source(storage_key(rest.span), &source); }
+        if allow_inference && has_dynamic_storage(rest.span) {
+            parameter.ty = HirType::Array(Box::new(HirType::Json));
+        }
+        return Ok(parameter);
     }
     let (name, type_ann, optional) = match pat {
         Pat::Ident(binding) => (
@@ -1987,6 +2004,6 @@ fn lower_param(
     if optional {
         ty = optional_parameter_type(ty);
     }
-    let ty = if allow_inference { storage_type(pat.span(), ty) } else { ty };
+    let ty = if allow_inference { storage_parameter_type(pat, ty) } else { ty };
     Ok(HirParam { name, ty })
 }

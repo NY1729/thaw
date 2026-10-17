@@ -1566,6 +1566,101 @@
       "name": "dynamic storage retains plain class identity",
       "expect": "matched",
       "source": "class Plain { value: number = 1; } function main(): void { const source = new Plain(); const values: Plain[] = []; const exposed: any = values; exposed[0] = source; console.log(values[0] === source, values[0] instanceof Plain); const object: any = new Function(\"return {value: 2}\")(); exposed[1] = object; console.log(values[1] === object, values[1] instanceof Plain); }"
+    },
+    {
+      "name": "dynamic storage constructor arguments retain actual values",
+      "expect": "matched",
+      "source": "class Holder { constructor(value: number[], original: any) { const exposed: any = value; exposed[0] = original; } } function main(): void { const values: number[] = []; const original: any = {x: 7}; const holder = new Holder(values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"
+    },
+    {
+      "name": "dynamic storage unknown callable arguments retain actual values",
+      "expect": "matched",
+      "source": "function invoke(callback: any, value: number[], original: any): void { callback(value, original); } function main(): void { const values: number[] = []; const original: any = {x: 7}; const writer: any = new Function(\"value\", \"original\", \"value[0] = original\"); invoke(writer, values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"
+    },
+    {
+      "name": "dynamic storage class annotation retains plain runtime value",
+      "expect": "matched",
+      "source": "class C { value = 1; method(): number { return this.value; } } function main(): void { const plain: any = {value: 7}; const value: C = plain; console.log(value === plain, value instanceof C, typeof value.method); }"
+    },
+    {
+      "name": "dynamic storage logical alias keeps dynamic storage",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const exposed: any = xs || []; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage optional alias keeps dynamic storage",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const holder = {xs}; const exposed: any = holder?.xs; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage iteration alias keeps dynamic storage",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const original: any = {x: 7}; for (const row of [xs]) { const exposed: any = row; exposed[0] = original; } console.log(xs[0] === original, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage rest aliases keep all dynamic arguments",
+      "expect": "matched",
+      "source": "function mutate(...xs: number[][]): void { const exposed: any = xs; exposed[1][0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(first, second); console.log(typeof second[0], second[0].x); }"
+    },
+    {
+      "name": "dynamic storage spread aliases keep all dynamic arguments",
+      "expect": "matched",
+      "source": "function mutate(first: number[], second: number[]): void { const exposed: any = second; exposed[0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(...[first, second]); console.log(typeof second[0], second[0].x); }"
+    },
+    {
+      "name": "dynamic storage derived exposure promotes inherited fields",
+      "expect": "matched",
+      "source": "class Base { value: number = 1; read(): number { return this.value; } } class Derived extends Base {} function main(): void { const value = new Derived(); const exposed: any = value; const original: any = {x: 7}; exposed.value = original; console.log(value.value === original, typeof value.value, typeof value.read()); }"
+    },
+    {
+      "name": "dynamic storage any type aliases expose actual owners",
+      "expect": "matched",
+      "source": "type DynamicValue = any; function main(): void { const xs: number[] = [1]; const exposed: DynamicValue = xs; exposed[0] = {x: 7}; console.log(typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage nested any annotations expose actual slots",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const holder: {slot: any} = {slot: xs}; holder.slot[0] = {x: 7}; console.log(typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage dynamic callable aliases retain callback argument owners",
+      "expect": "matched",
+      "source": "function mutate(values: number[]): void { const exposed: any = values; exposed[0] = {x: 7}; } function main(): void { const values: number[] = []; const callable: any = mutate; callable(values); console.log(typeof values[0]); }"
+    },
+    {
+      "name": "dynamic storage dynamic rest packed owner retains self cycles",
+      "expect": "matched",
+      "source": "function cycle(...values: number[][]): any { const exposed: any = values; exposed[0] = exposed; return exposed; } function main(): void { const result: any = cycle([]); console.log(result[0] === result, Array.isArray(result)); }"
+    },
+    {
+      "name": "dynamic storage nested dynamic parameter slots",
+      "expect": "matched",
+      "source": "function write(holder: {slot:any}):void{holder.slot[0]={x:7};} function main():void{const xs:number[]=[1];const holder={slot:xs};write(holder);console.log(typeof xs[0],xs[0].x);}"
+    },
+    {
+      "name": "dynamic storage dynamic map value slots",
+      "expect": "matched",
+      "source": "function main():void{const xs:number[]=[1];const map=new Map<string,any>();map.set(\"x\",xs);map.get(\"x\")[0]={x:7};console.log(typeof xs[0],xs[0].x);}"
+    },
+    {
+      "name": "dynamic storage dynamic tuple spread owners",
+      "expect": "matched",
+      "source": "function mutate(a:number[],b:number[]):void{const exposed:any=b;exposed[0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const args:[number[],number[]]=[a,b];mutate(...args);console.log(typeof b[0],b[0].x);}"
+    },
+    {
+      "name": "dynamic storage dynamic rest callable owners",
+      "expect": "matched",
+      "source": "function mutate(...xs:number[][]):void{const exposed:any=xs;exposed[1][0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const fn:any=mutate;fn(a,b);console.log(typeof b[0],b[0].x);}"
+    },
+    {
+      "name": "dynamic storage inferred dynamic field writes",
+      "expect": "matched",
+      "source": "function main():void{const xs:number[]=[1];const holder={slot:undefined as any};holder.slot=xs;holder.slot[0]={x:7};console.log(typeof xs[0],xs[0].x);}"
+    },
+    {
+      "name": "dynamic collection parameters retain actual values",
+      "expect": "matched",
+      "source": "class Store {calls=0;use(m:Map<string,number>,s:Set<number>):number {this.calls+=1;m.set(\"ok\",1);s.add(2);return this.calls;}}\nfunction main():void {const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;\nconst wrong=new Map<string,string>();const wrongSet=new Set<string>();const d:any=wrong;const e:any=wrongSet;\ntry {a.use(d,c);console.log(\"accepted wrong map\");}catch(error:any){console.log(error instanceof TypeError);}\ntry {a.use(b,e);console.log(\"accepted wrong set\");}catch(error:any){console.log(error instanceof TypeError);}\nconst host:any=new Function(\"return new Map()\")();try{a.use(host,c);console.log(\"accepted host\");}catch(error:any){console.log(error instanceof TypeError);}\nconst fake:any={\"__thaw_js_handle_id__\":1};try{a.use(fake,c);console.log(\"accepted fake\");}catch(error:any){console.log(error instanceof TypeError);}\nconsole.log(store.calls,m.size,s.size);console.log(a.use(b,c),m.get(\"ok\"),s.has(2));}"
     }
   ]
 }
