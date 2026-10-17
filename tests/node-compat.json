@@ -1446,6 +1446,56 @@
       "name": "host collection iterator roots survive handle call chains",
       "expect": "matched",
       "source": "function main():void {const arr:JsValue=[1,2,3];const a:any=arr.values().map((v:any)=>v*2).drop(1).take(1);console.log(a.next().value,a.next().done);const box:any={m:new Map<string,number>(),s:new Set<number>([1,2])};const m:JsValue=box.m;m.set(\"a\",1);m.set(\"b\",2);const keys:any=m.keys().map((v:any)=>v+\"!\");console.log(keys.next().value,[...keys].join(\",\"));const set:JsValue=box.s;const entries:any=set.entries().flatMap((e:any)=>e);console.log([...entries].join(\",\"));}"
+    },
+    {
+      "name": "native class getter collection aliases",
+      "expect": "matched",
+      "source": "const sharedMap = new Map<string,number>();\nconst sharedSet = new Set<number>();\nclass Store {\n  get map(): Map<string,number> { return sharedMap; }\n  get set(): Set<number> { return sharedSet; }\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return this.map; }\n  getSet(): Set<number> { return this.set; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(s.map.get(\"a\"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);\n s.map.set(\"b\",3);s.set.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(s.map.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n}"
+    },
+    {
+      "name": "native class writable collection field aliases",
+      "expect": "matched",
+      "source": "class Store {\n  map: Map<string,number> = new Map<string, number>();\n  set: Set<number> = new Set<number>();\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return this.map; }\n  getSet(): Set<number> { return this.set; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(s.map.get(\"a\"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);\n s.map.set(\"b\",3);s.set.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(s.map.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n}"
+    },
+    {
+      "name": "native collection parameters and field writes preserve aliases",
+      "expect": "matched",
+      "source": "class Store {\n map:Map<string,number>=new Map<string,number>(); set:Set<number>=new Set<number>();\n replace(m:Map<string,number>,s:Set<number>):Map<string,number> { this.map=m;this.set=s;m.set(\"inside\",7);s.add(3);return m; }\n}\nasync function main():Promise<void>{\n const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;\n const result:any=a.replace(b,c); console.log(store.map===m,store.set===s,result===b,a.map===b,a.set===c,m.get(\"inside\"),s.has(3));\n const other=new Map<string,number>();const d:any=other;a.map=d;a.set=c;console.log(store.map===other,store.set===s);\n Object.defineProperty(a,\"map\",{value:b});console.log(store.map===m,a.map===b);\n for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}a.map.set(\"kept\",9);console.log(m.get(\"kept\"));\n}"
+    },
+    {
+      "name": "native inherited accessors preserve receiver and descriptors",
+      "expect": "matched",
+      "source": "class Base { n=1;get value():number{return this.n;}set value(v:number){this.n=v;} }\nclass Derived extends Base { get twice():number{return this.n*2;} }\nfunction main():void {const x=new Derived();const y=new Derived();y.n=5;const a:any=x;const b:any=y;console.log(a.value,a.twice);a.value=3;console.log(x.n,a.twice);const proto:any=Object.getPrototypeOf(a);const getter:any=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(proto),\"value\").get;console.log(getter.call(b));console.log(Object.keys(a).join(\",\"),Object.prototype.hasOwnProperty.call(a,\"value\"));}"
+    },
+    {
+      "name": "native inherited views retain real ancestor accessors",
+      "expect": "matched",
+      "source": "class Base {n=2;get value():number{return this.n;}set value(v:number){this.n=v;}}\nclass Derived extends Base {ping():number{return 1;}}\nfunction main():void { let seen=0;const ctor:any=Base;Object.defineProperty(ctor.prototype,\"value\",{get:()=>100,set:(v:number)=>{seen=v;},configurable:true});const x=new Derived();const a:any=x;console.log(a.value);a.value=4;console.log(x.n,a.value,a.ping(),seen); }"
+    },
+    {
+      "name": "native error subclass keeps its JavaScript prototype",
+      "expect": "matched",
+      "source": "class Failure extends Error { constructor(){super(\"failure\");} } function main():void {const cls:any=Failure;const e=new Failure();console.log(e instanceof Error,e.message,cls.prototype instanceof Error); }"
+    },
+    {
+      "name": "collection and number array callback parameters retain escaped owners",
+      "expect": "matched",
+      "source": "class Box {stored:Map<string,number>=new Map<string,number>();run(m:Map<string,number>,values:number[]):number {this.stored=m;m.set(\"sum\",values[0]+values[1]);return m.size;}}\nfunction make():any {const box=new Box();const a:any=box;const m=new Map<string,number>();const b:any=m;console.log(a.run(b,[2,3]),m.get(\"sum\"));return a;}\nasync function main():Promise<void>{const a:any=make();for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(a.stored.get(\"sum\"));}"
+    },
+    {
+      "name": "real class accessors preserve collection assignments",
+      "expect": "matched",
+      "source": "class Holder {map:Map<string,number>=new Map<string,number>();calls=0;get current():Map<string,number>{this.calls+=1;return this.map;}set current(v:Map<string,number>){this.calls+=1;this.map=v;}}\nfunction main():void {const token:any=Holder;const h=new Holder();const a:any=h;const m=new Map<string,number>();const b:any=m;console.log(h.calls);a.current=b;console.log(a.current===b,h.map===m,h.calls);a.current.set(\"x\",3);console.log(m.get(\"x\"),h.calls);}"
+    },
+    {
+      "name": "host getPrototypeOf preserves proxy exceptions",
+      "expect": "matched",
+      "source": "function main():void {const proxy:any=new Function(\"return new Proxy({}, {getPrototypeOf(){throw new Error('prototype failed');}})\")();try{Object.getPrototypeOf(proxy);console.log(\"accepted\");}catch(e:any){console.log(e.message);} }"
+    },
+    {
+      "name": "native private fields and accessors retain callback layout",
+      "expect": "matched",
+      "source": "class Counter {#n=1;get value():number{return this.#n;}set value(v:number){this.#n=v;}read():number{return this.#n;}}function main():void {const c=new Counter();const a:any=c;console.log(a.value,a.read(),Object.keys(a).length);a.value=4;console.log(c.read(),a.value);}"
     }
   ]
 }

@@ -626,11 +626,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(result);
             }
             "__thaw_json_get_prototype" => {
-                return self.compile_single_arg_call(
+                self.compile_register_js_callback_host_operations()?;
+                let result = self.compile_single_arg_call(
                     name.trim_start_matches("__"),
                     args,
                     "Object.getPrototypeOf",
-                );
+                )?;
+                self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                return Ok(result);
             }
             "__thaw_json_get_mut" => {
                 let [object, key] = args else {

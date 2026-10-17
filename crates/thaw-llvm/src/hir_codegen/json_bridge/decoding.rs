@@ -164,6 +164,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
+            HirType::Map(..) | HirType::Set(_) => self.compile_json_to_native_collection(json, ty),
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
             HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) => {
@@ -193,6 +194,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 "JSON-backed dictionary value cannot be restored as {other:?}"
             )),
         }
+    }
+
+    fn compile_json_to_native_collection(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let (pointer, valid) = self.query_native_receiver(
+            json.into_pointer_value(), &format!("collection:{ty:?}"),
+        )?;
+        let function = self.current_function();
+        let accepted = self.context.append_basic_block(function, "native_collection_accepted");
+        let rejected = self.context.append_basic_block(function, "native_collection_rejected");
+        self.builder.build_conditional_branch(valid, accepted, rejected)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected);
+        self.compile_throw_type_error("Expected a native collection with a compatible key and value type")?;
+        self.builder.position_at_end(accepted);
+        self.builder.build_int_to_ptr(pointer, self.context.ptr_type(AddressSpace::default()),
+            "native_collection_argument").map(Into::into).map_err(|error| error.to_string())
     }
 
     fn compile_json_value_to_native(
@@ -253,6 +274,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_handle_id did not return a value".into())
             }
+            HirType::Map(..) | HirType::Set(_) => self.compile_json_to_native_collection(json, ty),
             HirType::Function(params, ret) => self.compile_js_callback_from_json(json, params, ret),
             HirType::CallableFunction(params, _, None, ret) => {
                 self.compile_js_callback_from_json(json, params, ret)

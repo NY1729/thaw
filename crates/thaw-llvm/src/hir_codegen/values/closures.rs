@@ -584,7 +584,15 @@ impl<'ctx> HirCompiler<'ctx> {
             &fields[..fields.len() - 1]
         } else { fields };
         let expected = thaw_hir::native_object_layout_token(actual_fields);
-        let expected = self.builder.build_global_string_ptr(&expected, "native_receiver_layout")
+        self.query_native_receiver(json, &expected)
+    }
+
+    fn query_native_receiver(
+        &mut self,
+        json: PointerValue<'ctx>,
+        expected: &str,
+    ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), String> {
+        let expected = self.builder.build_global_string_ptr(expected, "native_receiver_layout")
             .map_err(|error| error.to_string())?;
         let handle = self.builder.build_call(
             self.module.get_function("thaw_json_borrowed_handle_id").unwrap(),

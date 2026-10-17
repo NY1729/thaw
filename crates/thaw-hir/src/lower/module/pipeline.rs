@@ -154,6 +154,21 @@ fn class_names_referenced_as_values(
     if collector.reads_prototype {
         collector.found.extend(collector.constructed);
     }
+    collector.found.extend(classes.iter()
+        .filter(|declaration| class_has_decorators(&declaration.class))
+        .map(|declaration| declaration.ident.sym.to_string()));
+    loop {
+        let mut added = false;
+        for declaration in classes {
+            if !collector.found.contains(declaration.ident.sym.as_ref()) { continue; }
+            if let Some(Expr::Ident(base)) = declaration.class.super_class.as_deref() {
+                if names.contains(base.sym.as_ref()) {
+                    added |= collector.found.insert(base.sym.to_string());
+                }
+            }
+        }
+        if !added { break; }
+    }
     collector.found
 }
 

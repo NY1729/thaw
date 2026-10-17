@@ -584,6 +584,7 @@
       : operation === 5 ? thawGraphArrayFrom(thawGraphApply(thawGraphSetValues, value, []))
       : operation === 6 ? thawGraphArrayFrom(thawGraphApply(thawGraphMapValues, value, []))
       : operation === 7 ? [...value]
+      : operation === 8 ? [thawGraphGetPrototypeOf(value)]
       : null;
     if (entries === null) throw new thawGraphTypeError('Invalid native host enumeration');
     return thawGraphEncode(entries, 0, true);
@@ -2086,6 +2087,18 @@
         // A class method is a prototype member in Node: it is reachable through `get`/`in`
         // below but is not an own property of the instance.
         if (isClass && methods[i]) {
+          if (accessors[i]) {
+            const proto = thawGraphGetPrototypeOf(target);
+            const owner = globalThis['__thaw_class_value_' + methods[i]];
+            const existing = typeof owner === 'function' && owner.prototype
+              && thawGraphReflectGetOwnPropertyDescriptor(owner.prototype, keys[i]);
+            if (existing) continue;
+            thawGraphDefineProperty(proto, keys[i], {
+              get: readable[i] ? callbacks[i * 2] : undefined,
+              set: writable[i] ? callbacks[i * 2 + 1] : undefined,
+              enumerable: false, configurable: true,
+            });
+          }
           continue;
         } else if (accessors[i]) {
           thawGraphDefineProperty(target, keys[i], {
@@ -2175,8 +2188,8 @@
           sync();
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
           if (index === undefined) return false;
-          if (isClass && methods[index]) return thawGraphReflectSet(target, key, value);
           if (accessors[index]) return thawGraphReflectSet(target, key, value, receiver);
+          if (isClass && methods[index]) return thawGraphReflectSet(target, key, value);
           if (!(flags(key) & 1)) return false;
           write(index, value);
           return true;
