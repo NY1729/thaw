@@ -601,6 +601,67 @@ fn bound_named_optional_and_default_functions_accept_omitted_arguments() {
 }
 
 #[test]
+fn bound_default_parameters_evaluate_at_each_invocation() {
+    let source = r#"
+        let calls = 0;
+        const f = (value: number = ++calls): number => value;
+        const g = f.bind(null);
+        function main(): void {
+            console.log(calls);
+            console.log(g());
+            console.log(g());
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_default_invocation_timing"), "0\n1\n2\n2\n");
+}
+
+#[test]
+fn bound_named_default_uses_omission_adapter_lazily() {
+    let source = r#"
+        let calls = 0;
+        function defaulted(value: number = ++calls): number { return value; }
+        function main(): void {
+            const bound = defaulted.bind(null);
+            console.log(calls);
+            console.log(bound());
+            console.log(bound());
+            console.log(bound(9));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_named_default_lazy"), "0\n1\n2\n9\n2\n");
+}
+
+#[test]
+fn bound_leading_argument_effect_runs_once_before_repeated_calls() {
+    let source = r#"
+        let calls = 0;
+        function next(): number { calls++; return 4; }
+        function add(first: number, later?: number): number { return first + (later ?? 0); }
+        function main(): void {
+            const bound = add.bind(null, next());
+            console.log(calls);
+            console.log(bound());
+            console.log(bound(3));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_leading_argument_once"), "1\n4\n7\n1\n");
+}
+
+#[test]
+fn required_callback_context_calls_defaulted_arrow_with_supplied_value() {
+    let source = r#"
+        function invoke(cb: (value: number) => number): number { return cb(9); }
+        function main(): void {
+            console.log(invoke((value: number = 5): number => value));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "required_callback_default_control"), "9\n");
+}
+
+#[test]
 fn bound_optional_function_expression_keeps_this_receiver() {
     let source = r#"
         function main(): void {

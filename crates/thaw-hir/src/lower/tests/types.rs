@@ -2219,6 +2219,38 @@ fn required_undefined_capable_local_parameter_stays_required() {
 }
 
 #[test]
+fn required_undefined_capable_parameter_stays_required_when_called_or_bound() {
+    for source in [
+        r#"function main(): void {
+            const required = (value: number | undefined) => value;
+            required();
+        }"#,
+        r#"function main(): void {
+            const required = (value: number | undefined) => value;
+            const bound = required.bind(null);
+            bound();
+        }"#,
+        r#"function main(): void {
+            const required = (value: number) => value;
+            required();
+        }"#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "omitted required argument was accepted: {source}");
+    }
+}
+
+#[test]
+fn required_callback_context_keeps_defaulted_arrow_parameter_required() {
+    lower(
+        r#"function invoke(cb: (value: number) => number): number { return cb(9); }
+        function main(): void {
+            console.log(invoke((value: number = 5): number => value));
+        }"#,
+    );
+}
+
+#[test]
 fn local_default_callable_can_be_called_and_bound_without_its_argument() {
     lower(
         r#"function main(): void {
