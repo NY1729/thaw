@@ -165,6 +165,9 @@ impl<'a> FnLowerer<'a> {
         match expr {
             Expr::Ident(receiver) => {
                 let name = self.resolve_binding(receiver.sym.as_ref());
+                if self.deferred_generic_binds.contains_key(&name) {
+                    return None;
+                }
                 self.native_class_aliases
                     .get(&name)
                     .cloned()

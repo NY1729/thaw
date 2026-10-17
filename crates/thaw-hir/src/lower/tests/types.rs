@@ -2096,6 +2096,158 @@ fn generic_optional_arrow_keeps_omitted_and_undefined_capable_arguments_optional
 }
 
 #[test]
+fn generic_optional_bound_arrow_specializes_explicit_type_arguments() {
+    let program = lower(
+        r#"type OptionalIdentity = <T>(value?: T) => T | undefined;
+        function main(): void {
+            const identity: OptionalIdentity = <T>(value?: T): T | undefined => value;
+            const later = identity.bind(null);
+            console.log(later(41));
+            console.log(later<number>(41));
+            console.log(later<number>());
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("Optional(F64)"), "omitted optional parameter/return should specialize to Optional(F64): {body}");
+    assert!(body.contains("OptionalNone(F64)"), "omitted bound argument should use the optional ABI slot: {body}");
+    assert!(!body.contains("Var(\"later\")"), "specialized calls must not retain the generic template: {body}");
+}
+
+#[test]
+fn generic_optional_bound_arrow_requires_inference_for_omitted_generic_argument() {
+    let module = thaw_parser::parse_typescript(
+        r#"type OptionalIdentity = <T>(value?: T) => T | undefined;
+        function main(): void {
+            const identity: OptionalIdentity = <T>(value?: T): T | undefined => value;
+            const later = identity.bind(null);
+            later();
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("cannot infer generic type parameter `T`"), "unexpected error: {error}");
+}
+
+#[test]
+fn non_generic_bound_arrow_rejects_explicit_type_arguments() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            const later = plain.bind(null);
+            later<number>(41);
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("non-generic function `later`"), "unexpected error: {error}");
+}
+
+#[test]
+fn generic_arrow_bind_does_not_emit_an_unresolved_runtime_template_reference() {
+    let program = lower(
+        r#"function main(): void {
+            const identity = <T>(value: T): T => value;
+            const bound = identity.bind(null);
+            console.log(bound(42));
+        }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(!body.contains("__thaw_call_selected_dynamic_method"), "{body}");
+    assert!(!body.contains("Var(\"identity\")"), "{body}");
+}
+
+#[test]
+fn generic_arrow_bind_rejects_unresolved_value_escapes() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const identity = <T>(value: T): T => value;
+            const bound = identity.bind(null);
+            console.log(bound);
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert_eq!(
+        error,
+        "generic bound function `bound` needs a call-site specialization before it can be used as a value"
+    );
+}
+
+#[test]
+fn generic_arrow_bind_rejects_unresolved_member_calls() {
+    for member_use in ["bound.foo();", "bound.call(null, 1);"] {
+        let source = format!(
+            r#"function main(): void {{
+                const identity = <T>(value: T): T => value;
+                const bound = identity.bind(null);
+                {member_use}
+            }}"#
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(
+            error,
+            "generic bound function `bound` needs a call-site specialization before it can be used as a value"
+        );
+    }
+}
+
+#[test]
+fn generic_arrow_bind_rejects_mutable_binding() {
+    for kind in ["let", "var"] {
+        let source = format!(
+            r#"function main(): void {{
+                const identity = <T>(value: T): T => value;
+                {kind} bound = identity.bind(null);
+            }}"#
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(
+            error,
+            "generic bound function templates currently require an immutable binding"
+        );
+    }
+}
+
+#[test]
+fn generic_arrow_bind_rejects_assignment_to_template() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const identity = <T>(value: T): T => value;
+            const bound = identity.bind(null);
+            bound = identity;
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert_eq!(error, "cannot assign to constant `bound`");
+}
+
+#[test]
+fn generic_arrow_bind_captures_tuple_spread_before_later_argument_mutation() {
+    let program = lower(
+        r#"function main(): void {
+            const tuple: [number, number] = [1, 2];
+            const mutable: any = tuple;
+            const first = <A, B, C>(a: A, b: B, c: C): A => a;
+            const bound = first.bind(null, ...tuple, (mutable[0] = 3));
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    let spread_read = body.find("TypedIndex(Var(\"__thaw_native_spread_").unwrap();
+    let mutation = body.find("JsonIndexSet(").unwrap();
+    assert!(spread_read < mutation, "tuple spread element is read after a later bind argument mutates it: {body}");
+}
+
+#[test]
 fn recursive_generic_function_expression_keeps_an_omitted_optional_argument() {
     let program = lower(
         r#"function main(): void {
