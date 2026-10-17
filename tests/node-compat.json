@@ -1516,6 +1516,26 @@
       "name": "dynamic storage does not adopt plain objects as classes",
       "expect": "matched",
       "source": "class C { x = 1; method(): number { return this.x; } } function main(): void { const xs: C[] = []; const a: any = xs; const plain: any = new Function(\"return {x: 7}\")(); a[0] = plain; console.log(xs[0] === plain, xs[0] instanceof C, typeof xs[0].method); const real = new C(); a[1] = real; console.log(xs[1] === real, xs[1] instanceof C, xs[1].method()); }"
+    },
+    {
+      "name": "dynamic class fields retain actual values",
+      "expect": "matched",
+      "source": "class Box { value: number = 1; read(): number { return this.value; } } function main(): void { const box = new Box(); const exposed: any = box; const original: any = new Function(\"return {x: 7}\")(); exposed.value = original; console.log(box.read() === original, box.value === original, typeof box.value); }"
+    },
+    {
+      "name": "dynamic method results retain fresh optional tuple and async aliases",
+      "expect": "matched",
+      "source": "class Factory { last: number[] = []; fresh(): number[] { const result: number[] = [1]; this.last = result; return result; } optional(present: boolean): number[] | undefined { return present ? this.last : undefined; } pair(): [number[], number[]] { return [this.last, this.last]; } async delayed(): Promise<number[]> { await Promise.resolve(); return this.last; } } async function main(): Promise<void> { const factory = new Factory(); const exposed: any = factory; const result: any = exposed.fresh(); console.log(result === factory.last, exposed.optional(true) === result, exposed.optional(false) === undefined); const pair: any = exposed.pair(); console.log(pair[0] === result, pair[1] === result); const delayed: any = await exposed.delayed(); delayed[0] = 9; console.log(delayed === result, factory.last[0]); }"
+    },
+    {
+      "name": "dynamic class instances preserve inheritance and private brands",
+      "expect": "matched",
+      "source": "class Base { #secret: number = 3; read(): number { return this.#secret; } } class Derived extends Base { get doubled(): number { return this.read() * 2; } } function main(): void { const values: Base[] = []; const exposed: any = values; const real = new Derived(); const plain: any = new Function(\"return {}\")(); exposed[0] = real; exposed[1] = plain; console.log(values[0] === real, values[0] instanceof Base, values[0] instanceof Derived, exposed[0].doubled, values[0].read()); try { exposed[0].read.call(plain); } catch (error) { console.log(error instanceof TypeError); } console.log(values[1] === plain, values[1] instanceof Base, typeof values[1].read); }"
+    },
+    {
+      "name": "dynamic collection slots retain arbitrary keys and values",
+      "expect": "matched",
+      "source": "function main(): void { const map = new Map<number, number>(); const set = new Set<number>(); const m: any = map; const s: any = set; const original: any = new Function(\"return {x: 7}\")(); m.set(\"key\", original); s.add(original); console.log(map.size, m.get(\"key\") === original, s.has(original), set.size); original.x = 9; console.log(m.get(\"key\").x); }"
     }
   ]
 }

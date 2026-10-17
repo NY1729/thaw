@@ -55,7 +55,7 @@ fn collect_native_classes<'a>(
         } else {
             None
         };
-        let result = Box::new(if method.function.is_generator {
+        let result = Box::new(storage_return_type(method.function.span, if method.function.is_generator {
             lower_generator_return_type(
                 method.function.is_async,
                 &method.function.return_type,
@@ -74,7 +74,7 @@ fn collect_native_classes<'a>(
                 &substitution,
                 interfaces.get(class),
             )?
-        });
+        }));
         Ok(if rest.is_some() || optional.iter().any(|value| *value) {
             HirType::CallableFunction(
                 params,
@@ -213,6 +213,7 @@ fn collect_native_classes<'a>(
                         format!("class `{name}` field `{field_name}` needs a type annotation")
                     })?,
             };
+            field_type = storage_type(property.span, field_type);
             if property.is_optional {
                 field_type = optional_parameter_type(field_type);
             }
@@ -296,6 +297,7 @@ fn collect_native_classes<'a>(
                 format!("class `{name}` parameter property `{field_name}` needs a type annotation")
             })?;
             let mut ty = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            ty = storage_type(binding.id.span, ty);
             if binding.id.optional {
                 ty = optional_parameter_type(ty);
             }

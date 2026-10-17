@@ -257,6 +257,7 @@ impl<'a> FnLowerer<'a> {
             .map(|ann| lower_ts_type(&ann.type_ann, self.interfaces, self.generic_interfaces))
             .transpose()?;
 
+        let declared_return = declared_return.map(|ty| storage_return_type(arrow.span, ty));
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();

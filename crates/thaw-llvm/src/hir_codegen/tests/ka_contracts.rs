@@ -365,3 +365,23 @@ fn ka_contract_dynamic_storage_3() {
 fn ka_contract_dynamic_storage_4() {
     assert_eq!(compile_and_run(r##"class C { x = 1; method(): number { return this.x; } } function main(): void { const xs: C[] = []; const a: any = xs; const plain: any = new Function("return {x: 7}")(); a[0] = plain; console.log(xs[0] === plain, xs[0] instanceof C, typeof xs[0].method); const real = new C(); a[1] = real; console.log(xs[1] === real, xs[1] instanceof C, xs[1].method()); }"##, "ka_contract_dynamic_storage_4"), "true false undefined\ntrue true 1\n");
 }
+
+#[test]
+fn ka_contract_dynamic_class_storage_1() {
+    assert_eq!(compile_and_run(r##"class Box { value: number = 1; read(): number { return this.value; } } function main(): void { const box = new Box(); const exposed: any = box; const original: any = new Function("return {x: 7}")(); exposed.value = original; console.log(box.read() === original, box.value === original, typeof box.value); }"##, "ka_contract_dynamic_class_storage_1"), "true true object\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_2() {
+    assert_eq!(compile_and_run(r##"class Factory { last: number[] = []; fresh(): number[] { const result: number[] = [1]; this.last = result; return result; } optional(present: boolean): number[] | undefined { return present ? this.last : undefined; } pair(): [number[], number[]] { return [this.last, this.last]; } async delayed(): Promise<number[]> { await Promise.resolve(); return this.last; } } async function main(): Promise<void> { const factory = new Factory(); const exposed: any = factory; const result: any = exposed.fresh(); console.log(result === factory.last, exposed.optional(true) === result, exposed.optional(false) === undefined); const pair: any = exposed.pair(); console.log(pair[0] === result, pair[1] === result); const delayed: any = await exposed.delayed(); delayed[0] = 9; console.log(delayed === result, factory.last[0]); }"##, "ka_contract_dynamic_class_storage_2"), "true true true\ntrue true\ntrue 9\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_3() {
+    assert_eq!(compile_and_run(r##"class Base { #secret: number = 3; read(): number { return this.#secret; } } class Derived extends Base { get doubled(): number { return this.read() * 2; } } function main(): void { const values: Base[] = []; const exposed: any = values; const real = new Derived(); const plain: any = new Function("return {}")(); exposed[0] = real; exposed[1] = plain; console.log(values[0] === real, values[0] instanceof Base, values[0] instanceof Derived, exposed[0].doubled, values[0].read()); try { exposed[0].read.call(plain); } catch (error) { console.log(error instanceof TypeError); } console.log(values[1] === plain, values[1] instanceof Base, typeof values[1].read); }"##, "ka_contract_dynamic_class_storage_3"), "true true true 6 3\ntrue\ntrue false undefined\n");
+}
+
+#[test]
+fn ka_contract_dynamic_class_storage_4() {
+    assert_eq!(compile_and_run(r##"function main(): void { const map = new Map<number, number>(); const set = new Set<number>(); const m: any = map; const s: any = set; const original: any = new Function("return {x: 7}")(); m.set("key", original); s.add(original); console.log(map.size, m.get("key") === original, s.has(original), set.size); original.x = 9; console.log(m.get("key").x); }"##, "ka_contract_dynamic_class_storage_4"), "1 true true 1\n9\n");
+}

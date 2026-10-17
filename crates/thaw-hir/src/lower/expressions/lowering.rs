@@ -666,6 +666,10 @@ impl<'a> FnLowerer<'a> {
             match expr {
                 Expr::Array(array) => return self.lower_dynamic_storage_array(array),
                 Expr::Object(object) => return self.lower_dynamic_accessor_object_lit(object, true),
+                Expr::New(new) if matches!(new.callee.as_ref(), Expr::Ident(name)
+                    if matches!(name.sym.as_ref(), "Array" | "Map" | "Set" | "WeakMap" | "WeakSet")) => {
+                    return self.lower_dynamic_storage_constructor(new);
+                }
                 _ => {}
             }
         }

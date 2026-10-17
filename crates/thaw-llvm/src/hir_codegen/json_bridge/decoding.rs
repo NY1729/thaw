@@ -1,4 +1,29 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_json_to_native_object_argument(
+        &mut self, json: PointerValue<'ctx>, ty: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let HirType::Object(fields) = ty else { unreachable!() };
+        let (owner, present) = self.query_native_object_receiver(json, fields)?;
+        let function = self.current_function();
+        let borrowed = self.context.append_basic_block(function, "object_argument_borrowed");
+        let copied = self.context.append_basic_block(function, "object_argument_copied");
+        let done = self.context.append_basic_block(function, "object_argument_ready");
+        self.builder.build_conditional_branch(present, borrowed, copied).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(borrowed);
+        let owner = self.builder.build_int_to_ptr(owner, self.context.ptr_type(AddressSpace::default()), "object_argument_owner")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(copied);
+        let copy = self.compile_json_to_native_object(json.into(), ty)?;
+        let copy_exit = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let result = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "object_argument")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&owner, borrowed), (&copy, copy_exit)]);
+        Ok(result.as_basic_value())
+    }
+
     fn compile_json_to_native_object(
         &mut self,
         json: BasicValueEnum<'ctx>,

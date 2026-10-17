@@ -1015,6 +1015,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             interfaces.get(name.as_str()),
                         )?
                     };
+                    let ret = storage_return_type(method.function.span, ret);
                     let symbol = match method.kind {
                         MethodKind::Getter => {
                             class_getter_symbol(&name, &method_name, method.is_static)

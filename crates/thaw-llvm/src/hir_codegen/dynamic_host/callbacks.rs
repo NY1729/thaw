@@ -22,6 +22,16 @@ pub(super) fn json_callback_wants_graph(params: &[HirType]) -> bool {
     params.iter().any(contains_collection) || (!takes_byte_buffer && params.contains(&HirType::Json))
 }
 
+fn json_callback_result_wants_graph(result: &HirType) -> bool {
+    match result {
+        HirType::Json | HirType::Dictionary(_) => true,
+        HirType::Promise(inner) | HirType::Optional(inner) | HirType::Nullable(inner)
+        | HirType::Nullish(inner) | HirType::Array(inner) => json_callback_result_wants_graph(inner),
+        HirType::Tuple(members) | HirType::Union(members) => members.iter().any(json_callback_result_wants_graph),
+        _ => false,
+    }
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_js_callback_from_json(
         &mut self,
@@ -987,6 +997,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(accepted);
                 Ok(self.builder.build_int_to_ptr(pointer, ptr_type, "native_method_original_receiver")
                     .map_err(|error| error.to_string())?.into())
+            } else if graph_mode && matches!(param, HirType::Object(fields)
+                if fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))) {
+                self.compile_json_to_native_object_argument(argument, param)
             } else {
                 self.compile_json_value_to_native(argument.into(), param)
             };
@@ -1994,6 +2007,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Callback failures can carry tracked Box<Value> payloads across a
         // JavaScript Error carrier. Start tracing before module initialization
         // so the packet lease can preserve the existing arena owner graph.
+        let graph_mode = graph_mode || json_callback_result_wants_graph(ret);
         self.tracks_owned_json_roots = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
             .map_err(|error| error.to_string())?;

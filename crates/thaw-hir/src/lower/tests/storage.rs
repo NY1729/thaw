@@ -141,3 +141,11 @@ fn storage_does_not_alias_unrelated_function_parameters() {
     assert_eq!(double.params[0].ty, HirType::F64);
     assert_eq!(double.ret, HirType::F64);
 }
+
+#[test]
+fn storage_tracks_returned_callable_aliases() {
+    assert_eq!(storage_allocations(r#"
+        function make(xs: number[]): () => number[] { return () => xs; }
+        function main(): void { const source: number[] = []; const read = make(source); const exposed: any = read(); }
+    "#), vec![true]);
+}

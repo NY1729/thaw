@@ -90,24 +90,30 @@ impl StorageGraph {
         self.edges.entry(right).or_default().push(left);
     }
     fn connect_calls(&mut self) {
-        let mut links = Vec::new();
-        for call in &self.calls {
-            let mut pending = vec![storage_key(call.callee)];
-            let mut seen = HashSet::new();
-            while let Some(node) = pending.pop() {
-                if !seen.insert(node) { continue; }
-                if let Some(callable) = self.callables.get(&node) {
-                    links.push((storage_key(call.result), callable.result));
-                    for (actual, formal) in call.arguments.iter().zip(&callable.params) {
-                        links.push((storage_key(*actual), storage_key(*formal)));
+        let mut connected = HashSet::new();
+        loop {
+            let mut links = Vec::new();
+            for (index, call) in self.calls.iter().enumerate() {
+                let mut pending = vec![storage_key(call.callee)];
+                let mut seen = HashSet::new();
+                while let Some(node) = pending.pop() {
+                    if !seen.insert(node) { continue; }
+                    if let Some(callable) = self.callables.get(&node) {
+                        if connected.insert((index, node)) {
+                            links.push((storage_key(call.result), callable.result));
+                            for (actual, formal) in call.arguments.iter().zip(&callable.params) {
+                                links.push((storage_key(*actual), storage_key(*formal)));
+                            }
+                        }
+                    }
+                    if let Some(neighbors) = self.edges.get(&node) {
+                        pending.extend(neighbors.iter().copied().filter(|next| !self.captures.contains(&(node, *next))));
                     }
                 }
-                if let Some(neighbors) = self.edges.get(&node) {
-                    pending.extend(neighbors.iter().copied().filter(|next| !self.captures.contains(&(node, *next))));
-                }
             }
+            if links.is_empty() { break; }
+            for (left, right) in links { self.link_keys(left, right); }
         }
-        for (left, right) in links { self.link_keys(left, right); }
     }
     fn callable(&mut self, span: Span, parameters: &[Pat], result: Option<&TsType>) {
         let result_node = (span.lo.0, 0);
@@ -529,6 +535,30 @@ fn storage_reference_type(ty: &TsType) -> bool {
 }
 fn storage_return_type(span: Span, source: HirType) -> HirType {
     if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().result_is_dynamic(span)) {
-        dynamic_storage_type(source)
+        if matches!(source, HirType::Function(..) | HirType::CallableFunction(..)) {
+            HirType::Dynamic
+        } else { dynamic_storage_type(source) }
     } else { source }
+}
+
+impl FnLowerer<'_> {
+    fn lower_dynamic_storage_constructor(&mut self, new: &swc_ecma_ast::NewExpr) -> Result<HirExpr, String> {
+        let Expr::Ident(name) = new.callee.as_ref() else { unreachable!() };
+        let mut arguments = Vec::new();
+        for argument in new.args.iter().flatten() {
+            let value = self.lower_expr(&argument.expr)?;
+            if argument.spread.is_some() {
+                let value = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+                arguments.push(HirExpr::JsonAsNative(Box::new(value), HirType::Array(Box::new(HirType::Json))));
+            } else {
+                let value = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+                arguments.push(HirExpr::TypedClosure(HirType::Array(Box::new(HirType::Json)), Box::new(HirExpr::ArrayLit(vec![value]))));
+            }
+        }
+        let arguments = self.wrap_native_value_as_json(HirExpr::ArrayConcat(arguments, HirType::Json), HirType::Array(Box::new(HirType::Json)))?;
+        let value = HirExpr::Call(Box::new(HirExpr::Var("constructDynamicValue".into())), vec![
+            HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())), vec![HirExpr::Lit(HirLit::Str(name.sym.to_string()))]), arguments,
+        ]);
+        Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())), vec![value]))
+    }
 }

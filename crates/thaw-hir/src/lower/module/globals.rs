@@ -709,7 +709,7 @@ fn class_method_bridge_expr(
         Box::new(result_type),
     );
     Ok(HirExpr::Call(
-        Box::new(HirExpr::Var("registerNativeCallback".to_string())),
+        Box::new(HirExpr::Var("registerNativeCallbackGraph".to_string())),
         vec![HirExpr::TypedClosure(callback_type, Box::new(lambda))],
     ))
 }

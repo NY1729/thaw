@@ -2123,7 +2123,7 @@
       // the call's own receiver when that is another projected owner (`m.call(otherView)`).
       const methodFunctions = [];
       const method = index => methodFunctions[index] ??= thawGraphDefineProperty(function (...args) {
-        const receiver = thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [this])
+        const receiver = isClass || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [this])
           ? this : wrapper;
         return thawGraphApply(thawGraphApply(callbacks[index * 2], receiver, []), undefined, args);
       }, 'name', { value: keys[index], configurable: true });
@@ -2469,10 +2469,7 @@
     },
     writable: false, configurable: false,
   });
-  // Whether a method's object result is a live part of its receiver: a native view or projected
-  // owner wrapper, or an object stored (depth <= 2, bounded scan, data properties only) in the
-  // receiver. Such a result is handed back by reference, not as a data snapshot, so mutating it
-  // reaches the owner (`o.items().push(x)`).
+  // Dynamic results keep their actual references; iterator helpers also carry protocol state.
   thawGraphDefineProperty(globalThis, '__thaw_json_result_is_live', {
     value: (receiver, result, method, trackOnly = false) => {
       if (result === null || typeof result !== 'object') return false;
@@ -2507,27 +2504,7 @@
         return true;
       }
       if (trackOnly) return false;
-      if (receiver === null || typeof receiver !== 'object'
-        || thawGraphArrayIsArray(receiver)
-        || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [receiver])
-        || thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [receiver])) return false;
-      let budget = 256;
-      const scan = (holder, depth) => {
-        const keys = thawGraphReflectOwnKeys(holder);
-        for (let i = 0; i < keys.length && budget > 0; i++, budget--) {
-          const descriptor = thawGraphObjectGetOwnPropertyDescriptor(holder, keys[i]);
-          if (!descriptor || !thawGraphOwn(descriptor, 'value')) continue;
-          const value = descriptor.value;
-          if (value === result) return true;
-          if (depth > 1 && value !== null && typeof value === 'object'
-            && !thawGraphArrayIsArray(value)
-            && !thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [value])
-            && !thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [value])
-            && scan(value, depth - 1)) return true;
-        }
-        return false;
-      };
-      return scan(receiver, 2);
+      return true;
     },
     writable: false, configurable: false,
   });
