@@ -2261,6 +2261,7 @@ impl<'a> FnLowerer<'a> {
             }));
         }
 
+        let fixed_arguments_before_native_rest_pack = lowered_arguments.len();
         let native_rest_values = if forwarded_rest_array {
             None
         } else {
@@ -2276,6 +2277,12 @@ impl<'a> FnLowerer<'a> {
                 })
             })
         };
+        let packed_native_rest_fixed_count = native_rest_values.as_ref().and_then(|_| {
+            signature.as_ref().and_then(|signature| {
+                let rest_index = signature.params.len().checked_sub(1)?;
+                Some(fixed_arguments_before_native_rest_pack.min(rest_index))
+            })
+        });
         let local_rest_values = if forwarded_rest_array {
             None
         } else {
@@ -2684,9 +2691,20 @@ impl<'a> FnLowerer<'a> {
                         matches!(constraint, TsType::TsTypeOperator(operator) if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf)
                     })
             };
+            let inference_argument_count = packed_native_rest_fixed_count
+                .filter(|supplied_fixed| {
+                    signature
+                        .generic_param_optional
+                        .iter()
+                        .skip(*supplied_fixed)
+                        .take(signature.generic_param_patterns.len().saturating_sub(1))
+                        .any(|optional| *optional)
+                })
+                .unwrap_or(args.len());
             let mut actual = args
                 .iter()
                 .enumerate()
+                .take(inference_argument_count)
                 .map(|(index, arg)| {
                     let source = (signature.native_rest.is_none()
                         && call.args.len() == args.len())
@@ -3099,8 +3117,59 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .map(|arg| self.infer_expr_type(arg))
                 .collect::<Result<Vec<_>, _>>()?;
+            let has_generic_optional = signature
+                .generic_param_optional
+                .iter()
+                .any(|optional| *optional);
+            let specialization_params = if has_generic_optional {
+                signature.generic_param_patterns.iter().enumerate()
+                    .map(|(index, pattern)| {
+                        let ty = instantiate_generic_pattern(pattern, &substitution)?;
+                        Ok(if signature.generic_param_optional[index] {
+                            optional_parameter_type(ty)
+                        } else {
+                            ty
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                param_types
+            };
+            if has_generic_optional {
+                if let Some(supplied_fixed) = packed_native_rest_fixed_count {
+                    let fixed_count = specialization_params.len().saturating_sub(1);
+                    if supplied_fixed < fixed_count {
+                        let rest_argument = args.pop();
+                        for (index, expected) in specialization_params
+                            .iter()
+                            .enumerate()
+                            .skip(supplied_fixed)
+                            .take(fixed_count - supplied_fixed)
+                        {
+                            if signature.generic_param_optional.get(index) == Some(&true) {
+                                args.push(omitted_parameter_value(expected)?);
+                            }
+                        }
+                        if let Some(rest_argument) = rest_argument {
+                            args.push(rest_argument);
+                        }
+                    }
+                }
+                let supplied = args.len();
+                let mut values = args.into_iter().enumerate();
+                args = values
+                    .by_ref()
+                    .map(|(index, value)| match specialization_params.get(index) {
+                        Some(expected) => self.coerce_to_declared(expected, value),
+                        None => Ok(value),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for expected in specialization_params.iter().skip(supplied) {
+                    args.push(omitted_parameter_value(expected)?);
+                }
+            }
             let lowered_name =
-                specialized_generic_function_name(&callee_name, &param_types, signature, types);
+                specialized_generic_function_name(&callee_name, &specialization_params, signature, types);
             let return_type = resolve_ts_type_with_substitution(
                 signature
                     .generic_return_type

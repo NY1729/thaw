@@ -792,6 +792,18 @@ impl<'a> FnLowerer<'a> {
             self.generic_interfaces,
             expected_return,
         )?;
+        let substitution = signature.generic_type_params.iter().cloned()
+            .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
+        let specialized_parameters = signature.generic_param_patterns.iter().enumerate()
+            .map(|(index, pattern)| {
+                let ty = instantiate_generic_pattern(pattern, &substitution)?;
+                Ok(if signature.generic_param_optional[index] {
+                    optional_parameter_type(ty)
+                } else {
+                    ty
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let return_type =
             if let Some(expected) = expected_return.filter(|ty| **ty != HirType::Dynamic) {
                 expected.clone()
@@ -812,9 +824,28 @@ impl<'a> FnLowerer<'a> {
                     self.generic_interfaces,
                     &mut Vec::new(),
                 )?
-            };
+        };
         let receiver = self.specialized_generic_receiver(name, &signature, &concrete_types)?;
-        let self_type = HirType::Function(parameter_types.to_vec(), Box::new(return_type));
+        let has_rest = matches!(arrow.params.last(), Some(Pat::Rest(_)));
+        let rest = has_rest.then(|| match specialized_parameters.last() {
+            Some(HirType::Array(element)) => Box::new(element.as_ref().clone()),
+            _ => Box::new(HirType::Dynamic),
+        });
+        let callable_fixed_count = specialized_parameters.len() - usize::from(has_rest);
+        let callable_parameters = &specialized_parameters[..callable_fixed_count];
+        let callable_optional = &signature.generic_param_optional[..callable_fixed_count];
+        let self_type = if rest.is_some()
+            || callable_optional.iter().any(|optional| *optional)
+        {
+            HirType::CallableFunction(
+                callable_parameters.to_vec(),
+                optional_parameter_mask(callable_optional),
+                rest,
+                Box::new(return_type),
+            )
+        } else {
+            HirType::Function(callable_parameters.to_vec(), Box::new(return_type))
+        };
         let self_name = format!("__thaw_recursive_generic_{}", self.next_binding);
         self.next_binding += 1;
         let saved_binding = self.bindings.get(&internal).cloned();
@@ -824,7 +855,7 @@ impl<'a> FnLowerer<'a> {
             .or_default()
             .push(self_name.clone());
         let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver);
-        let lowered = self.lower_contextual_arrow(arrow, parameter_types, expected_return);
+        let lowered = self.lower_contextual_arrow(arrow, &specialized_parameters, expected_return);
         self.non_arrow_receiver = previous;
         self.scope.remove(&self_name);
         if let Some(saved) = saved_binding {

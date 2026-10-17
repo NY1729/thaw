@@ -515,12 +515,14 @@ impl<'a> FnLowerer<'a> {
         let receiver = self.specialized_generic_receiver(name, &signature, &concrete_types)?;
         let concrete = signature.generic_type_params.iter().cloned()
             .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
+        let recursive = self.generic_arrow_self_names.get(name).cloned();
         let required_optional_parameters = signature
             .generic_param_optional
             .iter()
             .enumerate()
             .map(|(index, optional)| {
                 *optional
+                    && recursive.is_none()
                     && unspread_arguments.get(index) == Some(&true)
                     && parameter_types.get(index).is_some_and(|actual| !generic_argument_may_be_undefined(actual))
                     && !generic_arrow_parameter_is_reassigned(arrow, index)
@@ -556,7 +558,6 @@ impl<'a> FnLowerer<'a> {
                 arguments.push(native_rest_array(rest, element));
             }
         }
-        let recursive = self.generic_arrow_self_names.get(name).cloned();
         let mut recursive_state = None;
         if let Some(internal) = recursive {
             let return_type = signature.generic_return_type.as_ref().ok_or_else(|| {
@@ -575,7 +576,25 @@ impl<'a> FnLowerer<'a> {
                 self.generic_interfaces,
                 &mut Vec::new(),
             )?;
-            let self_type = HirType::Function(runtime_parameter_types.clone(), Box::new(return_type));
+            let rest = has_rest.then(|| match runtime_parameter_types.last() {
+                Some(HirType::Array(element)) => Box::new(element.as_ref().clone()),
+                _ => Box::new(HirType::Dynamic),
+            });
+            let callable_fixed_count = runtime_parameter_types.len() - usize::from(has_rest);
+            let callable_parameters = &runtime_parameter_types[..callable_fixed_count];
+            let callable_optional = &signature.generic_param_optional[..callable_fixed_count];
+            let self_type = if rest.is_some()
+                || callable_optional.iter().any(|optional| *optional)
+            {
+                HirType::CallableFunction(
+                    callable_parameters.to_vec(),
+                    optional_parameter_mask(callable_optional),
+                    rest,
+                    Box::new(return_type),
+                )
+            } else {
+                HirType::Function(callable_parameters.to_vec(), Box::new(return_type))
+            };
             let self_name = format!("__thaw_recursive_generic_{}", self.next_binding);
             self.next_binding += 1;
             let saved_binding = self.bindings.get(&internal).cloned();
