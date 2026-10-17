@@ -16130,3 +16130,68 @@ fn recorded_intl_contracts_match() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn iterator_helpers_close_sources_and_complete_after_errors() {
+    assert_eq!(
+        load(
+            r#"
+      function __iterator_helper_close_controls() {
+        const results = [];
+        for (const method of ['map', 'filter', 'drop', 'take', 'flatMap']) {
+          const source = new Map([['a', 1], ['b', 2]]).values();
+          const helper = method === 'map' ? source.map(x => x)
+            : method === 'filter' ? source.filter(() => true)
+            : method === 'drop' ? source.drop(0)
+            : method === 'take' ? source.take(2)
+            : source.flatMap(x => [x, x + 1]);
+          helper.next();
+          try { results.push(helper.return().done && helper.next().done); }
+          catch { results.push(false); }
+        }
+        const failed = [1, 2].values().map(() => { throw new Error('mapper'); });
+        try { failed.next(); } catch {}
+        try { results.push(failed.next().done); } catch { results.push(false); }
+        const order = [];
+        const outer = { next() { return { value: 1, done: false }; },
+          return() { order.push('outer'); throw new Error('outer close'); } };
+        const inner = { next() { return { value: 2, done: false }; },
+          return() { order.push('inner'); throw new Error('inner close'); } };
+        const flattened = Iterator.from(outer).flatMap(() => inner);
+        flattened.next();
+        try { flattened.return(); } catch (error) { results.push(error.message); }
+        results.push(flattened.next().done, flattened.return().done);
+        results.push(order.join(','));
+        return results;
+      }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("__iterator_helper_close_controls", "[]"),
+        r#"[true,true,true,true,true,true,"inner close",true,true,"inner,outer"]"#
+    );
+}
+
+#[test]
+fn iterator_predicates_release_rejected_reference_values() {
+    let runtime = rquickjs::Runtime::new().unwrap();
+    let context = rquickjs::Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        let result: String = ctx
+            .eval(
+                r#"(() => {
+          const found = [{ n: 1 }, { n: 2 }].values().find(x => x.n === 2);
+          const filtered = [{}, {}].values().filter(() => false).toArray();
+          const failed = [{}].values().filter(() => { throw new Error('predicate'); });
+          try { failed.next(); } catch {}
+          return found.n + ':' + filtered.length + ':' + failed.next().done;
+        })()"#,
+            )
+            .unwrap();
+        assert_eq!(result, "2:0:true");
+    });
+    drop(context);
+    runtime.run_gc();
+}
