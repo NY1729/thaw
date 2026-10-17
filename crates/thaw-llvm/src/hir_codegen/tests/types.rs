@@ -555,6 +555,21 @@ fn bound_non_generic_optional_arrow_accepts_omitted_argument() {
 }
 
 #[test]
+fn bound_optional_function_expression_keeps_this_receiver() {
+    let source = r#"
+        function main(): void {
+            const f = function(this: { value: number }, arg?: number): number {
+                return arg === undefined ? this.value : arg;
+            };
+            const g = f.bind({ value: 7 });
+            console.log(g());
+            console.log(g(3));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_optional_function_expression_this"), "7\n3\n");
+}
+
+#[test]
 fn generic_arrow_bind_defers_specialization_until_direct_call() {
     let source = r#"
         function main(): void {

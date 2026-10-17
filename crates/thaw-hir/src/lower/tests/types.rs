@@ -2188,6 +2188,23 @@ fn local_default_callable_can_be_called_and_bound_without_its_argument() {
 }
 
 #[test]
+fn optional_function_expression_with_this_keeps_receiver_type() {
+    let program = lower(
+        r#"function main(): void {
+            const f = function(this: { value: number }, arg?: number): number {
+                return arg === undefined ? this.value : arg;
+            };
+            const g = f.bind({ value: 7 });
+            console.log(g());
+            console.log(g(3));
+        }"#,
+    );
+    let body = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(body.contains("FunctionWithThis"), "function-expression receiver metadata was lost: {body}");
+    assert!(body.contains("CallableFunction([Optional(F64)], Inline(1)"), "optional argument metadata was lost: {body}");
+}
+
+#[test]
 fn non_generic_bound_arrow_rejects_explicit_type_arguments() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
