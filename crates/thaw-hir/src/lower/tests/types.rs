@@ -2153,6 +2153,41 @@ fn non_generic_optional_arrow_direct_call_keeps_omittable_parameter() {
 }
 
 #[test]
+fn unannotated_optional_local_callables_keep_their_callable_shape() {
+    let program = lower(
+        r#"function main(): void {
+            const arrow = (value?: number) => value;
+            const expression = function (value?: number) { return value; };
+        }"#,
+    );
+    let body = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert_eq!(body.matches("CallableFunction([Optional(F64)], Inline(1), None").count(), 4, "both optional local callables must retain bit zero: {body}");
+}
+
+#[test]
+fn required_undefined_capable_local_parameter_stays_required() {
+    let program = lower(
+        r#"function main(): void {
+            const required = (value: number | undefined) => value;
+        }"#,
+    );
+    let body = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(!body.contains("CallableFunction([Optional(F64)], Inline(1)"), "required parameter was made omittable: {body}");
+}
+
+#[test]
+fn local_default_callable_can_be_called_and_bound_without_its_argument() {
+    lower(
+        r#"function main(): void {
+            const f = (value: number = 5): number => value;
+            console.log(f());
+            const g = f.bind(null);
+            console.log(g());
+        }"#,
+    );
+}
+
+#[test]
 fn non_generic_bound_arrow_rejects_explicit_type_arguments() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {

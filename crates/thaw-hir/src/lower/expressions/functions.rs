@@ -252,7 +252,13 @@ impl<'a> FnLowerer<'a> {
                     self.generic_interfaces,
                     false,
                     &HashMap::new(),
-                ).map(|mut lowered| { lowered.ty = storage_parameter_type(param, lowered.ty); lowered })
+                ).map(|mut lowered| {
+                    lowered.ty = storage_parameter_type(param, lowered.ty);
+                    if matches!(param, Pat::Assign(_)) {
+                        lowered.ty = optional_parameter_type(lowered.ty);
+                    }
+                    lowered
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         if arrow.is_generator {
@@ -560,8 +566,8 @@ impl<'a> FnLowerer<'a> {
                         .map(|ty| HirParam { name, ty })
                 })
                 .collect();
-            Ok(rest_aware_closure(
-                arrow,
+            Ok(callable_aware_closure(
+                &arrow.params,
                 HirExpr::Lambda(captures, params, return_type, Box::new(body)),
             ))
         });
@@ -1142,7 +1148,7 @@ impl<'a> FnLowerer<'a> {
                 .zip(parameter_types)
                 .map(|(parameter, contextual)| {
                     if matches!(parameter, Pat::Assign(_)) {
-                        return Ok(contextual.clone());
+                        return Ok(optional_parameter_type(contextual.clone()));
                     }
                     let annotation = match parameter {
                         Pat::Ident(binding) => binding.type_ann.as_ref(),
@@ -1459,8 +1465,8 @@ impl<'a> FnLowerer<'a> {
                         .map(|ty| HirParam { name, ty })
                 })
                 .collect();
-            Ok(rest_aware_closure(
-                arrow,
+            Ok(callable_aware_closure(
+                &arrow.params,
                 HirExpr::Lambda(captures, params, ret, Box::new(body)),
             ))
         });
@@ -1479,8 +1485,8 @@ impl<'a> FnLowerer<'a> {
     }
 }
 
-/// A JavaScript `(...rest) => ...` function's own logical type is a
-/// `CallableFunction` with a rest parameter -- the flattened trailing
+/// A JavaScript arrow's own logical type is a `CallableFunction` when source
+/// syntax carries optional/default or rest parameters -- the flattened trailing
 /// `Array(element)` parameter is only its *native* ABI, produced by
 /// `lower_param` packing `Pat::Rest`. When an arrow is lowered without a
 /// declared callback type to carry that distinction (the bare call site
@@ -1498,33 +1504,36 @@ impl<'a> FnLowerer<'a> {
 /// type here keeps `has_rest` intact through every downstream consumer
 /// (`compile_json_object_set_native_with_undefined`'s `CallableFunction`
 /// arm, `compile_register_native_callback_from_closure_with_rest`).
-fn rest_aware_closure(arrow: &swc_ecma_ast::ArrowExpr, closure: HirExpr) -> HirExpr {
-    if !matches!(arrow.params.last(), Some(Pat::Rest(_))) {
-        return closure;
-    }
+fn callable_aware_closure(source_parameters: &[Pat], closure: HirExpr) -> HirExpr {
     let HirExpr::Lambda(_, params, ret, _) = &closure else {
         return closure;
     };
-    let Some((last, fixed)) = params.split_last() else {
-        return closure;
-    };
-    let HirType::Array(element) = &last.ty else {
-        return closure;
+    let has_rest = matches!(source_parameters.last(), Some(Pat::Rest(_)));
+    let (fixed, rest) = if has_rest {
+        let Some((last, fixed)) = params.split_last() else { return closure };
+        let HirType::Array(element) = &last.ty else { return closure };
+        (fixed, Some(element.clone()))
+    } else {
+        (params.as_slice(), None)
     };
     let receiver_offset = usize::from(fixed.first().is_some_and(|param| param.name == "__thaw_this"));
     let fixed = &fixed[receiver_offset..];
-    let optional = arrow.params[..fixed.len()]
+    let source_fixed = if has_rest {
+        &source_parameters[..source_parameters.len() - 1]
+    } else {
+        source_parameters
+    };
+    let optional = source_fixed
         .iter()
-        .map(|parameter| match parameter {
-            Pat::Assign(_) => true,
-            Pat::Ident(binding) => binding.id.optional,
-            _ => false,
-        })
+        .map(pattern_is_omittable)
         .collect::<Vec<_>>();
+    if !has_rest && !optional.iter().any(|optional| *optional) {
+        return closure;
+    }
     let callable = HirType::CallableFunction(
         fixed.iter().map(|parameter| parameter.ty.clone()).collect(),
         optional_parameter_mask(&optional),
-        Some(element.clone()),
+        rest,
         Box::new(ret.clone()),
     );
     HirExpr::TypedClosure(callable, Box::new(closure))
