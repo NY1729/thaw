@@ -65,6 +65,7 @@
   const thawOriginSerialSet = WeakMap.prototype.set;
   const thawProjectedReceivers = new WeakSet();
   const thawNativeViews = new WeakSet();
+  const thawLiveIterators = new WeakSet();
   // Native Map/Set live views (`__thaw_collection_with_native_view`): view -> { isMap, keys, get }.
   const thawNativeCollections = new WeakMap();
   const thawNativeCollectionState = value => value !== null && typeof value === 'object'
@@ -2408,6 +2409,7 @@
           return thawGraphApply(isMap ? thawMapIteratorNext : thawSetIteratorNext, this, []);
         }, writable: true, configurable: true });
         thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [iterator]);
+        thawGraphApply(thawProjectedReceiverAdd, thawLiveIterators, [iterator]);
         return iterator;
       };
       const reject = () => new thawGraphTypeError(
@@ -2458,19 +2460,39 @@
   // receiver. Such a result is handed back by reference, not as a data snapshot, so mutating it
   // reaches the owner (`o.items().push(x)`).
   thawGraphDefineProperty(globalThis, '__thaw_json_result_is_live', {
-    value: (receiver, result, method) => {
+    value: (receiver, result, method, trackOnly = false) => {
       if (result === null || typeof result !== 'object') return false;
+      const iteratorRoot = method === 'keys' || method === 'values' || method === 'entries';
+      const liveIterator = receiver !== null && typeof receiver === 'object'
+        && thawGraphApply(thawProjectedReceiverHas, thawLiveIterators, [receiver]);
+      if (trackOnly && !iteratorRoot && !liveIterator) return false;
       if (thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [result])
         || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [result])) return true;
-      if ((method === 'keys' || method === 'values' || method === 'entries')
-        && (thawNativeCollectionState(receiver) || thawGraphArrayIsArray(receiver)
-          || thawGraphKind(thawGraphMapSize, receiver) || thawGraphKind(thawGraphSetSize, receiver))) {
-        thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [result]);
+      if (iteratorRoot) {
+        let source = false;
+        try {
+          source = thawNativeCollectionState(receiver) || thawGraphArrayIsArray(receiver)
+            || thawGraphKind(thawGraphMapSize, receiver) || thawGraphKind(thawGraphSetSize, receiver);
+        } catch (error) {
+          // A revoked proxy is not inspected further just to track a returned iterator.
+          if (!(error instanceof thawGraphTypeError)) throw error;
+        }
+        if (source) {
+          thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [result]);
+          thawGraphApply(thawProjectedReceiverAdd, thawLiveIterators, [result]);
+          return true;
+        }
+      }
+      if (liveIterator) {
+        if (method === 'map' || method === 'filter' || method === 'flatMap'
+          || method === 'take' || method === 'drop') {
+          thawGraphApply(thawProjectedReceiverAdd, thawNativeViews, [result]);
+          thawGraphApply(thawProjectedReceiverAdd, thawLiveIterators, [result]);
+        }
+        // Keep helper state and yielded reference values intact across the boundary.
         return true;
       }
-      // Keep yielded reference values intact inside the IteratorResult object.
-      if (method === 'next' && receiver !== null && typeof receiver === 'object'
-        && thawGraphApply(thawProjectedReceiverHas, thawNativeViews, [receiver])) return true;
+      if (trackOnly) return false;
       if (receiver === null || typeof receiver !== 'object'
         || thawGraphArrayIsArray(receiver)
         || thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [receiver])

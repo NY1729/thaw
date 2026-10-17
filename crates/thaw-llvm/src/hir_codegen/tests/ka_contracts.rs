@@ -211,3 +211,24 @@ fn native_any_collection_keys_preserve_identity_through_host_aliases() {
  console.log(q.get(NaN),q.get(0),q.get("x"),q.get(true),q.get(null),q.get(undefined),q.get(1n));
 }"##,"native_any_collection_keys_preserve_identity_through_host_aliases"),"true 1 1 2 3\n4 2 3\n4 4 true true\ntrue false true\n5\ntrue true\nfalse\ntrue\n5 3\n8 8\n1 2 3 4 5 6 7\n");
 }
+
+#[test]
+fn native_iterator_helpers_preserve_lazy_state_and_references() {
+    assert_eq!(compile_and_run(r###"function make():any {const m=new Map<string,number>();m.set("a",1);m.set("b",2);const a:any=m;return a.values().map((v:any)=>v*2).take(2);}
+async function main():Promise<void> {
+ const m=new Map<number,number>();m.set(1,1);m.set(2,2);m.set(3,3);const a:any=m;let calls=0;
+ const it:any=a.values().map((v:any)=>{calls+=1;return v*2;}).filter((v:any)=>v>2).drop(1).take(2).flatMap((v:any)=>[v,v+1]);
+ console.log(calls);m.set(3,30);m.set(4,4);console.log(it.next().value,calls);m.set(5,5);console.log([...it].join(","),calls,it.next().done);
+ const key:any={n:1};const other:any={n:2};const refs=new Map<any,number>();refs.set(key,1);refs.set(other,2);const b:any=refs;
+ const found:any=b.keys().find((k:any)=>k.n===2);console.log(found===other);
+ const reduced:any=b.keys().reduce((acc:any,k:any)=>k);console.log(reduced===other);
+ const arr:any=b.keys().toArray();console.log(arr.length,arr[0]===key,arr[1]===other);
+ const bad:any=a.values().map((v:any)=>{throw new Error("helper failed");});try {bad.next();}catch(e:any){console.log(e.message);}console.log(bad.next().done);
+ const retained:any=make();for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log([...retained].join(","),retained.next().done);
+}"###, "native_iterator_helpers_preserve_lazy_state_and_references"), "0\n60 3\n61,8,9 4 true\ntrue\ntrue\n2 true true\nhelper failed\ntrue\n2,4 true\n");
+}
+
+#[test]
+fn host_iterator_roots_survive_chained_helpers() {
+    assert_eq!(compile_and_run(r###"function main():void {const arr:JsValue=[1,2,3];const a:any=arr.values().map((v:any)=>v*2).drop(1).take(1);console.log(a.next().value,a.next().done);const box:any={m:new Map<string,number>(),s:new Set<number>([1,2])};const m:JsValue=box.m;m.set("a",1);m.set("b",2);const keys:any=m.keys().map((v:any)=>v+"!");console.log(keys.next().value,[...keys].join(","));const set:JsValue=box.s;const entries:any=set.entries().flatMap((e:any)=>e);console.log([...entries].join(","));}"###, "host_iterator_roots_survive_chained_helpers"), "4 true\na! b!\n1,1,2,2\n");
+}

@@ -44675,6 +44675,7 @@ static JSValue js_iterator_proto_func(JSContext *ctx, JSValueConst this_val,
                     }
                     break;
                 }
+                JS_FreeValue(ctx, item);
                 index_val = JS_UNDEFINED;
                 ret = JS_UNDEFINED;
                 item = JS_UNDEFINED;
@@ -44988,6 +44989,20 @@ static JSValue js_iterator_helper_next(JSContext *ctx, JSValueConst this_val,
 
     it->executing = 1;
 
+    /* return() closes sources without advancing them or invoking mapper callbacks. */
+    if (magic == GEN_MAGIC_RETURN) {
+        if (it->kind == JS_ITERATOR_HELPER_KIND_FLAT_MAP && !JS_IsUndefined(it->inner)) {
+            int close_failed = JS_IteratorClose(ctx, it->inner, false);
+            JS_FreeValue(ctx, it->inner);
+            it->inner = JS_UNDEFINED;
+            if (close_failed)
+                goto fail;
+        }
+        *pdone = true;
+        ret = JS_IteratorClose(ctx, it->obj, false) ? JS_EXCEPTION : JS_UNDEFINED;
+        goto done;
+    }
+
     switch (it->kind) {
     case JS_ITERATOR_HELPER_KIND_DROP:
         {
@@ -45052,6 +45067,7 @@ static JSValue js_iterator_helper_next(JSContext *ctx, JSValueConst this_val,
             selected = JS_Call(ctx, it->func, JS_UNDEFINED, countof(args), args);
             JS_FreeValue(ctx, index_val);
             if (JS_IsException(selected)) {
+                JS_FreeValue(ctx, item);
                 JS_FreeValue(ctx, method);
                 goto fail;
             }
@@ -45060,6 +45076,7 @@ static JSValue js_iterator_helper_next(JSContext *ctx, JSValueConst this_val,
                 ret = item;
                 goto done;
             }
+            JS_FreeValue(ctx, item);
             goto filter_again;
         }
         break;
@@ -45214,6 +45231,7 @@ done:
     it->executing = 0;
     return ret;
 fail:
+    *pdone = true;
     /* close the iterator object, preserving pending exception */
     JS_IteratorClose(ctx, it->obj, true);
     ret = JS_EXCEPTION;

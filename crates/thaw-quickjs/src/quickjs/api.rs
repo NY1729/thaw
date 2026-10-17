@@ -1047,6 +1047,22 @@ fn resolve_value_graph_impl<'js>(
     })
 }
 
+// Chained handle calls also need to preserve iterator-helper tracking.
+fn track_iterator_result<'js>(
+    ctx: &Ctx<'js>, receiver: u64, result: &Value<'js>, name: &str,
+) -> Result<(), BoundaryError> {
+    if !result.is_object() || !matches!(name, "keys" | "values" | "entries" | "map" | "filter" | "flatMap" | "take" | "drop") {
+        return Ok(());
+    }
+    let track: Function = ctx.globals().get("__thaw_json_result_is_live")
+        .map_err(|error| error.to_string())?;
+    track.call::<_, bool>((value_for_handle(ctx, receiver)?, result.clone(), name, true))
+        .map(|_| ()).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_tagged_exception(ctx),
+            error => error.to_string().into(),
+        })
+}
+
 /// A method that returns its own receiver (`emitter.on(..)`, `readable.setEncoding(..)`,
 /// every fluent API) must hand back the live object, not a data snapshot of it:
 /// the snapshot copies own properties only, so the methods are gone and a later call
@@ -4781,6 +4797,7 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
         let value = if defer_resolution { value } else {
             resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"), true)?
         };
+        track_iterator_result(&ctx, receiver, &value, &name)?;
         retain_value(&ctx, value)
     });
     match result {
@@ -4899,6 +4916,7 @@ fn thaw_js_call_method_handle_impl(
                 true,
             )?
         };
+        track_iterator_result(&ctx, handle, &value, &name)?;
         retain_value(&ctx, value)
     });
     match result {
