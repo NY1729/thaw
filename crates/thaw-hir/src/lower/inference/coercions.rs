@@ -570,6 +570,10 @@ impl<'a> FnLowerer<'a> {
         // `callable_value_compatible`: an `Optional`/`CallableFunction`
         // difference still falls through to the adapter path (e.g. a
         // default-argument wrapper).
+        if let (HirType::Function(params, ret), HirType::CallableFunction(..)) = (declared, &inferred) {
+            self.validate_promise_callback_value(&value, params, Some(ret))?;
+            return self.normalize_promise_callback(value, params);
+        }
         if callable_abi_compatible(declared, &inferred) {
             return Ok(value);
         }

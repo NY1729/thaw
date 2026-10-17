@@ -2130,6 +2130,167 @@ fn generic_optional_bound_arrow_requires_inference_for_omitted_generic_argument(
 }
 
 #[test]
+fn non_generic_optional_arrow_bind_keeps_omittable_parameter() {
+    let program = lower(
+        r#"function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            const later = plain.bind(null);
+            console.log(later());
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn non_generic_optional_arrow_bind_shifts_mask_and_keeps_rest_shape() {
+    let program = lower(
+        r#"function main(): void {
+            const optional = (value?: number): number | undefined => value;
+            const noBound = optional.bind(null);
+            const prefix = (first: number, later?: string): string | undefined => later;
+            const shifted = prefix.bind(null, 1);
+            const boundOptional = prefix.bind(null, 1, "fixed");
+            const optionalRest = (first?: number, ...rest: number[]): number => rest.length;
+            const packed = optionalRest.bind(null);
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let callable = |name: &str| {
+        main.body.iter().find_map(|statement| match statement {
+            HirStmt::Let(found, HirType::CallableFunction(params, optional, rest, _), _)
+                if found == name => Some((params, optional, rest)),
+            _ => None,
+        }).unwrap_or_else(|| panic!("bound callable `{name}` missing from HIR: {:#?}", main.body))
+    };
+
+    let (params, mask, rest) = callable("noBound");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::F64))]);
+    assert!(mask.contains(0));
+    assert!(rest.is_none());
+
+    let (params, mask, rest) = callable("shifted");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::Str))]);
+    assert!(mask.contains(0), "original optional bit 1 must shift to bound bit 0");
+    assert!(rest.is_none());
+
+    let (params, mask, rest) = callable("boundOptional");
+    assert!(params.is_empty(), "binding the optional slot leaves no fixed parameters");
+    assert!(mask.is_empty());
+    assert!(rest.is_none());
+
+    let (params, mask, rest) = callable("packed");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::F64))]);
+    assert!(mask.contains(0));
+    assert_eq!(rest.as_deref(), Some(&HirType::F64));
+}
+
+#[test]
+fn non_generic_optional_arrow_direct_call_keeps_omittable_parameter() {
+    let program = lower(
+        r#"function main(): void {
+            const plain = (value?: number): number | undefined => value;
+            console.log(plain());
+        }"#,
+    );
+    assert!(program.functions.iter().any(|function| function.name == "main"));
+}
+
+#[test]
+fn unannotated_optional_local_callables_keep_their_callable_shape() {
+    let program = lower(
+        r#"function main(): void {
+            const arrow = (value?: number) => value;
+            const expression = function (value?: number) { return value; };
+        }"#,
+    );
+    let body = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert_eq!(body.matches("CallableFunction([Optional(F64)], Inline(1), None").count(), 4, "both optional local callables must retain bit zero: {body}");
+}
+
+#[test]
+fn required_undefined_capable_local_parameter_stays_required() {
+    let program = lower(
+        r#"function main(): void {
+            const required = (value: number | undefined) => value;
+        }"#,
+    );
+    let body = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(!body.contains("CallableFunction([Optional(F64)], Inline(1)"), "required parameter was made omittable: {body}");
+}
+
+#[test]
+fn required_undefined_capable_parameter_stays_required_when_called_or_bound() {
+    for source in [
+        r#"function main(): void {
+            const required = (value: number | undefined) => value;
+            required();
+        }"#,
+        r#"function main(): void {
+            const required = (value: number | undefined) => value;
+            const bound = required.bind(null);
+            bound();
+        }"#,
+        r#"function main(): void {
+            const required = (value: number) => value;
+            required();
+        }"#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "omitted required argument was accepted: {source}");
+    }
+}
+
+#[test]
+fn required_callback_context_keeps_defaulted_arrow_parameter_required() {
+    lower(
+        r#"function invoke(cb: (value: number) => number): number { return cb(9); }
+        function main(): void {
+            console.log(invoke((value: number = 5): number => value));
+        }"#,
+    );
+}
+
+#[test]
+fn required_callback_context_rejects_incompatible_defaulted_parameter() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const invalid: (value: number) => number = (value: string = "x"): number => 1;
+        }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
+fn local_default_callable_can_be_called_and_bound_without_its_argument() {
+    lower(
+        r#"function main(): void {
+            const f = (value: number = 5): number => value;
+            console.log(f());
+            const g = f.bind(null);
+            console.log(g());
+        }"#,
+    );
+}
+
+#[test]
+fn optional_function_expression_with_this_keeps_receiver_type() {
+    let program = lower(
+        r#"function main(): void {
+            const f = function(this: { value: number }, arg?: number): number {
+                return arg === undefined ? this.value : arg;
+            };
+            const g = f.bind({ value: 7 });
+            console.log(g());
+            console.log(g(3));
+        }"#,
+    );
+    let body = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(body.contains("FunctionWithThis"), "function-expression receiver metadata was lost: {body}");
+    assert!(body.contains("CallableFunction([Optional(F64)], Inline(1)"), "optional argument metadata was lost: {body}");
+}
+
+#[test]
 fn non_generic_bound_arrow_rejects_explicit_type_arguments() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
