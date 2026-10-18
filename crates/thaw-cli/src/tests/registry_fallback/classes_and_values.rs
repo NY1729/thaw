@@ -308,6 +308,106 @@ function main(): void {
 }
 
 #[test]
+fn decorated_class_keeps_live_registry_projection_for_supported_contracts() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-decorated-observer-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("decorated-observer");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function observe(value: any): string;\n\
+         export declare function observeUnknown(value: unknown): string;\n\
+         export declare function observeObject(value: object): string;\n\
+         export declare function observeStructural(value: { value: number; bump(): number }): string;\n\
+         export declare function observeJson(value: Json): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        r#"function makeObserver() {
+    var first;
+    var seen = false;
+    return function(value) {
+        var same = seen && value === first;
+        if (!seen) { first = value; seen = true; }
+        var methodValue = value.bump();
+        value.value++;
+        return (same ? 'same' : 'first') + ':method:' + methodValue + ':' + value.value;
+    };
+}
+module.exports.observe = makeObserver();
+module.exports.observeUnknown = makeObserver();
+module.exports.observeObject = makeObserver();
+module.exports.observeStructural = makeObserver();
+module.exports.observeJson = makeObserver();
+"#,
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { observe, observeUnknown, observeObject, observeStructural, observeJson } from "decorated-observer";
+function Mark(value: JsValue): JsValue { return value; }
+@Mark class Item {
+    value: number = 0;
+    bump(): number { this.value++; return this.value; }
+}
+function check(label: string, first: string, second: string, item: Item): void {
+    console.log(label, first, second, item.value);
+}
+function main(): void {
+    const a = new Item();
+    check("any", observe(a), observe(a), a);
+    const u = new Item();
+    check("unknown", observeUnknown(u), observeUnknown(u), u);
+    const o = new Item();
+    check("object", observeObject(o), observeObject(o), o);
+    const s = new Item();
+    check("structural", observeStructural(s), observeStructural(s), s);
+    const j = new Item();
+    const json: Json = j;
+    check("json", observeJson(json), observeJson(json), j);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let lines: Vec<_> = String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    for (line, label) in lines
+        .iter()
+        .zip(["any", "unknown", "object", "structural", "json"])
+    {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(fields[0], label, "{line}");
+        assert_eq!(
+            fields[1].split(':').collect::<Vec<_>>(),
+            ["first", "method", "1", "2"],
+            "{line}"
+        );
+        assert_eq!(
+            fields[2].split(':').collect::<Vec<_>>(),
+            ["same", "method", "3", "4"],
+            "{line}"
+        );
+        assert_eq!(fields[3], "4", "{line}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+#[test]
 fn local_generic_identity_keeps_class_writeback_after_typed_js_boundary() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-fallback-generic-class-identity-{}",
