@@ -664,6 +664,47 @@ fn compiles_tagged_template_raw_strings() {
 }
 
 #[test]
+fn compiles_tagged_template_callable_metadata() {
+    let source = r#"
+        function rest(strings: any, ...values: any[]): string {
+            return strings.raw === strings.raw ? values.join(",") : "lost raw";
+        }
+        const alias = rest;
+        function defaulted(strings: any, value: number = 7): number { return value; }
+        function optional(strings: any, value?: number): number { return value === undefined ? 9 : value; }
+        function main(): void {
+            console.log(rest`a${1}b${2}`);
+            console.log(alias`a${3}b${4}`);
+            console.log(defaulted`plain`);
+            console.log(defaulted`value ${5}`);
+            console.log(optional`plain`);
+            console.log(optional`value ${6}`);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tagged_template_callable_metadata"),
+        "1,2\n3,4\n7\n5\n9\n6\n"
+    );
+}
+
+#[test]
+fn compiles_zero_parameter_tagged_templates() {
+    let source = r#"
+        let log = "";
+        function side(n: number): number { log += n; return n; }
+        function tag(): number { return 7; }
+        function main(): void {
+            console.log(tag`plain`);
+            console.log(tag`a${side(1)}b${side(2)}c`, log);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "zero_parameter_tagged_templates"),
+        "7\n7 12\n"
+    );
+}
+
+#[test]
 fn compiles_native_string_split() {
     let source = r#"
         function printAll(parts: string[]): void {
