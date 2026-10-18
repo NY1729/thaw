@@ -239,6 +239,7 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
+        let saved_active_non_arrow_this = self.active_non_arrow_this.clone();
         if arrow.type_params.is_some() {
             return Err("generic arrow functions are not supported yet".into());
         }
@@ -287,6 +288,7 @@ impl<'a> FnLowerer<'a> {
                 lowerer.class_context = None;
                 lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
+                lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
                 lowerer.scope.insert(name.clone(), receiver.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
                 params.push(HirParam { name, ty: receiver.clone() });
@@ -582,6 +584,7 @@ impl<'a> FnLowerer<'a> {
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
+        self.active_non_arrow_this = saved_active_non_arrow_this;
         result
     }
 
@@ -619,6 +622,7 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
+        let saved_active_non_arrow_this = self.active_non_arrow_this.clone();
         let result = self.with_function_control_flow(|lowerer| {
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
             let mut body = Vec::new();
@@ -627,6 +631,7 @@ impl<'a> FnLowerer<'a> {
                 lowerer.class_context = None;
                 lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
+                lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
                 lowerer.scope.insert(name.clone(), receiver.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
                 params.push(HirParam { name, ty: receiver.clone() });
@@ -693,6 +698,7 @@ impl<'a> FnLowerer<'a> {
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
+        self.active_non_arrow_this = saved_active_non_arrow_this;
         if result.is_ok()
             && hir_type_contains_dynamic(&declared_return)
             && inferred_return != declared_return
@@ -1210,6 +1216,7 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
+        let saved_active_non_arrow_this = self.active_non_arrow_this.clone();
         let saved_scope = self.scope.clone();
         let saved_source_scope = self.source_scope.clone();
         let saved_source_return = self.source_ret_type.clone();
@@ -1229,6 +1236,7 @@ impl<'a> FnLowerer<'a> {
                 lowerer.class_context = None;
                 lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
+                lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
                 lowerer.scope.insert(name.clone(), receiver.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
                 params.push(HirParam { name, ty: receiver.clone() });
@@ -1492,6 +1500,7 @@ impl<'a> FnLowerer<'a> {
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
+        self.active_non_arrow_this = saved_active_non_arrow_this;
         result
     }
 }

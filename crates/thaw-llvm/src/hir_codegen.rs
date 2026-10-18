@@ -687,6 +687,7 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             | HirExpr::RecursiveClosure(_, _, inner)
             | HirExpr::TypedClosure(_, inner)
             | HirExpr::NonArrowFunction(inner)
+            | HirExpr::NonArrowThis { payload: inner, .. }
             | HirExpr::PromiseNew(inner, _, _, _)
             | HirExpr::PromiseNewMixed(inner, _, _)
             | HirExpr::PropAccess(inner, _, _)

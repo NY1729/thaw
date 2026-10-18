@@ -111,6 +111,7 @@ struct FnLowerer<'a> {
     class_context: Option<Symbol>,
     unbound_this_context: bool,
     non_arrow_receiver: Option<HirType>,
+    active_non_arrow_this: Option<(Symbol, HirType)>,
     /// A contextual type hint for the *next* call expression `lower_call`
     /// handles, consumed (taken, not just read) as its very first action
     /// so it can never leak into a nested/argument call's own inference --

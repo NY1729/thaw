@@ -24,7 +24,13 @@ fn target_to_read_expr(target: &Target) -> Result<HirExpr, String> {
         Target::Var(name) => HirExpr::Var(name.clone()),
         Target::Index(arr, idx) => HirExpr::Index(Box::new(arr.clone()), idx.clone()),
         Target::Prop(obj, ty, field) => {
-            HirExpr::PropAccess(Box::new(obj.clone()), ty.clone(), field.clone())
+            HirExpr::PropAccess(
+                Box::new(obj.clone().with_non_arrow_this_access(
+                    NonArrowThisAccess::Read(field.clone()),
+                )),
+                ty.clone(),
+                field.clone(),
+            )
         }
         Target::Dictionary(object, key, element) => match element {
             HirType::F64 => HirExpr::JsonAsNumber(Box::new(HirExpr::JsonKey(
@@ -57,7 +63,12 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
         Target::Var(name) => HirExpr::Assign(name, Box::new(value)),
         Target::Index(arr, idx) => HirExpr::IndexAssign(Box::new(arr), idx, Box::new(value)),
         Target::Prop(obj, ty, field) => {
-            HirExpr::PropAssign(Box::new(obj), ty, field, Box::new(value))
+            HirExpr::PropAssign(
+                Box::new(obj.with_non_arrow_this_access(NonArrowThisAccess::Write(field.clone()))),
+                ty,
+                field,
+                Box::new(value),
+            )
         }
         Target::Dictionary(object, key, element) => {
             HirExpr::JsonSet(Box::new(object), key, Box::new(value), element, false)
@@ -81,6 +92,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             names.insert(name.clone());
             collect_referenced_bindings(value, names);
         }
+        HirExpr::NonArrowThis { payload, .. } => collect_referenced_bindings(payload, names),
         HirExpr::PostfixUpdate(name, _) => {
             names.insert(name.clone());
         }
@@ -279,6 +291,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)
         | HirExpr::EnumReverseLookup(value, _)
+        | HirExpr::NonArrowThis { payload: value, .. }
         | HirExpr::PropAccess(value, _, _)
         | HirExpr::JsonGet(value, _)
         | HirExpr::JsonAsNumber(value)

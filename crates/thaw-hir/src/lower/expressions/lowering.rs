@@ -1218,6 +1218,13 @@ impl<'a> FnLowerer<'a> {
                         result,
                     ));
                 }
+                if let Some((name, declared)) = &self.active_non_arrow_this {
+                    return Ok(HirExpr::NonArrowThis {
+                        payload: Box::new(HirExpr::Var(name.clone())),
+                        declared: declared.clone(),
+                        access: NonArrowThisAccess::Value,
+                    });
+                }
                 let name = self.resolve_binding("this");
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))

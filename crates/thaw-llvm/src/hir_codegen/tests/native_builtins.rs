@@ -11940,6 +11940,7 @@ fn native_projection_method_registration_retains_physical_receiver_hir_type() {
             HirExpr::Block(body) => visit_stmts(body, counts),
             HirExpr::Lambda(_, _, _, body)
             | HirExpr::NonArrowFunction(body)
+            | HirExpr::NonArrowThis { payload: body, .. }
             | HirExpr::TypedClosure(_, body)
             | HirExpr::OptionalSome(body, _)
             | HirExpr::OptionalValue(body, _)

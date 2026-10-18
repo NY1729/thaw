@@ -1,6 +1,13 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum NonArrowThisAccess {
+    Value,
+    Read(Symbol),
+    Write(Symbol),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum HirExpr {
     Lit(HirLit),
     Var(Symbol),
@@ -111,6 +118,12 @@ pub enum HirExpr {
     /// A non-arrow JavaScript function expression. Preserves dynamic `this`
     /// provenance across lowering; its enclosed closure carries the call ABI.
     NonArrowFunction(Box<HirExpr>),
+    /// A source `this` access in an ordinary function, with its typed ABI receiver payload.
+    NonArrowThis {
+        payload: Box<HirExpr>,
+        declared: HirType,
+        access: NonArrowThisAccess,
+    },
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     FunctionRefThis(String, HirType, Vec<HirType>, HirType),
@@ -272,6 +285,21 @@ pub enum HirExpr {
     /// Restores a structured native value from its JSON-backed dictionary
     /// representation. Lowering only emits target layouts supported by LLVM.
     JsonAsNative(Box<HirExpr>, HirType),
+}
+
+impl HirExpr {
+    pub fn with_non_arrow_this_access(self, access: NonArrowThisAccess) -> Self {
+        match self {
+            Self::NonArrowThis {
+                payload, declared, ..
+            } => Self::NonArrowThis {
+                payload,
+                declared,
+                access,
+            },
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

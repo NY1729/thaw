@@ -3708,7 +3708,9 @@ impl<'a> FnLowerer<'a> {
                 self.scope.insert(receiver.clone(), object_type.clone());
                 let bound = HirExpr::Var(receiver.clone());
                 let getter = HirExpr::PropAccess(
-                    Box::new(bound.clone()),
+                    Box::new(bound.clone().with_non_arrow_this_access(
+                        NonArrowThisAccess::Read(property.to_string()),
+                    )),
                     object_type.clone(),
                     getter,
                 );
@@ -3718,7 +3720,13 @@ impl<'a> FnLowerer<'a> {
                     &[(receiver, object_type, object)],
                 );
             }
-            let getter = HirExpr::PropAccess(Box::new(object.clone()), object_type, getter);
+            let getter = HirExpr::PropAccess(
+                Box::new(object.clone().with_non_arrow_this_access(
+                    NonArrowThisAccess::Read(property.to_string()),
+                )),
+                object_type,
+                getter,
+            );
             return Ok(HirExpr::Call(Box::new(getter), vec![object]));
         }
         if fields
@@ -3737,7 +3745,9 @@ impl<'a> FnLowerer<'a> {
             return Ok(HirExpr::Lit(HirLit::Undefined));
         }
         Ok(HirExpr::PropAccess(
-            Box::new(object),
+            Box::new(object.with_non_arrow_this_access(
+                NonArrowThisAccess::Read(property.to_string()),
+            )),
             object_type,
             property.to_string(),
         ))

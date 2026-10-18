@@ -1058,7 +1058,8 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
                 walk_expr(no, visit);
             }
             HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
-            | HirExpr::NonArrowFunction(body) => walk_expr(body, visit),
+            | HirExpr::NonArrowFunction(body)
+            | HirExpr::NonArrowThis { payload: body, .. } => walk_expr(body, visit),
             HirExpr::Block(statements) => for statement in statements {
                 match statement {
                     HirStmt::Expr(value) | HirStmt::Throw(value)

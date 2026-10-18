@@ -128,6 +128,7 @@ impl<'a> FnLowerer<'a> {
             class_context: None,
             unbound_this_context: false,
             non_arrow_receiver: None,
+            active_non_arrow_this: None,
             expected_return_hint: None,
             expected_source_return_hint: None,
             expected_arrow_return_hint: None,

@@ -1,9 +1,18 @@
 // shortcut: complex bodies keep generic receiver errors; use runtime property checks for full parity.
 fn simple_this_receiver_access<'a>(body: &'a HirExpr, params: &[HirParam]) -> Option<(&'a str, bool)> {
+    fn this_payload(expr: &HirExpr) -> Option<&HirExpr> {
+        match expr {
+            HirExpr::NonArrowThis { payload, .. } => Some(payload),
+            other => Some(other),
+        }
+    }
+    fn is_this(expr: &HirExpr) -> bool {
+        matches!(this_payload(expr), Some(HirExpr::Var(name)) if name == "__thaw_this")
+    }
     fn property(expr: &HirExpr) -> Option<&str> {
         match expr {
             HirExpr::PropAccess(object, HirType::Object(_), field)
-                if matches!(object.as_ref(), HirExpr::Var(name) if name == "__thaw_this")
+                if is_this(object)
                     && !is_hidden_accessor_field(field) => Some(field),
             _ => None,
         }
@@ -23,7 +32,7 @@ fn simple_this_receiver_access<'a>(body: &'a HirExpr, params: &[HirParam]) -> Op
             if (simple(left) || property(left).is_some()) && (simple(right) || property(right).is_some()) =>
                 property(left).or_else(|| property(right)).map(|field| (field, false)),
         HirExpr::PropAssign(object, HirType::Object(_), field, value)
-            if matches!(object.as_ref(), HirExpr::Var(name) if name == "__thaw_this")
+            if is_this(object)
                 && !is_hidden_accessor_field(field) => {
             if let Some(read) = property(value) { Some((read, false)) }
             else if simple(value) { Some((field, true)) }

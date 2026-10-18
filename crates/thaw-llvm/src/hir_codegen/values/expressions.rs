@@ -139,6 +139,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(ty, ptr, name)
                     .map_err(|e| e.to_string())
             }
+            HirExpr::NonArrowThis { payload, .. } => self.compile_expr(payload),
 
             HirExpr::Assign(name, value) => {
                 let (ptr, _ty) = *self
