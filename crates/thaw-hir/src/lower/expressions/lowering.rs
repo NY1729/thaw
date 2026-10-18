@@ -1761,98 +1761,109 @@ impl<'a> FnLowerer<'a> {
                     | HirExpr::FunctionRefThis(name, _, _, _) => Some(name.as_str()),
                     _ => None,
                 };
-                // Positional arguments convert to the tag's declared parameter
-                // types (`strings: any` receives a dynamic array, not the raw
-                // native buffer).
-                let declared_params = tag_name
-                    .and_then(|name| self.signatures.get(name))
-                    .filter(|signature| signature.generic_type_params.is_empty())
-                    .map(|signature| signature.params.clone());
-                let args = if let Some(declared) = declared_params {
-                    let rest_slot = tag_name
+                // The inferred callable type describes the value actually called
+                // (including default/rest adapters); FnSignature is only needed
+                // for plain physical Function types, which cannot carry rest data.
+                let callable = match self.infer_expr_type(&tag)? {
+                    HirType::Function(params, _) => tag_name
                         .and_then(|name| self.signatures.get(name))
-                        .is_some_and(|signature| signature.native_rest.is_some());
-                    let positional = declared.len() - usize::from(rest_slot);
-                    args.into_iter()
+                        .and_then(|signature| signature.native_rest.as_ref().map(|rest| {
+                            (params[..params.len().saturating_sub(1)].to_vec(),
+                             HirOptionalMask::default(), Some(rest.clone()))
+                        }))
+                        .or(Some((params, HirOptionalMask::default(), None))),
+                    HirType::CallableFunction(params, optional, rest, _) => {
+                        Some((params, optional, rest.map(|element| *element)))
+                    }
+                    HirType::FunctionWithThis(_, visible) => match *visible {
+                        HirType::Function(params, _) => tag_name
+                            .and_then(|name| self.signatures.get(name))
+                            .and_then(|signature| {
+                                signature.native_rest.as_ref().map(|rest| {
+                                    (
+                                        params[..params.len().saturating_sub(1)].to_vec(),
+                                        HirOptionalMask::default(),
+                                        Some(rest.clone()),
+                                    )
+                                })
+                            })
+                            .or(Some((params, HirOptionalMask::default(), None))),
+                        HirType::CallableFunction(params, optional, rest, _) => {
+                            Some((params, optional, rest.map(|element| *element)))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let mut extra_statements = Vec::new();
+                let args = if let Some((params, optional, rest)) = callable {
+                    let fixed_count = params.len();
+                    let mut args = args;
+                    if args.len() < fixed_count {
+                        for (index, parameter) in params.iter().enumerate().skip(args.len()) {
+                            if !is_optional_parameter(&optional, index) {
+                                return Err(format!(
+                                    "tagged template omits required parameter {}",
+                                    index + 1
+                                ));
+                            }
+                            args.push(omitted_parameter_value(parameter)?);
+                        }
+                    }
+                    if rest.is_none() && args.len() > fixed_count {
+                        let values = args.split_off(1);
+                        for (index, value) in values.into_iter().enumerate() {
+                            let ty = self.infer_expr_type(&value)?;
+                            let name = format!("__thaw_template_arg_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            extra_statements.push(HirStmt::Let(name.clone(), ty, value));
+                            if index + 1 < fixed_count {
+                                args.push(HirExpr::Var(name));
+                            }
+                        }
+                    }
+                    let trailing = if rest.is_some() && args.len() > fixed_count {
+                        args.split_off(fixed_count)
+                    } else {
+                        Vec::new()
+                    };
+                    let mut args = args
+                        .into_iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            if index == 0 && index < positional && index < declared.len() {
-                                // `strings: any` is a live view of the template object, so
-                                // `.raw` and its identity survive the conversion.
-                                self.coerce_to_declared_aliasing(&declared[index], value)
-                            } else if index < positional && index < declared.len() {
-                                self.coerce_to_declared(&declared[index], value)
+                            if index == 0 && index < fixed_count {
+                                self.coerce_to_declared_aliasing(&params[index], value)
+                            } else if index < fixed_count {
+                                self.coerce_to_declared(&params[index], value)
                             } else {
                                 Ok(value)
                             }
                         })
-                        .collect::<Result<Vec<_>, String>>()?
-                } else {
-                    args
-                };
-                let args =
-                    if let Some(name) = tag_name {
-                    match self.signatures.get(name).map(|signature| {
-                        (signature.params.len(), signature.native_rest.clone())
-                    }) {
-                        // `signature.params` already counts the rest
-                        // parameter's own packed-array slot as its last
-                        // entry (matching `lower_call`'s own
-                        // `param_types = signature.params.clone()` after
-                        // packing) -- the number of *positional* arguments
-                        // before that slot is one less.
-                        Some((total_params, Some(element)))
-                            if total_params > 0 && args.len() >= total_params - 1 =>
-                        {
-                            let positional = total_params - 1;
-                            let mut args = args;
-                            let trailing = args.split_off(positional);
-                            let trailing = trailing
-                                .into_iter()
-                                .map(|value| self.coerce_to_declared(&element, value))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            args.push(native_rest_array(trailing, &element));
-                            args
-                        }
-                        _ => args,
+                        .collect::<Result<Vec<_>, String>>()?;
+                    if let Some(element) = rest {
+                        let trailing = trailing
+                            .into_iter()
+                            .map(|value| self.coerce_to_declared(&element, value))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        args.push(native_rest_array(trailing, &element));
                     }
+                    args
                 } else {
                     args
                 };
                 // A tag function may declare fewer parameters than the template has
                 // substitutions: JavaScript still evaluates every substitution, in
                 // order, and the callee ignores the extras.
-                let fixed_param_count = tag_name
-                    .and_then(|name| self.signatures.get(name))
-                    .filter(|signature| {
-                        signature.generic_type_params.is_empty() && signature.native_rest.is_none()
-                    })
-                    .map(|signature| signature.params.len());
-                let mut extra_statements = Vec::new();
-                let args = match fixed_param_count {
-                    Some(cap) if args.len() > cap && cap >= 1 => {
-                        let mut kept = Vec::with_capacity(cap);
-                        for (index, argument) in args.into_iter().enumerate() {
-                            if index == 0 {
-                                kept.push(argument);
-                                continue;
-                            }
-                            let argument_type = self.infer_expr_type(&argument)?;
-                            let temp = format!("__thaw_template_arg_{}", self.next_binding);
-                            self.next_binding += 1;
-                            self.scope.insert(temp.clone(), argument_type.clone());
-                            extra_statements.push(HirStmt::Let(
-                                temp.clone(),
-                                argument_type,
-                                argument,
-                            ));
-                            if kept.len() < cap {
-                                kept.push(HirExpr::Var(temp));
-                            }
-                        }
-                        kept
-                    }
-                    _ => args,
+                let tag = if extra_statements.is_empty() {
+                    tag
+                } else {
+                    let ty = self.infer_expr_type(&tag)?;
+                    let name = format!("__thaw_template_tag_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    extra_statements.insert(0, HirStmt::Let(name.clone(), ty, tag));
+                    HirExpr::Var(name)
                 };
                 let call = HirExpr::Call(Box::new(tag), args);
                 // `infer_expr_type` (not the simpler `_inner` variant
