@@ -1536,6 +1536,21 @@ impl FnLowerer<'_> {
         }
         self.coerce_primitive_array_argument(value, declared)
     }
+
+    fn coerce_jit_structural_class_argument(
+        &mut self,
+        value: HirExpr,
+        declared: &HirType,
+    ) -> Result<HirExpr, String> {
+        let json = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_decode_native_argument".into())),
+            vec![HirExpr::TypedClosure(
+                declared.clone(),
+                Box::new(json),
+            )],
+        ))
+    }
 }
 
 impl FnLowerer<'_> {
