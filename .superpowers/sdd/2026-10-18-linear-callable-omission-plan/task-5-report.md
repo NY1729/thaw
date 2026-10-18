@@ -13,3 +13,9 @@ Verification passed:
 - `cargo clippy --locked -p thaw-hir -p thaw-llvm --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed.
 
 Repository audit found no remaining `omitted_parameter_symbol`, `default_arity_symbol`, subset-mask generator/parser, class wrapper generator, old selector name, or omission-parameter cap. The only remaining 16-byte limit is the unrelated direct aggregate FFI register-layout constraint in `crates/thaw-hir/src/hir/program.rs`; `HirOptionalMask` remains as canonical omission metadata. No publication or full LLVM suite was performed.
+
+## Follow-up: bound native method rest arguments
+
+An additional review found that specialized instance/static class `.bind()` paths treated the physical native rest-array slot as fixed and dropped rest metadata from their returned callable. Both regressions were confirmed red before the fix with a bind arity rejection. The bind paths now split fixed parameters from the native rest element, coerce bound rest-prefix values by element type, preserve the returned callable's rest type, and concatenate bound prefix values with invocation-time rest values. Instance and static controls cover `sum(first, base = 1, ...values)`, bound prefix `[2, 3]` with omitted `base`, and no-rest-prefix binds that retain the optional `base` mask. They pass with output `11\n20\n14\n6\n`.
+
+Follow-up verification passed: full `thaw-hir` (569), LLVM class filter (23), both new rest-prefix controls, prior bind/call/apply/rest/inheritance/super/receiver/generic controls, FFI layout control, Clippy, fmt, and diff checks.
