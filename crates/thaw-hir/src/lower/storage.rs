@@ -5,6 +5,7 @@ struct StoragePlan {
     dynamic: HashSet<(u32, u32)>,
     source_types: HashMap<(u32, u32), HirType>,
     source_conflicts: HashSet<(u32, u32)>,
+    class_fields: HashMap<(String, String), (Span, bool)>,
     argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     callable_parameters: HashMap<u32, Vec<(u32, u32)>>,
     quickjs_function_value_nodes: HashSet<(u32, u32)>,
@@ -63,6 +64,7 @@ impl StoragePlan {
             dynamic,
             source_types: HashMap::new(),
             source_conflicts: HashSet::new(),
+            class_fields: HashMap::new(),
             argument_parameters: graph.argument_parameters,
             callable_parameters,
             quickjs_function_value_nodes,
@@ -1203,6 +1205,60 @@ fn storage_source_type(span: Span) -> Option<HirType> {
         (!active.source_conflicts.contains(&storage_key(span))).then(|| active.source_types.get(&storage_key(span)).cloned()).flatten()
     })
 }
+fn remember_class_source_field(class: &str, field: &str, span: Span, optional: bool) {
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        active.borrow_mut().class_fields.insert((class.to_owned(), field.to_owned()), (span, optional));
+    });
+}
+
+fn storage_source_type_from_plan(span: Span, active: &StoragePlan) -> Option<HirType> {
+    let key = storage_key(span);
+    (!active.source_conflicts.contains(&key)).then(|| active.source_types.get(&key).cloned()).flatten()
+}
+
+fn source_class_contract(ty: &HirType, active: &StoragePlan, seen: &mut HashSet<String>) -> HirType {
+    match ty {
+        HirType::Object(fields) => {
+            let identities = fields.first().and_then(|(marker, tag)| {
+                (*tag == HirType::Bool)
+                    .then(|| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+                    .flatten()
+            });
+            let mut restored = fields.iter().map(|(name, field)| {
+                (name.clone(), source_class_contract(field, active, seen))
+            }).collect::<Vec<_>>();
+            let mut restored_names = HashSet::new();
+            if let Some(identities) = identities {
+                for class in identities.split('\u{1f}') {
+                    if seen.insert(class.to_owned()) {
+                        for ((owner, name), (span, optional)) in &active.class_fields {
+                            if owner == class && restored_names.insert(name.clone()) {
+                                if let Some(mut source) = storage_source_type_from_plan(*span, active) {
+                                    if *optional { source = optional_parameter_type(source); }
+                                    let source = source_class_contract(&source, active, seen);
+                                    if let Some((_, field)) = restored.iter_mut().find(|(existing, _)| existing == name) {
+                                        *field = source;
+                                    } else {
+                                        restored.push((name.clone(), source));
+                                    }
+                                }
+                            }
+                        }
+                        seen.remove(class);
+                    }
+                }
+            }
+            HirType::Object(restored)
+        }
+        HirType::Array(inner) => HirType::Array(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Tuple(types) => HirType::Tuple(types.iter().map(|ty| source_class_contract(ty, active, seen)).collect()),
+        HirType::Optional(inner) => HirType::Optional(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Nullable(inner) => HirType::Nullable(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Nullish(inner) => HirType::Nullish(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Union(types) => HirType::Union(types.iter().map(|ty| source_class_contract(ty, active, seen)).collect()),
+        other => other.clone(),
+    }
+}
 fn storage_source_return_type(source_start: u32) -> Option<HirType> {
     if source_start == 0 { return None; }
     let key = (source_start, 0);
@@ -1483,6 +1539,42 @@ impl FnLowerer<'_> {
 }
 
 impl FnLowerer<'_> {
+    fn source_contract_type_for_expression(&self, expression: &Expr) -> Option<HirType> {
+        let restore = |ty| ACTIVE_STORAGE_PLAN.with(|active| {
+            source_class_contract(&ty, &active.borrow(), &mut HashSet::new())
+        });
+        match expression {
+            Expr::Ident(identifier) => {
+                let name = self.resolve_binding(identifier.sym.as_ref());
+                self.source_scope.get(&name).cloned()
+                    .or_else(|| storage_source_type(identifier.span))
+                    .or_else(|| self.scope.get(&name).cloned())
+                    .map(restore)
+            }
+            Expr::This(_) => {
+                let name = self.resolve_binding("this");
+                self.source_scope.get(&name).cloned().or_else(|| self.scope.get(&name).cloned()).map(restore)
+            }
+            Expr::Paren(value) => self.source_contract_type_for_expression(&value.expr),
+            Expr::TsNonNull(value) => self.source_contract_type_for_expression(&value.expr),
+            Expr::TsAs(value) => lower_ts_type(&value.type_ann, self.interfaces, self.generic_interfaces).ok().map(restore),
+            Expr::TsTypeAssertion(value) => lower_ts_type(&value.type_ann, self.interfaces, self.generic_interfaces).ok().map(restore),
+            Expr::Member(member) => {
+                if let Some(source) = storage_source_type(member.span) { return Some(restore(source)); }
+                let HirType::Object(fields) = self.source_contract_type_for_expression(&member.obj)? else { return None };
+                let MemberProp::Ident(property) = &member.prop else { return None };
+                fields.into_iter().find(|(field, _)| field == property.sym.as_ref()).map(|(_, ty)| restore(ty))
+            }
+            Expr::New(new_expr) => {
+                let Expr::Ident(class) = new_expr.callee.as_ref() else { return None };
+                let name = self.resolve_binding(class.sym.as_ref());
+                let restored = self.interfaces.get(&name).cloned().map(restore);
+                restored
+            }
+            _ => None,
+        }
+    }
+
     fn source_value_hint(&self, expression: &Expr) -> Option<HirExpr> {
         fn uncertain(ty: &HirType) -> bool {
             match ty {
@@ -1494,6 +1586,26 @@ impl FnLowerer<'_> {
             }
         }
         let typed = |ty| HirExpr::TypedClosure(if uncertain(&ty) { HirType::Json } else { ty }, Box::new(HirExpr::Lit(HirLit::Undefined)));
+        fn contains_native_class(ty: &HirType) -> bool {
+            match ty {
+                HirType::Object(fields) => {
+                    class_name_from_type(ty).is_some()
+                        || fields.iter().any(|(_, ty)| contains_native_class(ty))
+                }
+                HirType::Array(inner)
+                | HirType::Optional(inner)
+                | HirType::Nullable(inner)
+                | HirType::Nullish(inner) => contains_native_class(inner),
+                HirType::Tuple(types) | HirType::Union(types) => types.iter().any(contains_native_class),
+                _ => false,
+            }
+        }
+        let source_typed = |ty| {
+            HirExpr::TypedClosure(
+                if contains_native_class(&ty) { ty } else if uncertain(&ty) { HirType::Json } else { ty },
+                Box::new(HirExpr::Lit(HirLit::Undefined)),
+            )
+        };
         match expression {
             Expr::Lit(Lit::Num(value)) => Some(HirExpr::Lit(HirLit::F64(value.value))),
             Expr::Lit(Lit::Str(value)) => Some(HirExpr::Lit(HirLit::Str(value.value.to_string_lossy().into_owned()))),
@@ -1514,7 +1626,7 @@ impl FnLowerer<'_> {
                         None
                     }
                 }).or_else(|| self.json_narrowings.get(&name).cloned());
-                narrowed.or_else(|| self.source_scope.get(&name).or_else(|| self.scope.get(&name)).cloned()).map(typed)
+                narrowed.or_else(|| self.source_contract_type_for_expression(expression)).map(source_typed)
                     .or_else(|| {
                         let signature = self.signatures.get(&name)?;
                         (signature.is_extern
@@ -1531,8 +1643,7 @@ impl FnLowerer<'_> {
                     })
             }
             Expr::This(_) => {
-                let name = self.resolve_binding("this");
-                self.source_scope.get(&name).or_else(|| self.scope.get(&name)).cloned().map(typed)
+                self.source_contract_type_for_expression(expression).map(source_typed)
             }
             Expr::Paren(value) => self.source_value_hint(&value.expr),
             Expr::TsNonNull(value) => self.source_value_hint(&value.expr),
@@ -1557,6 +1668,7 @@ impl FnLowerer<'_> {
                 Some(HirExpr::ObjectLit(fields))
             }
             Expr::Member(member) => {
+                if let Some(ty) = self.source_contract_type_for_expression(expression) { return Some(source_typed(ty)); }
                 let owner = self.source_value_hint(&member.obj)?;
                 let ty = self.infer_expr_type(&owner).ok()?;
                 match (&ty, &member.prop) {
@@ -1565,6 +1677,9 @@ impl FnLowerer<'_> {
                     (HirType::Json | HirType::JsValue, _) => Some(typed(HirType::Json)),
                     _ => None,
                 }
+            }
+            Expr::New(_) if self.source_contract_type_for_expression(expression).is_some() => {
+                self.source_contract_type_for_expression(expression).map(source_typed)
             }
             Expr::New(new_expr)
                 if matches!(new_expr.callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "Date")

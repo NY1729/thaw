@@ -87,6 +87,56 @@ fn storage_keeps_native_control_unboxed() {
 }
 
 #[test]
+fn source_contract_lookup_keeps_local_alias_and_nested_class_field_types() {
+    let module = thaw_parser::parse_typescript(
+        "class Item { value: number = 1; } class Holder { item: Item = new Item(); } class Maybe { value?: number; } abstract class Base { abstract value: number; label: string = 'base'; } class Derived extends Base { value: number = 2; } class Tree { child: any; value: number = 1; } function f() { item; alias; holder.item; new Item(); dynamic; unknown; new Maybe(); new Derived(); new Tree(); fake; }",
+    ).unwrap();
+    let _storage = StorageScope::enter(&module).unwrap();
+    let (mut interfaces, generic_interfaces) = resolve_interfaces(&module).unwrap();
+    let classes = collect_native_classes(&module, &mut interfaces, &generic_interfaces).unwrap();
+    assert_eq!(classes.len(), 6);
+    let tree = interfaces.get("Tree").unwrap().clone();
+    let tree_decl = classes.iter().find(|class| class.ident.sym == "Tree").unwrap();
+    let ClassMember::ClassProp(child) = &tree_decl.class.body[0] else { panic!("expected child property"); };
+    remember_storage_source(storage_key(child.span), &tree);
+    let item = interfaces.get("Item").unwrap().clone();
+    let holder = interfaces.get("Holder").unwrap().clone();
+    let signatures = HashMap::new();
+    let enum_values = EnumValues::new();
+    let enum_reverse_values = EnumReverseValues::new();
+    let mut lowerer = FnLowerer::new(&signatures, &interfaces, &generic_interfaces, &enum_values, &enum_reverse_values, HirType::Void, None);
+    lowerer.source_scope.insert("item".into(), item.clone());
+    lowerer.source_scope.insert("alias".into(), item.clone());
+    lowerer.source_scope.insert("holder".into(), holder);
+    lowerer.source_scope.insert("dynamic".into(), HirType::Json);
+    let fake = HirType::Object(vec![
+        ("__thaw_class_identity_\u{1e}Item".into(), HirType::Str),
+        ("value".into(), HirType::Json),
+    ]);
+    lowerer.source_scope.insert("fake".into(), fake.clone());
+
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = module.body.last().unwrap() else { panic!("expected source fixture function"); };
+    let expressions = function.function.body.as_ref().unwrap().stmts.iter().map(|statement| {
+        let Stmt::Expr(statement) = statement else { panic!("expected expression statement"); };
+        statement.expr.as_ref()
+    }).collect::<Vec<_>>();
+    for expression in [&expressions[0], &expressions[1], &expressions[2], &expressions[3]] {
+        let contract = lowerer.source_contract_type_for_expression(expression).unwrap();
+        assert!(matches!(&contract, HirType::Object(fields) if fields.iter().any(|(name, ty)| name == "value" && *ty == HirType::F64)), "{contract:?}");
+    }
+    assert_eq!(lowerer.source_contract_type_for_expression(expressions[4]), Some(HirType::Json));
+    assert_eq!(lowerer.source_contract_type_for_expression(expressions[5]), None);
+    let optional = lowerer.source_contract_type_for_expression(expressions[6]).unwrap();
+    assert!(matches!(&optional, HirType::Object(fields) if fields.iter().any(|(name, ty)| name == "value" && *ty == HirType::Optional(Box::new(HirType::F64)))));
+    let inherited = lowerer.source_contract_type_for_expression(expressions[7]).unwrap();
+    assert!(matches!(&inherited, HirType::Object(fields) if fields.iter().any(|(name, ty)| name == "value" && *ty == HirType::F64)));
+    assert!(matches!(&inherited, HirType::Object(fields) if fields.iter().any(|(name, ty)| name == "label" && *ty == HirType::Str)));
+    let recursive = lowerer.source_contract_type_for_expression(expressions[8]).unwrap();
+    assert!(matches!(&recursive, HirType::Object(fields) if fields.iter().any(|(name, ty)| name == "value" && *ty == HirType::F64)));
+    assert_eq!(lowerer.source_contract_type_for_expression(expressions[9]), Some(fake));
+}
+
+#[test]
 fn storage_tracks_casts_late_writes_and_unknown_calls() {
     assert_eq!(
         storage_allocations(

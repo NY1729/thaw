@@ -213,6 +213,7 @@ fn collect_native_classes<'a>(
                         format!("class `{name}` field `{field_name}` needs a type annotation")
                     })?,
             };
+            remember_class_source_field(name, &field_name, property.span, property.is_optional);
             field_type = storage_type(property.span, field_type);
             if property.is_optional {
                 field_type = optional_parameter_type(field_type);
@@ -297,6 +298,7 @@ fn collect_native_classes<'a>(
                 format!("class `{name}` parameter property `{field_name}` needs a type annotation")
             })?;
             let mut ty = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            remember_class_source_field(name, &field_name, binding.id.span, binding.id.optional);
             ty = storage_type(binding.id.span, ty);
             if binding.id.optional {
                 ty = optional_parameter_type(ty);
