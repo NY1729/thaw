@@ -71,6 +71,59 @@ function main(): void {
 }
 
 #[test]
+fn kb_contract_escaped_arrows_keep_lazy_lexical_receiver() {
+    let source = r#"let effects = 0;
+const unused = function(this: { n: number }): number { const read = () => this.n; return 1; };
+const escaped = function(this: { n: number }): () => number { effects++; return () => this.n; };
+const nested = function(this: { n: number }): () => () => number { return () => () => this.n; };
+const siblings = function(this: { n: number }): [() => number, () => number] { return [() => this.n, () => this.n]; };
+const ownReceiver = function(this: { n: number }): number {
+  function ordinary(this: { n: number }): number { return this.n; }
+  const lexical = () => this.n;
+  return ordinary.call({ n: 4 }) * 10 + lexical();
+};
+const alias = function(this: { n: number }): () => number { const self = this; return () => self.n; };
+const primitive = function(this: symbol): symbol { const self = this; return self; };
+const invokeWithReceiver: any = new Function('callback', 'receiver', 'return callback.call(receiver);');
+const install: any = new Function('callback', 'const owner={n:1}; const read=callback.call(owner); owner.n=7; return {owner,read};');
+const invokeHost: any = new Function('result', 'next', 'result.owner.n=next; return result.read();');
+function main(): void {
+  console.log(unused.call(undefined as any), unused.call(null as any));
+  const invalid = escaped.call(undefined as any);
+  console.log('created');
+  try { invalid(); } catch (error: any) { console.log(effects, error.message); }
+  const owner = { n: 2 };
+  const deep = nested.call(owner);
+  const pair = siblings.call(owner);
+  const first = pair[0];
+  const second = pair[1];
+  owner.n = 5;
+  console.log(deep()(), first(), second());
+  console.log(ownReceiver.call({ n: 3 }));
+  const captured = alias.call(owner);
+  owner.n = 8;
+  console.log(captured());
+  const symbol = Symbol('identity');
+  console.log(primitive.call(symbol) === symbol);
+  const invalidHost = invokeWithReceiver(function(this: any): () => number { effects++; return () => this.n; }, null);
+  console.log('host callback created');
+  try { invalidHost(); } catch (error: any) { console.log(effects, error.message); }
+  const invalidHostUndefined = invokeWithReceiver(function(this: any): () => number { effects++; return () => this.n; }, undefined);
+  try { invalidHostUndefined(); } catch (error: any) { console.log(effects, error.message); }
+  const result = install(function(this: any): () => number { return () => this.n; });
+  console.log(invokeHost(result, 7), invokeHost(result, 9));
+}"#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let hir = format!("{:#?}", thaw_hir::lower_module(&module).unwrap());
+    assert!(hir.contains("FunctionWithThis("), "{hir}");
+    assert!(hir.contains("registerNativeCallback"), "{hir}");
+    assert_eq!(
+        compile_and_run(source, "kb_contract_escaped_arrows_keep_lazy_lexical_receiver"),
+        "1 1\ncreated\n1 Cannot read properties of undefined (reading 'n')\n5 5 5\n43\n8\ntrue\nhost callback created\n2 Cannot read properties of null (reading 'n')\n3 Cannot read properties of undefined (reading 'n')\n7 9\n"
+    );
+}
+
+#[test]
 fn kb_contract_this_assignment_and_call_order_matches_node() {
     let source = r#"let trace = "";
 const assign = function(this: { a: number }, rhs: () => number): number { this.a = rhs(); return 0; };

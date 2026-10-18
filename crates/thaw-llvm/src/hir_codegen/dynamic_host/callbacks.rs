@@ -2029,6 +2029,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
+        let callback_has_this = matches!(
+            self.expr_hir_type(closure_expr),
+            Some(HirType::FunctionWithThis(_, _))
+        );
         let callback_type = match self.expr_hir_type(closure_expr) {
             Some(HirType::FunctionWithThis(_, visible)) => Some(*visible),
             other => other,
@@ -2091,7 +2095,8 @@ impl<'ctx> HirCompiler<'ctx> {
             matches!(inner, HirExpr::Call(callee, _)
                 if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias"))
         };
-        let graph_mode = graph_mode
+        // Graph callback framing carries JavaScript's call-time receiver into the hidden `this` entry.
+        let graph_mode = graph_mode || callback_has_this
             || (!aliased_adapter && json_callback_wants_graph(&params));
         let closure = self.compile_expr(closure_expr)?;
         if optional {
