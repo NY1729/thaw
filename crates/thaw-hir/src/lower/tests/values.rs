@@ -3459,3 +3459,254 @@ fn symbol_bearing_native_composites_select_projection() {
     let body = format!("{program:#?}");
     assert!(body.contains("retainDynamicNative"), "{body}");
 }
+
+fn structural_class_argument_source(decorator: &str) -> String {
+    format!(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {{ value: number }}): string;
+            {decorator}class Item {{ value: number = 1; }}
+            function main(): void {{ __thaw_typed_js_7368617065(new Item()); }}
+        "#
+    )
+}
+
+#[test]
+fn undecorated_class_satisfies_external_structural_argument() {
+    let module = thaw_parser::parse_typescript(&structural_class_argument_source(""))
+        .expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "class public source field value: number should satisfy {{ value: number }}; got: {}", result.unwrap_err());
+}
+
+#[test]
+fn decorated_class_satisfies_external_structural_argument() {
+    let module = thaw_parser::parse_typescript(&structural_class_argument_source("declare function Mark(value: any): any;\n@Mark\n"))
+        .expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "decorated class public source field value: number should satisfy {{ value: number }}; got: {}", result.unwrap_err());
+}
+
+#[test]
+fn external_structural_argument_accepts_class_prototype_method() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {
+                bump(value?: number): number;
+                rest(...values: number[]): number;
+                asyncBump(): Promise<number>;
+            }): number;
+            class Item {
+                value: number = 1;
+                bump(value?: number): number { return this.value; }
+                rest(...values: number[]): number { return this.value; }
+                async asyncBump(): Promise<number> { return this.value; }
+            }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "class prototype methods should satisfy structural method contracts: {}", result.unwrap_err());
+}
+
+#[test]
+fn external_structural_argument_rejects_missing_or_incompatible_class_methods() {
+    for (class, diagnostic) in [
+        ("class Item { value: number = 1; }", "missing required field `bump`"),
+        ("class Item { value: number = 1; bump(value?: number): string { return 'wrong'; } }", "incompatible method signature"),
+        ("class Item { value: number = 1; bump(value: string): number { return 1; } }", "incompatible method signature"),
+    ] {
+        let source = format!(
+            "declare function __thaw_typed_js_7368617065(value: {{ bump(value?: number): number }}): number;\n{class}\nfunction main(): void {{ __thaw_typed_js_7368617065(new Item()); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse");
+        let error = lower_module(&module).expect_err("missing or incompatible method must be rejected");
+        assert!(error.contains("bump"), "{error}");
+        assert!(error.contains(diagnostic), "{error}");
+        assert!(!error.contains("__thaw_class_identity_"), "{error}");
+    }
+}
+
+#[test]
+fn external_structural_argument_rejects_missing_and_incompatible_fields() {
+    for source in [
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): string;
+            class Item { other: number = 1; }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): string;
+            class Item { value: string = "wrong"; }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).expect("parse");
+        let error = lower_module(&module).expect_err("invalid class source shape should be rejected");
+        assert!(error.contains("value"), "{error}");
+        assert!(!error.contains("__thaw_class_identity_"), "{error}");
+    }
+}
+
+#[test]
+fn external_class_union_mismatch_diagnostic_hides_identity_marker() {
+    for target in ["{ name: string } | { count: number }", "Item | { name: string }"] {
+        let source = format!(
+            "declare function __thaw_typed_js_7368617065(value: {target}): void;\nclass Item {{ value: number = 1; }}\nclass Other {{ value: number = 1; }}\nfunction main(): void {{ __thaw_typed_js_7368617065(new Other()); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse");
+        let error = lower_module(&module).expect_err("incompatible class must not satisfy union target");
+        assert!(!error.contains("__thaw_class_identity_"), "{error}");
+    }
+}
+
+#[test]
+fn external_structural_argument_recurses_through_nested_arrays_and_optional_fields() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {
+                child: { value: number };
+                children: { value: number }[];
+                pair: [number, string];
+                choice: number | string;
+                absent?: string;
+            }): void;
+            class Child { value: number = 1; extra: string = "ok"; }
+            class Holder {
+                child: Child = new Child();
+                children: Child[] = [];
+                pair: [number, string] = [1, "ok"];
+                choice: number | string = 1;
+                extra: boolean = true;
+            }
+            function main(): void {
+                const item = new Holder();
+                const alias = item;
+                __thaw_typed_js_7368617065(alias);
+            }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_ok(), "nested class fields should satisfy recursive structural targets");
+}
+
+#[test]
+fn external_dictionary_source_contract_preserves_object_literal_coercion() {
+    for (target, argument, succeeds) in [
+        ("Record<string, number>", "{ a: 1 }", true),
+        ("Record<string, number> | { tag: string }", "{ a: 1 }", true),
+        ("Record<string, number> | undefined", "{ a: 1 }", true),
+        ("Record<string, number> | null", "{ a: 1 }", true),
+        ("Record<string, number> | null | undefined", "{ a: 1 }", true),
+        ("Record<string, number>", "{ a: 'wrong' }", false),
+        ("Record<string, number> | { tag: string }", "{ a: 'wrong' }", false),
+    ] {
+        let source = format!(
+            "declare function __thaw_typed_js_7368617065(value: {target}): void;\nfunction main(): void {{ __thaw_typed_js_7368617065({argument}); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse");
+        let result = lower_module(&module);
+        assert_eq!(result.is_ok(), succeeds, "target={target}, argument={argument}: {result:?}");
+    }
+}
+
+#[test]
+fn external_structural_argument_reports_nested_public_field_on_mismatch() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { child: { value: number } }): void;
+            class Child { value: string = "wrong"; }
+            class Holder { child: Child = new Child(); }
+            function main(): void { __thaw_typed_js_7368617065(new Holder()); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("nested incompatible public field must fail");
+    assert!(error.contains("field `child`"), "{error}");
+    assert!(error.contains("field `value`"), "{error}");
+    assert!(!error.contains("__thaw_class_identity_"), "{error}");
+}
+
+#[test]
+fn external_structural_argument_preserves_nullable_and_undefined_contracts() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {
+                nullable: string | null;
+                optional: string | undefined;
+                nullish: string | null | undefined;
+                absent?: number;
+            }): void;
+            class Item {
+                nullable: string | null = null;
+                optional: string | undefined = undefined;
+                nullish: string | null | undefined = undefined;
+            }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_ok(), "matching nullable and undefined source contracts should pass");
+}
+
+#[test]
+fn external_structural_argument_does_not_drop_optional_source_to_required() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): void;
+            class Item { value?: number; }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("optional source cannot satisfy a required field");
+    assert!(error.contains("value"), "{error}");
+}
+
+#[test]
+fn plain_object_does_not_satisfy_nominal_class_argument() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: Item): string;
+            class Item { value: number = 1; }
+            function main(): void { __thaw_typed_js_7368617065({ value: 1 }); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("plain object must not acquire Item identity");
+    assert!(!error.contains("__thaw_class_identity_"), "{error}");
+}
+
+#[test]
+fn another_class_does_not_satisfy_nominal_class_argument() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: Item): string;
+            class Item { value: number = 1; }
+            class Other { value: number = 1; }
+            function main(): void { __thaw_typed_js_7368617065(new Other()); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("another class must not satisfy nominal Item");
+    assert!(error.contains("Other") || error.contains("Item"), "{error}");
+    assert!(!error.contains("__thaw_class_identity_"), "{error}");
+}
+
+#[test]
+fn getter_only_class_field_satisfies_structural_contract_without_evaluation() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): string;
+            class Item { get value(): number { throw new Error("read"); } }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "getter return type should satisfy structural contract without running getter: {:?}", result.err());
+}
+
+#[test]
+fn class_array_satisfies_top_level_structural_array_contract() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }[]): string;
+            class Item { value: number = 1; extra: string = "ok"; }
+            function main(): void { __thaw_typed_js_7368617065([new Item()]); }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_ok(), "class instances should satisfy structural array elements");
+}

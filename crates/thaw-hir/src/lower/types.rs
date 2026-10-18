@@ -144,6 +144,9 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         }
         HirType::Union(elements) => elements.iter().all(supports_generic_native_layout),
         HirType::Tuple(elements) => elements.iter().all(supports_generic_native_layout),
+        HirType::Object(fields) if class_name_from_type(ty).is_some() => fields.iter().all(|(_, field)| {
+            *field == HirType::Json || supports_generic_native_layout(field)
+        }),
         HirType::Object(fields) => fields
             .iter()
             .all(|(_, ty)| supports_generic_native_layout(ty)),

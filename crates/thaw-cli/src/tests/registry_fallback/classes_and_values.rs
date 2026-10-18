@@ -81,6 +81,266 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn structural_package_arguments_accept_decorated_and_undecorated_classes() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-structural-class-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function inspect(value: { value: number }): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.inspect = function(value) { return value.value; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { inspect } from "shape-kit";
+function Mark(value: JsValue): JsValue { return value; }
+class Plain { value: number = 17; }
+@Mark class Decorated { value: number = 29; }
+function main(): void {
+    console.log(inspect(new Plain()));
+    console.log(inspect(new Decorated()));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "17\n29\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn structural_package_arguments_reject_missing_and_incompatible_fields() {
+    for (name, class, expected_diagnostic) in [
+        ("missing", "class Item {}", "missing required field"),
+        ("wrong", "class Item { value: string = 'bad'; }", "F64"),
+    ] {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-registry-fallback-structural-{name}-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        let package = registry.join("shape-kit");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export declare function inspect(value: { value: number }): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("bundle.js"),
+            "module.exports.inspect = function(value) { return value.value; };\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            format!(
+                "import {{ inspect }} from 'shape-kit';\n{class}\nfunction main(): void {{ inspect(new Item()); }}\n"
+            ),
+        )
+        .unwrap();
+        let error = build(&entry, &dir.join("app"), &[], &[], &[], &registry, &[]).unwrap_err();
+        assert!(error.contains("value"), "{error}");
+        assert!(error.contains(expected_diagnostic), "{error}");
+        assert!(!error.contains("__thaw_class_identity"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn structural_package_arguments_accept_nested_and_class_array_fields() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-structural-nested-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function inspect(value: { child: { value: number }; children: { value: number }[]; absent?: string }): number;\n",
+    ).unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.inspect = function(value) { return value.child.value + value.children[0].value; };\n",
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { inspect } from "shape-kit";
+class Child { value: number = 17; extra: string = "ok"; }
+class Holder { child: Child = new Child(); children: Child[] = [new Child()]; extra = true; }
+function main(): void { console.log(inspect(new Holder())); }
+"#,
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "34\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn structural_package_arguments_call_class_prototype_methods_on_the_original() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-structural-method-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function inspect(value: { value: number; bump(): number }): number;\n",
+    ).unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.inspect = function(value) { return value.bump() + value.value; };\n",
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { inspect } from "shape-kit";
+class Item {
+    value: number = 4;
+    bump(): number { this.value++; return this.value; }
+}
+function main(): void {
+    const item = new Item();
+    console.log(inspect(item), item.value);
+}
+"#,
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "10 5\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn structural_package_getter_error_is_thrown_once_at_conversion() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-structural-getter-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function inspect(value: { value: number }): number;\n",
+    ).unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.inspect = function(value) { return value.value; };\n",
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { inspect } from "shape-kit";
+class Item {
+    reads = 0;
+    get value(): number { this.reads++; throw new Error("getter failed"); }
+}
+function main(): void {
+    const item = new Item();
+    try { inspect(item); } catch (error) { console.log(error.message, item.reads); }
+}
+"#,
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "getter failed 1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn decorated_class_passed_to_any_package_identity_stays_live() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-class-any-live-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("identity-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export declare function identity(value: any): any;\n").unwrap();
+    std::fs::write(package.join("bundle.js"), "module.exports.identity = function(value) { return value; };\n").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"import { identity } from "identity-kit";
+function Mark(value: JsValue): JsValue { return value; }
+@Mark class Item { value: number = 3; }
+function main(): void {
+    const item = new Item();
+    const returned = identity(item);
+    returned.value = 9;
+    console.log(returned === item, item.value);
+}
+"#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true 9\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn local_generic_identity_keeps_class_writeback_after_typed_js_boundary() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-generic-class-identity-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("identity-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export declare function identity<T>(item: T): T;\nexport declare function inspect(value: { value: number }): number;\n").unwrap();
+    std::fs::write(package.join("bundle.js"), "module.exports.identity = function(item) { return item; };\nmodule.exports.inspect = function(value) { return value.value; };\n").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"import { identity, inspect } from "identity-kit";
+class Item { value: number = 5; }
+function localIdentity<T>(item: T): T { return item; }
+function main(): void {
+    const item = new Item();
+    console.log(inspect(item));
+    const localReturned = localIdentity(item);
+    localReturned.value = 8;
+    console.log(localReturned === item, item.value);
+    const importedReturned = identity(item);
+    importedReturned.value = 13;
+    console.log(importedReturned === item, item.value);
+}
+"#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\ntrue 8\ntrue 13\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A bare (non-`new`) factory function's declared return type names a
 /// real class only through a *generic type alias* (`type
 /// Transporter<T, D> = Mail; createTransport(): Transporter;`) rather

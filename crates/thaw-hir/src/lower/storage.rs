@@ -5,6 +5,7 @@ struct StoragePlan {
     dynamic: HashSet<(u32, u32)>,
     source_types: HashMap<(u32, u32), HirType>,
     source_conflicts: HashSet<(u32, u32)>,
+    class_fields: HashMap<(String, String), (Span, bool)>,
     argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     callable_parameters: HashMap<u32, Vec<(u32, u32)>>,
     quickjs_function_value_nodes: HashSet<(u32, u32)>,
@@ -63,6 +64,7 @@ impl StoragePlan {
             dynamic,
             source_types: HashMap::new(),
             source_conflicts: HashSet::new(),
+            class_fields: HashMap::new(),
             argument_parameters: graph.argument_parameters,
             callable_parameters,
             quickjs_function_value_nodes,
@@ -1203,6 +1205,60 @@ fn storage_source_type(span: Span) -> Option<HirType> {
         (!active.source_conflicts.contains(&storage_key(span))).then(|| active.source_types.get(&storage_key(span)).cloned()).flatten()
     })
 }
+fn remember_class_source_field(class: &str, field: &str, span: Span, optional: bool) {
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        active.borrow_mut().class_fields.insert((class.to_owned(), field.to_owned()), (span, optional));
+    });
+}
+
+fn storage_source_type_from_plan(span: Span, active: &StoragePlan) -> Option<HirType> {
+    let key = storage_key(span);
+    (!active.source_conflicts.contains(&key)).then(|| active.source_types.get(&key).cloned()).flatten()
+}
+
+fn source_class_contract(ty: &HirType, active: &StoragePlan, seen: &mut HashSet<String>) -> HirType {
+    match ty {
+        HirType::Object(fields) => {
+            let identities = fields.first().and_then(|(marker, tag)| {
+                (*tag == HirType::Bool)
+                    .then(|| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+                    .flatten()
+            });
+            let mut restored = fields.iter().map(|(name, field)| {
+                (name.clone(), source_class_contract(field, active, seen))
+            }).collect::<Vec<_>>();
+            let mut restored_names = HashSet::new();
+            if let Some(identities) = identities {
+                for class in identities.split('\u{1f}') {
+                    if seen.insert(class.to_owned()) {
+                        for ((owner, name), (span, optional)) in &active.class_fields {
+                            if owner == class && restored_names.insert(name.clone()) {
+                                if let Some(mut source) = storage_source_type_from_plan(*span, active) {
+                                    if *optional { source = optional_parameter_type(source); }
+                                    let source = source_class_contract(&source, active, seen);
+                                    if let Some((_, field)) = restored.iter_mut().find(|(existing, _)| existing == name) {
+                                        *field = source;
+                                    } else {
+                                        restored.push((name.clone(), source));
+                                    }
+                                }
+                            }
+                        }
+                        seen.remove(class);
+                    }
+                }
+            }
+            HirType::Object(restored)
+        }
+        HirType::Array(inner) => HirType::Array(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Tuple(types) => HirType::Tuple(types.iter().map(|ty| source_class_contract(ty, active, seen)).collect()),
+        HirType::Optional(inner) => HirType::Optional(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Nullable(inner) => HirType::Nullable(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Nullish(inner) => HirType::Nullish(Box::new(source_class_contract(inner, active, seen))),
+        HirType::Union(types) => HirType::Union(types.iter().map(|ty| source_class_contract(ty, active, seen)).collect()),
+        other => other.clone(),
+    }
+}
 fn storage_source_return_type(source_start: u32) -> Option<HirType> {
     if source_start == 0 { return None; }
     let key = (source_start, 0);
@@ -1404,6 +1460,20 @@ impl FnLowerer<'_> {
     }
 }
 
+fn contains_native_class(ty: &HirType) -> bool {
+    match ty {
+        HirType::Object(fields) => {
+            class_name_from_type(ty).is_some() || fields.iter().any(|(_, ty)| contains_native_class(ty))
+        }
+        HirType::Array(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => contains_native_class(inner),
+        HirType::Tuple(types) | HirType::Union(types) => types.iter().any(contains_native_class),
+        _ => false,
+    }
+}
+
 fn storage_reference_type(ty: &TsType) -> bool {
     !matches!(ty, TsType::TsKeywordType(keyword)
         if !matches!(keyword.kind, TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsObjectKeyword | TsKeywordTypeKind::TsUnknownKeyword))
@@ -1480,9 +1550,60 @@ impl FnLowerer<'_> {
         }
         self.coerce_primitive_array_argument(value, declared)
     }
+
+    fn coerce_jit_structural_class_argument(
+        &mut self,
+        value: HirExpr,
+        declared: &HirType,
+    ) -> Result<HirExpr, String> {
+        let json = self.coerce_to_declared_aliasing(&HirType::Json, value)?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_decode_native_argument".into())),
+            vec![HirExpr::TypedClosure(
+                declared.clone(),
+                Box::new(json),
+            )],
+        ))
+    }
 }
 
 impl FnLowerer<'_> {
+    fn source_contract_type_for_expression(&self, expression: &Expr) -> Option<HirType> {
+        let restore = |ty| ACTIVE_STORAGE_PLAN.with(|active| {
+            source_class_contract(&ty, &active.borrow(), &mut HashSet::new())
+        });
+        match expression {
+            Expr::Ident(identifier) => {
+                let name = self.resolve_binding(identifier.sym.as_ref());
+                self.source_scope.get(&name).cloned()
+                    .or_else(|| storage_source_type(identifier.span))
+                    .or_else(|| self.scope.get(&name).cloned())
+                    .map(restore)
+            }
+            Expr::This(_) => {
+                let name = self.resolve_binding("this");
+                self.source_scope.get(&name).cloned().or_else(|| self.scope.get(&name).cloned()).map(restore)
+            }
+            Expr::Paren(value) => self.source_contract_type_for_expression(&value.expr),
+            Expr::TsNonNull(value) => self.source_contract_type_for_expression(&value.expr),
+            Expr::TsAs(value) => lower_ts_type(&value.type_ann, self.interfaces, self.generic_interfaces).ok().map(restore),
+            Expr::TsTypeAssertion(value) => lower_ts_type(&value.type_ann, self.interfaces, self.generic_interfaces).ok().map(restore),
+            Expr::Member(member) => {
+                if let Some(source) = storage_source_type(member.span) { return Some(restore(source)); }
+                let HirType::Object(fields) = self.source_contract_type_for_expression(&member.obj)? else { return None };
+                let MemberProp::Ident(property) = &member.prop else { return None };
+                fields.into_iter().find(|(field, _)| field == property.sym.as_ref()).map(|(_, ty)| restore(ty))
+            }
+            Expr::New(new_expr) => {
+                let Expr::Ident(class) = new_expr.callee.as_ref() else { return None };
+                let name = self.resolve_binding(class.sym.as_ref());
+                let restored = self.interfaces.get(&name).cloned().map(restore);
+                restored
+            }
+            _ => None,
+        }
+    }
+
     fn source_value_hint(&self, expression: &Expr) -> Option<HirExpr> {
         fn uncertain(ty: &HirType) -> bool {
             match ty {
@@ -1494,6 +1615,12 @@ impl FnLowerer<'_> {
             }
         }
         let typed = |ty| HirExpr::TypedClosure(if uncertain(&ty) { HirType::Json } else { ty }, Box::new(HirExpr::Lit(HirLit::Undefined)));
+        let source_typed = |ty| {
+            HirExpr::TypedClosure(
+                if contains_native_class(&ty) { ty } else if uncertain(&ty) { HirType::Json } else { ty },
+                Box::new(HirExpr::Lit(HirLit::Undefined)),
+            )
+        };
         match expression {
             Expr::Lit(Lit::Num(value)) => Some(HirExpr::Lit(HirLit::F64(value.value))),
             Expr::Lit(Lit::Str(value)) => Some(HirExpr::Lit(HirLit::Str(value.value.to_string_lossy().into_owned()))),
@@ -1514,7 +1641,7 @@ impl FnLowerer<'_> {
                         None
                     }
                 }).or_else(|| self.json_narrowings.get(&name).cloned());
-                narrowed.or_else(|| self.source_scope.get(&name).or_else(|| self.scope.get(&name)).cloned()).map(typed)
+                narrowed.or_else(|| self.source_contract_type_for_expression(expression)).map(source_typed)
                     .or_else(|| {
                         let signature = self.signatures.get(&name)?;
                         (signature.is_extern
@@ -1531,8 +1658,7 @@ impl FnLowerer<'_> {
                     })
             }
             Expr::This(_) => {
-                let name = self.resolve_binding("this");
-                self.source_scope.get(&name).or_else(|| self.scope.get(&name)).cloned().map(typed)
+                self.source_contract_type_for_expression(expression).map(source_typed)
             }
             Expr::Paren(value) => self.source_value_hint(&value.expr),
             Expr::TsNonNull(value) => self.source_value_hint(&value.expr),
@@ -1557,6 +1683,7 @@ impl FnLowerer<'_> {
                 Some(HirExpr::ObjectLit(fields))
             }
             Expr::Member(member) => {
+                if let Some(ty) = self.source_contract_type_for_expression(expression) { return Some(source_typed(ty)); }
                 let owner = self.source_value_hint(&member.obj)?;
                 let ty = self.infer_expr_type(&owner).ok()?;
                 match (&ty, &member.prop) {
@@ -1565,6 +1692,9 @@ impl FnLowerer<'_> {
                     (HirType::Json | HirType::JsValue, _) => Some(typed(HirType::Json)),
                     _ => None,
                 }
+            }
+            Expr::New(_) if self.source_contract_type_for_expression(expression).is_some() => {
+                self.source_contract_type_for_expression(expression).map(source_typed)
             }
             Expr::New(new_expr)
                 if matches!(new_expr.callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "Date")
@@ -1587,15 +1717,20 @@ impl FnLowerer<'_> {
         &self,
         source: Option<&Expr>,
         physical: &HirExpr,
+        preserve_class_physical: bool,
     ) -> Result<HirType, String> {
         let physical_type = self.infer_expr_type(physical)?;
+        if preserve_class_physical && contains_native_class(&physical_type) {
+            return Ok(physical_type);
+        }
         if physical_type != HirType::JsValue {
             if let Some(source) = source.filter(|source| has_dynamic_storage(source.span())) {
                 if let Some(source_type) = self
                     .source_value_hint(source)
                     .and_then(|hint| self.infer_expr_type(&hint).ok())
                     .filter(|source_type| {
-                        !matches!(source_type, HirType::Json | HirType::Dynamic | HirType::JsValue)
+                        !(matches!(source_type, HirType::Json | HirType::Dynamic | HirType::JsValue)
+                            || preserve_class_physical && contains_native_class(source_type))
                     })
                 {
                     return Ok(source_type);
@@ -1605,42 +1740,147 @@ impl FnLowerer<'_> {
         Ok(physical_type)
     }
 
-    fn validate_storage_source_type(&mut self, expected: &HirType, source: HirExpr) -> Result<(), String> {
-        if matches!(self.infer_expr_type(&source)?, HirType::Json | HirType::JsValue | HirType::Dynamic)
-            || matches!((&source, expected), (HirExpr::ArrayLit(elements), HirType::Array(_)) if elements.is_empty()) {
+    fn validate_source_assignable(&mut self, expected: &HirType, actual: &HirType) -> Result<(), String> {
+        if matches!(actual, HirType::Json | HirType::JsValue | HirType::Dynamic) {
             return Ok(());
         }
+        if let HirType::Union(members) = actual {
+            for member in members {
+                self.validate_source_assignable(expected, member)?;
+            }
+            return Ok(());
+        }
+        if let HirType::Union(members) = expected {
+            if members.iter().any(|member| self.validate_source_assignable(member, actual).is_ok()) {
+                return Ok(());
+            }
+            return Err("value does not satisfy any member of the declared union".to_string());
+        }
+        match (expected, actual) {
+            (HirType::Optional(_), HirType::Undefined)
+            | (HirType::Nullable(_), HirType::Null)
+            | (HirType::Nullish(_), HirType::Null | HirType::Undefined) => return Ok(()),
+            (HirType::Optional(expected), HirType::Optional(actual))
+            | (HirType::Nullable(expected), HirType::Nullable(actual))
+            | (HirType::Nullish(expected), HirType::Nullish(actual)) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Nullish(expected), HirType::Optional(actual) | HirType::Nullable(actual)) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Optional(expected), actual) => {
+                if matches!(actual, HirType::Nullable(_) | HirType::Nullish(_)) {
+                    return Err(format!("value has type {actual:?}, expected {expected:?} or undefined"));
+                }
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Nullable(expected), actual) if !matches!(actual, HirType::Nullish(_) | HirType::Optional(_)) && *actual != HirType::Null => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Nullish(expected), actual) if !matches!(actual, HirType::Null | HirType::Undefined) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Array(expected), HirType::Array(actual)) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Array(expected), HirType::Tuple(actual)) => {
+                for element in actual { self.validate_source_assignable(expected, element)?; }
+                return Ok(());
+            }
+            (HirType::Tuple(expected), HirType::Tuple(actual)) => {
+                let required = expected.iter().take_while(|ty| omitted_parameter_value(ty).is_err()).count();
+                if actual.len() < required || actual.len() > expected.len() {
+                    return Err(format!("value has tuple length {}, expected {}..={}", actual.len(), required, expected.len()));
+                }
+                for (expected, actual) in expected.iter().zip(actual) {
+                    self.validate_source_assignable(expected, actual)?;
+                }
+                return Ok(());
+            }
+            (HirType::Object(expected), HirType::Object(actual)) => {
+                if let Some(class) = class_name_from_type(&HirType::Object(expected.clone())) {
+                    return if class_type_has_identity(&HirType::Object(actual.clone()), class) {
+                        Ok(())
+                    } else {
+                        let actual_name = class_name_from_type(&HirType::Object(actual.clone()))
+                            .map(|name| format!("class `{name}`"))
+                            .unwrap_or_else(|| format!("value of type {actual:?}"));
+                        Err(format!("{actual_name} does not satisfy nominal class `{class}`"))
+                    };
+                }
+                let public = |name: &str| !name.starts_with("__thaw_class_identity_\u{1e}")
+                    && !name.starts_with("__thaw_private_") && !is_hidden_accessor_field(name);
+                for (name, expected_field) in expected.iter().filter(|(name, _)| public(name)) {
+                    if let Some((_, actual_field)) = actual.iter().find(|(actual_name, _)| actual_name == name && public(actual_name)) {
+                        self.validate_source_assignable(expected_field, actual_field)
+                            .map_err(|error| format!("field `{name}`: {error}"))?;
+                    } else if omitted_parameter_value(expected_field).is_err() {
+                        let actual_class = HirType::Object(actual.clone());
+                        if let Some(class) = class_name_from_type(&actual_class) {
+                            if self.class_method_signature_compatible(class, name, expected_field, true) {
+                                continue;
+                            }
+                            if self.class_method_signature_exists(class, name) {
+                                return Err(format!("field `{name}` has an incompatible method signature"));
+                            }
+                        }
+                        return Err(format!("missing required field `{name}`"));
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        self.coerce_to_declared(expected, HirExpr::TypedClosure(
+            actual.clone(), Box::new(HirExpr::Lit(HirLit::Undefined)),
+        )).map(|_| ())
+    }
+
+    fn validate_storage_source_type(&mut self, expected: &HirType, source: HirExpr) -> Result<(), String> {
+        let actual = self.infer_expr_type(&source)?;
+        if matches!(actual, HirType::Json | HirType::JsValue | HirType::Dynamic) { return Ok(()); }
         if let HirType::Union(members) = expected {
             for member in members {
                 if self.validate_storage_source_type(member, source.clone()).is_ok() {
                     return Ok(());
                 }
             }
+            return self.validate_source_assignable(expected, &actual);
+        }
+        if matches!(&source, HirExpr::ObjectLit(_) | HirExpr::ArrayLit(_)) {
+            if let HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) = expected {
+                return self.validate_storage_source_type(inner, source);
+            }
+        }
+        if matches!((expected, &source), (HirType::Dictionary(_), HirExpr::ObjectLit(_))) {
             return self.coerce_to_declared(expected, source).map(|_| ());
         }
-        if let (HirType::Array(expected), HirExpr::ArrayLit(values)) = (expected, &source) {
-            for value in values {
-                if !matches!(value, HirExpr::Lit(HirLit::ArrayHole)) { self.validate_storage_source_type(expected, value.clone())?; }
+        if matches!((expected, &actual), (HirType::Tuple(_), HirType::Array(_))) {
+            return self.coerce_to_declared(expected, source).map(|_| ());
+        }
+        if let (HirType::Object(expected_fields), HirExpr::ObjectLit(values)) = (expected, &source) {
+            if class_name_from_type(expected).is_some() {
+                return self.validate_source_assignable(expected, &actual);
             }
-            return Ok(());
-        }
-        if let (HirType::Array(expected), HirType::Array(actual)) = (expected, self.infer_expr_type(&source)?) {
-            return self.validate_storage_source_type(expected, HirExpr::TypedClosure(*actual, Box::new(HirExpr::Lit(HirLit::Undefined))));
-        }
-        if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, self.infer_expr_type(&source)?) {
             for (name, expected_field) in expected_fields {
-                if let Some((_, actual)) = actual_fields.iter().find(|(actual, _)| actual == name) {
-                    let value = if let HirExpr::ObjectLit(fields) = &source {
-                        fields.iter().find(|(field, _)| field == name).map(|(_, value)| value.clone())
-                    } else { None }.unwrap_or_else(|| HirExpr::TypedClosure(actual.clone(), Box::new(HirExpr::Lit(HirLit::Undefined))));
-                    self.validate_storage_source_type(expected_field, value)?;
+                if let Some((_, value)) = values.iter().find(|(field, _)| field == name) {
+                    self.validate_storage_source_type(expected_field, value.clone())
+                        .map_err(|error| format!("field `{name}`: {error}"))?;
                 } else if omitted_parameter_value(expected_field).is_err() {
-                    return self.coerce_to_declared(expected, source).map(|_| ());
+                    return Err(format!("missing required field `{name}`"));
                 }
             }
             return Ok(());
         }
-        self.coerce_to_declared(expected, source).map(|_| ())
+        if let (HirType::Array(element), HirExpr::ArrayLit(values)) = (expected, &source) {
+            for value in values {
+                if !matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
+                    self.validate_storage_source_type(element, value.clone())?;
+                }
+            }
+            return Ok(());
+        }
+        self.validate_source_assignable(expected, &actual)
     }
 
     fn validate_storage_source(&mut self, expression: &Expr, expected: &HirType) -> Result<(), String> {

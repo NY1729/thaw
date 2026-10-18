@@ -1098,6 +1098,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             interfaces.get(name.as_str()),
                         )?
                     };
+                    if method.kind == MethodKind::Getter && !method.is_static {
+                        remember_class_source_field(&name, &method_name, method.function.span, false);
+                        remember_storage_source(storage_key(method.function.span), &ret);
+                    }
                     let ret = storage_return_type(method.function.span, ret);
                     let symbol = match method.kind {
                         MethodKind::Getter => {
