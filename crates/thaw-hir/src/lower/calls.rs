@@ -402,13 +402,21 @@ impl<'a> FnLowerer<'a> {
         let label = format!("native class method `{class_name}.{method_name}.bind`");
         let (leading_values, leading_bindings) =
             self.lower_native_spread_values(leading_arguments, &label)?;
-        if leading_values.len() > signature.params.len().saturating_sub(1) {
+        let receiver_count = 1;
+        let fixed_param_count = signature
+            .params
+            .len()
+            .saturating_sub(receiver_count + usize::from(signature.native_rest.is_some()));
+        let fixed_params = &signature.params[receiver_count..receiver_count + fixed_param_count];
+        let rest = signature.native_rest.clone();
+        if rest.is_none() && leading_values.len() > fixed_params.len() {
             return Err(format!(
                 "native class method `{class_name}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
                 leading_values.len(),
-                signature.params.len().saturating_sub(1)
+                fixed_params.len()
             ));
         }
+        let fixed_bound_count = leading_values.len().min(fixed_params.len());
 
         let target_name = format!("__thaw_bind_target_{}", self.next_binding);
         self.next_binding += 1;
@@ -422,11 +430,11 @@ impl<'a> FnLowerer<'a> {
         ];
         bindings.extend(leading_bindings);
         let mut bound_argument_names = Vec::new();
-        for (index, (value, expected)) in leading_values
-            .iter()
-            .zip(signature.params[1..].iter())
-            .enumerate()
-        {
+        let mut bound_argument_types = Vec::with_capacity(leading_values.len());
+        for (index, value) in leading_values.iter().enumerate() {
+            let expected = fixed_params.get(index).or(rest.as_ref()).ok_or_else(|| {
+                format!("native class method `{class_name}.{method_name}.bind` has no parameter {}", index + 1)
+            })?;
             let value = self
                 .coerce_to_declared(expected, value.clone())
                 .map_err(|error| {
@@ -439,9 +447,11 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(name.clone(), expected.clone());
             bound_argument_names.push(name.clone());
+            bound_argument_types.push(expected.clone());
             bindings.push((name, expected.clone(), value));
         }
-        let parameters = signature.params[1 + leading_values.len()..]
+        let remaining_fixed = fixed_params[fixed_bound_count..].to_vec();
+        let mut parameters = remaining_fixed
             .iter()
             .enumerate()
             .map(|(index, ty)| HirParam {
@@ -449,13 +459,46 @@ impl<'a> FnLowerer<'a> {
                 ty: ty.clone(),
             })
             .collect::<Vec<_>>();
+        let invocation_rest_name = rest.as_ref().map(|element| {
+            let name = format!("__thaw_bound_rest_{}", self.next_binding);
+            self.next_binding += 1;
+            parameters.push(HirParam {
+                name: name.clone(),
+                ty: HirType::Array(Box::new(element.clone())),
+            });
+            name
+        });
         let mut arguments = vec![HirExpr::Var(bound_name.clone())];
-        arguments.extend(bound_argument_names.iter().cloned().map(HirExpr::Var));
         arguments.extend(
-            parameters
+            bound_argument_names[..fixed_bound_count]
+                .iter()
+                .cloned()
+                .map(HirExpr::Var),
+        );
+        arguments.extend(
+            parameters[..remaining_fixed.len()]
                 .iter()
                 .map(|parameter| HirExpr::Var(parameter.name.clone())),
         );
+        if let (Some(element), Some(invocation_rest_name)) = (&rest, invocation_rest_name) {
+            let bound_rest = bound_argument_names[fixed_bound_count..]
+                .iter()
+                .cloned()
+                .map(HirExpr::Var)
+                .collect::<Vec<_>>();
+            let rest_argument = if bound_rest.is_empty() {
+                HirExpr::Var(invocation_rest_name)
+            } else {
+                HirExpr::ArrayConcat(
+                    vec![
+                        HirExpr::ArrayLit(bound_rest),
+                        HirExpr::Var(invocation_rest_name),
+                    ],
+                    element.clone(),
+                )
+            };
+            arguments.push(rest_argument);
+        }
         let mut captures = vec![HirParam {
             name: bound_name.clone(),
             ty: target_type.clone(),
@@ -464,11 +507,7 @@ impl<'a> FnLowerer<'a> {
             bound_argument_names
                 .iter()
                 .cloned()
-                .zip(
-                    signature.params[1..1 + leading_values.len()]
-                        .iter()
-                        .cloned(),
-                )
+                .zip(bound_argument_types)
                 .map(|(name, ty)| HirParam { name, ty }),
         );
         let closure_return = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
@@ -478,9 +517,9 @@ impl<'a> FnLowerer<'a> {
             signature.ret.clone()
         };
         let closure_type = HirType::CallableFunction(
-            parameters.iter().map(|parameter| parameter.ty.clone()).collect(),
-            signature.source_omittable.shifted(1 + leading_values.len()),
-            None,
+            remaining_fixed,
+            signature.source_omittable.shifted(receiver_count + fixed_bound_count),
+            rest.map(Box::new),
             Box::new(closure_return.clone()),
         );
         let closure = HirExpr::TypedClosure(closure_type, Box::new(HirExpr::Lambda(
@@ -533,26 +572,33 @@ impl<'a> FnLowerer<'a> {
         let label = format!("native static method `{}.{method_name}.bind`", class.sym);
         let (leading_values, leading_bindings) =
             self.lower_native_spread_values(leading_arguments, &label)?;
-        if leading_values.len() > signature.params.len() {
+        let fixed_param_count = signature
+            .params
+            .len()
+            .saturating_sub(usize::from(signature.native_rest.is_some()));
+        let fixed_params = &signature.params[..fixed_param_count];
+        let rest = signature.native_rest.clone();
+        if rest.is_none() && leading_values.len() > fixed_params.len() {
             return Err(format!(
                 "native static method `{}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
                 class.sym,
                 leading_values.len(),
-                signature.params.len()
+                fixed_params.len()
             ));
         }
+        let fixed_bound_count = leading_values.len().min(fixed_params.len());
         let this_name = format!("__thaw_static_bind_this_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(this_name.clone(), this_type.clone());
         let mut bindings = vec![(this_name, this_type, this_value)];
         bindings.extend(leading_bindings);
         let mut captures = Vec::new();
-        let mut arguments = Vec::new();
-        for (index, (value, expected)) in leading_values
-            .iter()
-            .zip(signature.params.iter())
-            .enumerate()
-        {
+        let mut bound_names = Vec::with_capacity(leading_values.len());
+        let mut bound_types = Vec::with_capacity(leading_values.len());
+        for (index, value) in leading_values.iter().enumerate() {
+            let expected = fixed_params.get(index).or(rest.as_ref()).ok_or_else(|| {
+                format!("native static method `{}.{method_name}.bind` has no parameter {}", class.sym, index + 1)
+            })?;
             let value = self
                 .coerce_to_declared(expected, value.clone())
                 .map_err(|error| {
@@ -566,13 +612,11 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(name.clone(), expected.clone());
             bindings.push((name.clone(), expected.clone(), value));
-            captures.push(HirParam {
-                name: name.clone(),
-                ty: expected.clone(),
-            });
-            arguments.push(HirExpr::Var(name));
+            bound_names.push(name);
+            bound_types.push(expected.clone());
         }
-        let parameters = signature.params[leading_values.len()..]
+        let remaining_fixed = fixed_params[fixed_bound_count..].to_vec();
+        let mut parameters = remaining_fixed
             .iter()
             .enumerate()
             .map(|(index, ty)| HirParam {
@@ -580,10 +624,49 @@ impl<'a> FnLowerer<'a> {
                 ty: ty.clone(),
             })
             .collect::<Vec<_>>();
+        let invocation_rest_name = rest.as_ref().map(|element| {
+            let name = format!("__thaw_static_bound_rest_{}", self.next_binding);
+            self.next_binding += 1;
+            parameters.push(HirParam {
+                name: name.clone(),
+                ty: HirType::Array(Box::new(element.clone())),
+            });
+            name
+        });
+        let mut arguments = bound_names[..fixed_bound_count]
+            .iter()
+            .cloned()
+            .map(HirExpr::Var)
+            .collect::<Vec<_>>();
         arguments.extend(
-            parameters
+            parameters[..remaining_fixed.len()]
                 .iter()
                 .map(|parameter| HirExpr::Var(parameter.name.clone())),
+        );
+        if let (Some(element), Some(invocation_rest_name)) = (&rest, invocation_rest_name) {
+            let bound_rest = bound_names[fixed_bound_count..]
+                .iter()
+                .cloned()
+                .map(HirExpr::Var)
+                .collect::<Vec<_>>();
+            let rest_argument = if bound_rest.is_empty() {
+                HirExpr::Var(invocation_rest_name)
+            } else {
+                HirExpr::ArrayConcat(
+                    vec![
+                        HirExpr::ArrayLit(bound_rest),
+                        HirExpr::Var(invocation_rest_name),
+                    ],
+                    element.clone(),
+                )
+            };
+            arguments.push(rest_argument);
+        }
+        captures.extend(
+            bound_names
+                .into_iter()
+                .zip(bound_types)
+                .map(|(name, ty)| HirParam { name, ty }),
         );
         let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
             HirType::Promise(Box::new(signature.ret.clone()))
@@ -591,9 +674,9 @@ impl<'a> FnLowerer<'a> {
             signature.ret.clone()
         };
         let closure_type = HirType::CallableFunction(
-            parameters.iter().map(|parameter| parameter.ty.clone()).collect(),
-            signature.source_omittable.shifted(leading_values.len()),
-            None,
+            remaining_fixed,
+            signature.source_omittable.shifted(fixed_bound_count),
+            rest.map(Box::new),
             Box::new(result.clone()),
         );
         let closure = HirExpr::TypedClosure(closure_type, Box::new(HirExpr::Lambda(

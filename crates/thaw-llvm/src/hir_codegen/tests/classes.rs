@@ -4272,3 +4272,54 @@ fn static_class_method_assigns_to_optional_callable_type() {
         "7\n11\n3\n13\n"
     );
 }
+
+#[test]
+fn bound_instance_class_method_preserves_rest_prefix_after_optional_fixed_parameter() {
+    let source = r#"
+        class Counter {
+            sum(first: number, base: number = 1, ...values: number[]): number {
+                let total = first + base;
+                for (const value of values) total += value;
+                return total;
+            }
+        }
+        function main(): void {
+            const counter = new Counter();
+            const bound = counter.sum.bind(counter, 5, undefined, 2, 3);
+            const noRestPrefix = counter.sum.bind(counter, 5);
+            console.log(bound());
+            console.log(bound(4, 5));
+            console.log(noRestPrefix(4, 5));
+            console.log(noRestPrefix());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bound_instance_method_rest_prefix"),
+        "11\n20\n14\n6\n"
+    );
+}
+
+#[test]
+fn bound_static_class_method_preserves_rest_prefix_after_optional_fixed_parameter() {
+    let source = r#"
+        class Counter {
+            static sum(first: number, base: number = 1, ...values: number[]): number {
+                let total = first + base;
+                for (const value of values) total += value;
+                return total;
+            }
+        }
+        function main(): void {
+            const bound = Counter.sum.bind(undefined, 5, undefined, 2, 3);
+            const noRestPrefix = Counter.sum.bind(undefined, 5);
+            console.log(bound());
+            console.log(bound(4, 5));
+            console.log(noRestPrefix(4, 5));
+            console.log(noRestPrefix());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bound_static_method_rest_prefix"),
+        "11\n20\n14\n6\n"
+    );
+}
