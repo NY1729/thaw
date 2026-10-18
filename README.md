@@ -189,6 +189,15 @@ Native array and record returns are copied into owned internal storage when dyna
 is required; later dynamic writes do not change the original foreign memory. Class annotations
 do not give an unbranded foreign object a native class brand.
 
+At supported decorated-class boundaries, including typed-JavaScript calls and
+Registry calls through `any`, `unknown`, `object`, method-bearing structural
+declarations, or an explicit `Json` alias, JavaScript sees a live view of the
+native instance: repeated passage preserves identity, prototype methods work,
+and JavaScript field writes update the native instance. Data-only structural
+parameters follow their declared source contract and may materialize the
+declared native layout; this does not imply JavaScript object identity. An
+unsupported or incompatible layout may be copied or rejected.
+
 Known gaps against Node semantics:
 
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
@@ -196,8 +205,6 @@ Known gaps against Node semantics:
   access reports Node's property-specific `TypeError`, including reads in an assignment's RHS.
   Complex bodies (branches, nested closures, suspended async functions) and extracted
   object-literal methods still report `TypeError: Incompatible function receiver`.
-- Decorated classes are live views in local `any` slots; arguments handed to npm or ambient
-  functions are still snapshots.
 - Native FFI collection parameters require an authenticated native collection with compatible
   key and value types. A JavaScript-owned collection is rejected at that boundary.
 

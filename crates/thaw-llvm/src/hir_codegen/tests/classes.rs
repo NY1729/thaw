@@ -4177,10 +4177,10 @@ fn decorated_instances_keep_identity_across_typed_js_calls() {
     let source = r#"
         function Mark(target: JsValue): void {}
         @Mark
-        class Item { value: number = 1; }
+        class Item { value: number = 1; bump(): number { this.value += 1; return this.value; } }
         declare function __thaw_typed_js_70726f6265(value: Item): boolean;
         function main(): void {
-            loadScript("globalThis.probe = (value) => { if (!globalThis.keptItem) globalThis.keptItem = value; const same = globalThis.keptItem === value; value.value += 1; return same; };");
+            loadScript("globalThis.probe = (value) => { if (!globalThis.keptItem) globalThis.keptItem = value; const same = globalThis.keptItem === value; const result = value.bump(); return same && result === value.value; };");
             const item = new Item();
             console.log(__thaw_typed_js_70726f6265(item), __thaw_typed_js_70726f6265(item), item.value);
         }
