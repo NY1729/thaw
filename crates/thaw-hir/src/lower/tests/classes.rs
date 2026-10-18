@@ -1251,8 +1251,12 @@ fn lowers_super_to_the_base_initializer_on_the_same_instance() {
         .unwrap();
     // The `super(...)` arguments are evaluated first (staged as `__thaw_native_arg_N`), then the
     // base initializer is invoked on the same `__thaw_this` instance.
-    let super_call = format!("{:?}", initializer.body[0]);
-    assert!(matches!(&initializer.body[0], HirStmt::Expr(HirExpr::Call(_, _))), "{super_call}");
+    let super_call_index = initializer
+        .body
+        .iter()
+        .position(|statement| matches!(statement, HirStmt::Expr(HirExpr::Call(_, _))))
+        .expect("base initializer call");
+    let super_call = format!("{:?}", initializer.body[super_call_index]);
     assert!(
         super_call.contains(
             "Call(Var(\"__thaw_class_Base_initialize\"), [Var(\"__thaw_this\"), Var(\"__thaw_native_arg_0\")])"
@@ -1260,7 +1264,7 @@ fn lowers_super_to_the_base_initializer_on_the_same_instance() {
         "{super_call}"
     );
     assert!(matches!(
-        &initializer.body[1],
+        &initializer.body[super_call_index + 1],
         HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "label"
     ));
 }

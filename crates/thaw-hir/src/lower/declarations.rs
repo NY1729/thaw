@@ -333,6 +333,72 @@ fn lower_callable_omitted_parameter_wrappers(
     Ok(wrappers)
 }
 
+// These temporary wrappers only supply ABI sentinels; source defaults and destructuring run in the initializer.
+fn lower_constructor_abi_wrappers(
+    symbol: &str,
+    params: &[HirParam],
+    patterns: &[Pat],
+    receiver_count: usize,
+    ret: &HirType,
+) -> Result<Vec<HirFunction>, String> {
+    let mut wrappers = Vec::new();
+    if let Some(default_start) = trailing_omittable_start(patterns) {
+        for arity in default_start..patterns.len() {
+            let total_arity = receiver_count + arity;
+            let wrapper_params = params[..total_arity].to_vec();
+            let mut args = wrapper_params
+                .iter()
+                .map(|param| HirExpr::Var(param.name.clone()))
+                .collect::<Vec<_>>();
+            args.extend(
+                params[total_arity..]
+                    .iter()
+                    .map(|param| omitted_parameter_value(&param.ty))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            wrappers.push(HirFunction {
+                name: default_arity_symbol(symbol, total_arity),
+                params: wrapper_params,
+                ret: ret.clone(),
+                is_async: false,
+                body: vec![HirStmt::Return(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var(symbol.to_string())),
+                    args,
+                )))],
+            });
+        }
+    }
+    for mask in omitted_parameter_masks(patterns, receiver_count)? {
+        let wrapper_params = params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, param)| (!mask.contains(index)).then_some(param.clone()))
+            .collect::<Vec<_>>();
+        let mut supplied = wrapper_params.iter();
+        let mut args = Vec::with_capacity(params.len());
+        for (index, param) in params.iter().enumerate() {
+            if mask.contains(index) {
+                args.push(omitted_parameter_value(&param.ty)?);
+            } else {
+                args.push(HirExpr::Var(
+                    supplied.next().expect("kept parameter").name.clone(),
+                ));
+            }
+        }
+        wrappers.push(HirFunction {
+            name: omitted_parameter_symbol(symbol, &mask),
+            params: wrapper_params,
+            ret: ret.clone(),
+            is_async: false,
+            body: vec![HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Var(symbol.to_string())),
+                args,
+            )))],
+        });
+    }
+    Ok(wrappers)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_class_constructor(
     declaration: &ClassDecl,
@@ -363,7 +429,7 @@ fn lower_class_constructor(
         .unwrap_or_default();
     let has_implicit_constructor = constructor.is_none();
     let mut params = Vec::with_capacity(source_params.len());
-    for (index, parameter) in source_params.iter().enumerate() {
+    for parameter in source_params {
         let pattern = class_constructor_param_pattern(parameter);
         let mut parameter = lower_param(
             &pattern,
@@ -372,7 +438,9 @@ fn lower_class_constructor(
             false,
             &HashMap::new(),
         )?;
-        parameter.ty = signatures[&constructor_symbol].params[index].clone();
+        if !matches!(pattern, Pat::Assign(_)) {
+            parameter.ty = signatures[&constructor_symbol].params[params.len()].clone();
+        }
         params.push(parameter);
     }
     if constructor.is_none() && declaration.class.super_class.is_some() {
@@ -387,12 +455,33 @@ fn lower_class_constructor(
             .collect();
     }
 
+    let abi_params = if has_implicit_constructor {
+        params.clone()
+    } else {
+        signatures[&constructor_symbol]
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let pattern = class_constructor_param_pattern(&source_params[index]);
+                HirParam {
+                    name: if matches!(pattern, Pat::Ident(_)) {
+                        params[index].name.clone()
+                    } else {
+                        format!("__thaw_constructor_arg_{index}")
+                    },
+                    ty: ty.clone(),
+                }
+            })
+            .collect()
+    };
+
     let this_name = "__thaw_this".to_string();
     let mut initializer_params = vec![HirParam {
         name: this_name.clone(),
         ty: instance_type.clone(),
     }];
-    initializer_params.extend(params.iter().cloned());
+    initializer_params.extend(abi_params.iter().cloned());
 
     let mut lowerer = FnLowerer::new(
         signatures,
@@ -410,7 +499,10 @@ fn lower_class_constructor(
         };
         lowerer.super_initializer = Some((
             class_initializer_symbol(base.sym.as_ref()),
-            interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
+            interfaces
+                .get(base.sym.as_ref())
+                .cloned()
+                .unwrap_or(HirType::Void),
             base.sym.to_string(),
         ));
     }
@@ -419,22 +511,87 @@ fn lower_class_constructor(
         .entry("this".into())
         .or_default()
         .push(this_name.clone());
-    for parameter in &initializer_params {
-        lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
-        lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
-        lowerer
-            .scope
-            .insert(parameter.name.clone(), parameter.ty.clone());
-        lowerer
-            .bindings
-            .entry(parameter.name.clone())
-            .or_default()
-            .push(parameter.name.clone());
+    lowerer
+        .scope
+        .insert(this_name.clone(), instance_type.clone());
+    let mut initializer_body = Vec::new();
+    if has_implicit_constructor {
+        for parameter in &abi_params {
+            lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+            lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
+            lowerer
+                .scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+            lowerer
+                .bindings
+                .entry(parameter.name.clone())
+                .or_default()
+                .push(parameter.name.clone());
+        }
+    } else {
+        for (index, (source, parameter)) in source_params.iter().zip(&params).enumerate() {
+            let raw = &abi_params[index];
+            let pattern = class_constructor_param_pattern(source);
+            let (binding_pattern, default) = match &pattern {
+                Pat::Assign(assignment) => {
+                    (assignment.left.as_ref(), Some(assignment.right.as_ref()))
+                }
+                Pat::Rest(rest) => (rest.arg.as_ref(), None),
+                other => (other, None),
+            };
+            let value = if let Some(default) = default {
+                let default_value = lowerer.lower_expr(default)?;
+                let default_value = lowerer.coerce_to_declared(&parameter.ty, default_value)?;
+                let (missing, provided) = match &raw.ty {
+                    HirType::Optional(payload) => (
+                        HirExpr::OptionalIsNone(Box::new(HirExpr::Var(raw.name.clone())), payload.as_ref().clone()),
+                        HirExpr::OptionalValue(Box::new(HirExpr::Var(raw.name.clone())), payload.as_ref().clone()),
+                    ),
+                    HirType::Nullish(payload) => (
+                        HirExpr::NullishIsUndefined(Box::new(HirExpr::Var(raw.name.clone())), payload.as_ref().clone()),
+                        HirExpr::Var(raw.name.clone()),
+                    ),
+                    other => return Err(format!("defaulted constructor parameter needs an undefined-capable ABI type, got {other:?}")),
+                };
+                HirExpr::Conditional(
+                    Box::new(missing),
+                    Box::new(default_value),
+                    Box::new(provided),
+                    parameter.ty.clone(),
+                )
+            } else {
+                HirExpr::Var(raw.name.clone())
+            };
+            if matches!(binding_pattern, Pat::Ident(_)) {
+                if default.is_some() || raw.name != parameter.name {
+                    initializer_body.push(HirStmt::Let(
+                        parameter.name.clone(),
+                        parameter.ty.clone(),
+                        value,
+                    ));
+                }
+                lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+                lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
+                lowerer
+                    .scope
+                    .insert(parameter.name.clone(), parameter.ty.clone());
+                lowerer
+                    .bindings
+                    .entry(parameter.name.clone())
+                    .or_default()
+                    .push(parameter.name.clone());
+            } else {
+                lowerer.lower_binding_pattern(
+                    binding_pattern,
+                    value,
+                    &parameter.ty,
+                    &mut initializer_body,
+                )?;
+            }
+            lowerer.remember_source_parameter(&parameter.name, &pattern);
+        }
     }
 
-    for (pattern, parameter) in source_params.iter().map(class_constructor_param_pattern).zip(&params) {
-        lowerer.remember_source_parameter(&parameter.name, &pattern);
-    }
     let mut own_initializers = Vec::new();
     for member in &declaration.class.body {
         let ClassMember::ClassProp(property) = member else {
@@ -453,7 +610,9 @@ fn lower_class_constructor(
             .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
         let value = match property.value.as_deref() {
             Some(initializer) => {
-                if let Some(source) = storage_source_type(property.span).filter(|source| has_dynamic_storage(property.span) && *source != expected) {
+                if let Some(source) = storage_source_type(property.span)
+                    .filter(|source| has_dynamic_storage(property.span) && *source != expected)
+                {
                     lowerer.validate_storage_source(initializer, &source)?;
                 }
                 let value = lowerer.lower_expr(initializer)?;
@@ -481,15 +640,22 @@ fn lower_class_constructor(
             continue;
         };
         let field = parameter_property_binding(property)?.id.sym.to_string();
+        let HirType::Object(fields) = &instance_type else {
+            unreachable!("native class layouts are fixed objects")
+        };
+        let expected = fields
+            .iter()
+            .find_map(|(name, ty)| (name == &field).then(|| ty.clone()))
+            .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
+        let value = lowerer.coerce_to_declared(&expected, HirExpr::Var(parameter.name.clone()))?;
         own_initializers.push(HirStmt::Expr(HirExpr::PropAssign(
             Box::new(HirExpr::Var(this_name.clone())),
             instance_type.clone(),
             field,
-            Box::new(HirExpr::Var(parameter.name.clone())),
+            Box::new(value),
         )));
     }
     let implicit_own_initializers = own_initializers.clone();
-    let mut initializer_body = Vec::new();
     if declaration.class.super_class.is_some() {
         if let Some(constructor) = constructor {
             let block = constructor.body.as_ref().ok_or_else(|| {
@@ -542,23 +708,23 @@ fn lower_class_constructor(
                 )));
                 initializer_body.append(&mut own_initializers);
             } else {
-            let signature = &signatures[&base_initializer];
-            if signature.params.len() != params.len() + 1 {
-                return Err(format!(
+                let signature = &signatures[&base_initializer];
+                if signature.params.len() != params.len() + 1 {
+                    return Err(format!(
                     "derived class `{class_name}` cannot forward its implicit constructor arguments to the base"
                 ));
-            }
-            let mut args = vec![HirExpr::Var(this_name.clone())];
-            args.extend(
-                params
-                    .iter()
-                    .map(|parameter| HirExpr::Var(parameter.name.clone())),
-            );
-            initializer_body.push(HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var(base_initializer)),
-                args,
-            )));
-            initializer_body.append(&mut own_initializers);
+                }
+                let mut args = vec![HirExpr::Var(this_name.clone())];
+                args.extend(
+                    params
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                initializer_body.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(base_initializer)),
+                    args,
+                )));
+                initializer_body.append(&mut own_initializers);
             }
         }
     } else {
@@ -574,13 +740,13 @@ fn lower_class_constructor(
 
     let mut initialize_args = vec![HirExpr::Var(this_name.clone())];
     initialize_args.extend(
-        params
+        abi_params
             .iter()
             .map(|parameter| HirExpr::Var(parameter.name.clone())),
     );
     let constructor = HirFunction {
         name: constructor_symbol.clone(),
-        params: params.clone(),
+        params: abi_params.clone(),
         ret: instance_type.clone(),
         is_async: false,
         body: vec![
@@ -607,70 +773,24 @@ fn lower_class_constructor(
         .map(class_constructor_param_pattern)
         .collect::<Vec<_>>();
     let mut functions = vec![constructor, initializer];
-    functions.extend(lower_callable_default_wrappers(
+    functions.extend(lower_constructor_abi_wrappers(
         &constructor_symbol,
-        &params,
+        &abi_params,
         &patterns,
         0,
-        None,
         &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
-    )?);
-    functions.extend(lower_callable_omitted_parameter_wrappers(
-        &constructor_symbol,
-        &params,
-        &patterns,
-        0,
-        None,
-        &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
     )?);
     let mut initializer_wrapper_params = vec![HirParam {
-        name: this_name,
+        name: this_name.clone(),
         ty: instance_type.clone(),
     }];
-    initializer_wrapper_params.extend(params.iter().cloned());
-    functions.extend(lower_callable_default_wrappers(
+    initializer_wrapper_params.extend(abi_params.iter().cloned());
+    functions.extend(lower_constructor_abi_wrappers(
         &initializer_symbol,
         &initializer_wrapper_params,
         &patterns,
         1,
-        None,
         &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
-    )?);
-    functions.extend(lower_callable_omitted_parameter_wrappers(
-        &initializer_symbol,
-        &initializer_wrapper_params,
-        &patterns,
-        1,
-        None,
-        &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
     )?);
     if has_implicit_constructor {
         if let Some(Expr::Ident(base)) = declaration.class.super_class.as_deref() {
