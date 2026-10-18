@@ -2243,6 +2243,7 @@ fn generator_expressions_keep_optional_and_rest_callable_shape() {
             const rest = function* (...values: number[]): Generator<number> { yield values.length; };
             const packed = rest.bind(null);
             const contextual: (value?: number) => Generator<number> = function* (value: number = 7): Generator<number> { yield value; };
+            const receiver = function* (this: { base: number }, value?: number): Generator<number> { yield this.base + (value ?? 0); };
         }"#,
     );
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
@@ -2261,6 +2262,28 @@ fn generator_expressions_keep_optional_and_rest_callable_shape() {
     assert!(params.is_empty());
     assert!(mask.is_empty());
     assert_eq!(rest.as_deref(), Some(&HirType::F64));
+    let receiver = main.body.iter().find_map(|statement| match statement {
+        HirStmt::Let(name, HirType::FunctionWithThis(_, ty), init) if name == "receiver" => {
+            Some((ty.as_ref(), init))
+        }
+        _ => None,
+    }).unwrap();
+    let HirType::CallableFunction(params, mask, rest, _) = receiver.0 else {
+        panic!("explicit receiver lost callable metadata: {:?}", receiver.0)
+    };
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::F64))]);
+    assert!(mask.contains(0));
+    assert!(rest.is_none());
+    let HirExpr::NonArrowFunction(closure) = receiver.1 else {
+        panic!("explicit receiver lost its non-arrow closure: {:?}", receiver.1)
+    };
+    let HirExpr::TypedClosure(_, closure) = closure.as_ref() else {
+        panic!("explicit receiver lost its callable wrapper: {closure:?}")
+    };
+    let HirExpr::Lambda(_, physical_params, _, _) = closure.as_ref() else {
+        panic!("explicit receiver lost its closure lambda: {closure:?}")
+    };
+    assert_eq!(physical_params.first().map(|param| param.name.as_str()), Some("__thaw_this"));
 }
 
 #[test]

@@ -64,15 +64,19 @@ fn compiles_generator_callable_shapes_and_invocation_timing() {
             console.log((await iterator.next()).value); console.log(calls, bodyRuns);
             console.log((await defaults(3).next()).value); console.log(calls, bodyRuns);
             const rest = async function* (...items: number[]): AsyncGenerator<number> { yield items.length; };
+            const boundRest = rest.bind(null);
             console.log((await rest().next()).value); console.log((await rest(1, 2).next()).value);
+            console.log((await boundRest().next()).value); console.log((await boundRest(1, 2).next()).value);
             const receiver = function* (this: { base: number }, value?: number): Generator<number> { yield this.base + (value ?? 0); };
             const holder = { base: 4 };
+            const boundReceiver = receiver.bind(holder);
             console.log(receiver.call(holder).next().value); console.log(receiver.call(holder, 3).next().value);
+            console.log(boundReceiver().next().value); console.log(boundReceiver(3).next().value);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "generator_callable_shapes_and_invocation_timing"),
-        "-1\n-1\n7\n7\n3\n0\n1 0\n7\n1 1\n3\n1 2\n0\n2\n4\n7\n"
+        "-1\n-1\n7\n7\n3\n0\n1 0\n7\n1 1\n3\n1 2\n0\n2\n0\n2\n4\n7\n4\n7\n"
     );
 }
 
