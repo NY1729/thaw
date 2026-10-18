@@ -458,15 +458,31 @@ struct GenericArrowThisOperation {
 }
 
 impl<'a> FnLowerer<'a> {
-    fn lower_generic_arrow_operation(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+    fn lower_generic_arrow_operation(
+        &mut self,
+        call: &CallExpr,
+        expected_source_return_hint: Option<&HirType>,
+        expected_return_hint: Option<&HirType>,
+    ) -> Result<Option<HirExpr>, String> {
         let Callee::Expr(callee) = &call.callee else { return Ok(None); };
         let Expr::Member(operation) = callee.as_ref() else { return Ok(None); };
         let Some(method) = member_property_name(&operation.prop) else { return Ok(None); };
         if !matches!(method.as_str(), "call" | "apply" | "bind") { return Ok(None); }
         let Expr::Ident(target) = operation.obj.as_ref() else { return Ok(None); };
         let name = self.resolve_binding(target.sym.as_ref());
-        if !self.generic_non_arrow_names.contains(&name) { return Ok(None); }
-        let Some(arrow) = self.generic_arrows.get(&name).cloned() else { return Ok(None); };
+        let Some(template) = self.generic_callable_template(&name) else { return Ok(None); };
+        match &template {
+            GenericCallableTemplate::Arrow { .. } if !self.generic_non_arrow_names.contains(&name) => return Ok(None),
+            GenericCallableTemplate::Named { symbol } => {
+                if method == "bind" { return Ok(None); }
+                if self.signatures.get(symbol).is_some_and(|signature| signature.generic_this_pattern.is_some()) {
+                    return Err(format!(
+                        "generic function .{method}() cannot specialize explicit generic this for `{symbol}`"
+                    ));
+                }
+            }
+            _ => {}
+        }
         let (this_value, this_type, supplied) = if let Some((this_arg, supplied)) = call.args.split_first() {
             if this_arg.spread.is_some() {
                 return Err(format!("generic function .{method}() cannot spread its thisArg"));
@@ -522,18 +538,18 @@ impl<'a> FnLowerer<'a> {
                     present_call.args = vec![swc_ecma_ast::ExprOrSpread {
                         spread: Some(call.span), expr: values.expr.clone(),
                     }];
-                    let present = self.lower_generic_arrow_call_with_this(&name, &arrow,
+                    let present = self.lower_generic_template_call_with_this(&template,
                         &present_call, Some(GenericArrowThisOperation {
                             receiver: (HirExpr::Var(this_name.clone()), this_type.clone()),
                             bind: false, ignored: Vec::new(), prelowered: Some(vec![tuple]),
-                        }))?;
+                        }), expected_source_return_hint, expected_return_hint)?;
                     let mut absent_call = call.clone();
                     absent_call.args.clear();
-                    let absent = self.lower_generic_arrow_call_with_this(&name, &arrow,
+                    let absent = self.lower_generic_template_call_with_this(&template,
                         &absent_call, Some(GenericArrowThisOperation {
                             receiver: (HirExpr::Var(this_name), this_type),
                             bind: false, ignored: Vec::new(), prelowered: None,
-                        }))?;
+                        }), expected_source_return_hint, expected_return_hint)?;
                     let result_ty = self.infer_expr_type(&present)?;
                     if result_ty != self.infer_expr_type(&absent)? {
                         return Err("generic .apply() nullish tuple branches infer different return types".into());
@@ -566,13 +582,83 @@ impl<'a> FnLowerer<'a> {
         } else { supplied.to_vec() };
         let mut invocation = call.clone();
         invocation.args = forwarded;
-        self.lower_generic_arrow_call_with_this(&name, &arrow, &invocation,
+        self.lower_generic_template_call_with_this(&template, &invocation,
             Some(GenericArrowThisOperation {
                 receiver: (this_value, this_type),
                 bind: method == "bind",
                 ignored: discarded_apply_arguments,
                 prelowered: prelowered_apply_arguments,
-            })).map(Some)
+            }), expected_source_return_hint, expected_return_hint).map(Some)
+    }
+
+    fn lower_generic_template_call_with_this(
+        &mut self,
+        template: &GenericCallableTemplate,
+        call: &CallExpr,
+        operation: Option<GenericArrowThisOperation>,
+        expected_source_return_hint: Option<&HirType>,
+        expected_return_hint: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        match template {
+            GenericCallableTemplate::Arrow { binding, expression } => {
+                self.lower_generic_arrow_call_with_this(binding, expression, call, operation)
+            }
+            GenericCallableTemplate::Named { symbol } => {
+                let (Some((this_value, this_type)), Some(operation)) =
+                    (operation.as_ref().map(|operation| operation.receiver.clone()), operation)
+                else {
+                    return self.lower_generic_named_call(
+                        call, symbol, expected_source_return_hint, expected_return_hint,
+                    );
+                };
+                if operation.bind {
+                    return Err("named generic function .bind() is not supported in this phase".into());
+                }
+                let this_name = format!("__thaw_generic_named_this_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(this_name.clone(), this_type.clone());
+                let mut bindings = vec![(this_name, this_type, this_value)];
+                let mut forwarded = call.clone();
+                if let Some(mut containers) = operation.prelowered {
+                    if containers.len() != 1 {
+                        return Err("generic .apply() needs one argument container".into());
+                    }
+                    let value = containers.pop().expect("one container");
+                    let mut ty = self.infer_expr_type(&value)?;
+                    if let HirExpr::ArrayLit(elements) = &value {
+                        ty = HirType::Tuple(
+                            elements.iter().map(|element| self.infer_expr_type(element))
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                    }
+                    let container_name = format!("__thaw_generic_named_container_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(container_name.clone(), ty.clone());
+                    bindings.push((container_name.clone(), ty.clone(), value));
+                    forwarded.args = if matches!(ty, HirType::Null | HirType::Undefined) {
+                        Vec::new()
+                    } else {
+                        vec![swc_ecma_ast::ExprOrSpread {
+                            spread: Some(call.span),
+                            expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                container_name.into(), call.span,
+                            ))),
+                        }]
+                    };
+                }
+                bindings.extend(operation.ignored);
+                let Callee::Expr(callee) = &call.callee else { return Err("generic operation target must be an identifier".into()); };
+                let Expr::Member(member) = callee.as_ref() else { return Err("generic operation target must be an identifier".into()); };
+                let Expr::Ident(source) = member.obj.as_ref() else { return Err("generic operation target must be an identifier".into()); };
+                forwarded.callee = Callee::Expr(Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    self.resolve_binding(source.sym.as_ref()).into(), call.span,
+                ))));
+                let result = self.lower_generic_named_call(
+                    &forwarded, symbol, expected_source_return_hint, expected_return_hint,
+                )?;
+                self.wrap_call_argument_bindings(result, &bindings)
+            }
+        }
     }
 
     fn lower_ignored_apply_extras(

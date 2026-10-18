@@ -40,7 +40,25 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
-        self.lower_call_with_class_guard(call, None)
+        self.lower_call_with_class_guard_and_target(call, None, None)
+    }
+
+    fn lower_generic_named_call(
+        &mut self,
+        call: &CallExpr,
+        target: &str,
+        expected_source_return_hint: Option<&HirType>,
+        expected_return_hint: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let previous_source = std::mem::replace(
+            &mut self.expected_source_return_hint,
+            expected_source_return_hint.cloned(),
+        );
+        let previous = std::mem::replace(&mut self.expected_return_hint, expected_return_hint.cloned());
+        let result = self.lower_call_with_class_guard_and_target(call, None, Some(target));
+        self.expected_source_return_hint = previous_source;
+        self.expected_return_hint = previous;
+        result
     }
 
     /// The guard is set only by the source-proven `receiver.method(...)`
@@ -51,6 +69,15 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         call: &CallExpr,
         class_method_guard: Option<&str>,
+    ) -> Result<HirExpr, String> {
+        self.lower_call_with_class_guard_and_target(call, class_method_guard, None)
+    }
+
+    fn lower_call_with_class_guard_and_target(
+        &mut self,
+        call: &CallExpr,
+        class_method_guard: Option<&str>,
+        canonical_target: Option<&str>,
     ) -> Result<HirExpr, String> {
         // Taken (not just read) as the very first action, before this
         // call's own arguments are lowered below -- a hint set for *this*
@@ -461,7 +488,11 @@ impl<'a> FnLowerer<'a> {
         if let Some(invoked) = self.lower_object_prototype_to_string_call(call)? {
             return Ok(invoked);
         }
-        if let Some(generic) = self.lower_generic_arrow_operation(call)? {
+        if let Some(generic) = self.lower_generic_arrow_operation(
+            call,
+            expected_source_return_hint.as_ref(),
+            expected_return_hint.as_ref(),
+        )? {
             return Ok(generic);
         }
         if let Some(bound) = self.lower_function_bind(call)? {
@@ -1341,8 +1372,10 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let callee_name = match callee_expr.as_ref() {
-            Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
+        let source_callee_name = match callee_expr.as_ref() {
+            Expr::Ident(ident) => canonical_target
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.resolve_binding(ident.sym.as_ref())),
             // Console methods have no dedicated HIR node; they are encoded as
             // synthetic names such as "console.log" and codegen special-cases them.
             Expr::Member(member) => {
@@ -1361,6 +1394,13 @@ impl<'a> FnLowerer<'a> {
                 "unsupported call target (only plain identifiers and supported console methods are supported)"
                     .into(),
             ),
+        };
+        let known_template = canonical_target.is_none().then(|| {
+            self.generic_callable_template(&source_callee_name)
+        }).flatten();
+        let callee_name = match &known_template {
+            Some(GenericCallableTemplate::Named { symbol }) => symbol.clone(),
+            _ => source_callee_name,
         };
         if callee_name == "__thaw_mark_typed_wrapper_json_argument" {
             return Err("typed-wrapper JSON ownership marker is compiler-private".into());
@@ -1493,16 +1533,9 @@ impl<'a> FnLowerer<'a> {
             return self.lower_dynamic_value_call_on(callee, &call.args);
         }
 
-        match self.generic_callable_template(&callee_name) {
+        match known_template.or_else(|| canonical_target.is_none().then(|| self.generic_callable_template(&callee_name)).flatten()) {
             Some(GenericCallableTemplate::Arrow { binding, expression }) => {
                 return self.lower_generic_arrow_call(&binding, &expression, call);
-            }
-            Some(GenericCallableTemplate::Named { symbol }) if symbol != callee_name => {
-                let mut forwarded = call.clone();
-                forwarded.callee = Callee::Expr(Box::new(Expr::Ident(
-                    swc_ecma_ast::Ident::new_no_ctxt(symbol.into(), call.span),
-                )));
-                return self.lower_call(&forwarded);
             }
             Some(GenericCallableTemplate::Named { .. }) | None => {}
         }

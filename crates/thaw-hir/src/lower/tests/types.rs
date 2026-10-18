@@ -329,6 +329,65 @@ fn named_generic_template_specialization_keys_remain_distinct() {
 }
 
 #[test]
+fn named_generic_template_call_apply_specialize_by_actual_types() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function optional<T = number>(value?: T): T | undefined { return value; }
+        function collect<T>(first: T, ...rest: T[]): T { return first; }
+        function numeric<T extends number>(value: T): T { return value; }
+        function make<T>(value?: T): T { return value!; }
+        function main(): void {
+            identity.call(null, 1);
+            identity.call(null, "x");
+            identity.apply(null, [2]);
+            identity.apply(null, ["y"]);
+            optional.apply(null, []);
+            optional.apply(null);
+            collect.apply(null, [3, 4]);
+            numeric.apply(null, [5]);
+            const contextualNumber: number = make.call(null);
+            const makeAlias = make;
+            const contextualString: string = makeAlias.apply(null);
+        }
+    "#);
+    for name in [
+        "identity__thaw_f64",
+        "identity__thaw_str",
+        "optional__thaw_optional_f64",
+        "collect__thaw_f64__array_f64",
+        "make__thaw_optional_f64",
+        "make__thaw_optional_str",
+    ] {
+        assert!(program.functions.iter().any(|function| function.name == name), "missing {name}: {:?}", program.functions.iter().map(|function| &function.name).collect::<Vec<_>>());
+    }
+    let module = thaw_parser::parse_typescript(
+        "function numeric<T extends number>(value: T): T { return value; } function main(): void { numeric.apply(null, ['wrong']); }",
+    ).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("does not satisfy constraint F64"), "{error}");
+}
+
+#[test]
+fn named_generic_template_apply_accepts_nullable_tuple_container() {
+    for (container_type, absence) in [
+        ("[number] | undefined", "undefined"),
+        ("[number] | null", "null"),
+        ("[number] | null | undefined", "undefined"),
+    ] {
+        let source = format!(r#"
+            function identity<T = number>(value?: T): T | undefined {{ return value; }}
+            function main(): void {{
+                const args: {container_type} = {absence};
+                identity.apply(null, args);
+            }}
+        "#);
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let program = lower_module(&module).unwrap_or_else(|error| panic!("{container_type}: {error}"));
+        assert!(program.functions.iter().any(|function| function.name == "identity__thaw_optional_f64"));
+    }
+}
+
+#[test]
 fn named_generic_template_alias_and_chain_specialize_by_call_site() {
     let program = lower(r#"
         function identity<T>(value: T): T { return value; }

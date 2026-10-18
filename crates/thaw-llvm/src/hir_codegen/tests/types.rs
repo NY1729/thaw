@@ -193,6 +193,47 @@ fn named_generic_template_operations_runtime_matrix() {
 }
 
 #[test]
+fn named_generic_template_call_apply_specialize_and_preserve_order() {
+    let source = r#"
+        function identity<T>(value: T): T { console.log("body"); return value; }
+        function maybe<T = number>(value?: T): T | undefined { console.log("maybe-body"); return value; }
+        function collect<T>(first: T, ...rest: T[]): T { console.log("rest-body"); return first; }
+        async function asyncIdentity<T>(value: T): Promise<T> { console.log("async-body"); return value; }
+        function container(): [number] { console.log("container"); return [2]; }
+        async function main(): Promise<void> {
+            const alias = identity;
+            console.log(identity.call((console.log("this"), null), (console.log("arg"), 1)));
+            console.log(alias.call(null, "string"));
+            console.log(identity.apply(null, container(), (console.log("extra"), [99])));
+            console.log(alias.apply(null, ["apply-string"]));
+            console.log(identity.apply(null, [3]));
+            const maybeArgs: [number] | undefined = [5];
+            console.log(maybe.apply(null, maybeArgs, (console.log("nullable-extra"), [])));
+            const noArgs: [number] | undefined = undefined;
+            console.log(maybe.apply(null, noArgs));
+            const nullArgs: [number] | null = null;
+            console.log(maybe.apply(null, nullArgs));
+            const nullishArgs: [number] | null | undefined = undefined;
+            console.log(maybe.apply(null, nullishArgs));
+            console.log(maybe.apply(null));
+            console.log(maybe.apply(null, []));
+            console.log(collect.apply(null, [7, 8]));
+            console.log(await asyncIdentity.call(null, "async-call"));
+            console.log(await asyncIdentity.apply(null, [4]));
+            {
+                const identity = (value: number): number => 99;
+                console.log(alias("kept"));
+                console.log(alias.call(null, "kept-call"));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_call_apply"),
+        "this\narg\nbody\n1\nbody\nstring\ncontainer\nextra\nbody\n2\nbody\napply-string\nbody\n3\nnullable-extra\nmaybe-body\n5\nmaybe-body\nundefined\nmaybe-body\nundefined\nmaybe-body\nundefined\nmaybe-body\nundefined\nmaybe-body\nundefined\nrest-body\n7\nasync-body\nasync-call\nasync-body\n4\nbody\nkept\nbody\nkept-call\n"
+    );
+}
+
+#[test]
 fn recursively_specializes_named_generic_local_function_values() {
     let source = r#"
         type Repeat = <T, U>(value: T, marker: U, remaining: number) => T;
