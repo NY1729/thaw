@@ -1282,6 +1282,11 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_native_value_as_json(value, actual);
             }
         }
+        if matches!(declared, HirType::Function(..)) {
+            if let Some(adapted) = self.adapt_overloaded_callable_value(declared, value.clone())? {
+                return Ok(adapted);
+            }
+        }
         if let Some(adapted) = self.adapt_named_function_to_required_function(declared, &value)? {
             return Ok(adapted);
         }
