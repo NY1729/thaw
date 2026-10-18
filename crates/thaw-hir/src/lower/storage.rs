@@ -1729,8 +1729,8 @@ impl FnLowerer<'_> {
                     .source_value_hint(source)
                     .and_then(|hint| self.infer_expr_type(&hint).ok())
                     .filter(|source_type| {
-                        !(preserve_class_physical && contains_native_class(source_type))
-                            && !matches!(source_type, HirType::Json | HirType::Dynamic | HirType::JsValue)
+                        !(matches!(source_type, HirType::Json | HirType::Dynamic | HirType::JsValue)
+                            || preserve_class_physical && contains_native_class(source_type))
                     })
                 {
                     return Ok(source_type);

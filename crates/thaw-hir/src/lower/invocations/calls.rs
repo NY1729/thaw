@@ -2856,9 +2856,7 @@ impl<'a> FnLowerer<'a> {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
                         } else if jit_structural_class_object {
                             self.coerce_jit_structural_class_argument(value, declared)
-                        } else if quickjs_function_value {
-                            self.coerce_primitive_array_argument_aliasing(value, declared)
-                        } else if user_function {
+                        } else if quickjs_function_value || user_function {
                             self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)
                             && dynamic_symbol(&callee_name).is_none()
