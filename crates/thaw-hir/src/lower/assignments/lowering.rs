@@ -1,10 +1,19 @@
 impl<'a> FnLowerer<'a> {
     fn guard_private_json_receiver_access(
+        &mut self,
         object: HirExpr,
         key: HirExpr,
         result: HirExpr,
         write: bool,
-    ) -> HirExpr {
+    ) -> Result<HirExpr, String> {
+        let key = if self.infer_expr_type(&key)? == HirType::Symbol {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_symbol_to_string".into())),
+                vec![key],
+            )
+        } else {
+            self.coerce_primitive_to_string(key)?
+        };
         let receiver = object.with_non_arrow_this_access(NonArrowThisAccess::Value);
         let is_nullish = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
@@ -31,7 +40,7 @@ impl<'a> FnLowerer<'a> {
                 ],
             )
         };
-        HirExpr::Block(vec![
+        Ok(HirExpr::Block(vec![
             HirStmt::If(
                 is_nullish,
                 vec![HirStmt::If(
@@ -42,7 +51,7 @@ impl<'a> FnLowerer<'a> {
                 Vec::new(),
             ),
             HirStmt::Return(Some(result)),
-        ])
+        ]))
     }
 
     /// `o.k op= r` / `o[k] ??= r` on a dynamic (`any`) target: the receiver and key are evaluated
@@ -55,6 +64,10 @@ impl<'a> FnLowerer<'a> {
         key: HirExpr,
     ) -> Result<HirExpr, String> {
         use swc_ecma_ast::{AssignExpr, BinExpr, BinaryOp, ComputedPropName, Ident, MemberExpr, MemberProp};
+        let private_jsvalue = matches!(
+            &object,
+            HirExpr::NonArrowThis { declared: HirType::JsValue, .. }
+        );
         let span = swc_common::DUMMY_SP;
         let object_name = format!("__thaw_dynamic_compound_object_{}", self.next_binding);
         self.next_binding += 1;
@@ -108,10 +121,24 @@ impl<'a> FnLowerer<'a> {
             }
         };
         let result = self.lower_expr(&rewritten)?;
-        self.wrap_call_argument_bindings(
-            result,
-            &[(object_name, HirType::JsValue, object), (key_name, key_type, key)],
-        )
+        if private_jsvalue {
+            let receiver = object.clone().with_non_arrow_this_access(NonArrowThisAccess::TypedValue);
+            let guarded = self.guard_private_json_receiver_access(
+                object,
+                HirExpr::Var(key_name.clone()),
+                HirExpr::Block(vec![
+                    HirStmt::Let(object_name, HirType::JsValue, receiver),
+                    HirStmt::Return(Some(result)),
+                ]),
+                false,
+            )?;
+            self.wrap_call_argument_bindings(guarded, &[(key_name, key_type, key)])
+        } else {
+            self.wrap_call_argument_bindings(
+                result,
+                &[(object_name, HirType::JsValue, object), (key_name, key_type, key)],
+            )
+        }
     }
 
     fn lower_assignment_target_write(
@@ -196,7 +223,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let private_json_write = match &target {
-            Target::Dictionary(object, key, HirType::Json)
+            Target::Dictionary(object, key, _)
             | Target::DynamicProperty(object, key)
                 if private_json_write_guard && matches!(object, HirExpr::NonArrowThis { .. }) =>
             {
@@ -223,7 +250,7 @@ impl<'a> FnLowerer<'a> {
         let Some((object, key)) = private_json_write else {
             return Ok(result);
         };
-        Ok(Self::guard_private_json_receiver_access(object, key, result, true))
+        self.guard_private_json_receiver_access(object, key, result, true)
     }
 
     fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -251,7 +278,7 @@ impl<'a> FnLowerer<'a> {
             return self.lower_fixed_object_property_read(object, fields, property);
         }
         let private_json_read = match target {
-            Target::Dictionary(object, key, HirType::Json)
+            Target::Dictionary(object, key, _)
                 if matches!(object, HirExpr::NonArrowThis { .. }) =>
             {
                 Some((object.clone(), (**key).clone()))
@@ -280,7 +307,7 @@ impl<'a> FnLowerer<'a> {
             let Some((object, key)) = private_json_read else {
                 return Ok(read);
             };
-            return Ok(Self::guard_private_json_receiver_access(object, key, read, false));
+            return self.guard_private_json_receiver_access(object, key, read, false);
         };
         let array_type = self.infer_expr_type(array)?;
         let HirType::Array(element) = &array_type else {
@@ -1153,7 +1180,18 @@ impl<'a> FnLowerer<'a> {
                 &HirType::Json,
                 HirExpr::Var(value_name.clone()),
             )?;
+            let private_jsvalue = matches!(
+                object,
+                HirExpr::NonArrowThis { declared: HirType::JsValue, .. }
+            );
             let mut statements = Vec::new();
+            if private_jsvalue {
+                statements.push(HirStmt::Let(
+                    object_name.clone(),
+                    HirType::JsValue,
+                    object.clone().with_non_arrow_this_access(NonArrowThisAccess::TypedValue),
+                ));
+            }
             statements.extend([
                 HirStmt::Expr(HirExpr::Call(
                     Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
@@ -1166,13 +1204,25 @@ impl<'a> FnLowerer<'a> {
                 HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
             ]);
             let result = HirExpr::Block(statements);
+            let result = if private_jsvalue {
+                self.guard_private_json_receiver_access(
+                    object.clone(),
+                    HirExpr::Var(key_name.clone()),
+                    result,
+                    true,
+                )?
+            } else {
+                result
+            };
             let mut dynamic_bindings = target_bindings;
             if deferred_private_write {
                 dynamic_bindings.extend([
                     (key_name, key_type, key.as_ref().clone()),
                     (value_name, rhs_type, rhs),
-                    (object_name, HirType::JsValue, object.clone()),
                 ]);
+                if !private_jsvalue {
+                    dynamic_bindings.push((object_name, HirType::JsValue, object.clone()));
+                }
             } else {
                 dynamic_bindings.extend([
                     (object_name, HirType::JsValue, object.clone()),

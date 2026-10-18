@@ -205,6 +205,12 @@ const compound = function(this: { a: number }, rhs: () => number): number { this
 const compoundAny = function(this: any, rhs: () => number): number { this.a += rhs(); return 0; };
 const computedCompoundAny = function(this: any, key: () => string, rhs: () => number): number { this[key()] += rhs(); return 0; };
 const indexedCompoundAny = function(this: any, rhs: () => number): number { this[0] += rhs(); return 0; };
+const typedDictionaryCompound = function(this: { [key: string]: number }, rhs: () => number): number { this.a += rhs(); return 0; };
+const typedDictionaryAssign = function(this: { [key: string]: number }, key: () => string, rhs: () => number): number { this[key()] = rhs(); return 0; };
+const jsValueConstant = function(this: JsValue): number { return 1; };
+const jsValueCompound = function(this: JsValue, rhs: () => number): number { this.a += rhs(); return 0; };
+const jsValueComputedAssign = function(this: JsValue, key: () => string, rhs: () => number): number { this[key()] = rhs(); return 0; };
+const jsValueSymbolCompound = function(this: JsValue, key: () => symbol, rhs: () => number): number { this[key()] += rhs(); return 0; };
 const update = function(this: { a: number }): number { this.a++; return 0; };
 const nested = function(this: { child: { a: number } }, rhs: () => number): number { this.child.a = rhs(); return 0; };
 const freeze = function(this: { a: number }, next: { a: number }): number { let self = this; self.a = (() => { self = next; return 7; })(); return this.a * 10 + self.a; };
@@ -243,6 +249,19 @@ function main(): void {
   trace = "";
   try { indexedCompoundAny.call(undefined as any, rhs); } catch (e: any) { console.log("indexed compound any " + trace + e.message); }
   trace = "";
+  try { typedDictionaryCompound.call(undefined as any, rhs); } catch (e: any) { console.log("typed dictionary compound " + trace + e.message); }
+  trace = "";
+  try { typedDictionaryAssign.call(null as any, () => { trace += "key "; return "a"; }, () => { trace += "rhs "; return 1; }); } catch (e: any) { console.log("typed dictionary assign " + trace + e.message); }
+  console.log("JsValue constant " + jsValueConstant.call(undefined as any));
+  trace = "";
+  try { jsValueCompound.call(undefined as any, rhs); } catch (e: any) { console.log("JsValue compound undefined " + trace + e.message); }
+  trace = "";
+  try { jsValueComputedAssign.call(undefined as any, () => { trace += "key "; return "a"; }, rhs); } catch (e: any) { console.log("JsValue assign undefined " + trace + e.message); }
+  trace = "";
+  try { jsValueComputedAssign.call(null as any, () => { trace += "key "; return "a"; }, rhs); } catch (e: any) { console.log("JsValue assign null " + trace + e.message); }
+  trace = "";
+  try { jsValueSymbolCompound.call(null as any, () => { trace += "key "; return Symbol("k"); }, rhs); } catch (e: any) { console.log("JsValue symbol key " + trace + e.message); }
+  trace = "";
   const compoundObject = { a: 2 };
   compoundAny.call(compoundObject, () => { trace += "rhs "; return 3; });
   console.log("compound any order " + trace + compoundObject.a);
@@ -250,6 +269,14 @@ function main(): void {
   let getterRhsCalls = 0;
   compoundAny.call(getterOwner, () => { getterRhsCalls++; return 2; });
   console.log("compound getter order " + getterOwner.value + " " + getterOwner.reads + " " + getterOwner.writes + " " + getterRhsCalls);
+  loadScript("globalThis.__task7_jsvalue_owner = { value: 2, reads: 0, writes: 0, get a() { this.reads++; return this.value; }, set a(value) { this.writes++; this.value = value; } };");
+  const jsValueOwner: JsValue = getDynamicValue("__task7_jsvalue_owner");
+  trace = "";
+  jsValueCompound.call(jsValueOwner, () => { trace += "rhs "; return 3; });
+  console.log("JsValue compound valid " + trace + Number(readDynamicValue(getDynamicProperty(jsValueOwner, "value"))) + " " + Number(readDynamicValue(getDynamicProperty(jsValueOwner, "reads"))) + " " + Number(readDynamicValue(getDynamicProperty(jsValueOwner, "writes"))));
+  trace = "";
+  jsValueComputedAssign.call(jsValueOwner, () => { trace += "key "; return "a"; }, () => { trace += "rhs "; return 8; });
+  console.log("JsValue assign valid " + trace + jsValueOwner.a);
   try { update.call(undefined as any); } catch (e: any) { console.log("update " + e.message); }
   trace = "";
   try { nested.call(undefined as any, rhs); } catch (e: any) { console.log("nested " + trace + e.message); }
@@ -261,7 +288,23 @@ function main(): void {
 }"#;
     assert_eq!(
         compile_and_run(source, "kb_contract_this_assignment_and_call_order_matches_node"),
-        "undefined assign rhs Cannot set properties of undefined (setting 'a')\nnull assign rhs Cannot set properties of null (setting 'a')\nliteral assign rhs Cannot set properties of undefined (setting 'a')\ncopy Cannot read properties of undefined (reading 'b')\ncomputed key Cannot read properties of undefined (reading 'a')\ndynamic named rhs Cannot set properties of undefined (setting 'a')\ndynamic computed key rhs Cannot set properties of undefined (setting 'a')\ndynamic computed null key rhs Cannot set properties of null (setting 'a')\nthis method Cannot read properties of undefined (reading 'method')\nalias method Cannot read properties of undefined (reading 'method')\nalias builtin XY\nbigint builtin 3\ncall 1 method arg \ncompound Cannot read properties of undefined (reading 'a')\ncompound any undefined Cannot read properties of undefined (reading 'a')\ncompound any null Cannot read properties of null (reading 'a')\ncomputed compound any key Cannot read properties of undefined (reading 'a')\nindexed compound any Cannot read properties of undefined (reading '0')\ncompound any order rhs 5\ncompound getter order 3 1 1 1\nupdate Cannot read properties of undefined (reading 'a')\nnested Cannot read properties of undefined (reading 'child')\nvalid copy 6\nvalid computed 6\nfrozen target 72 7 2\n"
+        "undefined assign rhs Cannot set properties of undefined (setting 'a')\nnull assign rhs Cannot set properties of null (setting 'a')\nliteral assign rhs Cannot set properties of undefined (setting 'a')\ncopy Cannot read properties of undefined (reading 'b')\ncomputed key Cannot read properties of undefined (reading 'a')\ndynamic named rhs Cannot set properties of undefined (setting 'a')\ndynamic computed key rhs Cannot set properties of undefined (setting 'a')\ndynamic computed null key rhs Cannot set properties of null (setting 'a')\nthis method Cannot read properties of undefined (reading 'method')\nalias method Cannot read properties of undefined (reading 'method')\nalias builtin XY\nbigint builtin 3\ncall 1 method arg \ncompound Cannot read properties of undefined (reading 'a')\ncompound any undefined Cannot read properties of undefined (reading 'a')\ncompound any null Cannot read properties of null (reading 'a')\ncomputed compound any key Cannot read properties of undefined (reading 'a')\nindexed compound any Cannot read properties of undefined (reading '0')\ntyped dictionary compound Cannot read properties of undefined (reading 'a')\ntyped dictionary assign key rhs Cannot set properties of null (setting 'a')\nJsValue constant 1\nJsValue compound undefined Cannot read properties of undefined (reading 'a')\nJsValue assign undefined key rhs Cannot set properties of undefined (setting 'a')\nJsValue assign null key rhs Cannot set properties of null (setting 'a')\nJsValue symbol key key Cannot read properties of null (reading 'Symbol(k)')\ncompound any order rhs 5\ncompound getter order 3 1 1 1\nJsValue compound valid rhs 5 1 1\nJsValue assign valid key rhs 8\nupdate Cannot read properties of undefined (reading 'a')\nnested Cannot read properties of undefined (reading 'child')\nvalid copy 6\nvalid computed 6\nfrozen target 72 7 2\n"
+    );
+}
+
+#[test]
+fn kb_contract_jsvalue_computed_compound_receiver_order_matches_node() {
+    let source = r#"let trace = "";
+const compound = function(this: JsValue, key: () => string, rhs: () => number): number { this[key()] += rhs(); return 0; };
+function main(): void {
+  const rhs = (): number => { trace += "rhs "; return 1; };
+  try { compound.call(undefined as any, () => { trace += "key "; return "a"; }, rhs); } catch (e: any) { console.log("undefined " + trace + e.message); }
+  trace = "";
+  try { compound.call(null as any, () => { trace += "key "; return "a"; }, rhs); } catch (e: any) { console.log("null " + trace + e.message); }
+}"#;
+    assert_eq!(
+        compile_and_run(source, "kb_contract_jsvalue_computed_compound_receiver_order_matches_node"),
+        "undefined key Cannot read properties of undefined (reading 'a')\nnull key Cannot read properties of null (reading 'a')\n"
     );
 }
 
