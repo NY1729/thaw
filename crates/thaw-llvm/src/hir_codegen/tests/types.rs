@@ -162,8 +162,7 @@ fn named_generic_template_operations_runtime_matrix() {
             const alias = identity;
             console.log(identity(1));
             console.log(alias(2));
-            const genericArrow: <T>(value: T) => T = <T>(value: T): T => value;
-            const typed: <T>(value: T) => T = genericArrow;
+            const typed: <U>(value: U) => U = identity;
             console.log(typed("typed"));
             const fixed = identity<number>;
             console.log(fixed(3));

@@ -288,10 +288,10 @@ fn named_generic_template_probe_matrix() {
     let probes = [
         ("direct", "identity(1);"),
         ("unannotated_alias", "const alias = identity; alias(1);"),
-        ("typed_alias", "const alias: <T>(value: T) => T = <T>(value: T): T => value; alias(1);"),
+        ("typed_alias", "const alias: <U>(value: U) => U = identity; alias(1);"),
         ("explicit_instantiation", "const fixed = identity<number>; fixed(1);"),
         ("bare_bind", "const bound = identity.bind(null); bound(1);"),
-        ("leading_bind", "function pair<T, U>(left: T, right: U): U { return right; } const bound = pair.bind(null, 1); bound(\"x\");"),
+        ("leading_bind", "const bound = pair.bind(null, 1); bound(\"x\");"),
         ("call", "identity.call(null, 1);"),
         ("apply", "identity.apply(null, [1]);"),
         ("explicit_bind", "const bound = (identity<number>).bind(null); bound(1);"),
@@ -303,7 +303,7 @@ fn named_generic_template_probe_matrix() {
     ];
     let mut failures = Vec::new();
     for (name, body) in probes {
-        let source = format!("function identity<T>(value: T): T {{ return value; }} function main(): void {{ {body} }}");
+        let source = format!("function identity<T>(value: T): T {{ return value; }} function pair<T, U>(left: T, right: U): U {{ return right; }} function main(): void {{ {body} }}");
         if let Err(error) = thaw_parser::parse_typescript(&source)
             .map_err(|error| error.to_string())
             .and_then(|module| lower_module(&module).map(|_| ()).map_err(|error| error.to_string()))
