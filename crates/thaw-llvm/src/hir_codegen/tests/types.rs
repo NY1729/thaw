@@ -1566,3 +1566,94 @@ fn compiles_generic_interface_instantiation() {
     "#;
     assert_eq!(compile_and_run(source, "generic_interfaces"), "42\nhi\n");
 }
+
+#[test]
+fn overloaded_bind_keeps_public_residuals_at_runtime() {
+    let source = r#"
+        function pick(prefix: number, value: number): number;
+        function pick(prefix: string, value: string): string;
+        function pick(prefix: number | string | boolean, value: number | string | boolean): number | string | boolean {
+            if (typeof prefix === "number") return value;
+            return value;
+        }
+        function main(): void {
+            const numberBound = pick.bind(undefined, 1);
+            const stringBound = pick.bind(undefined, "prefix");
+            const numberCallback: (value: number) => number = numberBound;
+            const stringCallback: (value: string) => string = stringBound;
+            const repeated = numberBound.bind(undefined);
+            console.log(numberBound(5));
+            console.log(numberCallback(6));
+            console.log(repeated(7));
+            console.log(numberBound.call(undefined, 8));
+            console.log(numberBound.apply(undefined, [9]));
+            console.log(stringBound("value"));
+            console.log(stringCallback("callback"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "overloaded_bind_residual_runtime"), "5\n6\n7\n8\n9\nvalue\ncallback\n");
+}
+
+#[test]
+fn overloaded_function_callback_uses_selected_public_adapter_at_runtime() {
+    let source = r#"
+        function pick(value: number): number;
+        function pick(value: string): string;
+        function pick(value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void {
+            const callback: (value: number) => number = pick;
+            console.log(callback(9));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "overloaded_callback_adapter_runtime"), "9\n");
+}
+
+#[test]
+fn overloaded_bind_evaluates_receiver_and_prefix_once() {
+    let source = r#"
+        let receiverEffects = 0;
+        let prefixEffects = 0;
+        function pick(prefix: number, value: number): number;
+        function pick(prefix: string, value: string): string;
+        function pick(prefix: number | string | boolean, value: number | string | boolean): number | string | boolean { return value; }
+        function nextReceiver(): number { receiverEffects += 1; return 0; }
+        function nextPrefix(): number { prefixEffects += 1; return 1; }
+        function main(): void {
+            const bound = pick.bind(nextReceiver(), nextPrefix());
+            console.log(bound(7));
+            console.log(receiverEffects);
+            console.log(prefixEffects);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "overloaded_bind_once"), "7\n1\n1\n");
+}
+
+#[test]
+fn overloaded_bind_retains_optional_and_rest_residuals_at_runtime() {
+    let source = r#"
+        function choose(prefix: string, value?: number): string;
+        function choose(prefix: string, ...values: number[]): string;
+        function choose(prefix: string | boolean, ...values: number[]): string | boolean { return prefix; }
+        function main(): void {
+            const bound = choose.bind(undefined, "p");
+            console.log(bound());
+            console.log(bound(1));
+            console.log(bound(1, 2));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "overloaded_bind_optional_rest_runtime"), "p\np\np\n");
+}
+
+#[test]
+fn overloaded_bind_callback_context_adapts_physical_abi_at_runtime() {
+    let source = r#"
+        function useCallback(callback: (value: number) => string): string;
+        function useCallback(callback: (value: string) => number): number;
+        function useCallback(callback: (value: number | string) => string | number): string | number { return callback(1); }
+        function main(): void {
+            const bound = useCallback.bind(undefined, (value) => value.toFixed());
+            console.log(bound());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "overloaded_bind_callback_abi"), "1\n");
+}
