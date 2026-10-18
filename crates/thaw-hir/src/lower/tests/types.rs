@@ -14,6 +14,56 @@ fn lowers_any_and_unknown_annotations_to_dynamic_values() {
 }
 
 #[test]
+fn lowers_local_callable_defaults_with_declared_nullable_and_tuple_types() {
+    lower(
+        r#"
+        function main(): void {
+            const nullable = (x: number | null = null): number => x ?? 7;
+            const tuple = (x: [number] = [7]): number => x[0];
+            const readonlyTuple = (x: readonly [number] = [7]): number => x[0];
+            const destructured = ([x]: [number] = [7]): number => x;
+            const maybeUndefined = (x: number | undefined = undefined) => x;
+            const narrowedUndefined = (x: number | undefined = 1) => x + 1;
+            nullable(3); nullable(null); nullable(); nullable(undefined);
+            tuple([3]); tuple(); tuple(undefined);
+            readonlyTuple([3]); readonlyTuple(); readonlyTuple(undefined);
+            destructured([3]); destructured(); destructured(undefined);
+            maybeUndefined(3); maybeUndefined(); maybeUndefined(undefined);
+            narrowedUndefined();
+        }
+        "#,
+    );
+}
+
+#[test]
+fn rejects_an_incompatible_local_callable_default() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void { const invalid = (x: number = "bad") => x; }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
+fn lowers_mixed_nullish_and_optional_tuple_callable_defaults() {
+    lower(
+        r#"
+        function main(): void {
+            const nullFallback = (x: number | null | undefined = null) => x;
+            const scalarFallback = (x: number | null | undefined = 3) => x;
+            const maybeFallback = (): number | undefined => undefined;
+            const optionalFallback = (x: number | null | undefined = maybeFallback()) => x;
+            const tuple = (x: [number] | undefined = [7]): number => x[0];
+            const readonlyTuple = (x: readonly [number] | undefined = [7]): number => x[0];
+            const arrayPattern = ([x]: [number] | undefined = [9]): number => x;
+            nullFallback(); scalarFallback(); optionalFallback();
+            tuple(); readonlyTuple(); arrayPattern();
+        }
+        "#,
+    );
+}
+
+#[test]
 fn stringifies_an_unknown_value_through_the_dynamic_host() {
     lower(
         r#"
