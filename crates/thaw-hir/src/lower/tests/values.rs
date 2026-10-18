@@ -3459,3 +3459,60 @@ fn symbol_bearing_native_composites_select_projection() {
     let body = format!("{program:#?}");
     assert!(body.contains("retainDynamicNative"), "{body}");
 }
+
+fn structural_class_argument_source(decorator: &str) -> String {
+    format!(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {{ value: number }}): string;
+            {decorator}class Item {{ value: number = 1; }}
+            function main(): void {{ __thaw_typed_js_7368617065(new Item()); }}
+        "#
+    )
+}
+
+#[test]
+fn undecorated_class_satisfies_external_structural_argument() {
+    let module = thaw_parser::parse_typescript(&structural_class_argument_source(""))
+        .expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "class public source field value: number should satisfy {{ value: number }}; got: {}", result.unwrap_err());
+}
+
+#[test]
+fn decorated_class_satisfies_external_structural_argument() {
+    let module = thaw_parser::parse_typescript(&structural_class_argument_source("declare function Mark(value: any): any;\n@Mark\n"))
+        .expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "decorated class public source field value: number should satisfy {{ value: number }}; got: {}", result.unwrap_err());
+}
+
+#[test]
+fn external_structural_argument_rejects_missing_and_incompatible_fields() {
+    for source in [
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): string;
+            class Item { other: number = 1; }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): string;
+            class Item { value: string = "wrong"; }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).expect("parse");
+        assert!(lower_module(&module).is_err(), "invalid class source shape should be rejected");
+    }
+}
+
+#[test]
+fn plain_object_does_not_satisfy_nominal_class_argument() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: Item): string;
+            class Item { value: number = 1; }
+            function main(): void { __thaw_typed_js_7368617065({ value: 1 }); }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_err(), "plain object must not acquire Item identity");
+}
