@@ -3978,7 +3978,14 @@ impl<'a> FnLowerer<'a> {
                 adapter_params.push(HirParam { name, ty: ty.clone() });
             }
             self.next_binding += 1;
-            let mut arguments = vec![source.clone()];
+            let receiver_argument = match params.first() {
+                Some(HirType::NonArrowReceiver(inner)) => HirExpr::NonArrowReceiverPack {
+                    value: Box::new(source.clone()),
+                    declared: inner.as_ref().clone(),
+                },
+                _ => source.clone(),
+            };
+            let mut arguments = vec![receiver_argument];
             arguments.extend(
                 adapter_params
                     .iter()
@@ -5673,6 +5680,10 @@ impl<'a> FnLowerer<'a> {
         };
         let Some((receiver, forwarded)) = accessor_params.split_first() else {
             return Err(format!("`{label}` accessor slot has no receiver"));
+        };
+        let receiver = match receiver {
+            HirType::NonArrowReceiver(inner) => inner.as_ref().clone(),
+            other => other.clone(),
         };
         if let swc_ecma_ast::Prop::Method(method) = property {
             return self.lower_object_function(

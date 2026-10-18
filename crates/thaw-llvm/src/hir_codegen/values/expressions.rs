@@ -702,11 +702,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(call_setter);
+                let (setter_params, setter_return) = self
+                    .object_accessor_signature(fields, field, true)?
+                    .unwrap_or_else(|| {
+                        (
+                            vec![
+                                HirType::NonArrowReceiver(Box::new(object_ty.clone())),
+                                field_type.clone(),
+                            ],
+                            HirType::Void,
+                        )
+                    });
                 self.compile_registered_accessor_call(
                     setter,
-                    &[object_ty.clone(), field_type.clone()],
-                    &HirType::Void,
-                    &[object.into(), val.into()],
+                    &setter_params,
+                    &setter_return,
+                    &[object.into(), val],
                     "object_setter_call",
                 )?;
                 self.builder
