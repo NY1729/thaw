@@ -16,6 +16,25 @@ struct GenericCallContext<'a> {
     expected_return_hint: Option<&'a HirType>,
 }
 
+fn packed_empty_native_rest_index(
+    args: &[HirExpr],
+    signature: &FnSignature,
+    packed_native_rest_fixed_count: Option<usize>,
+) -> Option<usize> {
+    if packed_native_rest_fixed_count.is_none() || signature.native_rest.is_none() {
+        return None;
+    }
+    if !matches!(signature.generic_param_patterns.last(), Some(GenericTypePattern::Array(_))) {
+        return None;
+    }
+    let index = args.len().checked_sub(1)?;
+    match args.get(index)? {
+        HirExpr::ArrayLit(values) if values.is_empty() => Some(index),
+        HirExpr::ArrayAlloc(length, _) if matches!(length.as_ref(), HirExpr::Lit(HirLit::F64(n)) if *n == 0.0) => Some(index),
+        _ => None,
+    }
+}
+
 impl FnLowerer<'_> {
     /// Infer and validate type arguments for the canonical direct-call path.
     /// Keep source-AST alignment here: literals and primitive-array indices
@@ -57,6 +76,7 @@ impl FnLowerer<'_> {
                     matches!(constraint, TsType::TsTypeOperator(operator) if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf)
                 })
         };
+        let empty_rest_index = packed_empty_native_rest_index(args, signature, *packed_native_rest_fixed_count);
         let inference_argument_count = packed_native_rest_fixed_count
             .filter(|supplied_fixed| {
                 signature
@@ -66,7 +86,8 @@ impl FnLowerer<'_> {
                     .take(signature.generic_param_patterns.len().saturating_sub(1))
                     .any(|optional| *optional)
             })
-            .unwrap_or(args.len());
+            .unwrap_or(args.len())
+            .min(empty_rest_index.unwrap_or(args.len()));
         let preserve_class_physical = !signature.is_extern;
         let mut actual = args
             .iter()
@@ -151,6 +172,32 @@ impl FnLowerer<'_> {
             }
         }
         Ok(Some(types))
+    }
+
+    fn retype_packed_empty_generic_rest(
+        &self,
+        args: &mut [HirExpr],
+        signature: &FnSignature,
+        types: &[HirType],
+        packed_native_rest_fixed_count: Option<usize>,
+    ) -> Result<(), String> {
+        if types.contains(&HirType::Dynamic) {
+            return Ok(());
+        }
+        let Some(index) = packed_empty_native_rest_index(args, signature, packed_native_rest_fixed_count) else {
+            return Ok(());
+        };
+        let Some(GenericTypePattern::Array(element)) = signature.generic_param_patterns.last() else {
+            return Ok(());
+        };
+        let substitution = signature.generic_type_params.iter().cloned()
+            .zip(types.iter().cloned()).collect::<HashMap<_, _>>();
+        let element = instantiate_generic_pattern(element, &substitution)?;
+        if self.infer_expr_type(&args[index])? == HirType::Array(Box::new(element.clone())) {
+            return Ok(());
+        }
+        args[index] = native_rest_array(Vec::new(), &element);
+        Ok(())
     }
 
     fn specialize_generic_native_call(

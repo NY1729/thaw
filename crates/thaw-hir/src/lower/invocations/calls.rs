@@ -3040,6 +3040,12 @@ impl<'a> FnLowerer<'a> {
             },
         )?;
 
+        if let (Some(signature), Some(types)) = (&signature, &generic_types) {
+            self.retype_packed_empty_generic_rest(
+                &mut args, signature, types, packed_native_rest_fixed_count,
+            )?;
+        }
+
         if let (Some(signature), Some(constraints)) = (&signature, self.call_constraints) {
             if let Some(types) = &generic_types {
                 constraints

@@ -441,6 +441,27 @@ fn named_generic_template_bind_checks_constraints() {
     assert!(error.contains("does not satisfy constraint F64"), "{error}");
 }
 
+#[test]
+fn named_generic_template_bind_rest_omission_uses_bound_type() {
+    let module = thaw_parser::parse_typescript(r#"
+        function collect<T>(first: T, ...rest: T[]): T { return first; }
+        function collectDefault<T = number>(first?: T, ...rest: T[]): T | undefined { return first; }
+        function collectExplicit<T>(first: T, ...rest: T[]): T { return first; }
+        function main(): void {
+            collect("direct");
+            const bound = collect.bind(null, "bound"); bound();
+            collectDefault();
+            const defaultBound = collectDefault.bind(null); defaultBound();
+            collectExplicit<string>("explicit");
+        }
+    "#).unwrap();
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "{result:?}");
+    let program = result.unwrap();
+    assert!(program.functions.iter().any(|function| function.name.starts_with("collect__thaw_str__array_str")));
+    assert!(program.functions.iter().any(|function| function.name.starts_with("collectDefault__thaw_optional_f64__array_f64")));
+    assert!(program.functions.iter().any(|function| function.name.starts_with("collectExplicit__thaw_str__array_str")));
+}
 
 #[test]
 fn named_generic_template_bind_captures_narrowed_source_hint() {

@@ -234,6 +234,52 @@ fn named_generic_template_call_apply_specialize_and_preserve_order() {
 }
 
 #[test]
+fn named_generic_template_bind_specializes_and_captures_once() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function pair<T, U>(left: T, right: U): U { return right; }
+        function optional<T = number>(value?: T): T | undefined { return value; }
+        function collect<T>(first: T, ...rest: T[]): T { return first; }
+        function pick<T, K extends keyof T>(obj: T, key: K): T[K] { return obj[key]; }
+        function main(): void {
+            let effects = 0;
+            const object = { value: 7 };
+            const identityAlias = identity;
+            const bound = identityAlias.bind((effects++, null), (effects++, object));
+            const alias = bound;
+            console.log(typeof bound);
+            console.log(alias() === object);
+            console.log(effects);
+            const pairBound = pair.bind(null, 1);
+            console.log(pairBound("number"));
+            console.log(pairBound(true));
+            const optionalBound = optional.bind(null);
+            console.log(optionalBound());
+            console.log(optionalBound("optional"));
+            const restBound = collect.bind(null, "rest");
+            console.log(restBound());
+            console.log(restBound("ignored", "tail"));
+            const key = "name";
+            const picked = pick.bind(null, { name: "key-capture" }, key);
+            console.log(picked());
+            const unknownValue: unknown = 8;
+            if (typeof unknownValue === "number") {
+                const narrowed = identity.bind(null, unknownValue);
+                console.log(narrowed());
+            }
+            {
+                const identity = (value: number): number => 99;
+                console.log(alias() === object);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_bind"),
+        "function\ntrue\n2\nnumber\ntrue\nundefined\noptional\nrest\nrest\nkey-capture\n8\ntrue\n"
+    );
+}
+
+#[test]
 fn recursively_specializes_named_generic_local_function_values() {
     let source = r#"
         type Repeat = <T, U>(value: T, marker: U, remaining: number) => T;
