@@ -11,6 +11,499 @@ fn receiver_wants_json(receiver: &HirType) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
+    pub(in crate::lower) fn adapt_selected_overload_argument(
+        &mut self,
+        physical: &HirType,
+        selected: Option<&HirType>,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let Some(selected) = selected else {
+            return Ok(value);
+        };
+        fn visible_callable(ty: &HirType) -> &HirType {
+            match ty {
+                HirType::FunctionWithThis(_, visible) => visible.as_ref(),
+                other => other,
+            }
+        }
+        let is_callable = |ty: &HirType| {
+            matches!(
+                visible_callable(ty),
+                HirType::Function(..) | HirType::CallableFunction(..)
+            )
+        };
+        let actual = self.infer_expr_type(&value)?;
+        if !is_callable(selected) || !is_callable(physical) || !is_callable(&actual) {
+            return Ok(value);
+        }
+        if visible_callable(physical) == visible_callable(&actual)
+            || callable_abi_compatible(visible_callable(physical), visible_callable(&actual))
+        {
+            return Ok(value);
+        }
+        let (HirType::Function(public_params, public_ret), HirType::Function(physical_params, physical_ret)) =
+            (visible_callable(selected), visible_callable(physical))
+        else {
+            return Err(format!(
+                "selected callback ABI {selected:?} cannot be adapted to implementation ABI {physical:?}"
+            ));
+        };
+        if public_params.len() != physical_params.len()
+            || self
+                .expect_type(selected, &value, "overload callback argument")
+                .is_err()
+        {
+            return Err(format!(
+                "selected callback ABI {selected:?} cannot be adapted to implementation ABI {physical:?}"
+            ));
+        }
+
+        let callback_name = format!("__thaw_overload_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_previous = self.scope.insert(callback_name.clone(), selected.clone());
+        let mut adapter_params = Vec::with_capacity(physical_params.len());
+        let mut callback_args = Vec::with_capacity(physical_params.len());
+        let mut parameter_previous = Vec::with_capacity(physical_params.len());
+        for (index, (physical_param, public_param)) in
+            physical_params.iter().zip(public_params).enumerate()
+        {
+            let name = format!("__thaw_overload_callback_arg_{}_{}", self.next_binding, index);
+            self.next_binding += 1;
+            let previous = self.scope.insert(name.clone(), physical_param.clone());
+            parameter_previous.push((name.clone(), previous));
+            adapter_params.push(HirParam {
+                name: name.clone(),
+                ty: physical_param.clone(),
+            });
+            let argument = if physical_param == public_param {
+                HirExpr::Var(name)
+            } else if matches!(physical_param, HirType::Union(members) if members.contains(public_param)) {
+                self.project_overload_call_result(
+                    HirExpr::Var(name),
+                    physical_param,
+                    public_param,
+                )?
+            } else {
+                return Err(format!(
+                    "callback parameter {physical_param:?} cannot be narrowed to selected public type {public_param:?}"
+                ));
+            };
+            callback_args.push(argument);
+        }
+        let callback_result = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            callback_args,
+        );
+        let adapter_body = if physical_ret.as_ref() == public_ret.as_ref() {
+            callback_result
+        } else if let HirType::Union(members) = physical_ret.as_ref() {
+            let Some(index) = members.iter().position(|member| member == public_ret.as_ref()) else {
+                return Err(format!(
+                    "selected callback return {:?} cannot be adapted to implementation return {:?}",
+                    public_ret, physical_ret
+                ));
+            };
+            HirExpr::UnionInject(Box::new(callback_result), index, members.clone())
+        } else {
+            return Err(format!(
+                "selected callback return {:?} cannot be adapted to implementation return {:?}",
+                public_ret, physical_ret
+            ));
+        };
+        let adapter = HirExpr::Lambda(
+            vec![HirParam {
+                name: callback_name.clone(),
+                ty: selected.clone(),
+            }],
+            adapter_params,
+            physical_ret.as_ref().clone(),
+            Box::new(adapter_body),
+        );
+        self.scope.insert(callback_name.clone(), selected.clone());
+        let factory = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam {
+                name: callback_name.clone(),
+                ty: selected.clone(),
+            }],
+            physical.clone(),
+            Box::new(adapter),
+        );
+        for (name, previous) in parameter_previous {
+            match previous {
+                Some(previous) => {
+                    self.scope.insert(name, previous);
+                }
+                None => {
+                    self.scope.remove(&name);
+                }
+            }
+        }
+        match callback_previous {
+            Some(previous) => {
+                self.scope.insert(callback_name, previous);
+            }
+            None => {
+                self.scope.remove(&callback_name);
+            }
+        }
+        Ok(HirExpr::Call(Box::new(factory), vec![value]))
+    }
+
+    pub(in crate::lower) fn select_public_overload(
+        &self,
+        overloads: &[HirType],
+        arguments: &[HirExpr],
+        call_receiver: Option<&HirExpr>,
+        label: &str,
+    ) -> Result<Option<HirType>, String> {
+        for public in overloads {
+            let (declared_receiver, callable) = match public {
+                HirType::FunctionWithThis(receiver, callable) => {
+                    (Some(receiver.as_ref()), callable.as_ref())
+                }
+                callable => (None, callable),
+            };
+            let (params, optional, rest, ret) = match callable {
+                HirType::Function(params, ret) => (
+                    params.as_slice(),
+                    HirOptionalMask::default(),
+                    None,
+                    ret.as_ref(),
+                ),
+                HirType::CallableFunction(params, optional, rest, ret) => (
+                    params.as_slice(),
+                    optional.clone(),
+                    rest.as_deref(),
+                    ret.as_ref(),
+                ),
+                _ => continue,
+            };
+            let inline_receiver = declared_receiver.is_some() && call_receiver.is_none();
+            let mut expected = Vec::with_capacity(params.len() + usize::from(inline_receiver));
+            if let Some(receiver) = declared_receiver.filter(|_| inline_receiver) {
+                expected.push(receiver.clone());
+            }
+            expected.extend(params.iter().cloned());
+            let receiver_offset = usize::from(inline_receiver);
+            if let (Some(receiver), Some(value)) = (declared_receiver, call_receiver) {
+                if self.expect_type(receiver, value, "overload receiver").is_err() {
+                    continue;
+                }
+            } else if declared_receiver.is_some() && call_receiver.is_none() && arguments.is_empty() {
+                continue;
+            }
+            let required = (0..expected.len())
+                .filter(|index| {
+                    *index < receiver_offset || !optional.contains(*index - receiver_offset)
+                })
+                .count();
+            if arguments.len() < required
+                || (rest.is_none() && arguments.len() > expected.len())
+            {
+                continue;
+            }
+            if arguments.iter().enumerate().all(|(index, argument)| {
+                expected
+                    .get(index)
+                    .or(rest)
+                    .is_some_and(|declared| {
+                        self.expect_public_overload_argument(declared, argument).is_ok()
+                    })
+            }) {
+                return Ok(Some(ret.clone()));
+            }
+        }
+        if overloads.is_empty() {
+            Ok(None)
+        } else {
+            Err(format!("no public overload of `{label}` accepts the supplied arguments"))
+        }
+    }
+
+    pub(in crate::lower) fn select_public_overload_for_source(
+        &self,
+        overloads: &[HirType],
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        call_receiver: Option<&HirExpr>,
+        label: &str,
+    ) -> Result<Option<HirType>, String> {
+        for public in overloads {
+            let (declared_receiver, callable) = match public {
+                HirType::FunctionWithThis(receiver, callable) => {
+                    (Some(receiver.as_ref()), callable.as_ref())
+                }
+                callable => (None, callable),
+            };
+            let (params, optional, rest) = match callable {
+                HirType::Function(params, _) => (
+                    params.as_slice(),
+                    HirOptionalMask::default(),
+                    None,
+                ),
+                HirType::CallableFunction(params, optional, rest, _) => (
+                    params.as_slice(),
+                    optional.clone(),
+                    rest.as_deref(),
+                ),
+                _ => continue,
+            };
+            let inline_receiver = declared_receiver.is_some() && call_receiver.is_none();
+            let mut expected = Vec::with_capacity(params.len() + usize::from(inline_receiver));
+            if let Some(receiver) = declared_receiver.filter(|_| inline_receiver) {
+                expected.push(receiver.clone());
+            }
+            expected.extend(params.iter().cloned());
+            let receiver_offset = usize::from(inline_receiver);
+            if let (Some(receiver), Some(value)) = (declared_receiver, call_receiver) {
+                if self.expect_type(receiver, value, "overload receiver").is_err() {
+                    continue;
+                }
+            } else if declared_receiver.is_some() && call_receiver.is_none() && arguments.is_empty() {
+                continue;
+            }
+
+            let state = self
+                .call_constraints
+                .map(|constraints| constraints.borrow().len());
+            let mut trial = self.clone();
+            let mut argument_count = 0;
+            let applicable = arguments.iter().all(|argument| {
+                if argument.spread.is_some()
+                    && !matches!(argument.expr.as_ref(), swc_ecma_ast::Expr::Array(_))
+                {
+                    let Ok(value) = trial.lower_expr_with_expected_type(&argument.expr, None) else {
+                        return false;
+                    };
+                    let Ok(HirType::Tuple(elements)) = trial.infer_expr_type(&value) else {
+                        return false;
+                    };
+                    return elements.iter().all(|actual| {
+                        let Some(declared) = expected.get(argument_count).or(rest) else {
+                            return false;
+                        };
+                        let typed = HirExpr::TypedIndex(
+                            Box::new(HirExpr::Lit(HirLit::Undefined)),
+                            Box::new(HirExpr::Lit(HirLit::F64(argument_count as f64))),
+                            actual.clone(),
+                        );
+                        argument_count += 1;
+                        trial.expect_type(declared, &typed, "overload argument").is_ok()
+                    });
+                }
+                let mut check = |expr: &swc_ecma_ast::Expr| {
+                    let Some(declared) = expected.get(argument_count).or(rest) else {
+                        return false;
+                    };
+                    let Ok(value) = trial.lower_expr_with_expected_type(expr, Some(declared))
+                    else {
+                        return false;
+                    };
+                    argument_count += 1;
+                    trial.expect_public_overload_argument(declared, &value).is_ok()
+                };
+                if argument.spread.is_none() {
+                    return check(&argument.expr);
+                }
+                let swc_ecma_ast::Expr::Array(array) = argument.expr.as_ref() else {
+                    unreachable!("nonliteral spread handled before contextual closure")
+                };
+                if array.elems.iter().any(Option::is_none) {
+                    return false;
+                }
+                array.elems.iter().flatten().all(|element| {
+                    if element.spread.is_some() {
+                        return false;
+                    }
+                    check(&element.expr)
+                })
+            });
+            let required = (0..expected.len())
+                .filter(|index| {
+                    *index < receiver_offset || !optional.contains(*index - receiver_offset)
+                })
+                .count();
+            let applicable = applicable
+                && argument_count >= required
+                && (rest.is_some() || argument_count <= expected.len());
+            if let (Some(constraints), Some(length)) = (self.call_constraints, state) {
+                constraints.borrow_mut().truncate(length);
+            }
+            if applicable {
+                return Ok(Some(public.clone()));
+            }
+        }
+        if overloads.is_empty() {
+            Ok(None)
+        } else {
+            Err(format!("no public overload of `{label}` accepts the supplied arguments"))
+        }
+    }
+
+    pub(in crate::lower) fn public_overload_argument_type(
+        &self,
+        public: &HirType,
+        index: usize,
+    ) -> Option<HirType> {
+        let (receiver, callable) = match public {
+            HirType::FunctionWithThis(receiver, callable) => {
+                (Some(receiver.as_ref()), callable.as_ref())
+            }
+            callable => (None, callable),
+        };
+        let (params, rest) = match callable {
+            HirType::Function(params, _) | HirType::CallableFunction(params, _, None, _) => {
+                (params.as_slice(), None)
+            }
+            HirType::CallableFunction(params, _, Some(rest), _) => {
+                (params.as_slice(), Some(rest.as_ref()))
+            }
+            _ => return None,
+        };
+        let offset = usize::from(receiver.is_some());
+        if index < offset {
+            receiver.cloned()
+        } else {
+            params
+                .get(index - offset)
+                .or(rest)
+                .cloned()
+        }
+    }
+
+    fn expect_public_overload_argument(
+        &self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<(), String> {
+        match declared {
+            HirType::Optional(_) if self.infer_expr_type(value)? == HirType::Undefined => Ok(()),
+            HirType::Optional(payload) => self
+                .expect_type(declared, value, "overload argument")
+                .or_else(|_| self.expect_type(payload, value, "overload argument")),
+            _ => self.expect_type(declared, value, "overload argument"),
+        }
+    }
+
+    pub(in crate::lower) fn public_overload_visible_argument_type(
+        &self,
+        public: &HirType,
+        index: usize,
+    ) -> Option<HirType> {
+        let callable = match public {
+            HirType::FunctionWithThis(_, callable) => callable.as_ref(),
+            callable => callable,
+        };
+        match callable {
+            HirType::Function(params, _) => params.get(index).cloned(),
+            HirType::CallableFunction(params, _, rest, _) => params
+                .get(index)
+                .or(rest.as_deref())
+                .cloned(),
+            _ => None,
+        }
+    }
+
+    pub(in crate::lower) fn public_overload_return_type(&self, public: &HirType) -> Option<HirType> {
+        let callable = match public {
+            HirType::FunctionWithThis(_, callable) => callable.as_ref(),
+            callable => callable,
+        };
+        match callable {
+            HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => {
+                Some(ret.as_ref().clone())
+            }
+            _ => None,
+        }
+    }
+
+    pub(in crate::lower) fn project_overload_call_result(
+        &mut self,
+        call: HirExpr,
+        physical: &HirType,
+        selected: &HirType,
+    ) -> Result<HirExpr, String> {
+        if physical == selected {
+            return Ok(call);
+        }
+        let HirType::Union(members) = physical else {
+            return Err(format!(
+                "overload return projection from {physical:?} to {selected:?} is unsupported"
+            ));
+        };
+        let fallback = Self::unreachable_value(selected)?;
+        let name = format!("__thaw_overload_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), physical.clone());
+        let value = HirExpr::Var(name.clone());
+        let throw = || {
+            HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "implementation returned a value outside the selected overload".into(),
+                ))),
+                Box::new(fallback.clone()),
+            )
+        };
+        let checked = if let HirType::Union(selected_members) = selected {
+            let mut checked = throw();
+            for (selected_index, member) in selected_members.iter().enumerate().rev() {
+                let Some(physical_index) = members.iter().position(|candidate| candidate == member)
+                else {
+                    return Err(format!(
+                        "overload return member {member:?} is not in implementation return {physical:?}"
+                    ));
+                };
+                checked = HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(physical_index as f64))),
+                    )),
+                    Box::new(HirExpr::UnionInject(
+                        Box::new(HirExpr::UnionValue(
+                            Box::new(value.clone()),
+                            physical_index,
+                            members.clone(),
+                        )),
+                        selected_index,
+                        selected_members.clone(),
+                    )),
+                    Box::new(checked),
+                    selected.clone(),
+                );
+            }
+            checked
+        } else {
+            let Some(index) = members.iter().position(|member| member == selected) else {
+                return Err(format!(
+                    "overload return {selected:?} is not a member of implementation return {physical:?}"
+                ));
+            };
+            HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                )),
+                Box::new(HirExpr::UnionValue(Box::new(value.clone()), index, members.clone())),
+                Box::new(throw()),
+                selected.clone(),
+            )
+        };
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name,
+                    ty: physical.clone(),
+                }],
+                selected.clone(),
+                Box::new(checked),
+            )),
+            vec![call],
+        ))
+    }
+
     /// Converts an explicit `thisArg` to the declared receiver of a `this`-taking
     /// closure: a native aggregate of another layout crosses as a Host `Json`.
     fn coerce_this_for_receiver(
@@ -1041,6 +1534,10 @@ impl<'a> FnLowerer<'a> {
         }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
+        let (public_overloads, target_type) = match target_type {
+            HirType::OverloadedFunction(public, physical) => (Some(public), *physical),
+            other => (None, other),
+        };
         let (target_type, declared_receiver) = match target_type {
             HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
             other => (other, None),
@@ -1069,8 +1566,155 @@ impl<'a> FnLowerer<'a> {
         let this_value = self.lower_expr(&this_argument.expr)?;
         let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
         let this_type = self.infer_expr_type(&this_value)?;
+        let mut residual_overloads = Vec::new();
+        let mut overload_argument_contexts = Vec::new();
+        if let Some(overloads) = public_overloads.as_deref() {
+            let mut viable = Vec::new();
+            for public in overloads {
+                let (public_receiver, callable) = match public {
+                    HirType::FunctionWithThis(receiver, callable) => {
+                        (Some(receiver.as_ref()), callable.as_ref())
+                    }
+                    callable => (None, callable),
+                };
+                if public_receiver.is_some_and(|receiver| {
+                    self.expect_type(receiver, &this_value, "overload bind receiver").is_err()
+                }) {
+                    continue;
+                }
+                let (public_params, public_rest) = match callable {
+                    HirType::Function(params, _) => (
+                        params.as_slice(), None,
+                    ),
+                    HirType::CallableFunction(params, _, rest, _) => (
+                        params.as_slice(), rest.as_deref(),
+                    ),
+                    _ => continue,
+                };
+                let state = self.call_constraints.map(|constraints| constraints.borrow().len());
+                let mut trial = self.clone();
+                let mut contexts = Vec::new();
+                let mut logical_count = 0usize;
+                let mut applicable = true;
+                for argument in leading {
+                    if argument.spread.is_none() {
+                        let Some(declared) = public_params.get(logical_count).or(public_rest) else {
+                            applicable = false;
+                            break;
+                        };
+                        let Ok(value) = trial.lower_expr_with_expected_type(&argument.expr, Some(declared)) else {
+                            applicable = false;
+                            break;
+                        };
+                        if trial.expect_public_overload_argument(declared, &value).is_err() {
+                            applicable = false;
+                            break;
+                        }
+                        contexts.push(declared.clone());
+                        logical_count += 1;
+                        continue;
+                    }
+                    if let swc_ecma_ast::Expr::Array(array) = argument.expr.as_ref() {
+                        if array.elems.iter().any(|element| {
+                            element.as_ref().is_none_or(|element| element.spread.is_some())
+                        }) {
+                            applicable = false;
+                            break;
+                        }
+                        for element in array.elems.iter().flatten() {
+                            let Some(declared) = public_params.get(logical_count).or(public_rest) else {
+                                applicable = false;
+                                break;
+                            };
+                            let Ok(value) = trial.lower_expr_with_expected_type(&element.expr, Some(declared)) else {
+                                applicable = false;
+                                break;
+                            };
+                            if trial.expect_public_overload_argument(declared, &value).is_err() {
+                                applicable = false;
+                                break;
+                            }
+                            contexts.push(declared.clone());
+                            logical_count += 1;
+                        }
+                        if !applicable { break; }
+                        continue;
+                    }
+                    let Ok(value) = trial.lower_expr_with_expected_type(&argument.expr, None) else {
+                        applicable = false;
+                        break;
+                    };
+                    let Ok(HirType::Tuple(elements)) = trial.infer_expr_type(&value) else {
+                        applicable = false;
+                        break;
+                    };
+                    for actual in elements {
+                        let Some(declared) = public_params.get(logical_count).or(public_rest) else {
+                            applicable = false;
+                            break;
+                        };
+                        let typed = HirExpr::TypedClosure(actual, Box::new(HirExpr::Lit(HirLit::Undefined)));
+                        if trial.expect_public_overload_argument(declared, &typed).is_err() {
+                            applicable = false;
+                            break;
+                        }
+                        contexts.push(declared.clone());
+                        logical_count += 1;
+                    }
+                    if !applicable { break; }
+                }
+                applicable &= public_rest.is_some() || logical_count <= public_params.len();
+                if let (Some(constraints), Some(length)) = (self.call_constraints, state) {
+                    constraints.borrow_mut().truncate(length);
+                }
+                if !applicable {
+                    continue;
+                }
+                let bound_fixed = logical_count.min(public_params.len());
+                let residual = match callable {
+                    HirType::Function(params, ret) => {
+                        HirType::Function(params[bound_fixed..].to_vec(), ret.clone())
+                    }
+                    HirType::CallableFunction(params, optional, rest, ret) => {
+                        HirType::CallableFunction(
+                            params[bound_fixed..].to_vec(),
+                            optional.shifted(bound_fixed),
+                            rest.clone(),
+                            ret.clone(),
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                viable.push((residual, contexts));
+            }
+            if viable.is_empty() {
+                return Err("no public overload accepts the supplied bind receiver and prefix".into());
+            }
+            for (residual, _) in &viable {
+                residual_overloads.push(residual.clone());
+            }
+            let context_count = viable.iter().map(|candidate| candidate.1.len()).max().unwrap_or(0);
+            for argument_index in 0..context_count {
+                let first = viable[0].1.get(argument_index).cloned();
+                let agreed = first.filter(|context| viable.iter().all(|candidate| {
+                    candidate.1.get(argument_index) == Some(context)
+                }));
+                overload_argument_contexts.push(agreed);
+            }
+        }
         let (leading, spread_bindings) =
-            self.lower_native_spread_values(leading, "function .bind()")?;
+            if public_overloads.is_some() {
+                let expected = if overload_argument_contexts.iter().all(Option::is_some) {
+                    overload_argument_contexts.iter().filter_map(Clone::clone).collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                self.lower_native_spread_values_with_overload_expected(
+                    leading, "function .bind()", &expected, None,
+                )?
+            } else {
+                self.lower_native_spread_values(leading, "function .bind()")?
+            };
         if !optional.is_empty() || rest.is_some() {
             if rest.is_none() && leading.len() > params.len() {
                 return Err(format!(
@@ -1095,6 +1739,10 @@ impl<'a> FnLowerer<'a> {
                     .get(index)
                     .or(rest.as_ref())
                     .expect("leading callable argument has a fixed or rest type");
+                let selected = overload_argument_contexts
+                    .get(index)
+                    .and_then(Option::as_ref);
+                let value = self.adapt_selected_overload_argument(expected, selected, value)?;
                 let value = self.coerce_to_declared(expected, value)?;
                 let name = format!("__thaw_rest_bound_argument_{}", self.next_binding);
                 self.next_binding += 1;
@@ -1185,6 +1833,11 @@ impl<'a> FnLowerer<'a> {
                 rest.map(Box::new),
                 Box::new(ret),
             );
+            let logical = if public_overloads.is_some() {
+                HirType::OverloadedFunction(residual_overloads.clone(), Box::new(logical))
+            } else {
+                logical
+            };
             let bound = self.wrap_call_argument_bindings(
                 HirExpr::TypedClosure(logical, Box::new(closure)),
                 &argument_bindings,
@@ -1204,10 +1857,22 @@ impl<'a> FnLowerer<'a> {
                 params.len()
             ));
         }
+        let bound_count = leading.len();
+        let overload_physical_bound = HirType::Function(
+            params[bound_count..].to_vec(),
+            Box::new(ret.clone()),
+        );
         let leading = leading
             .into_iter()
             .zip(&params)
-            .map(|(value, expected)| self.coerce_to_declared(expected, value))
+            .enumerate()
+            .map(|(index, (value, expected))| {
+                let selected = overload_argument_contexts
+                    .get(index)
+                    .and_then(Option::as_ref);
+                let value = self.adapt_selected_overload_argument(expected, selected, value)?;
+                self.coerce_to_declared(expected, value)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let target_name = format!("__thaw_function_bind_target_{}", self.next_binding);
         self.next_binding += 1;
@@ -1227,6 +1892,14 @@ impl<'a> FnLowerer<'a> {
             ),
             &argument_bindings,
         )?;
+        let bound = if public_overloads.is_some() {
+            HirExpr::TypedClosure(
+                HirType::OverloadedFunction(residual_overloads, Box::new(overload_physical_bound)),
+                Box::new(bound),
+            )
+        } else {
+            bound
+        };
         let guarded = self.guard_function_value(
             HirExpr::Var(target_name.clone()), &target_type,
             "Cannot read properties of undefined (reading 'bind')", bound,
@@ -1259,6 +1932,10 @@ impl<'a> FnLowerer<'a> {
         }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
+        let (public_overloads, target_type) = match target_type {
+            HirType::OverloadedFunction(public, physical) => (Some(public), *physical),
+            other => (None, other),
+        };
         // A `this`-taking closure keeps its declared receiver type: the explicit
         // `thisArg` is converted to it before the tagged receiver entry decodes it.
         let (target_type, declared_receiver) = match target_type {
@@ -1315,8 +1992,61 @@ impl<'a> FnLowerer<'a> {
         let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
         let this_type = self.infer_expr_type(&this_value)?;
         let label = format!("function .{operation_name}()");
-        let (arguments, spread_bindings) = self.lower_native_spread_values(&forwarded, &label)?;
+        let selected_public_signature = public_overloads
+            .as_deref()
+            .map(|overloads| {
+                self.select_public_overload_for_source(
+                    overloads,
+                    &forwarded,
+                    Some(&this_value),
+                    &label,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let selected_public_return = selected_public_signature
+            .as_ref()
+            .and_then(|public| self.public_overload_return_type(public));
+        let public_rest = selected_public_signature.as_ref().and_then(|public| match public {
+            HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                HirType::CallableFunction(_, _, rest, _) => rest.as_deref(),
+                _ => None,
+            },
+            HirType::CallableFunction(_, _, rest, _) => rest.as_deref(),
+            _ => None,
+        });
+        let public_params = selected_public_signature.as_ref().map(|public| {
+            (0..params.len())
+                .filter_map(|index| self.public_overload_visible_argument_type(public, index))
+                .collect::<Vec<_>>()
+        });
+        let (arguments, spread_bindings) = if let Some(public_params) = &public_params {
+            self.lower_native_spread_values_with_overload_expected(
+                &forwarded,
+                &label,
+                public_params,
+                public_rest,
+            )?
+        } else {
+            self.lower_native_spread_values(&forwarded, &label)?
+        };
         let mut arguments = arguments;
+        if let Some(public_fixed_count) = selected_public_signature.as_ref().and_then(|public| match public {
+            HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                HirType::CallableFunction(params, _, Some(_), _) => Some(params.len()),
+                _ => None,
+            },
+            HirType::CallableFunction(params, _, Some(_), _) => Some(params.len()),
+            _ => None,
+        }).filter(|count| *count < params.len()) {
+            if arguments.len() > public_fixed_count {
+                let public_rest_values = arguments.split_off(public_fixed_count);
+                for parameter in params.iter().skip(public_fixed_count) {
+                    arguments.push(omitted_parameter_value(parameter)?);
+                }
+                arguments.extend(public_rest_values);
+            }
+        }
         if arguments.len() > params.len() && rest.is_none() {
             return Err(format!(
                 "function .{operation_name}() expects {} argument(s), got {}",
@@ -1343,7 +2073,16 @@ impl<'a> FnLowerer<'a> {
         let mut arguments = arguments
             .into_iter()
             .zip(&params)
-            .map(|(argument, expected)| {
+            .enumerate()
+            .map(|(index, (argument, expected))| {
+                let public_expected = selected_public_signature
+                    .as_ref()
+                    .and_then(|public| self.public_overload_visible_argument_type(public, index));
+                let argument = self.adapt_selected_overload_argument(
+                    expected,
+                    public_expected.as_ref(),
+                    argument,
+                )?;
                 if quickjs_function_value {
                     self.coerce_primitive_array_argument_aliasing(argument, expected)
                 } else {
@@ -1368,14 +2107,20 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(this_name.clone(), this_type.clone());
         let mut argument_bindings = vec![(this_name.clone(), this_type, this_value)];
         argument_bindings.extend(spread_bindings);
-        let invoked = self.wrap_call_argument_bindings(
-            HirExpr::FunctionCallWithThis(
+        let invoked = HirExpr::FunctionCallWithThis(
                 Box::new(HirExpr::Var(target_name.clone())),
                 Box::new(HirExpr::Var(this_name)),
                 arguments,
                 abi_params,
-                ret,
-            ),
+                ret.clone(),
+            );
+        let invoked = if let Some(selected) = selected_public_return {
+            self.project_overload_call_result(invoked, &ret, &selected)?
+        } else {
+            invoked
+        };
+        let invoked = self.wrap_call_argument_bindings(
+            invoked,
             &argument_bindings,
         )?;
         let guarded = self.guard_function_value(
