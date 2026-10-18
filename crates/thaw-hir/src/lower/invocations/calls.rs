@@ -347,7 +347,7 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
             let rest_values = rest.as_ref().map(|element| {
-                let values = arguments.split_off(params.len());
+            let values = arguments.split_off(arguments.len().min(params.len()));
                 (element, values)
             });
             for parameter in params.iter().skip(arguments.len()) {
@@ -1103,7 +1103,7 @@ impl<'a> FnLowerer<'a> {
                             ));
                         }
                         let rest_values = rest.as_ref().map(|element| {
-                            let values = args.split_off(params.len());
+                            let values = args.split_off(args.len().min(params.len()));
                             (element, values)
                         });
                         for parameter in params.iter().skip(args.len()) {

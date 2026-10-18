@@ -892,7 +892,7 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::Block(statements))
     }
 
-    fn logical_function_ref_type(
+    pub(in crate::lower) fn logical_function_ref_type(
         &self,
         symbol: &str,
         physical_params: &[HirType],
@@ -938,23 +938,11 @@ impl<'a> FnLowerer<'a> {
         if member_property_name(&operation.prop).as_deref() != Some("bind") {
             return Ok(None);
         }
-        let mut target = self.lower_expr(&operation.obj)?;
+        let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
         let (target_type, declared_receiver) = match target_type {
             HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
             other => (other, None),
-        };
-        // Named declarations need omission metadata for `.bind`; rest declarations also
-        // expose a packed final array that `.bind` must treat as a rest-aware callable.
-        let target_type = match (&target, &target_type) {
-            (HirExpr::FunctionRef(name, physical_params, ret), HirType::Function(_, _)) => {
-                let logical = self.logical_function_ref_type(name, physical_params, ret);
-                if matches!(logical, HirType::CallableFunction(_, ref optional, _, _) if !optional.is_empty()) {
-                    target = self.coerce_to_declared(&logical, target)?;
-                }
-                logical
-            }
-            _ => target_type,
         };
         let (params, optional, rest, ret) = match &target_type {
             HirType::Function(params, ret) => (
@@ -1240,7 +1228,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let rest_values = rest.as_ref().map(|element| {
-            let values = arguments.split_off(params.len());
+            let values = arguments.split_off(arguments.len().min(params.len()));
             (element, values)
         });
         for parameter in params.iter().skip(arguments.len()) {
@@ -1675,7 +1663,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let rest_values = rest.as_ref().map(|element| {
-            let values = arguments.split_off(params.len());
+            let values = arguments.split_off(arguments.len().min(params.len()));
             (element, values)
         });
         for parameter in params.iter().skip(arguments.len()) {

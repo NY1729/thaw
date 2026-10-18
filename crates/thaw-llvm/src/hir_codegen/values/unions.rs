@@ -225,7 +225,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_int_compare(IntPredicate::EQ, left, right, "union_int_equal")
                 .map_err(|error| error.to_string()),
             (BasicValueEnum::PointerValue(left), BasicValueEnum::PointerValue(right)) => {
-                if ty == &HirType::NativeException {
+                if matches!(ty, HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)) {
+                    let left = self.resolve_closure_alias(left)?;
+                    let right = self.resolve_closure_alias(right)?;
+                    self.builder.build_int_compare(
+                        IntPredicate::EQ, left, right, "union_function_identity_equal",
+                    ).map_err(|error| error.to_string())
+                } else if ty == &HirType::NativeException {
                     let compared = self.builder.build_call(
                         self.module.get_function("thaw_exception_native_same").unwrap(),
                         &[left.into(), right.into()], "union_native_exception_identity",

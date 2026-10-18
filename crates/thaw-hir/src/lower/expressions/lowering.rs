@@ -913,7 +913,11 @@ impl<'a> FnLowerer<'a> {
                         };
                         // ponytail: a `this`-using function stays a plain FunctionRef;
                         // FunctionRefThis needs `.bind` lowering and llvm support first.
-                        return Ok(HirExpr::FunctionRef(name, signature.params.clone(), ret));
+                        return self.normalize_function_ref_value(HirExpr::FunctionRef(
+                            name,
+                            signature.params.clone(),
+                            ret,
+                        ));
                     }
                     // A bare class-name reference (not immediately
                     // `new`'d) -- real trigger: `class-transformer`'s

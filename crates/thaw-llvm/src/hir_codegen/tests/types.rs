@@ -669,6 +669,100 @@ fn bound_named_optional_rest_and_fixed_functions_keep_call_shapes() {
 }
 
 #[test]
+fn named_callable_values_keep_optional_default_and_rest_shapes() {
+    let source = r#"
+        function optional(value?: number): number { return value ?? 8; }
+        function other(value?: number): number { return value ?? 9; }
+        function defaulted(value: number = 7): number { return value; }
+        function packed(first?: number, ...rest: number[]): number { return rest.length + (first ?? 0); }
+        function main(): void {
+            const a = optional;
+            const b = defaulted;
+            const c = packed;
+            const box = { optional };
+            const list = [packed];
+            const restBox = { packed };
+            function factory() { return defaulted; }
+            console.log(a(), a(2), a.call(null), a.apply(null, [2]));
+            console.log(b(), b(3), box.optional(), factory()());
+            console.log(c(), c(2, 3, 4), list[0](), c.call(null), c.apply(null, [2, 3]));
+            console.log(restBox.packed());
+            const aliasBound = b.bind(null);
+            const packedBound = c.bind(null);
+            console.log(aliasBound(), packedBound());
+            const bound = defaulted.bind(null);
+            console.log(bound());
+            console.log(packed.bind(null)());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "named_callable_value_shapes"), "8 2 8 2\n7 3 8 7\n0 4 0 0 3\n0\n7 0\n7\n0\n");
+}
+
+#[test]
+fn named_callable_value_identity_and_nullable_default_are_preserved() {
+    let source = r#"
+        function defaulted(value: number = 5): number { return value; }
+        function main(): void {
+            const d1 = defaulted;
+            const d2 = defaulted;
+            const defaultBox = { defaulted };
+            const defaultList = [defaulted];
+            function factory() { return defaulted; }
+            const exact: (value: number) => number = defaulted;
+            console.log(d1 === d2, d1 === defaulted, defaultBox.defaulted === defaulted,
+                defaultList[0] === defaulted, factory() === defaulted, exact === defaulted);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "named_callable_value_identity_nullable"), "true true true true true true\n");
+}
+
+#[test]
+fn optional_callable_alias_identity_and_nullable_default_values_are_preserved() {
+    let source = r#"
+        function optional(value?: number): number { return value ?? 8; }
+        function other(value?: number): number { return value ?? 9; }
+        function main(): void {
+            const a = optional;
+            const b = optional;
+            const box = { optional };
+            const list = [optional];
+            const required: (value: number | undefined) => number = optional;
+            console.log(a === b, a === optional, box.optional === optional, list[0] === optional);
+            console.log(required === optional);
+            console.log(a !== other);
+            console.log(a(), a(2));
+            console.log(optional.bind(null) !== optional, optional.bind(null) !== optional.bind(null));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "optional_callable_alias_identity_nullable"), "true true true true\ntrue\ntrue\n8 2\ntrue true\n");
+}
+
+#[test]
+fn named_nullable_default_adapter_preserves_null_and_values() {
+    let source = r#"
+        function nullable(value: number | null = null): number { return value ?? 7; }
+        function main(): void {
+            const direct = nullable;
+            const bound = nullable.bind(null);
+            console.log(direct(), direct(null), direct(3), bound(), bound(null), bound(3));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "named_nullable_default_adapter"), "7 7 3 7 7 3\n");
+}
+
+#[test]
+fn named_callable_any_projection_keeps_function_identity() {
+    let source = r#"
+        function optional(value?: number): number { return value ?? 8; }
+        function main(): void {
+            const dynamic: any = optional;
+            console.log(dynamic === optional);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "named_callable_any_identity"), "true\n");
+}
+
+#[test]
 fn bound_named_optional_and_default_functions_accept_omitted_arguments() {
     let source = r#"
         function plain(value?: number): number | undefined { return value; }

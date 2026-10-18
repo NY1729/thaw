@@ -1,4 +1,24 @@
 impl<'ctx> HirCompiler<'ctx> {
+    pub(super) fn resolve_closure_alias(
+        &mut self,
+        pointer: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        let pointer = self.builder.build_pointer_cast(
+            pointer,
+            self.context.ptr_type(AddressSpace::default()),
+            "closure_alias_pointer",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_closure_alias_resolve").unwrap(),
+            &[pointer.into()],
+            "closure_alias_resolved",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("closure alias resolve returned no pointer")
+            .map(BasicValueEnum::into_pointer_value)
+            .map_err(str::to_string)
+    }
+
     /// `process.env.NAME`, via libc `getenv`. Returns an empty string
     /// instead of a null pointer when the variable is unset, since Str
     /// values elsewhere (puts/printf %s) assume a valid C string.
@@ -523,6 +543,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // those.
             let json_operands = self.expr_hir_type(lhs) == Some(HirType::Json)
                 && self.expr_hir_type(rhs) == Some(HirType::Json);
+            let function_operands = |ty: Option<HirType>| matches!(ty,
+                Some(HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)));
+            let native_function_operands = function_operands(self.expr_hir_type(lhs))
+                && function_operands(self.expr_hir_type(rhs));
             return match (lhs_value, rhs_value) {
                 (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => self
                     .builder
@@ -580,6 +604,14 @@ impl<'ctx> HirCompiler<'ctx> {
                                 self.context.i32_type().const_zero(),
                                 "string_eq",
                             )
+                            .map(Into::into)
+                            .map_err(|error| error.to_string());
+                    }
+                    if native_function_operands {
+                        let lhs = self.resolve_closure_alias(lhs)?;
+                        let rhs = self.resolve_closure_alias(rhs)?;
+                        return self.builder
+                            .build_int_compare(IntPredicate::EQ, lhs, rhs, "function_identity_eq")
                             .map(Into::into)
                             .map_err(|error| error.to_string());
                     }

@@ -288,6 +288,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_closure_alias_resolve",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_register_callback_origin",
             i8_type.fn_type(&[i8_ptr.into(), i64_type.into()], false),
             Some(Linkage::External),
