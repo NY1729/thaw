@@ -60,17 +60,20 @@ fn required_callable_view_does_not_allow_omitting_its_argument() {
 }
 
 #[test]
-fn generic_named_function_required_view_remains_unsupported() {
+fn generic_named_function_specializes_to_a_monomorphic_required_view() {
     let module = thaw_parser::parse_typescript(
         r#"
         function identity<T>(value: T): T { return value; }
         function main(): void {
             const exact: (value: number) => number = identity;
+            const alias = identity;
+            const exactAlias: (value: string) => string = alias;
         }
         "#,
     )
     .unwrap();
-    assert!(lower_module(&module).is_err());
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]
@@ -281,6 +284,343 @@ fn monomorphizes_a_generic_function_from_its_call_site() {
         .unwrap();
     assert_eq!(identity.params[0].ty, HirType::Str);
     assert_eq!(identity.ret, HirType::Str);
+}
+
+#[test]
+fn named_generic_template_probe_matrix() {
+    let probes = [
+        ("direct", "identity(1);"),
+        ("unannotated_alias", "const alias = identity; alias(1);"),
+        ("typed_alias", "const alias: <U>(value: U) => U = identity; alias(1);"),
+        ("explicit_instantiation", "const fixed = identity<number>; fixed(1);"),
+        ("bare_bind", "const bound = identity.bind(null); bound(1);"),
+        ("leading_bind", "const bound = pair.bind(null, 1); bound(\"x\");"),
+        ("call", "identity.call(null, 1);"),
+        ("apply", "identity.apply(null, [1]);"),
+        ("explicit_bind", "const bound = (identity<number>).bind(null); bound(1);"),
+        ("explicit_call", "(identity<number>).call(null, 1);"),
+        ("alias_bind", "const alias = identity; const bound = alias.bind(null); bound(1);"),
+        ("alias_call", "const alias = identity; alias.call(null, 1);"),
+        ("alias_of_alias", "const first = identity; const second = first; second(1);"),
+        ("typeof_alias", "const alias = identity; const kind: string = typeof alias;"),
+    ];
+    let mut failures = Vec::new();
+    for (name, body) in probes {
+        let source = format!("function identity<T>(value: T): T {{ return value; }} function pair<T, U>(left: T, right: U): U {{ return right; }} function main(): void {{ {body} }}");
+        if let Err(error) = thaw_parser::parse_typescript(&source)
+            .map_err(|error| error.to_string())
+            .and_then(|module| lower_module(&module).map(|_| ()).map_err(|error| error.to_string()))
+        {
+            failures.push(format!("{name}: {error}"));
+        }
+    }
+    assert!(failures.is_empty(), "named generic template probes failed:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn named_generic_template_specialization_keys_remain_distinct() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const alias = identity;
+            alias(1);
+            alias("x");
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_f64"));
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_str"));
+}
+
+#[test]
+fn named_generic_template_call_apply_specialize_by_actual_types() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function optional<T = number>(value?: T): T | undefined { return value; }
+        function collect<T>(first: T, ...rest: T[]): T { return first; }
+        function numeric<T extends number>(value: T): T { return value; }
+        function make<T>(value?: T): T { return value!; }
+        function main(): void {
+            identity.call(null, 1);
+            identity.call(null, "x");
+            identity.apply(null, [2]);
+            identity.apply(null, ["y"]);
+            optional.apply(null, []);
+            optional.apply(null);
+            collect.apply(null, [3, 4]);
+            numeric.apply(null, [5]);
+            const contextualNumber: number = make.call(null);
+            const makeAlias = make;
+            const contextualString: string = makeAlias.apply(null);
+        }
+    "#);
+    for name in [
+        "identity__thaw_f64",
+        "identity__thaw_str",
+        "optional__thaw_optional_f64",
+        "collect__thaw_f64__array_f64",
+        "make__thaw_optional_f64",
+        "make__thaw_optional_str",
+    ] {
+        assert!(program.functions.iter().any(|function| function.name == name), "missing {name}: {:?}", program.functions.iter().map(|function| &function.name).collect::<Vec<_>>());
+    }
+    let module = thaw_parser::parse_typescript(
+        "function numeric<T extends number>(value: T): T { return value; } function main(): void { numeric.apply(null, ['wrong']); }",
+    ).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("does not satisfy constraint F64"), "{error}");
+}
+
+#[test]
+fn named_generic_template_apply_accepts_nullable_tuple_container() {
+    for (container_type, absence) in [
+        ("[number] | undefined", "undefined"),
+        ("[number] | null", "null"),
+        ("[number] | null | undefined", "undefined"),
+    ] {
+        let source = format!(r#"
+            function identity<T = number>(value?: T): T | undefined {{ return value; }}
+            function main(): void {{
+                const args: {container_type} = {absence};
+                identity.apply(null, args);
+            }}
+        "#);
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let program = lower_module(&module).unwrap_or_else(|error| panic!("{container_type}: {error}"));
+        assert!(program.functions.iter().any(|function| function.name == "identity__thaw_optional_f64"));
+    }
+}
+
+#[test]
+fn named_generic_template_alias_and_chain_specialize_by_call_site() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const alias = identity;
+            const chain = alias;
+            chain(1);
+            chain("x");
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_f64"));
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_str"));
+}
+
+#[test]
+fn named_generic_template_bind_captures_key_literal_metadata() {
+    let program = lower(r#"
+        function pick<T, K extends keyof T>(obj: T, key: K): T[K] { return obj[key]; }
+        function main(): string {
+            const key = "name";
+            const bound = pick.bind(null, { name: "ok" }, key);
+            return bound();
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name.contains("pick__thaw_")));
+}
+
+#[test]
+fn named_generic_template_bind_keeps_unconstrained_string_as_string() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): string {
+            const bound = identity.bind(null, "x");
+            return bound();
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_str"));
+}
+
+#[test]
+fn named_generic_template_bind_checks_constraints() {
+    let valid = lower(r#"
+        function numeric<T extends number>(value: T): T { return value; }
+        function main(): number { const bound = numeric.bind(null, 1); return bound(); }
+    "#);
+    assert!(valid.functions.iter().any(|function| function.name == "numeric__thaw_f64"));
+    let module = thaw_parser::parse_typescript(
+        "function numeric<T extends number>(value: T): T { return value; } function main(): void { const bound = numeric.bind(null, 'wrong'); bound(); }",
+    ).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("does not satisfy constraint F64"), "{error}");
+}
+
+#[test]
+fn named_generic_template_bind_rejects_explicit_generic_this() {
+    for source in [
+        "function identify<T>(this: T): T { return this; } function main(): void { const bound = identify.bind(1); bound(); }",
+        "function identify<T>(this: T): T { return this; } function main(): void { const alias = identify; const bound = alias.bind(1); bound(); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(error, "generic function .bind() cannot specialize explicit generic this for `identify`");
+    }
+}
+
+#[test]
+fn named_generic_template_bind_rest_omission_uses_bound_type() {
+    let module = thaw_parser::parse_typescript(r#"
+        function collect<T>(first: T, ...rest: T[]): T { return first; }
+        function collectDefault<T = number>(first?: T, ...rest: T[]): T | undefined { return first; }
+        function collectExplicit<T>(first: T, ...rest: T[]): T { return first; }
+        function main(): void {
+            collect("direct");
+            const bound = collect.bind(null, "bound"); bound();
+            collectDefault();
+            const defaultBound = collectDefault.bind(null); defaultBound();
+            collectExplicit<string>("explicit");
+        }
+    "#).unwrap();
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "{result:?}");
+    let program = result.unwrap();
+    assert!(program.functions.iter().any(|function| function.name.starts_with("collect__thaw_str__array_str")));
+    assert!(program.functions.iter().any(|function| function.name.starts_with("collectDefault__thaw_optional_f64__array_f64")));
+    assert!(program.functions.iter().any(|function| function.name.starts_with("collectExplicit__thaw_str__array_str")));
+}
+
+#[test]
+fn named_generic_template_bind_captures_narrowed_source_hint() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const input: unknown = 7;
+            if (typeof input === "number") {
+                const bound = identity.bind(null, input);
+                const result: number = bound();
+            }
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_f64"));
+}
+
+#[test]
+fn named_generic_template_alias_lookup_respects_local_shadowing() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function shadow(identity: number): number {
+            const alias = identity;
+            return alias;
+        }
+        function main(): void {}
+    "#);
+    let shadow = program.functions.iter().find(|function| function.name == "shadow").unwrap();
+    assert_eq!(shadow.params[0].ty, HirType::F64);
+    assert!(format!("{:?}", shadow.body).contains("Var(\"identity\")"));
+}
+
+#[test]
+fn named_generic_template_aliases_reject_mutable_bindings() {
+    for source in [
+        "function identity<T>(value: T): T { return value; } function main(): void { let alias = identity; }",
+        "function identity<T>(value: T): T { return value; } function main(): void { const first = identity; let second = first; }",
+        "function identity<T>(value: T): T { return value; } function main(): void { var alias = identity; }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(error, "generic function template aliases currently require an immutable binding");
+    }
+}
+
+#[test]
+fn named_generic_template_alias_typeof_is_function() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): string {
+            const alias = identity;
+            const chain = alias;
+            return typeof chain;
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("Str(\"function\")"));
+}
+
+#[test]
+fn named_generic_template_typeof_preserves_shadowing() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function shadow(identity: number): string { return typeof identity; }
+        function localTemplates(): string {
+            const typed: <U>(value: U) => U = identity;
+            const arrow = <T>(value: T): T => value;
+            return typeof typed + typeof arrow;
+        }
+        function main(): string { return typeof identity; }
+    "#);
+    let shadow = program.functions.iter().find(|function| function.name == "shadow").unwrap();
+    assert!(format!("{:?}", shadow.body).contains("Str(\"number\")"), "shadowing typeof must retain the parameter's number type: {:?}", shadow.body);
+    let local_templates = program.functions.iter().find(|function| function.name == "localTemplates").unwrap();
+    assert_eq!(format!("{:?}", local_templates.body).matches("Str(\"function\")").count(), 2);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("Str(\"function\")"));
+}
+
+#[test]
+fn named_generic_template_rejects_unresolved_value_escapes() {
+    let escapes = [
+        (
+            "return",
+            "identity",
+            "function leak(): any { return identity; } function main(): void { leak(); }",
+        ),
+        (
+            "array",
+            "identity",
+            "function main(): void { const values = [identity]; }",
+        ),
+        (
+            "object value",
+            "identity",
+            "function main(): void { const values = { value: identity }; }",
+        ),
+        (
+            "object shorthand",
+            "identity",
+            "function main(): void { const values = { identity }; }",
+        ),
+        (
+            "any consumer",
+            "identity",
+            "function consume(value: any): void {} function main(): void { consume(identity); }",
+        ),
+        (
+            "alias return",
+            "alias",
+            "function leak(): any { const alias = identity; return alias; } function main(): void { leak(); }",
+        ),
+        (
+            "alias array",
+            "alias",
+            "function main(): void { const alias = identity; const values = [alias]; }",
+        ),
+        (
+            "alias object",
+            "alias",
+            "function main(): void { const alias = identity; const values = { value: alias }; }",
+        ),
+        (
+            "alias object shorthand",
+            "alias",
+            "function main(): void { const alias = identity; const values = { alias }; }",
+        ),
+        (
+            "alias any consumer",
+            "alias",
+            "function consume(value: any): void {} function main(): void { const alias = identity; consume(alias); }",
+        ),
+    ];
+    for (label, name, body) in escapes {
+        let source = format!(
+            "function identity<T>(value: T): T {{ return value; }} {body}"
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(
+            error,
+            format!("generic function template `{name}` needs a call-site specialization before it can be used as a value"),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -3001,6 +3341,21 @@ fn generic_function_declaration_nonrecursive_optional_specializations_match_defi
         assert!(body.contains(&format!("Var(\"{}\")", function.name)),
             "call sites should reference a declared specialization: {} in {body}", function.name);
     }
+}
+
+#[test]
+fn generic_function_declaration_preserves_direct_specialization_names() {
+    let program = lower(
+        r#"function identity<T>(value: T): T { return value; }
+            function main(): void {
+                console.log(identity(1));
+                console.log(identity("x"));
+            }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("identity__thaw_f64"), "{body}");
+    assert!(body.contains("identity__thaw_str"), "{body}");
 }
 
 #[test]

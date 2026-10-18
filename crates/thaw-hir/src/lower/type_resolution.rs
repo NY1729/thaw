@@ -1789,7 +1789,7 @@ fn resolve_ts_type_with_substitution(
                     .find(|element| **element != HirType::Undefined)
                     .filter(|_| elements.contains(&HirType::Undefined))
                 {
-                    return Ok(HirType::Optional(Box::new(payload.clone())));
+                    return Ok(optional_parameter_type(payload.clone()));
                 }
                 if let Some(payload) = elements
                     .iter()
