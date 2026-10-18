@@ -1188,18 +1188,23 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let forwarded = if operation_name == "apply" {
-            let [arguments] = supplied else {
-                return Err(
-                    "function .apply() expects exactly a thisArg and an argument tuple".into(),
-                );
-            };
-            if arguments.spread.is_some() {
-                return Err("function .apply() tuple cannot itself be spread".into());
+            match supplied {
+                [] => Vec::new(),
+                [arguments] => {
+                    if arguments.spread.is_some() {
+                        return Err("function .apply() tuple cannot itself be spread".into());
+                    }
+                    vec![swc_ecma_ast::ExprOrSpread {
+                        spread: Some(call.span),
+                        expr: arguments.expr.clone(),
+                    }]
+                }
+                _ => {
+                    return Err(
+                        "function .apply() expects exactly a thisArg and an argument tuple".into(),
+                    )
+                }
             }
-            vec![swc_ecma_ast::ExprOrSpread {
-                spread: Some(call.span),
-                expr: arguments.expr.clone(),
-            }]
         } else {
             supplied.to_vec()
         };
