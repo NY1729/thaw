@@ -3577,6 +3577,26 @@ fn external_structural_argument_recurses_through_nested_arrays_and_optional_fiel
 }
 
 #[test]
+fn external_dictionary_source_contract_preserves_object_literal_coercion() {
+    for (target, argument, succeeds) in [
+        ("Record<string, number>", "{ a: 1 }", true),
+        ("Record<string, number> | { tag: string }", "{ a: 1 }", true),
+        ("Record<string, number> | undefined", "{ a: 1 }", true),
+        ("Record<string, number> | null", "{ a: 1 }", true),
+        ("Record<string, number> | null | undefined", "{ a: 1 }", true),
+        ("Record<string, number>", "{ a: 'wrong' }", false),
+        ("Record<string, number> | { tag: string }", "{ a: 'wrong' }", false),
+    ] {
+        let source = format!(
+            "declare function __thaw_typed_js_7368617065(value: {target}): void;\nfunction main(): void {{ __thaw_typed_js_7368617065({argument}); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse");
+        let result = lower_module(&module);
+        assert_eq!(result.is_ok(), succeeds, "target={target}, argument={argument}: {result:?}");
+    }
+}
+
+#[test]
 fn external_structural_argument_reports_nested_public_field_on_mismatch() {
     let module = thaw_parser::parse_typescript(
         r#"
