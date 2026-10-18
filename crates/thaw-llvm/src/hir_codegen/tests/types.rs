@@ -154,6 +154,132 @@ fn compiles_multi_argument_generic_specializations_end_to_end() {
 }
 
 #[test]
+fn named_generic_template_operations_runtime_matrix() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function pair<T, U>(left: T, right: U): U { return right; }
+        function main(): void {
+            const alias = identity;
+            console.log(identity(1));
+            console.log(alias(2));
+            const typed: <U>(value: U) => U = identity;
+            console.log(typed("typed"));
+            const fixed = identity<number>;
+            console.log(fixed(3));
+            const bound = identity.bind(null);
+            console.log(bound("bound"));
+            const leading = pair.bind(null, 4);
+            console.log(leading("leading"));
+            console.log(identity.call(null, 5));
+            console.log(identity.apply(null, [6]));
+            const explicitBound = (identity<number>).bind(null);
+            console.log(explicitBound(7));
+            console.log((identity<number>).call(null, 8));
+            const aliasBound = alias.bind(null);
+            console.log(aliasBound("alias-bound"));
+            console.log(alias.call(null, "alias-call"));
+            const alias2 = alias;
+            console.log(alias2("alias-of-alias"));
+            const kind: string = typeof alias2;
+            console.log(kind);
+            console.log(alias(9));
+            console.log(alias("ten"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_operations"),
+        "1\n2\ntyped\n3\nbound\nleading\n5\n6\n7\n8\nalias-bound\nalias-call\nalias-of-alias\nfunction\n9\nten\n"
+    );
+}
+
+#[test]
+fn named_generic_template_call_apply_specialize_and_preserve_order() {
+    let source = r#"
+        function identity<T>(value: T): T { console.log("body"); return value; }
+        function maybe<T = number>(value?: T): T | undefined { console.log("maybe-body"); return value; }
+        function collect<T>(first: T, ...rest: T[]): T { console.log("rest-body"); return first; }
+        async function asyncIdentity<T>(value: T): Promise<T> { console.log("async-body"); return value; }
+        function container(): [number] { console.log("container"); return [2]; }
+        async function main(): Promise<void> {
+            const alias = identity;
+            console.log(identity.call((console.log("this"), null), (console.log("arg"), 1)));
+            console.log(alias.call(null, "string"));
+            console.log(identity.apply(null, container(), (console.log("extra"), [99])));
+            console.log(alias.apply(null, ["apply-string"]));
+            console.log(identity.apply(null, [3]));
+            const maybeArgs: [number] | undefined = [5];
+            console.log(maybe.apply(null, maybeArgs, (console.log("nullable-extra"), [])));
+            const noArgs: [number] | undefined = undefined;
+            console.log(maybe.apply(null, noArgs));
+            const nullArgs: [number] | null = null;
+            console.log(maybe.apply(null, nullArgs));
+            const nullishArgs: [number] | null | undefined = undefined;
+            console.log(maybe.apply(null, nullishArgs));
+            console.log(maybe.apply(null));
+            console.log(maybe.apply(null, []));
+            console.log(collect.apply(null, [7, 8]));
+            console.log(await asyncIdentity.call(null, "async-call"));
+            console.log(await asyncIdentity.apply(null, [4]));
+            {
+                const identity = (value: number): number => 99;
+                console.log(alias("kept"));
+                console.log(alias.call(null, "kept-call"));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_call_apply"),
+        "this\narg\nbody\n1\nbody\nstring\ncontainer\nextra\nbody\n2\nbody\napply-string\nbody\n3\nnullable-extra\nmaybe-body\n5\nmaybe-body\nundefined\nmaybe-body\nundefined\nmaybe-body\nundefined\nmaybe-body\nundefined\nmaybe-body\nundefined\nrest-body\n7\nasync-body\nasync-call\nasync-body\n4\nbody\nkept\nbody\nkept-call\n"
+    );
+}
+
+#[test]
+fn named_generic_template_bind_specializes_and_captures_once() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function pair<T, U>(left: T, right: U): U { return right; }
+        function optional<T = number>(value?: T): T | undefined { return value; }
+        function collect<T>(first: T, ...rest: T[]): T { return first; }
+        function pick<T, K extends keyof T>(obj: T, key: K): T[K] { return obj[key]; }
+        function main(): void {
+            let effects = 0;
+            const object = { value: 7 };
+            const identityAlias = identity;
+            const bound = identityAlias.bind((effects++, null), (effects++, object));
+            const alias = bound;
+            console.log(typeof bound);
+            console.log(alias() === object);
+            console.log(effects);
+            const pairBound = pair.bind(null, 1);
+            console.log(pairBound("number"));
+            console.log(pairBound(true));
+            const optionalBound = optional.bind(null);
+            console.log(optionalBound());
+            console.log(optionalBound("optional"));
+            const restBound = collect.bind(null, "rest");
+            console.log(restBound());
+            console.log(restBound("ignored", "tail"));
+            const key = "name";
+            const picked = pick.bind(null, { name: "key-capture" }, key);
+            console.log(picked());
+            const unknownValue: unknown = 8;
+            if (typeof unknownValue === "number") {
+                const narrowed = identity.bind(null, unknownValue);
+                console.log(narrowed());
+            }
+            {
+                const identity = (value: number): number => 99;
+                console.log(alias() === object);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_bind"),
+        "function\ntrue\n2\nnumber\ntrue\nundefined\noptional\nrest\nrest\nkey-capture\n8\ntrue\n"
+    );
+}
+
+#[test]
 fn recursively_specializes_named_generic_local_function_values() {
     let source = r#"
         type Repeat = <T, U>(value: T, marker: U, remaining: number) => T;
@@ -492,6 +618,59 @@ fn compiles_local_generic_arrow_specializations() {
     assert_eq!(
         compile_and_run(source, "local_generic_arrows"),
         "function\n17\nlocal\n18\n19\nselected\nspread\nliteral\nvalue=5\nvalue=true\n21\npromise-arrow\n"
+    );
+}
+
+#[test]
+fn compiles_named_generic_template_aliases_and_alias_chains() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const alias = identity;
+            const chain = alias;
+            console.log(chain(17));
+            console.log(chain("alias"));
+            console.log(typeof chain);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_aliases"),
+        "17\nalias\nfunction\n"
+    );
+}
+
+#[test]
+fn compiles_named_generic_templates_in_monomorphic_contexts() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function optional<T = number>(value?: T): T | undefined { return value; }
+        function collect<T>(...values: T[]): T[] { return values; }
+        async function main(): Promise<void> {
+            const numberIdentity: (value: number) => number = identity;
+            const alias = identity;
+            const stringIdentity: (value: string) => string = alias;
+            const optionalNumber: (value?: number) => number | undefined = optional;
+            const collectAlias = collect;
+            const restNumbers: (...values: number[]) => number[] = collectAlias;
+            console.log(numberIdentity(19));
+            console.log(stringIdentity("context"));
+            console.log(optionalNumber());
+            console.log(optionalNumber(31));
+            console.log(restNumbers().length);
+            console.log(restNumbers(32, 33)[1]);
+            const promised: number = await new Promise<number>((resolve, reject) => {
+                resolve(23);
+            }).then(identity);
+            const promisedAlias: string = await new Promise<string>((resolve, reject) => {
+                resolve("promise-context");
+            }).then(alias);
+            console.log(promised);
+            console.log(promisedAlias);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_contexts"),
+        "19\ncontext\nundefined\n31\n0\n33\n23\npromise-context\n"
     );
 }
 

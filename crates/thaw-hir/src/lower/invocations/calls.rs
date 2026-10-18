@@ -40,7 +40,25 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
-        self.lower_call_with_class_guard(call, None)
+        self.lower_call_with_class_guard_and_target(call, None, None)
+    }
+
+    fn lower_generic_named_call(
+        &mut self,
+        call: &CallExpr,
+        target: &str,
+        expected_source_return_hint: Option<&HirType>,
+        expected_return_hint: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let previous_source = std::mem::replace(
+            &mut self.expected_source_return_hint,
+            expected_source_return_hint.cloned(),
+        );
+        let previous = std::mem::replace(&mut self.expected_return_hint, expected_return_hint.cloned());
+        let result = self.lower_call_with_class_guard_and_target(call, None, Some(target));
+        self.expected_source_return_hint = previous_source;
+        self.expected_return_hint = previous;
+        result
     }
 
     /// The guard is set only by the source-proven `receiver.method(...)`
@@ -51,6 +69,15 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         call: &CallExpr,
         class_method_guard: Option<&str>,
+    ) -> Result<HirExpr, String> {
+        self.lower_call_with_class_guard_and_target(call, class_method_guard, None)
+    }
+
+    fn lower_call_with_class_guard_and_target(
+        &mut self,
+        call: &CallExpr,
+        class_method_guard: Option<&str>,
+        canonical_target: Option<&str>,
     ) -> Result<HirExpr, String> {
         // Taken (not just read) as the very first action, before this
         // call's own arguments are lowered below -- a hint set for *this*
@@ -461,7 +488,11 @@ impl<'a> FnLowerer<'a> {
         if let Some(invoked) = self.lower_object_prototype_to_string_call(call)? {
             return Ok(invoked);
         }
-        if let Some(generic) = self.lower_generic_arrow_operation(call)? {
+        if let Some(generic) = self.lower_generic_arrow_operation(
+            call,
+            expected_source_return_hint.as_ref(),
+            expected_return_hint.as_ref(),
+        )? {
             return Ok(generic);
         }
         if let Some(bound) = self.lower_function_bind(call)? {
@@ -1341,8 +1372,10 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let callee_name = match callee_expr.as_ref() {
-            Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
+        let source_callee_name = match callee_expr.as_ref() {
+            Expr::Ident(ident) => canonical_target
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.resolve_binding(ident.sym.as_ref())),
             // Console methods have no dedicated HIR node; they are encoded as
             // synthetic names such as "console.log" and codegen special-cases them.
             Expr::Member(member) => {
@@ -1361,6 +1394,13 @@ impl<'a> FnLowerer<'a> {
                 "unsupported call target (only plain identifiers and supported console methods are supported)"
                     .into(),
             ),
+        };
+        let known_template = canonical_target.is_none().then(|| {
+            self.generic_callable_template(&source_callee_name)
+        }).flatten();
+        let callee_name = match &known_template {
+            Some(GenericCallableTemplate::Named { symbol }) => symbol.clone(),
+            _ => source_callee_name,
         };
         if callee_name == "__thaw_mark_typed_wrapper_json_argument" {
             return Err("typed-wrapper JSON ownership marker is compiler-private".into());
@@ -1449,23 +1489,41 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some(bind) = self.deferred_generic_binds.get(&callee_name).cloned() {
-            let arrow = self.generic_arrows.get(&bind.target).cloned().ok_or_else(|| {
-                format!("generic bound function `{callee_name}` lost its generic template")
-            })?;
-            let leading_actuals = bind.leading_captures.iter()
-                .map(|capture| HirExpr::Var(capture.name.clone()))
-                .collect();
-            let operation = self.generic_non_arrow_names.contains(&bind.target).then(|| {
-                GenericArrowThisOperation {
-                    receiver: (HirExpr::Var(bind.this_capture.name.clone()), bind.this_capture.ty.clone()),
-                    bind: false,
-                    ignored: Vec::new(),
-                    prelowered: None,
+            match bind.target {
+                GenericCallableTemplate::Arrow { binding, expression } => {
+                    let leading_actuals = bind.leading_captures.iter()
+                        .map(|capture| HirExpr::Var(capture.name.clone()))
+                        .collect();
+                    let operation = self.generic_non_arrow_names.contains(&binding).then(|| {
+                        GenericArrowThisOperation {
+                            receiver: (HirExpr::Var(bind.this_capture.name.clone()), bind.this_capture.ty.clone()),
+                            bind: false,
+                            ignored: Vec::new(),
+                            prelowered: None,
+                        }
+                    });
+                    return self.lower_generic_arrow_call_with_leading_actuals(
+                        &binding, &expression, call, operation, leading_actuals,
+                    );
                 }
-            });
-            return self.lower_generic_arrow_call_with_leading_actuals(
-                &bind.target, &arrow, call, operation, leading_actuals,
-            );
+                GenericCallableTemplate::Named { symbol } => {
+                    let mut forwarded = call.clone();
+                    let mut args = bind.leading_captures.iter().map(|capture| swc_ecma_ast::ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            capture.name.clone().into(), capture.source_span.unwrap_or(call.span),
+                        ))),
+                    }).collect::<Vec<_>>();
+                    args.extend(call.args.clone());
+                    forwarded.args = args;
+                    forwarded.callee = Callee::Expr(Box::new(Expr::Ident(
+                        swc_ecma_ast::Ident::new_no_ctxt(symbol.clone().into(), call.span),
+                    )));
+                    return self.lower_generic_named_call(
+                        &forwarded, &symbol, expected_source_return_hint.as_ref(), expected_return_hint.as_ref(),
+                    );
+                }
+            }
         }
 
         if self.scope.get(&callee_name) == Some(&HirType::JsValue) {
@@ -1493,15 +1551,11 @@ impl<'a> FnLowerer<'a> {
             return self.lower_dynamic_value_call_on(callee, &call.args);
         }
 
-        if let Some(arrow) = self.generic_arrows.get(&callee_name).cloned() {
-            return self.lower_generic_arrow_call(&callee_name, &arrow, call);
-        }
-        if let Some(target) = self.generic_named_templates.get(&callee_name).cloned() {
-            let mut forwarded = call.clone();
-            forwarded.callee = Callee::Expr(Box::new(Expr::Ident(
-                swc_ecma_ast::Ident::new_no_ctxt(target.into(), call.span),
-            )));
-            return self.lower_call(&forwarded);
+        match known_template.or_else(|| canonical_target.is_none().then(|| self.generic_callable_template(&callee_name)).flatten()) {
+            Some(GenericCallableTemplate::Arrow { binding, expression }) => {
+                return self.lower_generic_arrow_call(&binding, &expression, call);
+            }
+            Some(GenericCallableTemplate::Named { .. }) | None => {}
         }
 
         if matches!(callee_name.as_str(), "isNaN" | "isFinite") {
@@ -2974,125 +3028,23 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let generic_types = if let Some(signature) = signature
-            .as_ref()
-            .filter(|signature| !signature.generic_type_params.is_empty())
-        {
-            let preserves_key_literal = |index: usize| {
-                let Some(GenericTypePattern::Variable(name)) =
-                    generic_pattern_for_physical_argument(signature, index)
-                else {
-                    return false;
-                };
-                signature
-                    .generic_type_params
-                    .iter()
-                    .position(|parameter| parameter == name)
-                    .and_then(|index| signature.generic_type_constraints.get(index))
-                    .and_then(Option::as_deref)
-                    .is_some_and(|constraint| {
-                        matches!(constraint, TsType::TsTypeOperator(operator) if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf)
-                    })
-            };
-            let inference_argument_count = packed_native_rest_fixed_count
-                .filter(|supplied_fixed| {
-                    signature
-                        .generic_param_optional
-                        .iter()
-                        .skip(*supplied_fixed)
-                        .take(signature.generic_param_patterns.len().saturating_sub(1))
-                        .any(|optional| *optional)
-                })
-                .unwrap_or(args.len());
-            let preserve_class_physical = !signature.is_extern;
-            let mut actual = args
-                .iter()
-                .enumerate()
-                .take(inference_argument_count)
-                .map(|(index, arg)| {
-                    let source = (signature.native_rest.is_none()
-                        && call.args.len() == args.len())
-                        .then(|| call.args.get(index))
-                        .flatten()
-                        .filter(|argument| argument.spread.is_none())
-                        .map(|argument| argument.expr.as_ref());
-                    match (call.type_args.is_none() && preserves_key_literal(index))
-                        .then(|| call.args.get(index))
-                        .flatten()
-                        .filter(|argument| argument.spread.is_none())
-                    {
-                        Some(argument) => match argument.expr.as_ref() {
-                            Expr::Lit(Lit::Str(value)) => Ok(HirType::StrLiteral(
-                                value.value.to_string_lossy().into_owned(),
-                            )),
-                            _ => self.generic_call_argument_source_type(
-                                source,
-                                arg,
-                                preserve_class_physical,
-                            ),
-                        },
-                        None => self.generic_call_argument_source_type(
-                            source,
-                            arg,
-                            preserve_class_physical,
-                        ),
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if call.type_args.is_some() {
-                for (index, ty) in actual.iter_mut().enumerate() {
-                    let Some(argument) = call.args.get(index).filter(|arg| arg.spread.is_none())
-                    else {
-                        continue;
-                    };
-                    let HirType::Optional(payload) = ty else {
-                        continue;
-                    };
-                    if self.is_primitive_array_index(&argument.expr, payload) {
-                        *ty = payload.as_ref().clone();
-                    }
-                }
-            }
-            let types = if let Some(type_args) = &call.type_args {
-                resolve_explicit_generic_type_tuple(
-                    signature,
-                    &type_args.params,
-                    GenericMatchActuals::Physical(&actual),
-                    self.interfaces,
-                    self.generic_interfaces,
-                )
-            } else {
-                infer_generic_type_tuple_for_call(
-                    signature,
-                    GenericMatchActuals::Physical(&actual),
-                    self.interfaces,
-                    self.generic_interfaces,
-                    expected_source_return_hint
-                        .as_ref()
-                        .or(expected_return_hint.as_ref()),
-                )
-            }
-            .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
-            if !types.contains(&HirType::Dynamic) {
-                for ty in &types {
-                    if !(supports_generic_native_layout(ty)
-                        || signature.is_extern && supports_generic_dynamic_layout(ty))
-                    {
-                        return Err(format!(
-                            "generic function `{callee_name}` cannot specialize for native layout {ty:?}"
-                        ));
-                    }
-                }
-            }
-            Some(types)
-        } else {
-            if call.type_args.is_some() {
-                return Err(format!(
-                    "non-generic function `{callee_name}` does not accept type arguments"
-                ));
-            }
-            None
-        };
+        let generic_types = self.infer_generic_call_types(
+            &callee_name,
+            signature.as_ref(),
+            &args,
+            &GenericCallContext {
+                call,
+                packed_native_rest_fixed_count,
+                expected_source_return_hint: expected_source_return_hint.as_ref(),
+                expected_return_hint: expected_return_hint.as_ref(),
+            },
+        )?;
+
+        if let (Some(signature), Some(types)) = (&signature, &generic_types) {
+            self.retype_packed_empty_generic_rest(
+                &mut args, signature, types, packed_native_rest_fixed_count,
+            )?;
+        }
 
         if let (Some(signature), Some(constraints)) = (&signature, self.call_constraints) {
             if let Some(types) = &generic_types {
@@ -3415,106 +3367,14 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
-        let lowered_name = if let Some(types) = generic_types
-            .as_ref()
-            .filter(|types| !types.contains(&HirType::Dynamic))
-        {
-            let signature = signature
-                .as_ref()
-                .expect("generic types require a generic signature");
-            let substitution = signature
-                .generic_type_params
-                .iter()
-                .cloned()
-                .zip(types.iter().cloned())
-                .collect::<HashMap<_, _>>();
-            if call.type_args.is_some() {
-                for (index, arg) in args.iter_mut().enumerate() {
-                    let Some(pattern) = generic_pattern_for_physical_argument(signature, index)
-                    else {
-                        continue;
-                    };
-                    let declared = instantiate_generic_pattern(pattern, &substitution)?;
-                    if matches!(declared, HirType::F64 | HirType::Str)
-                        && matches!(self.infer_expr_type(arg)?, HirType::Optional(payload) if *payload == declared)
-                    {
-                        *arg = self.coerce_primitive_array_argument(arg.clone(), &declared)?;
-                    }
-                }
-            }
-            let param_types = args
-                .iter()
-                .map(|arg| self.infer_expr_type(arg))
-                .collect::<Result<Vec<_>, _>>()?;
-            let has_generic_optional = signature
-                .generic_param_optional
-                .iter()
-                .any(|optional| *optional);
-            let specialization_params = if has_generic_optional {
-                signature.generic_param_patterns.iter().enumerate()
-                    .map(|(index, pattern)| {
-                        let ty = instantiate_generic_pattern(pattern, &substitution)?;
-                        Ok(if signature.generic_param_optional[index] {
-                            optional_parameter_type(ty)
-                        } else {
-                            ty
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?
-            } else {
-                param_types
-            };
-            if has_generic_optional {
-                if let Some(supplied_fixed) = packed_native_rest_fixed_count {
-                    let fixed_count = specialization_params.len().saturating_sub(1);
-                    if supplied_fixed < fixed_count {
-                        let rest_argument = args.pop();
-                        for (index, expected) in specialization_params
-                            .iter()
-                            .enumerate()
-                            .skip(supplied_fixed)
-                            .take(fixed_count - supplied_fixed)
-                        {
-                            if signature.generic_param_optional.get(index) == Some(&true) {
-                                args.push(omitted_parameter_value(expected)?);
-                            }
-                        }
-                        if let Some(rest_argument) = rest_argument {
-                            args.push(rest_argument);
-                        }
-                    }
-                }
-                let supplied = args.len();
-                let mut values = args.into_iter().enumerate();
-                args = values
-                    .by_ref()
-                    .map(|(index, value)| match specialization_params.get(index) {
-                        Some(expected) => self.coerce_to_declared(expected, value),
-                        None => Ok(value),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                for expected in specialization_params.iter().skip(supplied) {
-                    args.push(omitted_parameter_value(expected)?);
-                }
-            }
-            let lowered_name =
-                specialized_generic_function_name(&callee_name, &specialization_params, signature, types);
-            let return_type = resolve_ts_type_with_substitution(
-                signature
-                    .generic_return_type
-                    .as_ref()
-                    .expect("generic return type"),
-                &substitution,
-                self.interfaces,
-                self.generic_interfaces,
-                &mut Vec::new(),
-            )?;
-            self.generic_call_returns
-                .insert(lowered_name.clone(), return_type);
-            lowered_name
-        } else {
-            callee_name
-        };
+        let lowered_name = self.specialize_generic_native_call(
+            &callee_name,
+            call,
+            signature.as_ref(),
+            generic_types.as_deref(),
+            packed_native_rest_fixed_count,
+            &mut args,
+        )?;
         let result = if let Some(class_name) = class_method_guard {
             // The ordinary named-call path above has already selected its
             // overload, optional/default wrapper, rest ABI, and coercions.

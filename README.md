@@ -178,6 +178,19 @@ all Node built-ins, and all npm packages are not guaranteed. Third-party
 packages and native add-ons remain subject to their own platform and license
 requirements.
 
+Named generic function declarations can be specialized at a call site through
+immutable aliases and alias chains, including `bind`, `call`, and `apply`;
+`typeof` reports these templates as functions. Bound `this` and leading
+arguments are evaluated once when `bind` is created. `apply` supports statically
+known tuples and inline array literals, plus the existing rest-array
+normalization; arbitrary runtime-length arrays are not generally supported.
+Named generic operations with an explicit generic `this` receive a targeted
+diagnostic. Arbitrary runtime-polymorphic generic function values, including
+unspecialized values stored in arrays or objects or returned without a
+monomorphic context, remain unsupported, and mutable unannotated aliases are
+rejected. Explicit type arguments and monomorphic typed contexts remain
+supported.
+
 Arrays, records and collections exposed through `any` use dynamic storage from
 allocation. JavaScript-owned values retain reference identity when written through an
 alias, including plain objects in class-annotated arrays, self references and deep graphs.

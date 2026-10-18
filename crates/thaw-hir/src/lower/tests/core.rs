@@ -967,6 +967,37 @@ fn collection_type_arguments_keep_generic_substitutions() {
 }
 
 #[test]
+fn generic_undefined_unions_preserve_canonical_optional_types() {
+    let module = thaw_parser::parse_typescript("type Maybe<T> = T | undefined;").unwrap();
+    let ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) = &module.body[0] else {
+        panic!("expected type alias");
+    };
+    for (substituted, expected) in [
+        (
+            HirType::Optional(Box::new(HirType::F64)),
+            HirType::Optional(Box::new(HirType::F64)),
+        ),
+        (
+            HirType::Nullable(Box::new(HirType::F64)),
+            HirType::Nullish(Box::new(HirType::F64)),
+        ),
+    ] {
+        let substitution = HashMap::from([("T".into(), substituted)]);
+        assert_eq!(
+            resolve_ts_type_with_substitution(
+                &alias.type_ann,
+                &substitution,
+                &HashMap::new(),
+                &GenericInterfaces::new(),
+                &mut Vec::new(),
+            )
+            .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn substituted_collection_names_keep_plain_interface_shadowing() {
     let module = thaw_parser::parse_typescript("type M = Map; type S = Set; type W = WeakMap; type V = WeakSet;").unwrap();
     let shape = HirType::Object(vec![("custom".into(), HirType::Bool)]);
