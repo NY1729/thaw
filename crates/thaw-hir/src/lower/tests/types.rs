@@ -284,6 +284,51 @@ fn monomorphizes_a_generic_function_from_its_call_site() {
 }
 
 #[test]
+fn named_generic_template_probe_matrix() {
+    let probes = [
+        ("direct", "identity(1);"),
+        ("unannotated_alias", "const alias = identity; alias(1);"),
+        ("typed_alias", "const alias: <T>(value: T) => T = <T>(value: T): T => value; alias(1);"),
+        ("explicit_instantiation", "const fixed = identity<number>; fixed(1);"),
+        ("bare_bind", "const bound = identity.bind(null); bound(1);"),
+        ("leading_bind", "function pair<T, U>(left: T, right: U): U { return right; } const bound = pair.bind(null, 1); bound(\"x\");"),
+        ("call", "identity.call(null, 1);"),
+        ("apply", "identity.apply(null, [1]);"),
+        ("explicit_bind", "const bound = (identity<number>).bind(null); bound(1);"),
+        ("explicit_call", "(identity<number>).call(null, 1);"),
+        ("alias_bind", "const alias = identity; const bound = alias.bind(null); bound(1);"),
+        ("alias_call", "const alias = identity; alias.call(null, 1);"),
+        ("alias_of_alias", "const first = identity; const second = first; second(1);"),
+        ("typeof_alias", "const alias = identity; const kind: string = typeof alias;"),
+    ];
+    let mut failures = Vec::new();
+    for (name, body) in probes {
+        let source = format!("function identity<T>(value: T): T {{ return value; }} function main(): void {{ {body} }}");
+        if let Err(error) = thaw_parser::parse_typescript(&source)
+            .map_err(|error| error.to_string())
+            .and_then(|module| lower_module(&module).map(|_| ()).map_err(|error| error.to_string()))
+        {
+            failures.push(format!("{name}: {error}"));
+        }
+    }
+    assert!(failures.is_empty(), "named generic template probes failed:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn named_generic_template_specialization_keys_remain_distinct() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const alias = identity;
+            alias(1);
+            alias("x");
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_f64"));
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_str"));
+}
+
+#[test]
 fn specializes_multiple_generic_arguments_as_one_call_tuple() {
     let program = lower(
         r#"

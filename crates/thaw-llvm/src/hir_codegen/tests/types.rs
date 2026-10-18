@@ -154,6 +154,46 @@ fn compiles_multi_argument_generic_specializations_end_to_end() {
 }
 
 #[test]
+fn named_generic_template_operations_runtime_matrix() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function pair<T, U>(left: T, right: U): U { return right; }
+        function main(): void {
+            const alias = identity;
+            console.log(identity(1));
+            console.log(alias(2));
+            const genericArrow: <T>(value: T) => T = <T>(value: T): T => value;
+            const typed: <T>(value: T) => T = genericArrow;
+            console.log(typed("typed"));
+            const fixed = identity<number>;
+            console.log(fixed(3));
+            const bound = identity.bind(null);
+            console.log(bound("bound"));
+            const leading = pair.bind(null, 4);
+            console.log(leading("leading"));
+            console.log(identity.call(null, 5));
+            console.log(identity.apply(null, [6]));
+            const explicitBound = (identity<number>).bind(null);
+            console.log(explicitBound(7));
+            console.log((identity<number>).call(null, 8));
+            const aliasBound = alias.bind(null);
+            console.log(aliasBound("alias-bound"));
+            console.log(alias.call(null, "alias-call"));
+            const alias2 = alias;
+            console.log(alias2("alias-of-alias"));
+            const kind: string = typeof alias2;
+            console.log(kind);
+            console.log(alias(9));
+            console.log(alias("ten"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_operations"),
+        "1\n2\ntyped\n3\nbound\nleading\n5\n6\n7\n8\nalias-bound\nalias-call\nalias-of-alias\nfunction\n9\nten\n"
+    );
+}
+
+#[test]
 fn recursively_specializes_named_generic_local_function_values() {
     let source = r#"
         type Repeat = <T, U>(value: T, marker: U, remaining: number) => T;
