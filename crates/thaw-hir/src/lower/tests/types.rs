@@ -3069,6 +3069,21 @@ fn generic_function_declaration_nonrecursive_optional_specializations_match_defi
 }
 
 #[test]
+fn generic_function_declaration_preserves_direct_specialization_names() {
+    let program = lower(
+        r#"function identity<T>(value: T): T { return value; }
+            function main(): void {
+                console.log(identity(1));
+                console.log(identity("x"));
+            }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("identity__thaw_f64"), "{body}");
+    assert!(body.contains("identity__thaw_str"), "{body}");
+}
+
+#[test]
 fn generic_function_declaration_still_rejects_omitted_required_arguments() {
     let module = thaw_parser::parse_typescript(
         "function identity<T>(value: T): T { return value; } function main(): void { identity<number>(); }",

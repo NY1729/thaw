@@ -9,7 +9,227 @@ enum GenericCallableTemplate {
     },
 }
 
+struct GenericCallContext<'a> {
+    call: &'a CallExpr,
+    packed_native_rest_fixed_count: Option<usize>,
+    expected_source_return_hint: Option<&'a HirType>,
+    expected_return_hint: Option<&'a HirType>,
+}
+
 impl FnLowerer<'_> {
+    /// Infer and validate type arguments for the canonical direct-call path.
+    /// Keep source-AST alignment here: literals and primitive-array indices
+    /// intentionally use different metadata than the aligned hint filter.
+    fn infer_generic_call_types(
+        &self,
+        callee_name: &str,
+        signature: Option<&FnSignature>,
+        args: &[HirExpr],
+        context: &GenericCallContext<'_>,
+    ) -> Result<Option<Vec<HirType>>, String> {
+        let GenericCallContext {
+            call,
+            packed_native_rest_fixed_count,
+            expected_source_return_hint,
+            expected_return_hint,
+        } = context;
+        let Some(signature) = signature.filter(|signature| !signature.generic_type_params.is_empty()) else {
+            if call.type_args.is_some() {
+                return Err(format!(
+                    "non-generic function `{callee_name}` does not accept type arguments"
+                ));
+            }
+            return Ok(None);
+        };
+        let preserves_key_literal = |index: usize| {
+            let Some(GenericTypePattern::Variable(name)) =
+                generic_pattern_for_physical_argument(signature, index)
+            else {
+                return false;
+            };
+            signature
+                .generic_type_params
+                .iter()
+                .position(|parameter| parameter == name)
+                .and_then(|index| signature.generic_type_constraints.get(index))
+                .and_then(Option::as_deref)
+                .is_some_and(|constraint| {
+                    matches!(constraint, TsType::TsTypeOperator(operator) if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf)
+                })
+        };
+        let inference_argument_count = packed_native_rest_fixed_count
+            .filter(|supplied_fixed| {
+                signature
+                    .generic_param_optional
+                    .iter()
+                    .skip(*supplied_fixed)
+                    .take(signature.generic_param_patterns.len().saturating_sub(1))
+                    .any(|optional| *optional)
+            })
+            .unwrap_or(args.len());
+        let preserve_class_physical = !signature.is_extern;
+        let mut actual = args
+            .iter()
+            .enumerate()
+            .take(inference_argument_count)
+            .map(|(index, arg)| {
+                let source = (signature.native_rest.is_none() && call.args.len() == args.len())
+                    .then(|| call.args.get(index))
+                    .flatten()
+                    .filter(|argument| argument.spread.is_none())
+                    .map(|argument| argument.expr.as_ref());
+                match (call.type_args.is_none() && preserves_key_literal(index))
+                    .then(|| call.args.get(index))
+                    .flatten()
+                    .filter(|argument| argument.spread.is_none())
+                {
+                    Some(argument) => match argument.expr.as_ref() {
+                        Expr::Lit(Lit::Str(value)) => Ok(HirType::StrLiteral(
+                            value.value.to_string_lossy().into_owned(),
+                        )),
+                        _ => self.generic_call_argument_source_type(
+                            source,
+                            arg,
+                            preserve_class_physical,
+                        ),
+                    },
+                    None => self.generic_call_argument_source_type(
+                        source,
+                        arg,
+                        preserve_class_physical,
+                    ),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if call.type_args.is_some() {
+            for (index, ty) in actual.iter_mut().enumerate() {
+                let Some(argument) = call.args.get(index).filter(|arg| arg.spread.is_none()) else {
+                    continue;
+                };
+                let HirType::Optional(payload) = ty else {
+                    continue;
+                };
+                if self.is_primitive_array_index(&argument.expr, payload) {
+                    *ty = payload.as_ref().clone();
+                }
+            }
+        }
+        let types = if let Some(type_args) = &call.type_args {
+            resolve_explicit_generic_type_tuple(
+                signature,
+                &type_args.params,
+                GenericMatchActuals::Physical(&actual),
+                self.interfaces,
+                self.generic_interfaces,
+            )
+        } else {
+            infer_generic_type_tuple_for_call(
+                signature,
+                GenericMatchActuals::Physical(&actual),
+                self.interfaces,
+                self.generic_interfaces,
+                (*expected_source_return_hint).or(*expected_return_hint),
+            )
+        }
+        .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
+        if !types.contains(&HirType::Dynamic) {
+            for ty in &types {
+                if !(supports_generic_native_layout(ty)
+                    || signature.is_extern && supports_generic_dynamic_layout(ty))
+                {
+                    return Err(format!(
+                        "generic function `{callee_name}` cannot specialize for native layout {ty:?}"
+                    ));
+                }
+            }
+        }
+        Ok(Some(types))
+    }
+
+    fn specialize_generic_native_call(
+        &mut self,
+        callee_name: &str,
+        call: &CallExpr,
+        signature: Option<&FnSignature>,
+        generic_types: Option<&[HirType]>,
+        packed_native_rest_fixed_count: Option<usize>,
+        args: &mut Vec<HirExpr>,
+    ) -> Result<String, String> {
+        let Some(types) = generic_types.filter(|types| !types.contains(&HirType::Dynamic)) else {
+            return Ok(callee_name.to_owned());
+        };
+        let signature = signature.expect("generic types require a generic signature");
+        let substitution = signature
+            .generic_type_params
+            .iter()
+            .cloned()
+            .zip(types.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        if call.type_args.is_some() {
+            for (index, arg) in args.iter_mut().enumerate() {
+                let Some(pattern) = generic_pattern_for_physical_argument(signature, index) else {
+                    continue;
+                };
+                let declared = instantiate_generic_pattern(pattern, &substitution)?;
+                if matches!(declared, HirType::F64 | HirType::Str)
+                    && matches!(self.infer_expr_type(arg)?, HirType::Optional(payload) if *payload == declared)
+                {
+                    *arg = self.coerce_primitive_array_argument(arg.clone(), &declared)?;
+                }
+            }
+        }
+        let param_types = args
+            .iter()
+            .map(|arg| self.infer_expr_type(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_generic_optional = signature.generic_param_optional.iter().any(|optional| *optional);
+        let specialization_params = if has_generic_optional {
+            signature.generic_param_patterns.iter().enumerate()
+                .map(|(index, pattern)| {
+                    let ty = instantiate_generic_pattern(pattern, &substitution)?;
+                    Ok(if signature.generic_param_optional[index] {
+                        optional_parameter_type(ty)
+                    } else { ty })
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        } else { param_types };
+        if has_generic_optional {
+            if let Some(supplied_fixed) = packed_native_rest_fixed_count {
+                let fixed_count = specialization_params.len().saturating_sub(1);
+                if supplied_fixed < fixed_count {
+                    let rest_argument = args.pop();
+                    for (index, expected) in specialization_params.iter().enumerate()
+                        .skip(supplied_fixed).take(fixed_count - supplied_fixed)
+                    {
+                        if signature.generic_param_optional.get(index) == Some(&true) {
+                            args.push(omitted_parameter_value(expected)?);
+                        }
+                    }
+                    if let Some(rest_argument) = rest_argument { args.push(rest_argument); }
+                }
+            }
+            let supplied = args.len();
+            let mut values = std::mem::take(args).into_iter().enumerate();
+            *args = values.by_ref().map(|(index, value)| match specialization_params.get(index) {
+                Some(expected) => self.coerce_to_declared(expected, value),
+                None => Ok(value),
+            }).collect::<Result<Vec<_>, _>>()?;
+            for expected in specialization_params.iter().skip(supplied) {
+                args.push(omitted_parameter_value(expected)?);
+            }
+        }
+        let lowered_name = specialized_generic_function_name(callee_name, &specialization_params, signature, types);
+        let return_type = resolve_ts_type_with_substitution(
+            signature.generic_return_type.as_ref().expect("generic return type"),
+            &substitution,
+            self.interfaces,
+            self.generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        self.generic_call_returns.insert(lowered_name.clone(), return_type);
+        Ok(lowered_name)
+    }
+
     fn generic_callable_template(&self, name: &str) -> Option<GenericCallableTemplate> {
         let binding = self.resolve_binding(name);
         if let Some(expression) = self.generic_arrows.get(&binding) {
