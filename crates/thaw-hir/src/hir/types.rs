@@ -213,6 +213,9 @@ pub enum HirType {
         Option<Box<HirType>>,
         Box<HirType>,
     ),
+    /// Public source overloads carried alongside the single physical callable.
+    /// This is metadata only: storage and runtime representation follow `physical`.
+    OverloadedFunction(Vec<HirType>, Box<HirType>),
     Union(Vec<HirType>),
     /// A native `T | undefined` value represented as an explicit presence
     /// tag plus a payload. This avoids sentinel collisions with NaN/pointers.
@@ -261,14 +264,19 @@ pub fn native_exception_tag(ty: &HirType) -> Option<u64> {
         HirType::Tuple(_) => 27,
         HirType::Function(_, _)
         | HirType::FunctionWithThis(_, _)
-        | HirType::CallableFunction(..) => 28,
+        | HirType::CallableFunction(..)
+        | HirType::OverloadedFunction(_, _) => 28,
         HirType::Promise(_) => 29,
         _ => return None,
     })
 }
 
 pub fn native_exception_layout_token(ty: &HirType) -> Option<String> {
-    native_exception_tag(ty).map(|_| format!("{ty:?}"))
+    let physical = match ty {
+        HirType::OverloadedFunction(_, physical) => physical.as_ref(),
+        other => other,
+    };
+    native_exception_tag(physical).map(|_| format!("{physical:?}"))
 }
 
 #[derive(Debug, Clone, PartialEq)]

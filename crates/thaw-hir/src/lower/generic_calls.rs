@@ -787,6 +787,7 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(FnSignature {
+                        public_overloads: Vec::new(),
             params: Vec::new(),
             variadic: None,
             native_rest: None,
@@ -958,6 +959,7 @@ impl<'a> FnLowerer<'a> {
             )
         })?;
         Ok(FnSignature {
+                        public_overloads: Vec::new(),
             params: Vec::new(),
             variadic: None,
             native_rest: None,
@@ -1089,6 +1091,7 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(FnSignature {
+                        public_overloads: Vec::new(),
             params: Vec::new(),
             variadic: None,
             native_rest: None,

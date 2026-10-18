@@ -1253,6 +1253,7 @@ fn storage_type(span: Span, source: HirType) -> HirType {
         && matches!(
             &source,
             HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
+                | HirType::OverloadedFunction(..)
         )
     {
         return quickjs_function_value_type(source);
@@ -1303,6 +1304,7 @@ fn dynamic_storage_type(source: HirType) -> HirType {
             HirType::Array(Box::new(dynamic_storage_type(*element)))
         }
         HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
+        | HirType::OverloadedFunction(..)
         | HirType::JsValue => source,
         _ => HirType::Json,
     }
@@ -1430,7 +1432,7 @@ fn storage_return_type(span: Span, source: HirType) -> HirType {
     if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().result_is_dynamic(span)) {
         if is_generator_producer_type(&source) {
             source
-        } else if matches!(source, HirType::Function(..) | HirType::CallableFunction(..)) {
+        } else if matches!(source, HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)) {
             HirType::Dynamic
         } else { dynamic_storage_type(source) }
     } else { source }

@@ -21,6 +21,7 @@ struct NarrowingSnapshot {
 }
 
 /// Lowers one function body while retaining its typed lexical scope.
+#[derive(Clone)]
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     source_scope: HashMap<Symbol, HirType>,
