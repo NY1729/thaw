@@ -135,7 +135,11 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::JsonAsNumber(value)
             | HirExpr::JsonAsString(value)
             | HirExpr::JsonAsBool(value)
-            | HirExpr::JsonAsNative(value, _) => self.extract_first_frame_await(value, temporary),
+            | HirExpr::JsonAsNative(value, _)
+            | HirExpr::NonArrowThis { payload: value, .. }
+            | HirExpr::NonArrowReceiverPack { value, .. } => {
+                self.extract_first_frame_await(value, temporary)
+            }
             HirExpr::IndexAssign(a, b, c) => {
                 for value in [a, b, c] {
                     if let Some(found) = self.extract_first_frame_await(value, temporary)? {

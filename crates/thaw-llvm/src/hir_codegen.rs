@@ -1480,7 +1480,11 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::EnumReverseLookup(obj, _)
             | HirExpr::JsonAsNumber(obj)
             | HirExpr::JsonAsString(obj)
-            | HirExpr::JsonAsBool(obj) => self.expr_awaits_frame_source(obj, frame_functions),
+            | HirExpr::JsonAsBool(obj)
+            | HirExpr::NonArrowThis { payload: obj, .. }
+            | HirExpr::NonArrowReceiverPack { value: obj, .. } => {
+                self.expr_awaits_frame_source(obj, frame_functions)
+            }
             HirExpr::PropAssign(obj, _, _, value)
             | HirExpr::JsonIndex(obj, value)
             | HirExpr::JsonKey(obj, value)

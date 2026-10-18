@@ -124,6 +124,69 @@ function main(): void {
 }
 
 #[test]
+fn kb_contract_async_receiver_access_is_lazy_across_await() {
+    let source = r#"let trace = "";
+const read = async function(this: { n: number }): Promise<number> {
+  trace += "before;";
+  const before = () => this.n;
+  setTimeout(() => { this.n = 5; }, 0);
+  await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  trace += "after;";
+  const after = () => this.n;
+  return before() + after();
+};
+const skipped = async function(this: { n: number }): Promise<number> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  if (false) return this.n;
+  return 7;
+};
+const invalid = async function(this: { n: number }): Promise<number> {
+  trace += "invalid-before;";
+  await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  return this.n;
+};
+function realPromise(next: { n: number }): Promise<{ n: number }> {
+  return new Promise<{ n: number }>((resolve) => setTimeout(() => resolve(next), 1));
+}
+const alias = async function(this: { n: number }, next: { n: number }): Promise<number> {
+  let self = this;
+  self = await realPromise(next);
+  return self.n;
+};
+async function main(): Promise<void> {
+  const owner = { n: 3 };
+  const result = await read.call(owner);
+  owner.n = 5;
+  console.log(result, trace);
+  console.log(await skipped.call(undefined as any));
+  trace = "";
+  for (const receiver of [undefined, null]) {
+    try { await invalid.call(receiver as any); }
+    catch (error: any) { console.log(trace, error.message); }
+  }
+  console.log(await alias.call(owner, owner));
+  owner.n = 9;
+  console.log(await read.call(owner));
+}"#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let alias = program.globals.iter().find(|global| global.name == "alias").unwrap();
+    let thaw_hir::HirExpr::NonArrowFunction(lambda) = &alias.init else { panic!("alias function") };
+    let thaw_hir::HirExpr::Lambda(_, _, _, body) = lambda.as_ref() else { panic!("alias lambda") };
+    let thaw_hir::HirExpr::Block(body) = body.as_ref() else { panic!("alias body") };
+    assert!(body.iter().any(|stmt| matches!(stmt,
+        thaw_hir::HirStmt::Expr(thaw_hir::HirExpr::Assign(_, packed))
+            if matches!(packed.as_ref(), thaw_hir::HirExpr::NonArrowReceiverPack { value, .. }
+                if matches!(value.as_ref(), thaw_hir::HirExpr::Call(_, args)
+                    if args.iter().any(|arg| matches!(arg, thaw_hir::HirExpr::AwaitPromise(..)))))
+    )));
+    assert_eq!(
+        compile_and_run(source, "kb_contract_async_receiver_access_is_lazy_across_await"),
+        "10 before;after;\n7\ninvalid-before; Cannot read properties of undefined (reading 'n')\ninvalid-before;invalid-before; Cannot read properties of null (reading 'n')\n5\n10\n"
+    );
+}
+
+#[test]
 fn kb_contract_this_assignment_and_call_order_matches_node() {
     let source = r#"let trace = "";
 const assign = function(this: { a: number }, rhs: () => number): number { this.a = rhs(); return 0; };
