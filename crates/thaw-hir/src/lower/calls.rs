@@ -914,9 +914,7 @@ impl<'a> FnLowerer<'a> {
         let mut optional = HirOptionalMask::default();
         let mut fixed = physical_params[..fixed_count].to_vec();
         for (index, parameter) in fixed.iter_mut().enumerate() {
-            let mut singleton = HirOptionalMask::default();
-            singleton.insert(index);
-            if self.signatures.contains_key(&omitted_parameter_symbol(symbol, &singleton)) {
+            if signature.source_omittable.contains(index) {
                 optional.insert(index);
                 *parameter = optional_parameter_type(parameter.clone());
             }

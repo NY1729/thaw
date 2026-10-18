@@ -3710,6 +3710,7 @@ fn receiver_pattern_inference_signature(
         generic_param_patterns: visible_patterns.clone(),
         generic_param_optional: vec![false; visible_patterns.len()],
         generic_return_type: None,
+        source_omittable: HirOptionalMask::default(),
         type_predicate: None,
         generic_return_pattern: None,
         generic_this_pattern,
@@ -4601,6 +4602,7 @@ fn error_argument_staging_signature(ret: HirType) -> FnSignature {
         generic_type_params: Vec::new(), generic_type_constraints: Vec::new(),
         generic_type_defaults: Vec::new(), generic_param_patterns: Vec::new(),
         generic_param_optional: Vec::new(), generic_this_pattern: None,
+        source_omittable: HirOptionalMask::default(),
         generic_return_type: None, type_predicate: None, generic_return_pattern: None,
     }
 }

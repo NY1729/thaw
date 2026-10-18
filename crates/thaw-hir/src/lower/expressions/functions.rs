@@ -1068,6 +1068,7 @@ impl<'a> FnLowerer<'a> {
                     .as_ref()
                     .map(|annotation| annotation.type_ann.clone()),
                 generic_return_pattern: None,
+                source_omittable: source_omission_mask(&arrow.params, 0),
                 type_predicate: None,
             };
             let types = infer_generic_type_tuple(
