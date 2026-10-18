@@ -1961,7 +1961,7 @@ fn dollar_sign_in_class_name_does_not_split_nominal_ancestry() {
 }
 
 #[test]
-fn lowers_native_class_default_parameter_wrappers() {
+fn lowers_native_class_defaults_on_canonical_signatures() {
     let program = lower(
         r#"class Box {
             constructor(public value: number = 40, public label: string = String(value)) {}
@@ -1977,14 +1977,60 @@ fn lowers_native_class_default_parameter_wrappers() {
         }"#,
     );
     for symbol in [
-        default_arity_symbol(&class_constructor_symbol("Box"), 0),
-        default_arity_symbol(&class_method_symbol("Box", "add"), 1),
-        default_arity_symbol(&class_static_method_symbol("Box", "sum"), 0),
+        class_constructor_symbol("Box"),
+        class_initializer_symbol("Box"),
+        class_method_symbol("Box", "add"),
+        class_static_method_symbol("Box", "sum"),
     ] {
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == symbol));
+        assert_eq!(
+            program.functions.iter().filter(|function| function.name == symbol).count(),
+            1,
+            "{symbol} should have one canonical definition"
+        );
+    }
+    assert!(program.functions.iter().all(|function| {
+        !function.name.contains("__thawdefault_arity_")
+            && !function.name.contains("__thawomitted_mask_")
+    }));
+}
+
+#[test]
+fn class_callable_defaults_have_linear_hir_growth() {
+    let mut small_size = 0;
+    for count in [8, 17, 65] {
+        let parameters = (0..count)
+            .map(|index| format!("p{index}: number = {index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let optional = (0..count)
+            .map(|index| format!("p{index}?: number"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = lower(&format!(
+            "class Box {{ constructor({parameters}) {{}} method({optional}): number {{ return 1; }} }} function main(): number {{ const box = new Box(); const method: ({}) => number = box.method; return method(); }}",
+            (0..count).map(|index| format!("p{index}?: number")).collect::<Vec<_>>().join(", ")
+        ));
+        assert_eq!(program.functions.len(), 4, "{count} class slots must not emit wrapper clones");
+        let debug_size = format!("{program:#?}").len();
+        if count == 8 {
+            small_size = debug_size;
+            assert!(debug_size < 100_000, "8 class slots should keep debug HIR bounded");
+        } else {
+            assert!(debug_size < small_size * count * 2 / 8, "{count} class slots should grow linearly: {debug_size} vs {small_size}");
+        }
+    }
+}
+
+#[test]
+fn required_undefined_class_arguments_remain_required() {
+    for source in [
+        "class Box { constructor(value: number | undefined) {} } function main(): void { new Box(); }",
+        "class Box { method(value: number | undefined): void {} } function main(): void { new Box().method(); }",
+        "class Box<T> { constructor(value: T | undefined) {} } function main(): void { new Box<number>(); }",
+        "class Box<T> { method(value: T | undefined): void {} } function main(): void { new Box<number>().method(); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "{source}");
     }
 }
 

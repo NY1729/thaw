@@ -361,44 +361,6 @@ fn class_initializer_symbol(name: &str) -> Symbol {
     format!("__thaw_class_{name}_initialize")
 }
 
-fn default_arity_symbol(symbol: &str, arity: usize) -> Symbol {
-    format!("{symbol}__thawdefault_arity_{arity}")
-}
-
-fn omitted_parameter_symbol(symbol: &str, mask: &HirOptionalMask) -> Symbol {
-    let suffix = match mask {
-        HirOptionalMask::Inline(bits) => format!("{bits:x}"),
-        HirOptionalMask::Extended(words) => format!(
-            "x{}",
-            words.iter().map(|word| format!("{word:x}")).collect::<Vec<_>>().join("_")
-        ),
-    };
-    format!("{symbol}__thawomitted_mask_{suffix}")
-}
-
-fn omitted_parameter_mask_from_symbol(symbol: &str, base: &str) -> Option<HirOptionalMask> {
-    let suffix = symbol.strip_prefix(&format!("{base}__thawomitted_mask_"))?;
-    if let Some(words) = suffix.strip_prefix('x') {
-        let words = words
-            .split('_')
-            .map(|word| u64::from_str_radix(word, 16).ok())
-            .collect::<Option<Vec<_>>>()?;
-        return (words.len() > 1 && words.last().copied() != Some(0))
-            .then_some(HirOptionalMask::Extended(Box::new(words)));
-    }
-    u64::from_str_radix(suffix, 16).ok().map(HirOptionalMask::Inline)
-}
-
-fn omitted_parameter_masks_in_signatures(
-    signatures: &HashMap<Symbol, FnSignature>,
-    base: &str,
-) -> Vec<HirOptionalMask> {
-    signatures
-        .keys()
-        .filter_map(|symbol| omitted_parameter_mask_from_symbol(symbol, base))
-        .collect()
-}
-
 fn pattern_is_omittable(pattern: &Pat) -> bool {
     matches!(pattern, Pat::Assign(_))
         || matches!(pattern, Pat::Ident(binding) if binding.id.optional)
@@ -463,39 +425,36 @@ fn omitted_parameter_value(ty: &HirType) -> Result<HirExpr, String> {
     }
 }
 
-fn trailing_omittable_start(patterns: &[Pat]) -> Option<usize> {
-    let start = patterns
-        .iter()
-        .rposition(|pattern| !pattern_is_omittable(pattern))
-        .map_or(0, |index| index + 1);
-    (start < patterns.len()).then_some(start)
-}
+#[cfg(test)]
+mod source_omission_mask_tests {
+    use super::{mask_with_offset, source_omission_mask};
+    use crate::HirOptionalMask;
+    use swc_ecma_ast::{Decl, ModuleItem, Stmt};
 
-fn omitted_parameter_masks(
-    patterns: &[Pat],
-    receiver_count: usize,
-) -> Result<Vec<HirOptionalMask>, String> {
-    let omittable = patterns
-        .iter()
-        .enumerate()
-        .filter_map(|(index, pattern)| {
-            pattern_is_omittable(pattern).then_some(index + receiver_count)
-        })
-        .collect::<Vec<_>>();
-    if omittable.len() > 16 {
-        return Err("native class callables support at most 16 omittable parameters".into());
+    #[test]
+    fn source_masks_track_syntax_and_physical_receiver_offsets() {
+        let module = thaw_parser::parse_typescript(
+            "function f(this: number, required: number | undefined, optional?: number, defaulted: number = 1, ...rest: number[]): void {}",
+        )
+        .unwrap();
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0] else {
+            panic!("expected function declaration")
+        };
+        let patterns = function
+            .function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>();
+        let source = source_omission_mask(&patterns, 1);
+        assert_eq!(source, HirOptionalMask::Inline(0b1100));
+
+        let unbound = source.shifted(1);
+        assert_eq!(unbound, HirOptionalMask::Inline(0b0110));
+
+        let initializer = mask_with_offset(&source, 1, patterns.len() + 2);
+        assert_eq!(initializer, HirOptionalMask::Inline(0b11000));
     }
-    let mut masks = Vec::with_capacity((1usize << omittable.len()).saturating_sub(1));
-    for subset in 1usize..(1usize << omittable.len()) {
-        let mut mask = HirOptionalMask::default();
-        for (bit, parameter) in omittable.iter().enumerate() {
-            if subset & (1usize << bit) != 0 {
-                mask.insert(*parameter);
-            }
-        }
-        masks.push(mask);
-    }
-    Ok(masks)
 }
 
 fn native_rest_element(patterns: &[Pat], params: &[HirType]) -> Result<Option<HirType>, String> {
@@ -530,59 +489,6 @@ fn native_rest_array(values: Vec<HirExpr>, element: &HirType) -> HirExpr {
         HirExpr::ArrayAlloc(Box::new(HirExpr::Lit(HirLit::F64(0.0))), element.clone())
     } else {
         HirExpr::ArrayLit(values)
-    }
-}
-
-fn insert_omitted_parameter_signatures(
-    signatures: &mut HashMap<Symbol, FnSignature>,
-    symbol: &str,
-    patterns: &[Pat],
-    receiver_count: usize,
-) -> Result<(), String> {
-    let full = signatures[symbol].clone();
-    for mask in omitted_parameter_masks(patterns, receiver_count)? {
-        let mut wrapper = full.clone();
-        wrapper.source_omittable = HirOptionalMask::default();
-        wrapper.params = wrapper
-            .params
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, parameter)| (!mask.contains(index)).then_some(parameter))
-            .collect();
-        signatures.insert(omitted_parameter_symbol(symbol, &mask), wrapper);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod source_omission_mask_tests {
-    use super::{mask_with_offset, source_omission_mask};
-    use crate::HirOptionalMask;
-    use swc_ecma_ast::{Decl, ModuleItem, Stmt};
-
-    #[test]
-    fn source_masks_track_syntax_and_physical_receiver_offsets() {
-        let module = thaw_parser::parse_typescript(
-            "function f(this: number, required: number | undefined, optional?: number, defaulted: number = 1, ...rest: number[]): void {}",
-        )
-        .unwrap();
-        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0] else {
-            panic!("expected function declaration")
-        };
-        let patterns = function
-            .function
-            .params
-            .iter()
-            .map(|parameter| parameter.pat.clone())
-            .collect::<Vec<_>>();
-        let source = source_omission_mask(&patterns, 1);
-        assert_eq!(source, HirOptionalMask::Inline(0b1100));
-
-        let unbound = source.shifted(1);
-        assert_eq!(unbound, HirOptionalMask::Inline(0b0110));
-
-        let initializer = mask_with_offset(&source, 1, patterns.len() + 2);
-        assert_eq!(initializer, HirOptionalMask::Inline(0b11000));
     }
 }
 
