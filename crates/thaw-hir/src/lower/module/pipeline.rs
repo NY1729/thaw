@@ -661,6 +661,16 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         ));
                     }
                 }
+                if !is_extern && generic_type_params.is_empty() {
+                    for (index, parameter) in func.params.iter().enumerate() {
+                        let physical_index = index + usize::from(func.this_param.is_some());
+                        if pattern_is_omittable(&parameter.pat)
+                            && !matches!(params[physical_index], HirType::Dynamic | HirType::Json)
+                        {
+                            params[physical_index] = optional_parameter_type(params[physical_index].clone());
+                        }
+                    }
+                }
                 let assertion_function = matches!(
                     func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
                     Some(TsType::TsTypePredicate(predicate)) if predicate.asserts
@@ -728,7 +738,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     }
                     _ => None,
                 };
-                let generates_call_wrappers = !is_extern && generic_type_params.is_empty();
                 // A plain non-ambient function's trailing
                 // `...rest: T[]` parameter reuses the exact same
                 // `native_rest` mechanism a native class constructor's
@@ -790,26 +799,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         type_predicate,
                     },
                 );
-                if generates_call_wrappers {
-                    let patterns = func
-                        .params
-                        .iter()
-                        .map(|parameter| parameter.pat.clone())
-                        .collect::<Vec<_>>();
-                    let receiver_count = usize::from(func.this_param.is_some());
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        for arity in default_start..patterns.len() {
-                            let total_arity = receiver_count + arity;
-                            let mut wrapper = signatures[&name].clone();
-                            wrapper.params.truncate(total_arity);
-                            wrapper.source_omittable = HirOptionalMask::default();
-                            signatures.insert(default_arity_symbol(&name, total_arity), wrapper);
-                        }
-                    }
-                    insert_omitted_parameter_signatures(
-                        &mut signatures, &name, &patterns, receiver_count,
-                    )?;
-                }
                 if !is_extern {
                     fn_decls.push(fn_decl);
                 }
@@ -2232,43 +2221,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         if !signatures[&function.name].generic_type_params.is_empty() {
             continue;
         }
-        let patterns = fn_decl
-            .function
-            .params
-            .iter()
-            .map(|parameter| parameter.pat.clone())
-            .collect::<Vec<_>>();
-        let receiver_count = usize::from(fn_decl.function.this_param.is_some());
-        specialized.extend(lower_callable_default_wrappers(
-            &function.name,
-            &function.params,
-            &patterns,
-            receiver_count,
-            None,
-            &function.ret,
-            &signatures,
-            &interfaces,
-            &generic_interfaces,
-            &enum_values,
-            &enum_reverse_values,
-            &global_types,
-            &immutable_globals,
-        )?);
-        specialized.extend(lower_callable_omitted_parameter_wrappers(
-            &function.name,
-            &function.params,
-            &patterns,
-            receiver_count,
-            None,
-            &function.ret,
-            &signatures,
-            &interfaces,
-            &generic_interfaces,
-            &enum_values,
-            &enum_reverse_values,
-            &global_types,
-            &immutable_globals,
-        )?);
         specialized.push(function);
     }
     for declaration in &class_decls {

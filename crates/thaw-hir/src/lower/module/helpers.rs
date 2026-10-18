@@ -439,6 +439,9 @@ fn is_optional_parameter(mask: &HirOptionalMask, index: usize) -> bool {
 
 fn omitted_parameter_value(ty: &HirType) -> Result<HirExpr, String> {
     match ty {
+        HirType::Json | HirType::Dynamic | HirType::JsValue => {
+            Ok(HirExpr::Lit(HirLit::Undefined))
+        }
         HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
         HirType::Nullish(payload) => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
         HirType::Union(elements) => elements

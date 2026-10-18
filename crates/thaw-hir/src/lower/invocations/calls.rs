@@ -2426,17 +2426,15 @@ impl<'a> FnLowerer<'a> {
                     && sig.variadic.is_none()
                     && sig.native_rest.is_none()
             }) {
-                for ty in params[lowered_arguments.len().min(params.len())..].iter() {
-                    if matches!(
-                        ty,
-                        HirType::Json
-                            | HirType::Dynamic
-                            | HirType::JsValue
-                            | HirType::Optional(_)
-                            | HirType::Nullable(_)
-                            | HirType::Nullish(_)
-                            | HirType::Undefined
-                    ) {
+                let signature = signature.as_ref().expect("checked above");
+                for (index, ty) in params
+                    .iter()
+                    .enumerate()
+                    .skip(lowered_arguments.len().min(params.len()))
+                {
+                    if signature.source_omittable.contains(index) {
+                        lowered_arguments.push(omitted_parameter_value(ty)?);
+                    } else if matches!(ty, HirType::Json | HirType::Dynamic | HirType::JsValue) {
                         lowered_arguments.push(HirExpr::Lit(HirLit::Undefined));
                     } else {
                         break;

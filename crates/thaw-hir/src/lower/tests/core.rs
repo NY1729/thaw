@@ -29,6 +29,52 @@ fn lowers_typed_function_with_binary_op() {
 }
 
 #[test]
+fn free_function_defaults_have_linear_hir_growth() {
+    let mut small_size = 0;
+    for count in [8, 17, 65] {
+        let parameters = (0..count)
+            .map(|index| format!("p{index}: number = {index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = lower(&format!(
+            "function many({parameters}): number {{ return p0; }}"
+        ));
+        assert_eq!(program.functions.len(), 1, "{count} defaults must not emit arity or omission clones");
+        let debug_size = format!("{program:#?}").len();
+        if count == 8 {
+            small_size = debug_size;
+            assert!(debug_size < 100_000, "8 defaults should keep debug HIR bounded");
+        } else {
+            assert!(debug_size < small_size * count * 2 / 8, "{count} defaults should grow linearly: {debug_size} vs {small_size}");
+        }
+    }
+}
+
+#[test]
+fn free_function_requires_syntactic_omission_permission_for_undefined_types() {
+    let module = thaw_parser::parse_typescript(
+        "function required(value: number | undefined): void {} function main(): void { required(); }",
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err(), "a required undefined-capable parameter remains required");
+}
+
+#[test]
+fn free_function_callable_values_do_not_expand_optional_masks() {
+    for count in [8, 17, 65] {
+        let parameters = (0..count)
+            .map(|index| format!("p{index}: number = {index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = lower(&format!(
+            "function many({parameters}): number {{ return p0; }} function main(): number {{ const value = many; return value(); }}"
+        ));
+        assert_eq!(program.functions.len(), 2, "{count} optional named-value slots must not emit omission clones");
+        assert!(format!("{program:#?}").len() < 1_000_000, "{count} callable defaults should keep debug HIR bounded");
+    }
+}
+
+#[test]
 fn keeps_dynamic_call_results_live_when_used_as_member_receivers() {
     lower(
         r#"
@@ -1334,7 +1380,7 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
 }
 
 #[test]
-fn explicit_this_default_wrappers_keep_receiver_and_default_binding() {
+fn explicit_this_default_function_uses_canonical_parameter_abi() {
     let program = lower(
         r#"
         function withReceiver(this: number, value: number = this): number {
@@ -1342,20 +1388,14 @@ fn explicit_this_default_wrappers_keep_receiver_and_default_binding() {
         }
         "#,
     );
-    for name in [
-        "withReceiver__thawdefault_arity_1",
-        "withReceiver__thawomitted_mask_2",
-    ] {
-        let wrapper = program.functions.iter().find(|function| function.name == name)
-            .expect("receiver-preserving default wrapper");
-        assert_eq!(wrapper.params.len(), 1);
-        assert_eq!(wrapper.params[0].name, "__thaw_this");
-        assert_eq!(wrapper.params[0].ty, HirType::F64);
-        assert!(wrapper.body.iter().any(|statement| matches!(
-            statement,
-            HirStmt::Let(_, HirType::F64, HirExpr::Var(source)) if source == "__thaw_this"
-        )));
-    }
+    let function = program.functions.iter().find(|function| function.name == "withReceiver")
+        .expect("source function");
+    assert_eq!(function.params.len(), 2);
+    assert_eq!(function.params[0].name, "__thaw_this");
+    assert_eq!(function.params[0].ty, HirType::F64);
+    assert_eq!(function.params[1].ty, HirType::Optional(Box::new(HirType::F64)));
+    assert!(format!("{:?}", function.body).contains("OptionalIsNone"));
+    assert!(!program.functions.iter().any(|function| function.name.starts_with("withReceiver__thaw")));
 }
 
 #[test]

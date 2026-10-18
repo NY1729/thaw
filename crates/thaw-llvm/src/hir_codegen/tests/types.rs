@@ -734,6 +734,59 @@ fn named_callable_values_keep_optional_default_and_rest_shapes() {
 }
 
 #[test]
+fn named_default_parameters_apply_to_dynamic_undefined_but_preserve_null() {
+    let source = r#"
+        function defaulted(value: any = 7): any { return value; }
+        function main(): void {
+            const missing: any = undefined;
+            const explicitNull: any = null;
+            const alias: (value?: any) => any = defaulted;
+            console.log(defaulted(undefined), defaulted(missing), defaulted(explicitNull));
+            console.log(alias(missing), alias(explicitNull));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "named_default_dynamic_undefined"), "7 7 null\n7 null\n");
+}
+
+#[test]
+fn native_function_defaults_are_lazy_ordered_and_fresh() {
+    let source = r#"
+        let calls = "";
+        function mark(value: number): number { calls += value + ","; return value; }
+        function ordered(first: number = mark(1), required: number, later: number = mark(first + 1)): number {
+            return required + later;
+        }
+        function fresh(value: {count: number} = {count: 0}): number { value.count += 1; return value.count; }
+        function main(): void {
+            console.log(ordered(undefined, 4), calls);
+            console.log(ordered(3, 5, 6), calls);
+            console.log(fresh(), fresh());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_function_defaults_ordered_and_fresh"), "6 1,2,\n11 1,2,\n1 1\n");
+}
+
+#[test]
+fn native_function_default_parameter_destructuring_reads_getter_once() {
+    let source = r#"
+        let reads = 0;
+        function read({ nested: { value = 9 } }: { nested: { value?: number } }): number {
+            return value;
+        }
+        function main(): void {
+            const source = {
+                get nested(): { value?: number } {
+                    reads++;
+                    return { value: undefined };
+                },
+            };
+            console.log(read(source), reads);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_parameter_destructuring_getter_once"), "9 1\n");
+}
+
+#[test]
 fn named_callable_value_identity_and_nullable_default_are_preserved() {
     let source = r#"
         function defaulted(value: number = 5): number { return value; }

@@ -47,10 +47,6 @@ impl<'a> FnLowerer<'a> {
                 return Ok(None);
             }
         }
-        if optional.count() > 16 {
-            return Err("callable values support at most 16 omittable parameters".into());
-        }
-
         let mut parameters = fixed
             .iter()
             .enumerate()
@@ -65,6 +61,75 @@ impl<'a> FnLowerer<'a> {
                 ty: HirType::Array(rest.clone()),
             });
         }
+        // Class methods still have the legacy wrapper ABI in this task. The
+        // generated symbol prefix is the class-method discriminator; a method
+        // that does not read `this` still has a physical receiver parameter.
+        let source_signature = self
+            .signatures
+            .get(symbol)
+            .filter(|_| {
+                !symbol.starts_with("__thaw_class_") && !symbol.ends_with("__thaw_unbound")
+            })
+            .filter(|signature| {
+                !signature.uses_this && signature.source_omittable == *optional
+            });
+        if let Some(signature) = source_signature {
+            if signature.params == *source_params {
+                let mut arguments = Vec::with_capacity(expected_abi_count);
+                for (index, (actual, expected)) in
+                    source_params.iter().zip(fixed.iter()).enumerate()
+                {
+                    let argument = HirExpr::Var(parameters[index].name.clone());
+                    if actual == expected {
+                        arguments.push(argument);
+                    } else if *actual == HirType::Json
+                        && *expected == HirType::Optional(Box::new(HirType::Json))
+                        && optional.contains(index)
+                    {
+                        arguments.push(HirExpr::Conditional(
+                            Box::new(HirExpr::OptionalIsNone(
+                                Box::new(argument.clone()),
+                                HirType::Json,
+                            )),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                                Vec::new(),
+                            )),
+                            Box::new(HirExpr::OptionalValue(
+                                Box::new(argument),
+                                HirType::Json,
+                            )),
+                            HirType::Json,
+                        ));
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                if rest.is_some() {
+                    arguments.push(HirExpr::Var("__thaw_callable_rest".into()));
+                }
+                let call = HirExpr::Call(Box::new(HirExpr::Var(symbol.into())), arguments);
+                let body = if **ret == HirType::Void {
+                    HirExpr::Block(vec![HirStmt::Expr(call), HirStmt::Return(None)])
+                } else {
+                    HirExpr::Block(vec![HirStmt::Return(Some(call))])
+                };
+                let closure = HirExpr::Lambda(
+                    Vec::new(),
+                    parameters,
+                    ret.as_ref().clone(),
+                    Box::new(body),
+                );
+                return Ok(Some(HirExpr::TypedClosure(
+                    declared.clone(),
+                    Box::new(closure),
+                )));
+            }
+        }
+        if optional.count() > 16 {
+            return Err("callable values support at most 16 omittable parameters".into());
+        }
+
         let body = HirExpr::Block(self.build_callable_adapter_dispatch(
             symbol,
             fixed,
