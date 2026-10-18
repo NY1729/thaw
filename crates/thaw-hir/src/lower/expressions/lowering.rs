@@ -911,6 +911,27 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             signature.ret.clone()
                         };
+                        if !signature.public_overloads.is_empty() {
+                            let physical = if let Some(rest) = &signature.native_rest {
+                                HirType::CallableFunction(
+                                    signature.params[..signature.params.len() - 1].to_vec(),
+                                    signature.source_omittable.clone(),
+                                    Some(Box::new(rest.clone())),
+                                    Box::new(ret.clone()),
+                                )
+                            } else {
+                                HirType::Function(signature.params.clone(), Box::new(ret.clone()))
+                            };
+                            let normalized = self.normalize_function_ref_value(HirExpr::FunctionRef(
+                                name,
+                                signature.params.clone(),
+                                ret,
+                            ))?;
+                            return Ok(HirExpr::TypedClosure(
+                                HirType::OverloadedFunction(signature.public_overloads.clone(), Box::new(physical)),
+                                Box::new(normalized),
+                            ));
+                        }
                         // ponytail: a `this`-using function stays a plain FunctionRef;
                         // FunctionRefThis needs `.bind` lowering and llvm support first.
                         return self.normalize_function_ref_value(HirExpr::FunctionRef(

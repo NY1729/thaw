@@ -1880,7 +1880,7 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(HirExpr::ObjectLit(fields), &bindings)
     }
 
-    fn unreachable_value(ty: &HirType) -> Result<HirExpr, String> {
+    pub(in crate::lower) fn unreachable_value(ty: &HirType) -> Result<HirExpr, String> {
         match ty {
             HirType::F64 => Ok(HirExpr::Lit(HirLit::F64(0.0))),
             HirType::Bool => Ok(HirExpr::Lit(HirLit::Bool(false))),

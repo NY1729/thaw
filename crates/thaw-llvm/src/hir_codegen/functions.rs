@@ -102,6 +102,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            HirType::OverloadedFunction(_, physical) => self.basic_type(physical),
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Optional(payload) => {
                 let payload = self.basic_type(payload)?;

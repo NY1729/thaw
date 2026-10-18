@@ -472,13 +472,29 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let mut fn_decls = Vec::new();
     let mut global_decls = Vec::new();
     let mut generic_instantiations: HashMap<Symbol, Vec<Vec<HirType>>> = HashMap::new();
+    let mut implementation_names = std::collections::HashSet::new();
+    let mut implementation_counts: HashMap<Symbol, usize> = HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) = item {
+            if declaration.function.body.is_some() {
+                let name = declaration.ident.sym.to_string();
+                implementation_names.insert(name.clone());
+                *implementation_counts.entry(name).or_default() += 1;
+            }
+        }
+    }
+    if let Some((name, _)) = implementation_counts.iter().find(|(_, count)| **count > 1) {
+        return Err(format!("function `{name}` has multiple implementations"));
+    }
+    let mut public_overloads: HashMap<Symbol, Vec<HirType>> = HashMap::new();
 
     for item in &module.body {
         match item {
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) => {
                 let name = fn_decl.ident.sym.to_string();
                 let func = &fn_decl.function;
-                let is_extern = func.body.is_none();
+                let is_overload_declaration = func.body.is_none() && implementation_names.contains(&name);
+                let is_extern = func.body.is_none() && !is_overload_declaration;
                 let annotation_interfaces = if is_extern && dynamic_symbol(&name).is_none() {
                     native_interfaces.as_ref().unwrap_or(&interfaces)
                 } else { &interfaces };
@@ -760,21 +776,20 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .collect::<Vec<_>>();
                     native_rest_element(&patterns, &params)?
                 };
-                signatures.insert(
-                    name.clone(),
-                    FnSignature {
-                        params,
+                let signature = FnSignature {
+                        public_overloads: Vec::new(),
+                        params: params.clone(),
                         variadic,
-                        native_rest,
+                        native_rest: native_rest.clone(),
                         abstract_class_constructor: false,
-                        ret,
+                        ret: ret.clone(),
                         is_async: func.is_async && !func.is_generator,
                         returns_sparse_array: function_returns_sparse_array(func),
                         uses_this: func.this_param.is_some(),
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
                         accessor_owner: None,
-                        generic_type_params,
+                        generic_type_params: generic_type_params.clone(),
                         generic_type_constraints,
                         generic_type_defaults,
                         generic_param_patterns,
@@ -797,9 +812,43 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                         generic_return_pattern,
                         type_predicate,
-                    },
-                );
-                if !is_extern {
+                    };
+                if is_overload_declaration {
+                    if !generic_type_params.is_empty() {
+                        return Err(format!("generic overload declarations for `{name}` are not supported yet"));
+                    }
+                    let receiver_count = usize::from(func.this_param.is_some());
+                    let visible_params = if receiver_count == 1 { &params[1..] } else { &params[..] };
+                    let fixed_count = visible_params.len() - usize::from(native_rest.is_some());
+                    let public_return = if func.is_async && !func.is_generator {
+                        HirType::Promise(Box::new(ret.clone()))
+                    } else {
+                        ret.clone()
+                    };
+                    let optional = mask_with_offset(
+                        &source_omission_mask(
+                            &func.params.iter().map(|parameter| parameter.pat.clone()).collect::<Vec<_>>(),
+                            0,
+                        ),
+                        0,
+                        fixed_count,
+                    );
+                    let visible = HirType::CallableFunction(
+                        visible_params[..fixed_count].to_vec(),
+                        optional,
+                        native_rest.clone().map(Box::new),
+                        Box::new(public_return),
+                    );
+                    let public = if receiver_count == 1 {
+                        HirType::FunctionWithThis(Box::new(params[0].clone()), Box::new(visible))
+                    } else {
+                        visible
+                    };
+                    public_overloads.entry(name).or_default().push(public);
+                } else {
+                    signatures.insert(name.clone(), signature);
+                }
+                if !is_extern && !is_overload_declaration {
                     fn_decls.push(fn_decl);
                 }
             }
@@ -853,6 +902,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 signatures.insert(
                     class_constructor_symbol(&name),
                     FnSignature {
+                        public_overloads: Vec::new(),
                         params,
                         variadic: None,
                         native_rest: None,
@@ -892,6 +942,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 signatures.insert(
                     class_initializer_symbol(&name),
                     FnSignature {
+                        public_overloads: Vec::new(),
                         params: initializer_params,
                         variadic: None,
                         native_rest: None,
@@ -1068,6 +1119,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     signatures.insert(
                         symbol,
                         FnSignature {
+                        public_overloads: Vec::new(),
                             params,
                             variadic: None,
                             native_rest: None,
@@ -1519,6 +1571,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 signatures.insert(
                     getter.clone(),
                     FnSignature {
+                        public_overloads: Vec::new(),
                         params: Vec::new(),
                         variadic: None,
                         native_rest: None,
@@ -1592,6 +1645,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     signatures.insert(
                         setter.clone(),
                         FnSignature {
+                        public_overloads: Vec::new(),
                             params: vec![ty.clone()],
                             variadic: None,
                             native_rest: None,
@@ -1647,6 +1701,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     _ => None,
                 });
         }
+    }
+
+    for (name, overloads) in public_overloads {
+        let Some(signature) = signatures.get_mut(&name) else {
+            return Err(format!("overload declarations for `{name}` have no implementation"));
+        };
+        signature.public_overloads = overloads;
     }
 
     // Missing parameter/return annotations and global initializer types are type

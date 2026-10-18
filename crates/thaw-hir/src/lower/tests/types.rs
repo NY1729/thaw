@@ -494,6 +494,289 @@ fn dispatches_local_function_overloads_by_argument_type() {
 }
 
 #[test]
+fn public_overload_signature_controls_admissibility_and_result() {
+    let source = r#"
+        function pick(value: number): number;
+        function pick(value: string): string;
+        function pick(value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void {
+            const n: number = pick(1);
+            const s: string = pick("x");
+            const alias = pick;
+            const n2: number = alias(2);
+            const n3: number = pick.call(undefined, 3);
+            const s3: string = pick.apply(undefined, ["z"]);
+            const numberArgs: [number] = [8];
+            const tupleResult: number = pick.apply(undefined, numberArgs);
+            const object = { pick };
+            const s4: string = object.pick("q");
+            const array = [pick];
+            const n4: number = array[0](4);
+            function factory() { return pick; }
+            const s5: string = factory()("r");
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    assert!(lower_module(&module).is_ok(), "valid overload calls rejected: {:?}", lower_module(&module).unwrap_err());
+
+    for call in [
+        "pick(true)",
+        "const alias = pick; alias(true)",
+        "const object = { pick }; object.pick(true)",
+        "const array = [pick]; array[0](true)",
+        "function factory() { return pick; } factory()(true)",
+        "pick.call(undefined, true)",
+        "pick.apply(undefined, [true])",
+        "const args: [boolean] = [true]; pick.apply(undefined, args)",
+    ] {
+        let source = format!(
+            "function pick(value: number): number; function pick(value: string): string; function pick(value: number | string | boolean): number | string | boolean {{ return value; }} function main(): void {{ {call}; }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("no public overload"),
+            "{call} did not fail at public overload selection: {error}"
+        );
+    }
+
+    let wrong_return = thaw_parser::parse_typescript(
+        "function pick(value: number): number; function pick(value: string): string; function pick(value: number | string | boolean): number | string | boolean { return value; } function main(): void { const wrong: string = pick(1); }",
+    ).unwrap();
+    assert!(lower_module(&wrong_return).is_err(), "selected return type was not enforced");
+
+    lower(
+        r#"
+        function choose(value: number, fallback?: string): number;
+        function choose(value: string, ...tail: number[]): string;
+        function choose(value: number | string, fallback?: string | number[], ...tail: number[]): number | string {
+            return typeof value === "number" ? value : value;
+        }
+        function main(): void {
+            const optional: number = choose(1);
+            const optionalWithValue: number = choose(1, "default");
+            const optionalUndefined: number = choose(1, undefined);
+            const rest: string = choose("x", 1, 2);
+            const chooseAlias = choose;
+            const aliasOptional: number = chooseAlias(2);
+            const aliasRest: string = chooseAlias("y", 3, 4);
+            const chooseObject = { choose };
+            const objectRest: string = chooseObject.choose("o", 9);
+            const callRest: string = choose.call(undefined, "c", 5, 6);
+            const restArgs: [string, number, number] = ["a", 7, 8];
+            const applyRest: string = choose.apply(undefined, restArgs);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn overloaded_bind_rejects_implementation_only_prefix_arguments() {
+    let source = r#"
+        function pick(prefix: number, value: number): number;
+        function pick(prefix: string, value: string): string;
+        function pick(prefix: number | string | boolean, value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void { pick.bind(undefined, true); }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("no public overload"), "implementation-only bind argument escaped: {error}");
+}
+
+#[test]
+fn overloaded_bind_preserves_viable_residual_signatures_and_returns() {
+    lower(
+        r#"
+        function pick(prefix: number, value: number): number;
+        function pick(prefix: string, value: string): string;
+        function pick(prefix: number | string | boolean, value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void {
+            const numberBound = pick.bind(undefined, 1);
+            const numberResult: number = numberBound(2);
+            const numberCallback: (value: number) => number = numberBound;
+            const numberCallbackResult: number = numberCallback(4);
+            const repeated = numberBound.bind(undefined);
+            const repeatedResult: number = repeated(5);
+            const viaCall: number = numberBound.call(undefined, 6);
+            const viaApply: number = numberBound.apply(undefined, [7]);
+            const stringBound = pick.bind(undefined, "prefix");
+            const stringResult: string = stringBound("value");
+            const partial = pick.bind(undefined);
+            const partialNumber: number = partial(3, 4);
+            const partialString: string = partial("x", "y");
+        }
+        "#,
+    );
+}
+
+#[test]
+fn overloaded_bind_preserves_optional_rest_and_callback_residuals() {
+    lower(
+        r#"
+        function choose(prefix: string, value?: number): string;
+        function choose(prefix: string, ...values: number[]): string;
+        function choose(prefix: string | boolean, ...values: number[]): string | boolean { return prefix; }
+        function main(): void {
+            const bound = choose.bind(undefined, "p");
+            const optional: string = bound();
+            const present: string = bound(1);
+            const rest: string = bound(1, 2);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn overloaded_bind_rejects_prefix_when_no_public_signature_accepts_it() {
+    let source = r#"
+        function choose(prefix: number, value: number): number;
+        function choose(prefix: string, value: string): string;
+        function choose(prefix: number | string | boolean, value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void { choose.bind(undefined, true, false); }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("no public overload"), "implementation-only bind args escaped: {error}");
+}
+
+#[test]
+fn overloaded_bind_applies_selected_callback_context_before_physical_adaptation() {
+    lower(
+        r#"
+        function useCallback(callback: (value: number) => string): string;
+        function useCallback(callback: (value: string) => number): number;
+        function useCallback(callback: (value: number | string) => string | number): string | number { return callback(1); }
+        function main(): void {
+            const bound = useCallback.bind(undefined, (value) => value.toFixed());
+            const result: string = bound();
+        }
+        "#,
+    );
+}
+
+#[test]
+fn overloaded_bind_rejects_receiver_outside_public_overload_shapes() {
+    let source = r#"
+        function read(this: { value: number }, key: string): number;
+        function read(this: { value: string }, key: number): string;
+        function read(this: { value: number | string }, key: string | number): number | string { return 1; }
+        function main(): void { read.bind({ value: true }); }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("no public overload"), "implementation-only receiver escaped: {error}");
+}
+
+#[test]
+fn overloaded_bind_selects_typed_tuple_prefix_without_candidate_state_leaks() {
+    lower(
+        r#"
+        function pick(prefix: number, value: number): number;
+        function pick(prefix: string, value: string): string;
+        function pick(prefix: number | string | boolean, value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void {
+            const prefix: [number] = [1];
+            const bound = pick.bind(undefined, ...prefix);
+            const result: number = bound(2);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn overloaded_function_value_adapts_to_selected_callback_signature() {
+    lower(
+        r#"
+        function pick(value: number): number;
+        function pick(value: string): string;
+        function pick(value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void {
+            const callback: (value: number) => number = pick;
+            const result: number = callback(4);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn overloaded_function_value_rejects_incompatible_callback_signature() {
+    let source = r#"
+        function pick(value: number): number;
+        function pick(value: string): string;
+        function pick(value: number | string | boolean): number | string | boolean { return value; }
+        function main(): void {
+            const callback: (value: boolean) => number = pick;
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("no public overload"), "unexpected callback implementation fallback: {error}");
+}
+
+#[test]
+fn overloaded_apply_selects_from_typed_tuple() {
+    let valid = thaw_parser::parse_typescript(
+        "function pick(value: number): number; function pick(value: string): string; function pick(value: number | string | boolean): number | string | boolean { return value; } function main(): void { const args: [number] = [8]; const result: number = pick.apply(undefined, args); }")
+        .unwrap();
+    assert!(lower_module(&valid).is_ok(), "typed tuple apply should select the number overload");
+
+    let invalid = thaw_parser::parse_typescript(
+        "function pick(value: number): number; function pick(value: string): string; function pick(value: number | string | boolean): number | string | boolean { return value; } function main(): void { const args: [boolean] = [true]; pick.apply(undefined, args); }")
+        .unwrap();
+    let error = lower_module(&invalid).unwrap_err();
+    assert!(error.contains("no public overload"), "typed tuple boolean escaped overload selection: {error}");
+}
+
+#[test]
+fn overloaded_composite_return_uses_checked_projection() {
+    let module = thaw_parser::parse_typescript(
+        "function record(): { value: number }; function record(): string; function record(): { value: number } | string { return { value: 1 }; } function main(): void { const value: { value: number } = record(); }")
+        .unwrap();
+    assert!(lower_module(&module).is_ok(), "composite selected return projection should use a typed unreachable fallback");
+
+    let subset_union = thaw_parser::parse_typescript(
+        "function choose(value: number): number | string; function choose(value: string): boolean; function choose(value: number | string | boolean): number | string | boolean { return value; } function main(): void { const result: number | string = choose(1); }")
+        .unwrap();
+    let subset_result = lower_module(&subset_union);
+    assert!(
+        subset_result.is_ok(),
+        "subset-union selected return should remap tags into the selected union: {subset_result:?}"
+    );
+}
+
+#[test]
+fn overloaded_callback_arguments_use_candidate_context_without_state_leaks() {
+    lower(
+        r#"
+        function transform(kind: number, callback: (value: number) => number): number;
+        function transform(kind: string, callback: (value: string) => string): string;
+        function transform(kind: number | string, callback: (value: number | string) => number | string): number | string {
+            if (typeof kind === "number") return callback(kind);
+            return callback(kind);
+        }
+        function main(): void {
+            const numeric: number = transform(1, value => value + 1);
+            const textual: string = transform("x", value => value.toUpperCase());
+            const spreadNumeric: number = transform(...[1, value => value + 1]);
+            const applyTextual: string = transform.apply(undefined, ["x", value => value.toUpperCase()]);
+        }
+        "#,
+    );
+    lower(
+        r#"
+        function onlyCallback(callback: (value: number) => number): number;
+        function onlyCallback(callback: (value: string) => string): string;
+        function onlyCallback(callback: (value: number | string) => number | string): number | string {
+            return "implementation does not invoke the callback";
+        }
+        function main(): void {
+            const result: string = onlyCallback(value => value.toUpperCase());
+        }
+        "#,
+    );
+}
+
+#[test]
 fn specializes_generic_keyof_indexed_accesses() {
     lower(
         r#"
@@ -3722,6 +4005,7 @@ fn receiver_pattern_inference_signature(
 ) -> FnSignature {
     let physical_parameter_count = visible_patterns.len() + usize::from(uses_this);
     FnSignature {
+                        public_overloads: Vec::new(),
         params: vec![HirType::Dynamic; physical_parameter_count],
         variadic: None,
         native_rest: None,
@@ -4624,6 +4908,7 @@ fn receiver_pattern_inference_type_only_and_receiver_free_promise_controls() {
 // held field builder. All executable gates remain unrun.
 fn error_argument_staging_signature(ret: HirType) -> FnSignature {
     FnSignature {
+                        public_overloads: Vec::new(),
         params: Vec::new(), variadic: None, native_rest: None,
         abstract_class_constructor: false, ret, is_async: false,
         returns_sparse_array: false, uses_this: false, is_extern: false,

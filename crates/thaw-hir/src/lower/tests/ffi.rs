@@ -63,6 +63,85 @@ fn lowers_ambient_declaration_call_to_ffi_call() {
 }
 
 #[test]
+fn source_overloads_are_metadata_over_one_callable_and_stay_out_of_ffi() {
+    let program = lower(
+        r#"
+        function pick(x: number, y?: string): number;
+        function pick(x: string, ...rest: number[]): string;
+        function pick(x: number | string, y?: string | number[], ...tail: number[]): number | string { return x; }
+        declare function native_add(a: number, b: number): number;
+        function main(): void { const saved = pick; const values = [pick]; native_add(1, 2); }
+        "#,
+    );
+
+    assert_eq!(program.extern_functions.len(), 1);
+    assert_eq!(program.extern_functions[0].symbol, "native_add");
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let HirStmt::Let(_, stored_type, stored_value) = &main.body[0] else { panic!("expected stored overload") };
+    let HirType::OverloadedFunction(public, physical) = stored_type else { panic!("expected overload metadata") };
+    let HirExpr::TypedClosure(_, normalized) = stored_value else { panic!("expected overload wrapper") };
+    let HirExpr::TypedClosure(normalized_type, normalized_value) = normalized.as_ref() else {
+        panic!("expected ordinary function-reference normalization inside overload wrapper")
+    };
+    assert_eq!(
+        normalized_type,
+        &HirType::CallableFunction(
+            vec![
+                HirType::Union(vec![HirType::F64, HirType::Str]),
+                HirType::Optional(Box::new(HirType::Union(vec![
+                    HirType::Str,
+                    HirType::Array(Box::new(HirType::F64)),
+                ]))),
+            ],
+            HirOptionalMask::from_bools(&[false, true]),
+            Some(Box::new(HirType::F64)),
+            Box::new(HirType::Union(vec![HirType::F64, HirType::Str])),
+        ),
+    );
+    assert!(matches!(normalized_value.as_ref(), HirExpr::FunctionRef(name, _, _) if name == "pick"));
+    assert_eq!(public, &vec![
+        HirType::CallableFunction(
+            vec![HirType::F64, HirType::Optional(Box::new(HirType::Str))],
+            HirOptionalMask::from_bools(&[false, true]),
+            None,
+            Box::new(HirType::F64),
+        ),
+        HirType::CallableFunction(
+            vec![HirType::Str],
+            HirOptionalMask::default(),
+            Some(Box::new(HirType::F64)),
+            Box::new(HirType::Str),
+        ),
+    ]);
+    assert_eq!(
+        physical.as_ref(),
+        &HirType::CallableFunction(
+            vec![
+                HirType::Union(vec![HirType::F64, HirType::Str]),
+                HirType::Optional(Box::new(HirType::Union(vec![
+                    HirType::Str,
+                    HirType::Array(Box::new(HirType::F64)),
+                ]))),
+            ],
+            HirOptionalMask::from_bools(&[false, true]),
+            Some(Box::new(HirType::F64)),
+            Box::new(HirType::Union(vec![HirType::F64, HirType::Str])),
+        ),
+    );
+    let HirStmt::Let(_, array_type, _) = &main.body[1] else { panic!("expected overload array") };
+    assert_eq!(array_type, &HirType::Array(Box::new(stored_type.clone())));
+}
+
+#[test]
+fn duplicate_function_implementations_are_rejected_clearly() {
+    let module = thaw_parser::parse_typescript(
+        "function duplicate(x: number): number { return x; } function duplicate(x: string): string { return x; }",
+    ).expect("parse source");
+    let error = lower_module(&module).expect_err("duplicate implementations must fail");
+    assert!(error.contains("function `duplicate` has multiple implementations"), "{error}");
+}
+
+#[test]
 fn specializes_generic_dynamic_ambient_arguments_per_call() {
     let program = lower(
         r#"declare function __thaw_typed_napi_7765616b<T extends object>(value: T): JsValue;

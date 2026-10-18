@@ -41,6 +41,7 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 fn quickjs_callback_type(ty: &HirType) -> bool {
     match ty {
         HirType::Function(_, _) | HirType::CallableFunction(..) => true,
+        HirType::OverloadedFunction(_, physical) => quickjs_callback_type(physical),
         HirType::Optional(inner) => quickjs_callback_type(inner),
         _ => false,
     }

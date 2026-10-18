@@ -20,6 +20,9 @@ fn hir_type_contains_dynamic(ty: &HirType) -> bool {
                 || rest.as_deref().is_some_and(hir_type_contains_dynamic)
                 || hir_type_contains_dynamic(result)
         }
+        HirType::OverloadedFunction(public, physical) => {
+            public.iter().any(hir_type_contains_dynamic) || hir_type_contains_dynamic(physical)
+        }
         _ => false,
     }
 }
@@ -80,6 +83,7 @@ fn validate_trailing_type_parameter_defaults(
 
 fn supports_generic_native_layout(ty: &HirType) -> bool {
     match ty {
+        HirType::OverloadedFunction(_, physical) => supports_generic_native_layout(physical),
         // `JsValue` is as simple and fixed-size a scalar as `I64`/`Bool`
         // (a plain `i64` handle -- see thaw-llvm's `basic_type`), so a
         // generic function specializes for it exactly the same way. Real
@@ -153,6 +157,7 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
 
 fn supports_generic_dynamic_layout(ty: &HirType) -> bool {
     match ty {
+        HirType::OverloadedFunction(_, physical) => supports_generic_dynamic_layout(physical),
         HirType::Json => true,
         // A native `Promise<T>` handle is a plain arena pointer (see
         // thaw-llvm's `basic_type`), so a generic extern function can pass
@@ -532,6 +537,11 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
                 },
                 rest.as_deref().map(fingerprint).unwrap_or_else(|| "none".into()),
                 fingerprint(result)
+            ),
+            HirType::OverloadedFunction(public, physical) => format!(
+                "overloaded_{}_physical_{}",
+                public.iter().map(fingerprint).collect::<Vec<_>>().join("_"),
+                fingerprint(physical)
             ),
             other => panic!("unsupported generic specialization type: {other:?}"),
         }

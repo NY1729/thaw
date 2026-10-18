@@ -119,6 +119,8 @@ fn ordinary_quickjs_typed_symbol(name: &str) -> Option<String> {
 /// function body is lowered (so forward references and mutual calls work).
 #[derive(Clone)]
 struct FnSignature {
+    /// Ordered source-level callable declarations attached to this physical implementation.
+    public_overloads: Vec<HirType>,
     params: Vec<HirType>,
     variadic: Option<HirType>,
     native_rest: Option<HirType>,

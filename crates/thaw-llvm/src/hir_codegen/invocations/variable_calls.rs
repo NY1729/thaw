@@ -6,6 +6,10 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
         let ty = match self.variable_hir_types.get(name).cloned()? {
+            HirType::OverloadedFunction(_, physical) => *physical,
+            other => other,
+        };
+        let ty = match ty {
             HirType::FunctionWithThis(_, visible) => *visible,
             other => other,
         };

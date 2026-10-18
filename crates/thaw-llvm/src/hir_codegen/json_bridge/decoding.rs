@@ -240,6 +240,9 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
+            HirType::OverloadedFunction(_, physical) => {
+                self.compile_json_value_to_native(json, physical)
+            }
             HirType::F64 | HirType::I64 | HirType::Str | HirType::Bool => self.compile_json_value_to_native(json, ty),
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
             HirType::Map(..) | HirType::Set(_) => self.compile_json_to_native_collection(json, ty),
@@ -301,6 +304,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.compile_validate_native_argument(json, ty)?;
         match ty {
+            HirType::OverloadedFunction(_, physical) => self.compile_json_value_to_native(json, physical),
             HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
             HirType::I64 => {
                 let value = self.compile_json_as_value(json, "thaw_json_as_bigint_i64")?;

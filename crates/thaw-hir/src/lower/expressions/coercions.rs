@@ -1805,10 +1805,10 @@ impl<'a> FnLowerer<'a> {
             HirExpr::BinOp(BinOp::EqEqEq,
                 Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(left))),
                 Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(right))))
-        } else if matches!(&lhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
+        } else if matches!(&lhs_type, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))
             && rhs_type == HirType::Undefined {
             Self::function_pointer_is_undefined(left, &lhs_type)
-        } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
+        } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))
             && lhs_type == HirType::Undefined {
             Self::function_pointer_is_undefined(right, &rhs_type)
         } else if lhs_type == rhs_type
@@ -2180,8 +2180,8 @@ impl<'a> FnLowerer<'a> {
             }
             _ => {}
         }
-        let left_fn = matches!(lhs_ty, HirType::Function(_, _) | HirType::CallableFunction(..));
-        let right_fn = matches!(rhs_ty, HirType::Function(_, _) | HirType::CallableFunction(..));
+        let left_fn = matches!(lhs_ty, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..));
+        let right_fn = matches!(rhs_ty, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..));
         if left_fn && right_fn {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
@@ -2369,10 +2369,10 @@ impl<'a> FnLowerer<'a> {
         // equals both `undefined` and `null`. Bind both operands first to
         // preserve their effects and order, even when one is statically nullish.
         let nullish_function = match (&lhs_type, &rhs_type) {
-            (ty @ (HirType::Function(_, _) | HirType::CallableFunction(..)),
+            (ty @ (HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)),
                 HirType::Null | HirType::Undefined) => Some((true, (*ty).clone())),
             (HirType::Null | HirType::Undefined,
-                ty @ (HirType::Function(_, _) | HirType::CallableFunction(..))) => {
+                ty @ (HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))) => {
                 Some((false, (*ty).clone()))
             }
             _ => None,

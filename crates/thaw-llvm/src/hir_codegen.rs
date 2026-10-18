@@ -157,6 +157,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         | HirType::CallableFunction(..)
         | HirType::NativeException
         | HirType::FunctionWithThis(_, _) => Ok((8, 8)),
+        HirType::OverloadedFunction(_, physical) => raw_value_layout(physical),
         HirType::Union(members) if !members.is_empty() => Ok((16, 8)),
         HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
             let (payload_size, payload_align) = raw_value_layout(payload)?;

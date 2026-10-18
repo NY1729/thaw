@@ -129,7 +129,7 @@ fn callable_return_compatible(expected_ret: &HirType, ret: &HirType) -> bool {
 /// return (`void` discards any). Unlike `callable_value_compatible` this
 /// deliberately rejects `Optional`/`CallableFunction` differences, which
 /// change the ABI and need a real adapter (e.g. a default-argument wrapper).
-fn callable_abi_compatible(declared: &HirType, actual: &HirType) -> bool {
+pub(in crate::lower) fn callable_abi_compatible(declared: &HirType, actual: &HirType) -> bool {
     let (HirType::Function(declared_params, declared_ret), HirType::Function(params, ret)) =
         (declared, actual)
     else {

@@ -108,6 +108,12 @@ fn erase_dynamic_ty(ty: &mut HirType) {
             }
             erase_dynamic_ty(ret);
         }
+        HirType::OverloadedFunction(public, physical) => {
+            for signature in public {
+                erase_dynamic_ty(signature);
+            }
+            erase_dynamic_ty(physical);
+        }
         _ => {}
     }
 }
@@ -155,6 +161,12 @@ fn erase_ty(ty: &mut HirType) {
                 erase_ty(rest);
             }
             erase_ty(ret);
+        }
+        HirType::OverloadedFunction(public, physical) => {
+            for signature in public {
+                erase_ty(signature);
+            }
+            erase_ty(physical);
         }
         HirType::F64
         | HirType::I64

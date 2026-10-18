@@ -175,3 +175,140 @@ impl<'a> FnLowerer<'a> {
         Ok(None)
     }
 }
+
+impl<'a> FnLowerer<'a> {
+    pub(in crate::lower) fn adapt_overloaded_callable_value(
+        &mut self,
+        declared: &HirType,
+        value: HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::Function(expected_params, expected_ret) = declared else {
+            return Ok(None);
+        };
+        let actual_type = self.infer_expr_type(&value)?;
+        let (overloads, physical) = match actual_type {
+            HirType::OverloadedFunction(overloads, physical) => (overloads, *physical),
+            HirType::Function(_, _) => {
+                let HirExpr::FunctionRef(symbol, params, ret) = &value else {
+                    return Ok(None);
+                };
+                let Some(signature) = self.signatures.get(symbol)
+                    .filter(|signature| {
+                        !signature.public_overloads.is_empty()
+                            && !signature.uses_this
+                            && signature.generic_type_params.is_empty()
+                    })
+                else {
+                    return Ok(None);
+                };
+                (
+                    signature.public_overloads.clone(),
+                    HirType::Function(params.clone(), Box::new(ret.clone())),
+                )
+            }
+            _ => return Ok(None),
+        };
+        let (physical_params, physical_ret) = match &physical {
+            HirType::Function(params, ret) => (params.clone(), ret.as_ref().clone()),
+            HirType::CallableFunction(params, optional, None, ret) if optional.is_empty() => {
+                (params.clone(), ret.as_ref().clone())
+            }
+            _ => return Err("overloaded callback has an unsupported physical ABI".into()),
+        };
+
+        let mut selected = None;
+        for overload in &overloads {
+            let callable = match overload {
+                HirType::FunctionWithThis(_, _) => continue,
+                other => other,
+            };
+            let (params, ret) = match callable {
+                HirType::Function(params, ret) => (params, ret.as_ref()),
+                HirType::CallableFunction(params, optional, None, ret) if optional.is_empty() => {
+                    (params, ret.as_ref())
+                }
+                _ => continue,
+            };
+            if params.len() != expected_params.len() || params.len() != physical_params.len() {
+                continue;
+            }
+            let params_match = params.iter().zip(expected_params).all(|(public, expected)| {
+                let value = HirExpr::TypedClosure(
+                    expected.clone(),
+                    Box::new(HirExpr::Lit(HirLit::Undefined)),
+                );
+                self.expect_type(public, &value, "overloaded callback parameter").is_ok()
+            });
+            let return_matches = {
+                let result = HirExpr::TypedClosure(
+                    ret.clone(),
+                    Box::new(HirExpr::Lit(HirLit::Undefined)),
+                );
+                self.expect_type(expected_ret, &result, "overloaded callback return").is_ok()
+            };
+            if params_match && return_matches {
+                selected = Some((params.clone(), ret.clone()));
+                break;
+            }
+        }
+        let Some((public_params, public_ret)) = selected else {
+            return Err("no public overload is compatible with the expected callback type".into());
+        };
+
+        let target_name = format!("__thaw_overloaded_callback_target_{}", self.next_binding);
+        self.next_binding += 1;
+        let target_previous = self.scope.insert(target_name.clone(), physical.clone());
+        let mut params = Vec::with_capacity(expected_params.len());
+        let mut args = Vec::with_capacity(expected_params.len());
+        let mut parameter_previous = Vec::with_capacity(expected_params.len());
+        let adapted = (|| -> Result<HirExpr, String> {
+            for (index, (expected, public)) in expected_params.iter().zip(&public_params).enumerate() {
+                let name = format!("__thaw_overloaded_callback_arg_{}_{}", self.next_binding, index);
+                self.next_binding += 1;
+                parameter_previous.push((name.clone(), self.scope.insert(name.clone(), expected.clone())));
+                params.push(HirParam { name: name.clone(), ty: expected.clone() });
+                let value = HirExpr::Var(name);
+                let value = self.coerce_to_declared(public, value)?;
+                let value = self.coerce_to_declared(&physical_params[index], value)?;
+                args.push(value);
+            }
+            let call = HirExpr::Call(Box::new(HirExpr::Var(target_name.clone())), args.clone());
+            let call = if physical_ret == public_ret {
+                call
+            } else if matches!(&physical_ret, HirType::Union(members) if members.contains(&public_ret)) {
+                self.project_overload_call_result(call, &physical_ret, &public_ret)?
+            } else {
+                return Err(format!(
+                    "public callback return {public_ret:?} cannot be projected from physical return {physical_ret:?}"
+                ));
+            };
+            let call = self.coerce_to_declared(expected_ret, call)?;
+            let lambda = HirExpr::Lambda(
+                vec![HirParam { name: target_name.clone(), ty: physical.clone() }],
+                params.clone(),
+                expected_ret.as_ref().clone(),
+                Box::new(HirExpr::Block(vec![HirStmt::Return(Some(call))])),
+            );
+            Ok(HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam { name: target_name.clone(), ty: physical.clone() }],
+                    declared.clone(),
+                    Box::new(lambda),
+                )),
+                vec![value.clone()],
+            ))
+        })();
+        for (name, previous) in parameter_previous {
+            match previous {
+                Some(previous) => { self.scope.insert(name, previous); }
+                None => { self.scope.remove(&name); }
+            }
+        }
+        match target_previous {
+            Some(previous) => { self.scope.insert(target_name, previous); }
+            None => { self.scope.remove(&target_name); }
+        }
+        adapted.map(Some)
+    }
+}

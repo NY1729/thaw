@@ -1,4 +1,109 @@
 use super::*;
+use thaw_hir::HirOptionalMask;
+
+#[test]
+fn overloaded_callable_uses_its_physical_layout() {
+    let physical = HirType::CallableFunction(
+        vec![HirType::F64],
+        HirOptionalMask::default(),
+        Some(Box::new(HirType::Str)),
+        Box::new(HirType::Bool),
+    );
+    let metadata = HirType::OverloadedFunction(
+        vec![HirType::Function(
+            vec![HirType::Str],
+            Box::new(HirType::Str),
+        )],
+        Box::new(physical.clone()),
+    );
+    assert_eq!(raw_value_layout(&metadata), raw_value_layout(&physical));
+}
+
+#[test]
+fn overloaded_calls_use_selected_returns_and_evaluate_once() {
+    let output = compile_and_run(
+        r#"
+        let targetReads = 0;
+        let argumentReads = 0;
+        let implementations = 0;
+        function pick(value: number): number;
+        function pick(value: string): string;
+        function pick(value: number | string | boolean): number | string | boolean {
+            implementations++;
+            return value;
+        }
+        function target() { targetReads++; return pick; }
+        function argument(): number { argumentReads++; return 7; }
+        function main(): void {
+            const numberResult: number = target().call(undefined, argument());
+            const stringResult: string = pick.apply(undefined, ["ok"]);
+            console.log(numberResult, stringResult, targetReads, argumentReads, implementations);
+        }
+        "#,
+        "overloaded_calls_use_selected_returns_and_evaluate_once",
+    );
+    assert_eq!(output, "7 ok 1 1 2\n");
+}
+
+#[test]
+fn overloaded_rest_skips_implementation_fallback_slot() {
+    let output = compile_and_run(
+        r#"
+        function choose(value: number): number;
+        function choose(value: string, ...tail: number[]): string;
+        function choose(value: number | string, fallback?: string | number[], ...tail: number[]): number | string {
+            return typeof value === "number" ? value : value + tail[0];
+        }
+        function main(): void {
+            const result: string = choose("x", 7);
+            console.log(result);
+        }
+        "#,
+        "overloaded_rest_skips_implementation_fallback_slot",
+    );
+    assert_eq!(output, "x7\n");
+}
+
+#[test]
+fn overloaded_object_member_rest_skips_implementation_fallback_slot() {
+    let output = compile_and_run(
+        r#"
+        function choose(value: number): number;
+        function choose(value: string, ...tail: number[]): string;
+        function choose(value: number | string, fallback?: string | number[], ...tail: number[]): number | string {
+            return typeof value === "number" ? value : value + tail[0];
+        }
+        function main(): void {
+            const object = { choose };
+            const result: string = object.choose("x", 7);
+            console.log(result);
+        }
+        "#,
+        "overloaded_object_member_rest_skips_implementation_fallback_slot",
+    );
+    assert_eq!(output, "x7\n");
+}
+
+#[test]
+fn overloaded_callback_uses_selected_context_and_adapts_physical_abi() {
+    let output = compile_and_run(
+        r#"
+        function transform(kind: number, callback: (value: number) => number): number;
+        function transform(kind: string, callback: (value: string) => string): string;
+        function transform(kind: number | string, callback: (value: number | string) => number | string): number | string {
+            if (typeof kind === "number") return callback(kind);
+            return callback(kind);
+        }
+        function main(): void {
+            const numberResult: number = transform(4, value => value + 1);
+            const stringResult: string = transform("selected", value => value.toUpperCase());
+            console.log(numberResult, stringResult);
+        }
+        "#,
+        "overloaded_callback_uses_selected_context_and_adapts_physical_abi",
+    );
+    assert_eq!(output, "5 SELECTED\n");
+}
 
 fn cc_command() -> Command {
     let mut command = Command::new("cc");

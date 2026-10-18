@@ -1,11 +1,27 @@
+#[derive(Clone, Copy)]
+struct NativeSpreadOptions {
+    array_reads: bool,
+    snapshot_expanded_values: bool,
+    logical_argument_offsets: bool,
+}
+
 impl<'a> FnLowerer<'a> {
-    fn lower_literal_call_spread(&mut self, argument: &swc_ecma_ast::ExprOrSpread) -> Result<Option<HirExpr>, String> {
+    fn lower_literal_call_spread(
+        &mut self,
+        argument: &swc_ecma_ast::ExprOrSpread,
+        expected: &[HirType],
+        rest: Option<&HirType>,
+        argument_offset: usize,
+    ) -> Result<Option<HirExpr>, String> {
         if argument.spread.is_none() { return Ok(None); }
         let Expr::Array(array) = argument.expr.as_ref() else { return Ok(None) };
         if array.elems.iter().flatten().any(|element| element.spread.is_some()) { return Ok(None); }
         // The temporary spread container is unobservable; preserve its elements and evaluation order.
-        let values = array.elems.iter().map(|element| match element {
-            Some(element) => self.lower_expr(&element.expr),
+        let values = array.elems.iter().enumerate().map(|(index, element)| match element {
+            Some(element) => self.lower_expr_with_expected_type(
+                &element.expr,
+                expected.get(argument_offset + index).or(rest),
+            ),
             None => Ok(HirExpr::Lit(HirLit::ArrayHole)),
         }).collect::<Result<Vec<_>, _>>()?;
         Ok(Some(HirExpr::ArrayLit(values)))
@@ -35,7 +51,7 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, false, true)
+        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: true, logical_argument_offsets: false })
     }
 
     fn lower_native_spread_array_values(
@@ -43,7 +59,7 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, true, false)
+        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: true, snapshot_expanded_values: false, logical_argument_offsets: false })
     }
 
     fn lower_error_constructor_arguments(
@@ -51,7 +67,7 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, false, true)
+        self.lower_native_spread_values_impl(arguments, label, &[], None, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: true, logical_argument_offsets: false })
     }
 
     fn lower_native_spread_values_with_expected(
@@ -61,7 +77,17 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, expected, rest, false, false)
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: false })
+    }
+
+    fn lower_native_spread_values_with_overload_expected(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+        expected: &[HirType],
+        rest: Option<&HirType>,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, NativeSpreadOptions { array_reads: false, snapshot_expanded_values: false, logical_argument_offsets: true })
     }
 
     fn lower_native_spread_values_impl(
@@ -70,26 +96,46 @@ impl<'a> FnLowerer<'a> {
         label: &str,
         expected: &[HirType],
         rest: Option<&HirType>,
-        array_reads: bool,
-        snapshot_expanded_values: bool,
+        options: NativeSpreadOptions,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        let lowered = arguments
-            .iter()
-            .enumerate()
-            .map(|(index, argument)| {
-                if let Some(value) = self.lower_literal_call_spread(argument)? { return Ok(value); }
-                let value = self.lower_expr_with_expected_type(
-                    &argument.expr,
-                    expected.get(index).or(rest),
-                )?;
-                self.lower_storage_call_spread(argument, value)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut lowered = Vec::with_capacity(arguments.len());
+        let mut argument_offset = 0;
+        let mut source_argument_index = 0;
+        for argument in arguments {
+            if let Some(value) = self.lower_literal_call_spread(
+                argument,
+                expected,
+                rest,
+                if options.logical_argument_offsets { argument_offset } else { source_argument_index },
+            )? {
+                if let HirExpr::ArrayLit(elements) = &value {
+                    argument_offset += elements.len();
+                }
+                source_argument_index += 1;
+                lowered.push(value);
+                continue;
+            }
+            let expected_type = if argument.spread.is_some() {
+                None
+            } else {
+                expected.get(if options.logical_argument_offsets { argument_offset } else { source_argument_index }).or(rest)
+            };
+            let value = self.lower_expr_with_expected_type(&argument.expr, expected_type)?;
+            if argument.spread.is_some() {
+                if let HirType::Tuple(elements) = self.infer_expr_type(&value)? {
+                    argument_offset += elements.len();
+                }
+            } else {
+                argument_offset += 1;
+            }
+            source_argument_index += 1;
+            lowered.push(self.lower_storage_call_spread(argument, value)?);
+        }
         // Every argument must be evaluated before wrappers can omit it or reuse it.
         let mut bindings = Vec::new();
         let mut values = Vec::new();
         for (argument, value) in arguments.iter().zip(lowered) {
-            let value = if array_reads && argument.spread.is_none() {
+            let value = if options.array_reads && argument.spread.is_none() {
                 self.lower_array_index_operand(value)?
             } else {
                 value
@@ -97,14 +143,14 @@ impl<'a> FnLowerer<'a> {
             if argument.spread.is_none() {
                 // A literal has no side effects or ordering, so wrappers that need a
                 // static literal (Temporal calendars/units, `.flat(2)`) can still see it.
-                if !snapshot_expanded_values && matches!(value, HirExpr::Lit(_)) {
+                if !options.snapshot_expanded_values && matches!(value, HirExpr::Lit(_)) {
                     values.push(value);
                     continue;
                 }
                 // `infer_expr_type` erases `Bytes` to `Array(F64)`; keep it so a bound
                 // `Buffer` argument still reads as one (`Buffer.isBuffer`, hex/utf8 methods).
                 let ty = match self.infer_expr_type_inner(&value) {
-                    Ok(HirType::Bytes) if !snapshot_expanded_values => HirType::Bytes,
+                    Ok(HirType::Bytes) if !options.snapshot_expanded_values => HirType::Bytes,
                     _ => self.infer_expr_type(&value)?,
                 };
                 let name = format!("__thaw_native_arg_{}", self.next_binding);
@@ -119,12 +165,12 @@ impl<'a> FnLowerer<'a> {
             }
             if let HirExpr::ArrayLit(elements) = value {
                 for element in elements {
-                    let element = if array_reads {
+                    let element = if options.array_reads {
                         self.lower_array_index_operand(element)?
                     } else {
                         element
                     };
-                    if !snapshot_expanded_values && matches!(element, HirExpr::Lit(_)) {
+                    if !options.snapshot_expanded_values && matches!(element, HirExpr::Lit(_)) {
                         values.push(element);
                         continue;
                     }
@@ -148,7 +194,7 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(name.clone(), source_type.clone());
             bindings.push((name.clone(), source_type, value));
-            if snapshot_expanded_values {
+            if options.snapshot_expanded_values {
                 for (index, ty) in elements.into_iter().enumerate() {
                     let element = HirExpr::TypedIndex(
                         Box::new(HirExpr::Var(name.clone())),
