@@ -403,6 +403,61 @@ fn named_generic_template_alias_and_chain_specialize_by_call_site() {
 }
 
 #[test]
+fn named_generic_template_bind_captures_key_literal_metadata() {
+    let program = lower(r#"
+        function pick<T, K extends keyof T>(obj: T, key: K): T[K] { return obj[key]; }
+        function main(): string {
+            const key = "name";
+            const bound = pick.bind(null, { name: "ok" }, key);
+            return bound();
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name.contains("pick__thaw_")));
+}
+
+#[test]
+fn named_generic_template_bind_keeps_unconstrained_string_as_string() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): string {
+            const bound = identity.bind(null, "x");
+            return bound();
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_str"));
+}
+
+#[test]
+fn named_generic_template_bind_checks_constraints() {
+    let valid = lower(r#"
+        function numeric<T extends number>(value: T): T { return value; }
+        function main(): number { const bound = numeric.bind(null, 1); return bound(); }
+    "#);
+    assert!(valid.functions.iter().any(|function| function.name == "numeric__thaw_f64"));
+    let module = thaw_parser::parse_typescript(
+        "function numeric<T extends number>(value: T): T { return value; } function main(): void { const bound = numeric.bind(null, 'wrong'); bound(); }",
+    ).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("does not satisfy constraint F64"), "{error}");
+}
+
+
+#[test]
+fn named_generic_template_bind_captures_narrowed_source_hint() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const input: unknown = 7;
+            if (typeof input === "number") {
+                const bound = identity.bind(null, input);
+                const result: number = bound();
+            }
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_f64"));
+}
+
+#[test]
 fn named_generic_template_alias_lookup_respects_local_shadowing() {
     let program = lower(r#"
         function identity<T>(value: T): T { return value; }

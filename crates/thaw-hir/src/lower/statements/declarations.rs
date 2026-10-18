@@ -286,22 +286,21 @@ impl<'a> FnLowerer<'a> {
     fn deferred_generic_bind_call<'b>(
         &self,
         expression: &'b Expr,
-    ) -> Option<(&'b swc_ecma_ast::CallExpr, Symbol)> {
+    ) -> Option<(&'b swc_ecma_ast::CallExpr, GenericCallableTemplate)> {
         let Expr::Call(call) = expression else { return None };
         let Callee::Expr(callee) = &call.callee else { return None };
         let Expr::Member(member) = callee.as_ref() else { return None };
         let Expr::Ident(template) = member.obj.as_ref() else { return None };
         let MemberProp::Ident(method) = &member.prop else { return None };
         if method.sym != *"bind" { return None; }
-        let source = self.resolve_binding(template.sym.as_ref());
-        self.generic_arrows.contains_key(&source).then_some((call, source))
+        self.generic_callable_template(template.sym.as_ref()).map(|target| (call, target))
     }
 
     fn lower_deferred_generic_bind(
         &mut self,
         name: &str,
         call: &swc_ecma_ast::CallExpr,
-        target: Symbol,
+        target: GenericCallableTemplate,
     ) -> Result<Vec<HirStmt>, String> {
         let mut statements = Vec::new();
         let (this_value, leading) = match call.args.split_first() {
@@ -318,7 +317,7 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(this_name.clone(), this_type.clone());
         statements.push(HirStmt::Let(this_name.clone(), this_type.clone(), this_value));
-        let this_capture = GenericBindCapture { name: this_name, ty: this_type };
+        let this_capture = GenericBindCapture { name: this_name, ty: this_type, source_span: None };
 
         let (values, bindings) =
             self.lower_native_spread_values_with_snapshots(leading, "function .bind()")?;
@@ -326,10 +325,34 @@ impl<'a> FnLowerer<'a> {
             statements.push(HirStmt::Let(capture_name, ty, value));
         }
         let mut leading_captures = Vec::with_capacity(values.len());
-        for value in values {
+        for (index, value) in values.into_iter().enumerate() {
             let HirExpr::Var(capture_name) = &value else { unreachable!() };
             let ty = self.infer_expr_type(&value)?;
-            leading_captures.push(GenericBindCapture { name: capture_name.clone(), ty });
+            let source_span = if leading.iter().all(|argument| argument.spread.is_none()) {
+                leading.get(index).map(|argument| argument.expr.span())
+            } else { None };
+            if let Some(argument) = leading.get(index).filter(|_| source_span.is_some()) {
+                if let Some(hint) = self.source_value_hint(&argument.expr)
+                    .and_then(|hint| self.infer_expr_type(&hint).ok())
+                    .filter(|hint| !matches!(hint, HirType::Json | HirType::Dynamic | HirType::JsValue))
+                {
+                    self.source_scope.insert(capture_name.clone(), hint);
+                }
+                let static_string = match argument.expr.as_ref() {
+                    Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
+                    Expr::Ident(identifier) => {
+                        let source = self.resolve_binding(identifier.sym.as_ref());
+                        self.immutable_bindings.contains(&source)
+                            .then(|| self.static_string_bindings.get(&source).cloned())
+                            .flatten()
+                    }
+                    _ => None,
+                };
+                if let Some(value) = static_string {
+                    self.static_string_bindings.insert(capture_name.clone(), value);
+                }
+            }
+            leading_captures.push(GenericBindCapture { name: capture_name.clone(), ty, source_span });
         }
 
         let bound = self.bind_decl_local(name, HirType::Dynamic, true);

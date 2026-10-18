@@ -2,11 +2,12 @@
 struct GenericBindCapture {
     name: Symbol,
     ty: HirType,
+    source_span: Option<swc_common::Span>,
 }
 
 #[derive(Clone)]
 struct DeferredGenericBind {
-    target: Symbol,
+    target: GenericCallableTemplate,
     this_capture: GenericBindCapture,
     leading_captures: Vec<GenericBindCapture>,
 }

@@ -87,6 +87,13 @@ impl FnLowerer<'_> {
                         Expr::Lit(Lit::Str(value)) => Ok(HirType::StrLiteral(
                             value.value.to_string_lossy().into_owned(),
                         )),
+                        Expr::Ident(identifier) => self.static_string_bindings
+                            .get(&self.resolve_binding(identifier.sym.as_ref()))
+                            .map(|value| HirType::StrLiteral(value.clone()))
+                            .map(Ok)
+                            .unwrap_or_else(|| self.generic_call_argument_source_type(
+                                source, arg, preserve_class_physical,
+                            )),
                         _ => self.generic_call_argument_source_type(
                             source,
                             arg,
