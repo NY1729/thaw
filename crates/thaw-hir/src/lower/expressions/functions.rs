@@ -1032,6 +1032,7 @@ impl<'a> FnLowerer<'a> {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let signature = FnSignature {
+                        public_overloads: Vec::new(),
                 params: Vec::new(),
                 variadic: None,
                 native_rest: None,
