@@ -909,6 +909,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         HirType::Function(_, _) => Some("function"),
         HirType::FunctionWithThis(_, _) => Some("function"),
         HirType::CallableFunction(..) => Some("function"),
+        HirType::OverloadedFunction(_, physical) => native_typeof_name(physical),
         HirType::Array(_)
         | HirType::Bytes
         | HirType::Tuple(_)
