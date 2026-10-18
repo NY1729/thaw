@@ -2986,7 +2986,7 @@ fn optional_object_method_call_keeps_receiver_parameter() {
 }
 
 #[test]
-fn object_method_returning_this_copies_back_and_returns_the_owner() {
+fn object_method_returning_this_keeps_the_actual_receiver_value() {
     let program = lower(r#"
         function main(): boolean {
             const o = { n: 0, inc() { this.n++; return this; } };
@@ -2995,7 +2995,8 @@ fn object_method_returning_this_copies_back_and_returns_the_owner() {
     "#);
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
     let lowered = format!("{:?}", main.body);
-    assert!(lowered.contains("__thaw_method_receiver_copy_"), "{lowered}");
+    assert!(lowered.contains("access: Value"), "{lowered}");
+    assert!(!lowered.contains("__thaw_method_receiver_copy_"), "{lowered}");
     assert!(lowered.contains("PropAssign"), "{lowered}");
 }
 

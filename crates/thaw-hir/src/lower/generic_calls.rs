@@ -1870,7 +1870,7 @@ impl<'a> FnLowerer<'a> {
                 .ok_or("object method receiver has no private receiver parameter")?;
             let (this_arg, view_binding) = self.native_object_method_receiver(
                 receiver.clone(), &receiver_type, fields,
-            );
+            )?;
             if let Some(binding) = view_binding { spread_bindings.insert(0, binding); }
             arguments.insert(0, HirExpr::NonArrowReceiverPack {
                 value: Box::new(this_arg), declared: HirType::Object(fields.to_vec()),

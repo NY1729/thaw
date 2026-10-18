@@ -1237,7 +1237,7 @@ impl<'a> FnLowerer<'a> {
                                 receiver.clone(),
                                 &object_ty,
                                 receiver_fields,
-                            );
+                            )?;
                             if let Some(binding) = view_binding {
                                 bindings.insert(2, binding);
                                 args.insert(0, HirExpr::NonArrowReceiverPack {

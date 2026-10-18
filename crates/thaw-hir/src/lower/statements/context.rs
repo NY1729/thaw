@@ -94,6 +94,7 @@ impl<'a> FnLowerer<'a> {
             sparse_arrays: HashSet::new(),
             fresh_object_bindings: HashSet::new(),
             alias_native_arrays: false,
+            lowering_native_projection_factory: false,
             conservative_sparse_arrays: HashSet::new(),
             sparse_array_functions: HashSet::new(),
             next_binding: 0,

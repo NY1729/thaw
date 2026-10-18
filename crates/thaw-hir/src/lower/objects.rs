@@ -3140,7 +3140,15 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::Lit(HirLit::F64(value)));
                 }
                 let obj = self.lower_member_receiver(&member.obj)?;
-                let obj_ty = self.infer_expr_type(&obj)?;
+                let obj = if matches!(&obj, HirExpr::NonArrowThis { .. }) {
+                    obj.with_non_arrow_this_access(NonArrowThisAccess::Read(prop.sym.to_string()))
+                } else {
+                    obj
+                };
+                let obj_ty = match &obj {
+                    HirExpr::NonArrowThis { declared, .. } => declared.clone(),
+                    _ => self.infer_expr_type(&obj)?,
+                };
                 let (obj, obj_ty) =
                     self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref(), self.receiver_requires_narrowing(&member.obj))?;
                 // Raw catch-bound strings can carry the legacy
@@ -4169,7 +4177,7 @@ impl<'a> FnLowerer<'a> {
                 !params.first().and_then(Self::object_method_receiver_fields).is_some_and(|receiver|
                     receiver.last().is_some_and(|(name, marker)|
                         name == "__thaw_object_method_receiver"
-                            && *marker != HirType::Bool)),
+                            && !matches!(marker, HirType::Bool | HirType::Undefined))),
             HirType::Optional(inner) | HirType::Nullable(inner)
             | HirType::Nullish(inner) | HirType::Array(inner) =>
                 Self::live_projection_supported(inner, class_ok),
@@ -5955,27 +5963,30 @@ fn well_known_symbol_from_expr(expr: &Expr) -> Option<&'static str> {
     }
 }
 
+type NativeObjectMethodReceiver = (HirExpr, Option<(Symbol, HirType, HirExpr)>);
+
 impl<'a> FnLowerer<'a> {
     /// A method's synthetic marker is type metadata, not a physical field
     /// used by its body. When all readable/writable receiver fields are an
     /// exact prefix of the real allocation, alias the original pointer under
-    /// the method's narrow receiver type. The body then reads and writes the
-    /// original slots. Other layouts retain the existing materialization
+    /// the method's narrow receiver type when its fields are an exact physical
+    /// prefix of the owner. Other layouts retain the existing materialization
     /// path until they have an explicit projection.
     fn native_object_method_receiver(
         &mut self,
         source: HirExpr,
         actual: &HirType,
         fields: &[(Symbol, HirType)],
-    ) -> (HirExpr, Option<(Symbol, HirType, HirExpr)>) {
+    ) -> Result<NativeObjectMethodReceiver, String> {
         let marker = "__thaw_object_method_receiver";
         let prefix = fields.iter().take_while(|(name, _)| name.as_str() != marker)
             .collect::<Vec<_>>();
         let compatible = matches!(actual, HirType::Object(actual_fields)
-            if fields.last().is_some_and(|(name, ty)| name == marker && *ty == HirType::Bool)
+            if fields.last().is_some_and(|(name, ty)| name == marker
+                    && matches!(ty, HirType::Bool | HirType::Undefined))
                 && fields[..fields.len() - 1].iter().all(|(name, _)| name.as_str() != marker)
                 && actual_fields.iter().all(|(name, _)| name.as_str() != marker)
-                // Accessor callbacks can return the whole aliased receiver.
+                // An exact physical prefix shares the same slot offsets.
                 && !actual_fields.iter().any(|(name, _)| is_hidden_accessor_field(name))
                 && prefix.len() <= actual_fields.len()
                 && prefix.iter().copied().eq(actual_fields.iter().take(prefix.len())));
@@ -5984,7 +5995,22 @@ impl<'a> FnLowerer<'a> {
             let name = format!("__thaw_live_method_receiver_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(name.clone(), view_type.clone());
-            return (HirExpr::Var(name.clone()), Some((name, view_type, source)));
+            let needs_full_value_projection = fields.last().is_some_and(|(name, ty)|
+                name == marker && *ty == HirType::Undefined);
+            let registered_source = if needs_full_value_projection && !self.lowering_native_projection_factory {
+                if let HirType::Object(actual_fields) = actual {
+                if Self::fixed_object_supports_live_projection(actual)
+                    || self.live_projection_supported_with_classes(actual)
+                {
+                    self.retain_optional_native_this_projection(source, actual_fields)?
+                } else {
+                    source
+                }
+                } else { source }
+            } else {
+                source
+            };
+            return Ok((HirExpr::Var(name.clone()), Some((name, view_type, registered_source))));
         }
         let copied = fields.iter().map(|(name, _)| {
             if name == marker {
@@ -5998,13 +6024,12 @@ impl<'a> FnLowerer<'a> {
                     Box::new(source.clone()), actual.clone(), name.clone()))
             }
         }).collect();
-        (HirExpr::ObjectLit(copied), None)
+        Ok((HirExpr::ObjectLit(copied), None))
     }
 
-    /// A method whose body uses `this` as a value runs on a copy of its owner.
-    /// After the call, store the copy's fields back into the owner (so
-    /// `this.n++` is not lost) and, when the method returned that copy
-    /// (`return this`), hand back the owner itself so identity holds.
+    /// A method whose body uses `this` as a value runs on a copy when the
+    /// receiver cannot safely alias the native owner. After the call, store
+    /// copied fields back and preserve owner identity when it returned the copy.
     fn copy_back_method_receiver(
         &mut self,
         call: HirExpr,
@@ -6149,7 +6174,7 @@ impl<'a> FnLowerer<'a> {
         }
         let this = HirExpr::Var("__thaw_this".into());
         let (this_arg, view_binding) =
-            self.native_object_method_receiver(this, owner_type, receiver_fields);
+            self.native_object_method_receiver(this, owner_type, receiver_fields)?;
         let captures = vec![HirParam { name: "__thaw_this".into(), ty: owner_type.clone() }];
         let mut statements = Vec::new();
         if let Some((name, ty, value)) = view_binding {
@@ -6246,7 +6271,7 @@ impl<'a> FnLowerer<'a> {
         };
         let (this_arg, view_binding) = self.native_object_method_receiver(
             bound.clone(), &object_type, receiver_fields,
-        );
+        )?;
         let call = HirExpr::Call(
             Box::new(method),
             vec![HirExpr::NonArrowReceiverPack {

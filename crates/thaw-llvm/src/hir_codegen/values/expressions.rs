@@ -159,12 +159,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 let word = self.builder.build_load(self.context.i64_type(), word_ptr, "non_arrow_receiver_word")
                     .map_err(|error| error.to_string())?.into_int_value();
-                let access = match access {
-                    NonArrowThisAccess::Value => None,
-                    NonArrowThisAccess::Read(field) => Some((field.as_str(), false)),
-                    NonArrowThisAccess::Write(field) => Some((field.as_str(), true)),
-                };
-                self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word, access)
+                match access {
+                    NonArrowThisAccess::Value =>
+                        self.compile_non_arrow_json_value(self.current_function(), kind, word).map(Into::into),
+                    NonArrowThisAccess::TypedValue =>
+                        self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word, None),
+                    NonArrowThisAccess::Read(field) =>
+                        self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word,
+                            Some((field.as_str(), false))),
+                    NonArrowThisAccess::Write(field) =>
+                        self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word,
+                            Some((field.as_str(), true))),
+                }
             }
             HirExpr::NonArrowReceiverPack { value, .. } => {
                 let actual = self.expr_hir_type(value)

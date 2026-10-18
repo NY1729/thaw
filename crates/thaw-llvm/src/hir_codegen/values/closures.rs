@@ -1159,7 +1159,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.tracks_owned_json_roots = true;
         let join = self.context.append_basic_block(entry_fn, "receiver_json_ready");
         let rejected = self.context.append_basic_block(entry_fn, "receiver_json_rejected");
-        let cases = [0_u64, 1, 2, 3, 4, 5, 7, 8]
+        let cases = [0_u64, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             .map(|tag| (tag, self.context.append_basic_block(entry_fn, &format!("receiver_json_{tag}"))));
         let branches = cases.iter().map(|(tag, block)|
             (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
@@ -1203,6 +1203,50 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?.try_as_basic_value().basic()
                         .ok_or("string receiver constructor returned no value")?.into_pointer_value()
                 }
+                6 => {
+                    self.uses_quickjs = true;
+                    self.uses_quickjs_handles = true;
+                    let entry = entry_fn.get_first_basic_block().ok_or("receiver function has no entry block")?;
+                    let entry_builder = self.context.create_builder();
+                    if let Some(first) = entry.get_first_instruction() {
+                        entry_builder.position_before(&first);
+                    } else {
+                        entry_builder.position_at_end(entry);
+                    }
+                    let buffer = entry_builder.build_alloca(pointer, "receiver_symbol_handle_ledger")
+                        .map_err(|error| error.to_string())?;
+                    let capacity = entry_builder.build_alloca(self.context.i64_type(), "receiver_symbol_handle_capacity")
+                        .map_err(|error| error.to_string())?;
+                    entry_builder.build_store(buffer, pointer.const_null())
+                        .map_err(|error| error.to_string())?;
+                    entry_builder.build_store(capacity, self.context.i64_type().const_zero())
+                        .map_err(|error| error.to_string())?;
+                    let ledger = NativeHandleLedger { buffer, capacity };
+                    self.begin_live_native_projection_scope(ledger);
+
+                    let symbol = self.builder.build_int_to_ptr(word, pointer, "receiver_json_symbol")
+                        .map_err(|error| error.to_string())?;
+                    let placeholder = self.compile_live_symbol_json_placeholder(symbol, ledger)?
+                        .into_pointer_value();
+                    let handle = self.builder.build_call(
+                        self.module.get_function("thaw_json_borrowed_handle_id").unwrap(),
+                        &[placeholder.into()], "receiver_symbol_handle_id",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("symbol receiver placeholder has no borrowed handle")?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[placeholder.into()], "destroy_receiver_symbol_placeholder",
+                    ).map_err(|error| error.to_string())?;
+                    let converted = self.builder.build_call(
+                        self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                        &[handle.into()], "receiver_json_symbol_live",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("symbol receiver conversion returned no value")?;
+                    self.release_native_handle_ledger(ledger)?;
+                    self.finish_live_native_projection_scope()?;
+                    self.compile_check_json_host_error(converted, Some("thaw_json_destroy"))?
+                        .into_pointer_value()
+                }
                 7 => self.builder.build_int_to_ptr(word, pointer, "receiver_json_existing")
                     .map_err(|error| error.to_string())?,
                 8 => {
@@ -1210,12 +1254,54 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.uses_quickjs_handles = true;
                     self.compile_register_js_callback_host_operations()?;
                     let value = self.builder.build_call(
-                        self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
+                        self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
                         &[word.into()], "receiver_json_live_host")
                         .map_err(|error| error.to_string())?
                         .try_as_basic_value().basic()
                         .ok_or("live receiver conversion returned no value")?;
                     self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?
+                        .into_pointer_value()
+                }
+                9 => {
+                    self.uses_quickjs = true;
+                    self.uses_quickjs_handles = true;
+                    self.begin_fresh_event_key_argument_scope();
+                    let owner = self.builder.build_int_to_ptr(word, pointer, "receiver_native_object")
+                        .map_err(|error| error.to_string())?;
+                    let empty_layout = self.builder.build_global_string_ptr("", "receiver_full_projector_layout")
+                        .map_err(|error| error.to_string())?;
+                    let projector = self.builder.build_call(
+                        self.module.get_function("thaw_object_projector").unwrap(),
+                        &[owner.into(), empty_layout.as_pointer_value().into()], "receiver_full_projector",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("full native receiver projector lookup returned no value")?.into_pointer_value();
+                    let missing = self.builder.build_is_null(projector, "receiver_projector_missing")
+                        .map_err(|error| error.to_string())?;
+                    let function = self.current_function();
+                    let rejected = self.context.append_basic_block(function, "receiver_projector_rejected");
+                    let accepted = self.context.append_basic_block(function, "receiver_projector_ready");
+                    self.builder.build_conditional_branch(missing, rejected, accepted)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(rejected);
+                    self.reject_non_arrow_receiver()?;
+                    self.builder.position_at_end(accepted);
+                    let code = self.builder.build_load(pointer, projector, "receiver_projector_code")
+                        .map_err(|error| error.to_string())?.into_pointer_value();
+                    let factory = self.builder.build_indirect_call(
+                        self.function_type(&[], &HirType::JsValue)?, code, &[projector.into()],
+                        "call_receiver_projector",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("native receiver projector returned no handle")?.into_int_value();
+                    self.track_fresh_event_key_handle(factory)?;
+                    self.branch_on_pending_exception()?;
+                    let converted = self.builder.build_call(
+                        self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                        &[factory.into()], "receiver_projected_json",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("native receiver projection conversion returned no value")?;
+                    let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
+                    self.release_fresh_event_key_handles(&fresh_handles)?;
+                    self.compile_check_json_host_error(converted, Some("thaw_json_destroy"))?
                         .into_pointer_value()
                 }
                 _ => unreachable!(),

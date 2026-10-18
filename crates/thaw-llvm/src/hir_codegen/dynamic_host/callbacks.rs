@@ -380,12 +380,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.position_at_end(materialize);
             if matches!(receiver_type, HirType::Object(_)) {
                 self.push_catch_target(cleanup_failed);
-                let native_object = self.builder.build_int_to_ptr(
-                    word, pointer_type, "method_native_receiver",
-                ).map_err(|error| error.to_string())?;
-                let json = self.compile_native_object_to_json_with_undefined(
-                    native_object, receiver_type, true,
-                )?.into_pointer_value();
+                // Keep the full native receiver as a live actual-kind Json
+                // projection. A declared-view snapshot loses fields and aliasing.
+                let json = self.compile_non_arrow_json_value(
+                    adapter, self.context.i8_type().const_int(9, false), word,
+                )?;
                 self.builder.build_store(owned_receiver_json_slot, json)
                     .map_err(|error| error.to_string())?;
                 let json_word = self.builder.build_ptr_to_int(json, i64_type, "method_receiver_json_word")

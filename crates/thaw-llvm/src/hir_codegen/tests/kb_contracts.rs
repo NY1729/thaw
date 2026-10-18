@@ -100,6 +100,24 @@ function main(): void {
 }
 
 #[test]
+fn kb_contract_plain_object_method_value_and_computed_read_keep_live_receiver() {
+    let source = r#"const object = {
+  n: 0,
+  increment(): any { this.n++; return this; },
+  read(): number { return this["n"]; }
+};
+function main(): void {
+  console.log(object.increment().increment() === object, object.n, object.read());
+  const callFromJavaScript: any = new Function("owner", "return owner.read()");
+  console.log(callFromJavaScript(object), object.n);
+}"#;
+    assert_eq!(
+        compile_and_run(source, "kb_contract_plain_object_method_value_live_receiver"),
+        "true 2 2\n2 2\n"
+    );
+}
+
+#[test]
 fn kb_contract_bare_this_value_preserves_nullish_receiver() {
     let source = r#"const value = function(this: { n: number }): any { return this; };
 function main(): void {
@@ -125,6 +143,199 @@ function main(): void {
         compile_and_run(source, "kb_contract_typeof_this_uses_runtime_receiver_value"),
         "undefined\nobject\nobject\n"
     );
+}
+
+#[test]
+fn kb_contract_typed_this_value_keeps_actual_kind_and_alias() {
+    let source = r#"const actual = function(this: { n: number }): any { return this; };
+const kind = function(this: { n: number }): string { return typeof this; };
+const alias = function(this: { n: number }): any { const self = this; this.n++; return self; };
+const arrow = function(this: { n: number }): any { const read = () => this; return read(); };
+function main(): void {
+  console.log(kind.call(undefined as any));
+  console.log(kind.call(null as any));
+  console.log(kind.call(false as any));
+  console.log(kind.call(0 as any));
+  console.log(kind.call("x" as any));
+  console.log(kind.call(1n as any));
+  console.log(kind.call(Symbol("s") as any));
+  console.log(kind.call("host" as any));
+  console.log(kind.call({ n: 1 }));
+  const native = { n: 4, extra: 9 };
+  const result = actual.call(native);
+  console.log(result === native, result.extra);
+  const aliasResult = alias.call(native);
+  console.log(aliasResult === native, aliasResult.n, native.n);
+  console.log(arrow.call(native) === native);
+  console.log(actual.call(undefined as any) === undefined);
+  const hostKind: any = new Function("fn", "return fn.call(Object.create(null))");
+  console.log(hostKind(kind));
+  const hostSymbol: any = new Function("fn", "const symbol=Symbol('identity'); return fn.call(symbol)===symbol && fn.call(symbol)!==Symbol('identity')");
+  console.log(hostSymbol(actual));
+  const hostActual: any = new Function("fn", "value", "return fn.call(value)");
+  console.log(hostActual(actual, native) === native);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_typed_this_value_keeps_actual_kind_and_alias"),
+        "undefined\nobject\nboolean\nnumber\nstring\nbigint\nsymbol\nstring\nobject\ntrue 9\ntrue 5 5\ntrue\ntrue\nobject\ntrue\ntrue\n");
+}
+
+#[test]
+fn kb_contract_bare_this_value_keeps_declared_primitive_return_types() {
+    let source = r#"const bigintThis = function(this: bigint): bigint { return this; };
+const symbolThis = function(this: symbol): symbol { return this; };
+function main(): void {
+  const value = Symbol("identity");
+  console.log(bigintThis.call(12n), symbolThis.call(value) === value);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_bare_this_value_primitive_returns"), "12n true\n");
+}
+
+#[test]
+fn kb_contract_bare_this_alias_preserves_typed_primitive_return() {
+    let source = r#"const bigintThis = function(this: bigint): bigint { const self: bigint = this; return self; };
+function main(): void { console.log(bigintThis.call(12n)); }"#;
+    assert_eq!(compile_and_run(source, "kb_contract_bare_this_alias_primitive_return"), "12n\n");
+}
+
+#[test]
+fn kb_contract_bare_this_alias_preserves_lazy_payload_and_typed_values() {
+    let source = r#"const bigintThis = function(this: bigint): bigint { const self = this; return self; };
+const symbolThis = function(this: symbol): symbol { const self = this; return self; };
+const mutableBigintThis = function(this: bigint): bigint { let self = this; self = this; return self; };
+const capturedSymbolThis = function(this: symbol): symbol { const self = this; const read = (): symbol => self; return read(); };
+const unused = function(this: { n: number }): number { const self = this; return 3; };
+function main(): void {
+  const symbol = Symbol("same");
+  console.log(bigintThis.call(12n), mutableBigintThis.call(14n));
+  console.log(symbolThis.call(symbol) === symbol, capturedSymbolThis.call(symbol) === symbol);
+  console.log(unused.call(null as any));
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_bare_this_alias_private_payload"), "12n 14n\ntrue true\n3\n");
+}
+
+#[test]
+fn kb_contract_bare_this_alias_chain_and_native_reassignment_keep_actual_owner() {
+    let source = r#"const identity = function(this: { n: number }, replacement: { n: number }): any {
+  let first = this;
+  const second = first;
+  first = replacement;
+  return second === this ? first : second;
+};
+function main(): void {
+  const original = { n: 1 };
+  const replacement = { n: 4, extra: 9 };
+  const result = identity.call(original, replacement);
+  console.log(result === replacement, result.n, result.extra);
+  result.extra = 12;
+  console.log(replacement.extra);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_bare_this_alias_chain_native_reassignment"), "true 4 9\n12\n");
+}
+
+#[test]
+fn kb_contract_bare_this_alias_reassignment_preserves_reordered_layout() {
+    let source = r#"const replace = function(this: { n: number }): any {
+  let self = this;
+  self = { extra: 9, n: 4 };
+  self.n++;
+  return self;
+};
+function main(): void {
+  const result = replace.call({ n: 1 });
+  console.log(result.n, result.extra);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_bare_this_alias_reordered_reassignment"), "5 9\n");
+}
+
+#[test]
+fn kb_contract_bare_this_class_return_preserves_derived_owner() {
+    let source = r#"class Base { base = 1; }
+class Derived extends Base { extra = 9; }
+const identity = function(this: Base): Base { return this; };
+function main(): void {
+  const actual = new Derived();
+  const result = identity.call(actual);
+  console.log((result as any) === (actual as any), result instanceof Derived, result.extra);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_bare_this_class_return"), "true true 9\n");
+}
+
+#[test]
+fn kb_contract_typed_this_reordered_layout_keeps_declared_property_access() {
+    let source = r#"const update = function(this: { n: number }): number { this.n++; return this.n; };
+function main(): void {
+  const reordered = { extra: 9, n: 4 };
+  console.log(update.call(reordered), reordered.n, reordered.extra);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_typed_this_reordered_layout_keeps_declared_property_access"), "5 5 9\n");
+}
+
+#[test]
+fn kb_contract_object_method_this_value_keeps_full_owner_alias() {
+    let source = r#"const object = { n: 1, extra: 9, bump(): any { this.n++; return this; } };
+function main(): void {
+  const result = object.bump();
+  console.log(result === object, result.n, result.extra);
+  result.extra = 12;
+  console.log(object.extra);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_object_method_this_value_keeps_full_owner_alias"), "true 2 9\n12\n");
+}
+
+#[test]
+fn kb_contract_dynamic_object_method_value_uses_host_this_value() {
+    let source = r#"const object = { kind(): string { return typeof this; }, value(): any { return this; } };
+const invoke: any = new Function("method", "receiver", "return method.call(receiver)");
+function main(): void {
+  console.log(invoke(object.kind, 5));
+  console.log(invoke(object.value, 5));
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_dynamic_object_method_value_uses_host_this_value"), "number\n5\n");
+}
+
+#[test]
+fn kb_contract_class_this_value_keeps_derived_full_owner() {
+    let source = r#"class Base { value: number = 1; }
+class Derived extends Base { extra: number = 9; }
+const identity = function(this: Base): any { return this; };
+function main(): void {
+  const actual = new Derived();
+  const result = identity.call(actual);
+  console.log(result === actual, result.value, result.extra, result instanceof Derived);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_class_this_value_keeps_derived_full_owner"), "true 1 9 true\n");
+}
+
+#[test]
+fn kb_contract_class_this_value_preserves_unrelated_actual_owner() {
+    let source = r#"class Base { value: number = 1; }
+class Other { extra: number = 9; }
+const identity = function(this: Base): any { return this; };
+function main(): void {
+  const actual = new Other();
+  const result = identity.call(actual);
+  console.log(result === actual, result.extra, result instanceof Other);
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_class_this_value_preserves_unrelated_actual_owner"), "true 9 true\n");
+}
+
+#[test]
+fn kb_contract_object_method_value_observes_midbody_owner_mutation() {
+    let source = r#"let object: any = {};
+object = { n: 1, method(): number { const self = this; object.n = 7; return self.n; } };
+function main(): void { console.log(object.method(), object.n); }"#;
+    assert_eq!(compile_and_run(source, "kb_contract_object_method_value_observes_midbody_owner_mutation"), "7 7\n");
+}
+
+#[test]
+fn kb_contract_native_object_method_value_aliases_owner_midbody() {
+    let source = r#"const object = { n: 1, method(): number { const self = this; this.n = 7; return self.n; } };
+function main(): void { console.log(object.method(), object.n); }"#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("__thaw_register_native_object_projector"), "{hir}");
+    assert_eq!(compile_and_run(source, "kb_contract_native_object_method_value_aliases_owner_midbody"), "7 7\n");
 }
 
 #[test]

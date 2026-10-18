@@ -3,6 +3,9 @@ use super::*;
 #[derive(Debug, Clone, PartialEq)]
 pub enum NonArrowThisAccess {
     Value,
+    /// Materialize the receiver using its declared native ABI at an explicit
+    /// typed consumer boundary, such as a function's declared return type.
+    TypedValue,
     Read(Symbol),
     Write(Symbol),
 }

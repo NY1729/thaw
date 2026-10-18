@@ -119,6 +119,17 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
         }
+        let target = match target {
+            Target::Prop(object, object_type, field) => {
+                let object = if matches!(&object, HirExpr::NonArrowThis { .. }) {
+                    object.with_non_arrow_this_access(NonArrowThisAccess::Write(field.clone()))
+                } else {
+                    object
+                };
+                Target::Prop(object, object_type, field)
+            }
+            other => other,
+        };
         Ok(build_assign(target, value))
     }
 
@@ -139,7 +150,12 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_assignment_target_read(&mut self, target: &Target) -> Result<HirExpr, String> {
         if let Target::Prop(object, HirType::Object(fields), property) = target {
-            return self.lower_fixed_object_property_read(object.clone(), fields, property);
+            let object = if matches!(object, HirExpr::NonArrowThis { .. }) {
+                object.clone().with_non_arrow_this_access(NonArrowThisAccess::Read(property.clone()))
+            } else {
+                object.clone()
+            };
+            return self.lower_fixed_object_property_read(object, fields, property);
         }
         let Target::Index(array, index) = target else {
             return target_to_read_expr(target);

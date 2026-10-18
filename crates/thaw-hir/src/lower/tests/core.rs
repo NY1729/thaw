@@ -1382,8 +1382,8 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
         assert!(map_get_optional_binding(map_actual, "values"),
             "{name} uses the same genuine Map.get Optional<Json> source route");
         let (_, _, comparison) = one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
-        assert_eq!(named_call(comparison, "__thaw_json_from_consumed_dynamic"), name == "nominal",
-            "plain classes retain nominal identity through a live view; unsafe plain method receivers stay outside that path");
+        assert!(named_call(comparison, "__thaw_json_from_consumed_dynamic"),
+            "declared classes and computed plain-method receivers use the live actual-value projection");
         if name == "methodOwner" {
             let (owner_binding, owner_actual, _) =
                 one_operand_binding(after_left, "__thaw_strict_right_").unwrap();

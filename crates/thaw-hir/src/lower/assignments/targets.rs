@@ -152,7 +152,15 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 let object = self.lower_json_mutable_chain(&member.obj)?;
-                let object_type = self.infer_expr_type(&object)?;
+                let object = if let (MemberProp::Ident(property), HirExpr::NonArrowThis { .. }) = (&member.prop, &object) {
+                    object.with_non_arrow_this_access(NonArrowThisAccess::Write(property.sym.to_string()))
+                } else {
+                    object
+                };
+                let object_type = match &object {
+                    HirExpr::NonArrowThis { declared, .. } => declared.clone(),
+                    _ => self.infer_expr_type(&object)?,
+                };
                 self.lower_member_target_from_receiver(member, object, object_type)
             }
             _ => Err("unsupported assignment target".into()),
