@@ -301,7 +301,7 @@ impl<'a> FnLowerer<'a> {
                     && well_known_symbol_from_expr(&computed.expr).is_none())
             && matches!(self.peek_type_without_lowering(&member.obj),
                 Some(HirType::Array(element)) if matches!(*element,
-                    HirType::Function(..) | HirType::CallableFunction(..))));
+                    HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))));
         if indexed_function_element
             || (matches!(callee_expr.as_ref(), Expr::Ident(identifier)
                 if is_quickjs_function_value(identifier.span())
@@ -318,15 +318,71 @@ impl<'a> FnLowerer<'a> {
             if matches!(callee_ty, HirType::JsValue | HirType::Dynamic) {
                 return self.lower_dynamic_value_call_on(callee, &call.args);
             }
-            let (params, optional, rest) = match callee_ty {
-                HirType::Function(params, _) => (params, HirOptionalMask::default(), None),
-                HirType::CallableFunction(params, optional, rest, _) => {
-                    (params, optional, rest.map(|element| *element))
+            let (public_overloads, physical_ty) = match callee_ty {
+                HirType::OverloadedFunction(public, physical) => (Some(public), *physical),
+                other => (None, other),
+            };
+            let (params, optional, rest, physical_return) = match physical_ty {
+                HirType::Function(params, ret) => {
+                    (params, HirOptionalMask::default(), None, *ret)
+                }
+                HirType::CallableFunction(params, optional, rest, ret) => {
+                    (params, optional, rest.map(|element| *element), *ret)
                 }
                 _ => return Err("call target is not a function value".into()),
             };
-            let (mut arguments, bindings) =
-                self.lower_native_spread_values(&call.args, "function-value invocation")?;
+            let selected_public_signature = public_overloads
+                .as_deref()
+                .map(|overloads| self.select_public_overload_for_source(
+                    overloads, &call.args, None, "function value",
+                ))
+                .transpose()?
+                .flatten();
+            let selected_return = selected_public_signature
+                .as_ref()
+                .and_then(|public| self.public_overload_return_type(public));
+            let public_rest = selected_public_signature.as_ref().and_then(|public| match public {
+                HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                    HirType::CallableFunction(_, _, rest, _) => rest.as_deref(),
+                    _ => None,
+                },
+                HirType::CallableFunction(_, _, rest, _) => rest.as_deref(),
+                _ => None,
+            });
+            let public_params = selected_public_signature.as_ref().map(|public| {
+                (0..params.len())
+                    .filter_map(|index| self.public_overload_argument_type(public, index))
+                    .collect::<Vec<_>>()
+            });
+            let (mut arguments, bindings) = if let Some(public_params) = &public_params {
+                self.lower_native_spread_values_with_overload_expected(
+                    &call.args,
+                    "function-value invocation",
+                    public_params,
+                    public_rest,
+                )?
+            } else {
+                self.lower_native_spread_values(&call.args, "function-value invocation")?
+            };
+            if let Some(public) = selected_public_signature.as_ref() {
+                let public_rest = match public {
+                    HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                        HirType::CallableFunction(params, _, Some(_), _) => Some(params.len()),
+                        _ => None,
+                    },
+                    HirType::CallableFunction(params, _, Some(_), _) => Some(params.len()),
+                    _ => None,
+                };
+                if let Some(public_fixed_count) = public_rest.filter(|count| *count < params.len()) {
+                    if arguments.len() > public_fixed_count {
+                        let public_rest_values = arguments.split_off(public_fixed_count);
+                        for parameter in params.iter().skip(public_fixed_count) {
+                            arguments.push(omitted_parameter_value(parameter)?);
+                        }
+                        arguments.extend(public_rest_values);
+                    }
+                }
+            }
             if rest.is_none() && arguments.len() > params.len() {
                 return Err(format!(
                     "function value expects {} argument(s), got {}",
@@ -354,7 +410,16 @@ impl<'a> FnLowerer<'a> {
             let mut arguments = arguments
                 .into_iter()
                 .zip(&params)
-                .map(|(argument, expected)| {
+                .enumerate()
+                .map(|(index, (argument, expected))| {
+                    let public_expected = selected_public_signature.as_ref().and_then(|public| {
+                        self.public_overload_argument_type(public, index)
+                    });
+                    let argument = self.adapt_selected_overload_argument(
+                        expected,
+                        public_expected.as_ref(),
+                        argument,
+                    )?;
                     if quickjs_function_value {
                         self.coerce_primitive_array_argument_aliasing(argument, expected)
                     } else {
@@ -369,10 +434,13 @@ impl<'a> FnLowerer<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 arguments.push(native_rest_array(values, element));
             }
-            return self.wrap_call_argument_bindings(
-                HirExpr::Call(Box::new(callee), arguments),
-                &bindings,
-            );
+            let result = HirExpr::Call(Box::new(callee), arguments);
+            let result = if let Some(selected) = selected_return {
+                self.project_overload_call_result(result, &physical_return, &selected)?
+            } else {
+                result
+            };
+            return self.wrap_call_argument_bindings(result, &bindings);
         }
 
         if let Some(bound) = self.lower_native_class_bind(call)? {
@@ -1003,13 +1071,26 @@ impl<'a> FnLowerer<'a> {
                                     ret.as_ref().clone(),
                                     None,
                                     HirOptionalMask::default(),
+                                    None,
                                 )),
                                 HirType::CallableFunction(params, optional, rest, ret) => Some((
                                     params.clone(),
                                     ret.as_ref().clone(),
                                     rest.as_deref().cloned(),
                                     optional.clone(),
+                                    None,
                                 )),
+                                HirType::OverloadedFunction(public, physical) => match physical.as_ref() {
+                                    HirType::Function(params, ret) => Some((
+                                        params.clone(), ret.as_ref().clone(), None,
+                                        HirOptionalMask::default(), Some(public.clone()),
+                                    )),
+                                    HirType::CallableFunction(params, optional, rest, ret) => Some((
+                                        params.clone(), ret.as_ref().clone(), rest.as_deref().cloned(),
+                                        optional.clone(), Some(public.clone()),
+                                    )),
+                                    _ => None,
+                                },
                                 _ => None,
                             }),
                         _ => None,
@@ -1027,7 +1108,7 @@ impl<'a> FnLowerer<'a> {
                             expected_return_hint.as_ref(),
                         );
                     }
-                    if let Some((params, method_ret, rest, optional)) = callable {
+                    if let Some((params, method_ret, rest, optional, public_overloads)) = callable {
                         // Compile-time marker: keep ordinary function-valued
                         // properties distinct from receiver-aware methods.
                         let receiver_parameter = params.first().is_some_and(|parameter| {
@@ -1053,13 +1134,69 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             &params[..]
                         };
-                        let (mut args, mut bindings) = self
-                            .lower_native_spread_values_with_expected(
+                        let selected_public_signature = public_overloads
+                            .as_deref()
+                            .map(|overloads| {
+                                self.select_public_overload_for_source(
+                                    overloads,
+                                    &call.args,
+                                    None,
+                                    &label,
+                                )
+                            })
+                            .transpose()?
+                            .flatten();
+                        let selected_public_return = selected_public_signature
+                            .as_ref()
+                            .and_then(|public| self.public_overload_return_type(public));
+                        let public_rest = selected_public_signature.as_ref().and_then(|public| match public {
+                            HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                                HirType::CallableFunction(_, _, rest, _) => rest.as_deref(),
+                                _ => None,
+                            },
+                            HirType::CallableFunction(_, _, rest, _) => rest.as_deref(),
+                            _ => None,
+                        });
+                        let public_params = selected_public_signature.as_ref().map(|public| {
+                            (0..expected.len())
+                                .filter_map(|index| self.public_overload_visible_argument_type(public, index))
+                                .collect::<Vec<_>>()
+                        });
+                        let (mut args, mut bindings) = if let Some(public_params) = &public_params {
+                            self.lower_native_spread_values_with_overload_expected(
+                                &call.args,
+                                &label,
+                                public_params,
+                                public_rest,
+                            )?
+                        } else {
+                            self.lower_native_spread_values_with_expected(
                                 &call.args,
                                 &label,
                                 expected,
                                 rest.as_ref(),
-                            )?;
+                            )?
+                        };
+                        if let Some(public) = selected_public_signature.as_ref() {
+                            let visible_params = if receiver_parameter { &params[1..] } else { &params[..] };
+                            let public_rest_start = match public {
+                                HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                                    HirType::CallableFunction(public_params, _, Some(_), _) => Some(public_params.len()),
+                                    _ => None,
+                                },
+                                HirType::CallableFunction(public_params, _, Some(_), _) => Some(public_params.len()),
+                                _ => None,
+                            };
+                            if let Some(public_rest_start) = public_rest_start.filter(|start| *start < visible_params.len()) {
+                                if args.len() > public_rest_start {
+                                    let rest_values = args.split_off(public_rest_start);
+                                    for parameter in visible_params.iter().skip(public_rest_start) {
+                                        args.push(omitted_parameter_value(parameter)?);
+                                    }
+                                    args.extend(rest_values);
+                                }
+                            }
+                        }
                         bindings.insert(0, (receiver_name.clone(), object_ty.clone(), object_expr));
                         bindings.insert(1, (callee_name.clone(), callee_type, callee));
                         let mut copied_receiver = None;
@@ -1112,6 +1249,14 @@ impl<'a> FnLowerer<'a> {
                             .zip(&params)
                             .enumerate()
                             .map(|(index, (value, expected))| {
+                                let public_expected = selected_public_signature.as_ref().and_then(|public| {
+                                    self.public_overload_visible_argument_type(public, index)
+                                });
+                                let value = self.adapt_selected_overload_argument(
+                                    expected,
+                                    public_expected.as_ref(),
+                                    value,
+                                )?;
                                 self.coerce_to_declared(expected, value).map_err(|error| {
                                     format!(
                                         "argument {} of `{}.{}` is invalid: {error}",
@@ -1131,6 +1276,13 @@ impl<'a> FnLowerer<'a> {
                         }
                         let mut call_expr =
                             HirExpr::Call(Box::new(HirExpr::Var(callee_name)), args);
+                        if let Some(selected) = selected_public_return {
+                            call_expr = self.project_overload_call_result(
+                                call_expr,
+                                &method_ret,
+                                &selected,
+                            )?;
+                        }
                         if let Some(copy_name) = copied_receiver {
                             call_expr = self.copy_back_method_receiver(
                                 call_expr,
@@ -1816,9 +1968,30 @@ impl<'a> FnLowerer<'a> {
         }
 
         let signature = self.signatures.get(&callee_name).cloned();
+        let value_overloads = self.scope.get(&callee_name).and_then(|ty| match ty {
+            HirType::OverloadedFunction(public, _) => Some(public.clone()),
+            _ => None,
+        });
+        let public_overloads = signature
+            .as_ref()
+            .map(|signature| signature.public_overloads.as_slice())
+            .filter(|overloads| !overloads.is_empty())
+            .or(value_overloads.as_deref());
+        let selected_public_signature = public_overloads
+            .map(|overloads| {
+                self.select_public_overload_for_source(
+                    overloads,
+                    &call.args,
+                    None,
+                    &callee_name,
+                )
+            })
+            .transpose()?
+            .flatten();
         let local_function = self.scope.get(&callee_name).and_then(|ty| {
             let ty = match ty {
                 HirType::FunctionWithThis(_, visible) => visible.as_ref(),
+                HirType::OverloadedFunction(_, physical) => physical.as_ref(),
                 other => other,
             };
             match ty {
@@ -1888,13 +2061,17 @@ impl<'a> FnLowerer<'a> {
                         .as_ref()
                         .and_then(|(_, _, rest, _)| rest.as_ref())
                 });
-            let expected = param_types.as_ref().and_then(|params| {
+            let physical_expected = param_types.as_ref().and_then(|params| {
                 let rest_index = params.len().saturating_sub(1);
                 match rest_element {
                     Some(element) if index >= rest_index => Some(element),
                     _ => params.get(index),
                 }
             });
+            let public_expected = selected_public_signature
+                .as_ref()
+                .and_then(|public| self.public_overload_argument_type(public, index));
+            let expected = public_expected.as_ref().or(physical_expected);
             let generic_context = signature
                 .as_ref()
                 .filter(|_| argument.spread.is_none())
@@ -1933,16 +2110,7 @@ impl<'a> FnLowerer<'a> {
                 if argument.spread.is_some() || generic_placeholder {
                     return None;
                 }
-                param_types
-                    .as_ref()
-                    .and_then(|params| {
-                        let rest_index = params.len().saturating_sub(1);
-                        match rest_element {
-                            Some(element) if index >= rest_index => Some(element),
-                            _ => params.get(index),
-                        }
-                    })
-                    .and_then(|expected| match expected {
+                expected.and_then(|expected| match expected {
                         HirType::Function(params, ret) => {
                             Some((params.clone(), Some(ret.as_ref().clone())))
                         }
@@ -2056,7 +2224,32 @@ impl<'a> FnLowerer<'a> {
                         _ => None,
                 })
             });
-            let mut value = if let Some(value) = self.lower_literal_call_spread(argument)? {
+            let spread_expected = (index..index + call.args.len() + 1)
+                .filter_map(|argument_index| {
+                    selected_public_signature
+                        .as_ref()
+                        .and_then(|public| {
+                            self.public_overload_argument_type(public, argument_index)
+                        })
+                        .or_else(|| {
+                            param_types.as_ref().and_then(|params| {
+                                let rest_index = params.len().saturating_sub(1);
+                                match rest_element {
+                                    Some(element) if argument_index >= rest_index => {
+                                        Some(element.clone())
+                                    }
+                                    _ => params.get(argument_index).cloned(),
+                                }
+                            })
+                        })
+                })
+                .collect::<Vec<_>>();
+            let mut value = if let Some(value) = self.lower_literal_call_spread(
+                argument,
+                &spread_expected,
+                rest_element,
+                0,
+            )? {
                 value
             } else if let Some((params, ret)) = contextual_function {
                 if matches!(
@@ -2279,6 +2472,59 @@ impl<'a> FnLowerer<'a> {
             }));
         }
 
+        let selected_public_return = public_overloads
+            .map(|overloads| {
+                self.select_public_overload(overloads, &lowered_arguments, None, &callee_name)
+            })
+            .transpose()?
+            .flatten();
+
+        // A selected public overload can expose its rest parameter before
+        // implementation-only optional slots. Preserve source order, but
+        // insert those omitted fixed ABI values before the public rest tail.
+        if let Some(public) = selected_public_signature.as_ref() {
+            let public_has_rest = match public {
+                HirType::FunctionWithThis(_, callable) => matches!(callable.as_ref(),
+                    HirType::CallableFunction(_, _, Some(_), _)),
+                HirType::CallableFunction(_, _, Some(_), _) => true,
+                _ => false,
+            };
+            let implementation_rest = signature.as_ref().and_then(|signature| {
+                signature.native_rest.as_ref().map(|_| (signature.params.as_slice(), signature.params.len().saturating_sub(1)))
+            }).or_else(|| local_function.as_ref().and_then(|(params, _, rest, _)| {
+                rest.as_ref().map(|_| (params.as_slice(), params.len().saturating_sub(1)))
+            }));
+            if let Some((implementation_params, implementation_fixed_count)) = implementation_rest {
+                    let (public_fixed_count, public_optional) = match public {
+                        HirType::FunctionWithThis(_, callable) => match callable.as_ref() {
+                            HirType::CallableFunction(params, optional, _, _) => (params.len(), optional.clone()),
+                            HirType::Function(params, _) => (params.len(), HirOptionalMask::default()),
+                            _ => (0, HirOptionalMask::default()),
+                        },
+                        HirType::CallableFunction(params, optional, _, _) => (params.len(), optional.clone()),
+                        HirType::Function(params, _) => (params.len(), HirOptionalMask::default()),
+                        _ => (0, HirOptionalMask::default()),
+                    };
+                    if public_has_rest && public_fixed_count < implementation_fixed_count
+                        && lowered_arguments.len() > public_fixed_count {
+                        let public_rest_values = lowered_arguments.split_off(public_fixed_count);
+                        for parameter in implementation_params.iter().take(implementation_fixed_count).skip(public_fixed_count) {
+                            lowered_arguments.push(omitted_parameter_value(parameter)?);
+                        }
+                        lowered_arguments.extend(public_rest_values);
+                    } else if !public_has_rest && lowered_arguments.len() < public_fixed_count {
+                        for (index, parameter) in implementation_params.iter().enumerate()
+                            .take(public_fixed_count.min(implementation_fixed_count))
+                            .skip(lowered_arguments.len()) {
+                            if !public_optional.contains(index) {
+                                break;
+                            }
+                            lowered_arguments.push(omitted_parameter_value(parameter)?);
+                        }
+                    }
+            }
+        }
+
         let fixed_arguments_before_native_rest_pack = lowered_arguments.len();
         let native_rest_values = if forwarded_rest_array {
             None
@@ -2329,7 +2575,21 @@ impl<'a> FnLowerer<'a> {
                     .take(fixed_count)
                     .skip(lowered_arguments.len())
                 {
-                    if !is_optional_parameter(optional, index) {
+                    let public_optional = selected_public_signature
+                        .as_ref()
+                        .is_some_and(|public| {
+                            let callable = match public {
+                                HirType::FunctionWithThis(_, callable) => callable.as_ref(),
+                                callable => callable,
+                            };
+                            match callable {
+                                HirType::CallableFunction(_, public_optional, _, _) => {
+                                    public_optional.contains(index)
+                                }
+                                _ => false,
+                            }
+                        });
+                    if !is_optional_parameter(optional, index) && !public_optional {
                         return Err(format!(
                             "function `{callee_name}` expects argument {}, but it was omitted",
                             index + 1
@@ -2497,6 +2757,14 @@ impl<'a> FnLowerer<'a> {
                         Ok(value)
                     }
                     Some(declared) => {
+                        let public_expected = selected_public_signature
+                            .as_ref()
+                            .and_then(|public| self.public_overload_argument_type(public, i));
+                        let value = self.adapt_selected_overload_argument(
+                            declared,
+                            public_expected.as_ref(),
+                            value,
+                        )?;
                         let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
                         let actual = self.infer_expr_type(&value)?;
                         let live_method_json_argument = quickjs_instance_typed_method
@@ -3223,6 +3491,17 @@ impl<'a> FnLowerer<'a> {
             self.wrap_call_argument_bindings(result, &final_bindings)?
         } else {
             HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args)
+        };
+        let physical_return = signature
+            .as_ref()
+            .map(|signature| signature.ret.clone())
+            .or_else(|| local_function.as_ref().map(|(_, ret, _, _)| ret.clone()));
+        let result = if let (Some(selected), Some(physical_return)) =
+            (selected_public_return, physical_return.as_ref())
+        {
+            self.project_overload_call_result(result, physical_return, &selected)?
+        } else {
+            result
         };
         self.wrap_call_argument_bindings(result, &argument_bindings)
     }
