@@ -56,6 +56,7 @@ fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
         | HirType::Json
         | HirType::JsValue
         | HirType::NativeException
+        | HirType::NonArrowReceiver(_)
         | HirType::Function(..)
         | HirType::CallableFunction(..)
         | HirType::OverloadedFunction(..)
@@ -86,6 +87,9 @@ mod jit_dynamic_abi_tests {
     #[test]
     fn only_native_aggregate_slots_require_live_json_adaptation() {
         assert!(!jit_type_needs_live_json_adaptation(&HirType::JsValue));
+        assert!(!jit_type_needs_live_json_adaptation(&HirType::NonArrowReceiver(Box::new(
+            HirType::Object(vec![("n".into(), HirType::F64)]),
+        ))));
         assert!(!jit_type_needs_live_json_adaptation(&HirType::F64));
         assert!(jit_type_needs_live_json_adaptation(&HirType::Array(Box::new(
             HirType::F64,
