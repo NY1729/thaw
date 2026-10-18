@@ -468,11 +468,77 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Assign(assign) => {
-                let default = self.lower_expr(&assign.right)?;
+                let declared_type = if parameter_has_explicit_type_annotation(&assign.left) {
+                    Some(
+                        lower_param(
+                            &assign.left,
+                            self.interfaces,
+                            self.generic_interfaces,
+                            false,
+                            &HashMap::new(),
+                        )?
+                        .ty,
+                    )
+                } else {
+                    None
+                };
+                let contextual_type = declared_type.as_ref().map(|ty| {
+                    if matches!(&*assign.right, Expr::Array(_)) {
+                        match ty {
+                            HirType::Optional(inner)
+                            | HirType::Nullable(inner)
+                            | HirType::Nullish(inner) => inner.as_ref(),
+                            _ => ty,
+                        }
+                    } else {
+                        ty
+                    }
+                });
+                let mut default = self.lower_expr_with_expected_type(&assign.right, contextual_type)?;
+                let fallback_source_type = self.infer_expr_type(&default)?;
+                let value_context = match (declared_type.as_ref(), &fallback_source_type) {
+                    (Some(HirType::Optional(payload)), HirType::Undefined | HirType::Optional(_) | HirType::Nullish(_)) => {
+                        Some(HirType::Optional(payload.clone()))
+                    }
+                    (Some(HirType::Optional(payload)), _) => Some(payload.as_ref().clone()),
+                    (Some(HirType::Nullish(payload)), HirType::Undefined | HirType::Optional(_) | HirType::Nullish(_)) => {
+                        Some(HirType::Nullish(payload.clone()))
+                    }
+                    (Some(HirType::Nullish(payload)), _) => Some(HirType::Nullable(payload.clone())),
+                    _ => contextual_type.cloned(),
+                };
+                if let Some(value_context) = value_context.as_ref() {
+                    if !matches!(fallback_source_type, HirType::Null | HirType::Undefined) {
+                        default = self.coerce_to_declared(value_context, default)?;
+                    }
+                    if matches!(value_context, HirType::Tuple(_)) {
+                        default = HirExpr::TypedClosure(value_context.clone(), Box::new(default));
+                    }
+                }
                 let default_type = self.infer_expr_type(&default)?;
-                let value = self.lower_undefined_default(value, default)?;
+                let value = self.lower_undefined_default_with_type(
+                    value,
+                    default,
+                    declared_type.clone(),
+                    Some(fallback_source_type),
+                )?;
                 let value_type = self.infer_expr_type(&value)?;
-                self.lower_binding_pattern_impl(&assign.left, value, &value_type, statements, immutable)?;
+                let mut binding_pattern = assign.left.as_ref().clone();
+                let narrowed_annotation = match declared_type.as_ref() {
+                    Some(HirType::Optional(payload)) => value_type == **payload,
+                    Some(HirType::Nullish(payload)) => matches!(
+                        &value_type,
+                        HirType::Nullable(result_payload) | HirType::Optional(result_payload)
+                            if result_payload == payload
+                    ) || value_type == **payload,
+                    _ => false,
+                };
+                if narrowed_annotation {
+                    if let Pat::Ident(binding) = &mut binding_pattern {
+                        binding.type_ann = None;
+                    }
+                }
+                self.lower_binding_pattern_impl(&binding_pattern, value, &value_type, statements, immutable)?;
                 if let Pat::Ident(binding) = assign.left.as_ref() {
                     self.destructuring_default_types
                         .insert(self.resolve_binding(binding.id.sym.as_ref()), default_type);
