@@ -836,7 +836,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|lowered| storage_parameter_type(&class_constructor_param_pattern(parameter), lowered.ty))
+                                .map(|lowered| {
+                                    let pattern = class_constructor_param_pattern(parameter);
+                                    let ty = storage_parameter_type(&pattern, lowered.ty);
+                                    if pattern_is_omittable(&pattern) {
+                                        optional_parameter_type(ty)
+                                    } else {
+                                        ty
+                                    }
+                                })
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })

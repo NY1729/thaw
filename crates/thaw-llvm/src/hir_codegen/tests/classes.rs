@@ -1,3 +1,61 @@
+#[test]
+fn constructor_defaults_and_parameter_properties_use_resolved_arguments() {
+    let source = r#"
+        let order = "";
+        let getterCalls = 0;
+        function mark(label: string, value: number): number { order += label; return value; }
+        function defaultObject(): { x: number } { order += "X"; return { x: 7 }; }
+        class Base {
+            field: number = mark("F", 1);
+            after: number;
+            constructor(readonly value: number = 4, { x }: { x: number } = defaultObject()) {
+                order += "B";
+                this.after = x;
+            }
+        }
+        class Middle extends Base {}
+        class Leaf extends Middle {}
+        class Derived extends Base {
+            own: number = mark("f", 2);
+            constructor(value: number = mark("d", 3)) { order += "s"; super(value); order += "a"; }
+        }
+        class Rest {
+            size: number;
+            constructor(...items: number[]) { this.size = items.length; }
+        }
+        class NullishCtor {
+            value: any;
+            constructor(value: any = 4) { this.value = value; }
+        }
+        class OptionalCtor {
+            value?: number;
+            constructor(value?: number) { this.value = value; }
+        }
+        function main(): void {
+            const omitted = new Base();
+            console.log(omitted.value, omitted.after, omitted.field, order);
+            order = "";
+            const explicitUndefined = new Base(undefined, { get x(): number { getterCalls++; return 9; } });
+            console.log(explicitUndefined.value, explicitUndefined.after, getterCalls, order);
+            order = "";
+            const derived = new Derived();
+            console.log(derived.value, derived.own, order);
+            order = "";
+            const inherited = new Leaf();
+            console.log(inherited.value, order);
+            console.log(new Rest(1, 2, 3).size);
+            console.log(new NullishCtor(null).value, new NullishCtor(undefined).value,
+                new OptionalCtor().value, new OptionalCtor(undefined).value,
+                new OptionalCtor(8).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "constructor_defaults_parameter_properties"),
+        "4 7 1 XFB\n4 9 1 FB\n3 2 dsXFBfa\n4 XFB\n3\nnull 4 undefined undefined 8\n",
+    );
+}
+
+
 
 #[test]
 fn mixed_json_add_respects_literal_optional_string_and_operand_order() {
