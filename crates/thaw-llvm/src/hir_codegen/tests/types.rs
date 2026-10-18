@@ -797,11 +797,24 @@ fn named_callable_value_identity_and_nullable_default_are_preserved() {
             const defaultList = [defaulted];
             function factory() { return defaulted; }
             const exact: (value: number) => number = defaulted;
+            console.log(exact(12));
             console.log(d1 === d2, d1 === defaulted, defaultBox.defaulted === defaulted,
                 defaultList[0] === defaulted, factory() === defaulted, exact === defaulted);
         }
     "#;
-    assert_eq!(compile_and_run(source, "named_callable_value_identity_nullable"), "true true true true true true\n");
+    assert_eq!(compile_and_run(source, "named_callable_value_identity_nullable"), "12\ntrue true true true true true\n");
+}
+
+#[test]
+fn required_nullable_named_callable_accepts_present_value() {
+    let source = r#"
+        function maybe(value: number | undefined): number { return value ?? 4; }
+        function main(): void {
+            const exact: (value: number) => number = maybe;
+            console.log(exact(17));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "required_nullable_named_callable"), "17\n");
 }
 
 #[test]
@@ -1059,6 +1072,22 @@ fn generic_arrow_bind_preserves_omitted_optional_and_call_time_rest_values() {
     assert_eq!(
         compile_and_run(source, "generic_arrow_bind_optional_rest"),
         "undefined\n2\n"
+    );
+}
+
+#[test]
+fn generic_optional_native_rest_pads_fixed_slot_once() {
+    let source = r#"
+        function collect<T>(seed: T, value?: T, ...rest: T[]): number {
+            return value === undefined ? 10 + rest.length : rest.length;
+        }
+        function main(): void {
+            console.log(collect<number>(1));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_optional_native_rest_fixed_slot"),
+        "10\n"
     );
 }
 
