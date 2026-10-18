@@ -81,6 +81,90 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn structural_package_arguments_accept_decorated_and_undecorated_classes() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-structural-class-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function inspect(value: { value: number }): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.inspect = function(value) { return value.value; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { inspect } from "shape-kit";
+function Mark(value: JsValue): JsValue { return value; }
+class Plain { value: number = 17; }
+@Mark class Decorated { value: number = 29; }
+function main(): void {
+    console.log(inspect(new Plain()));
+    console.log(inspect(new Decorated()));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "17\n29\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn structural_package_arguments_reject_missing_and_incompatible_fields() {
+    for (name, class, expected_diagnostic) in [
+        ("missing", "class Item {}", "missing required field"),
+        ("wrong", "class Item { value: string = 'bad'; }", "F64"),
+    ] {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-registry-fallback-structural-{name}-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        let package = registry.join("shape-kit");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export declare function inspect(value: { value: number }): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("bundle.js"),
+            "module.exports.inspect = function(value) { return value.value; };\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            format!(
+                "import {{ inspect }} from 'shape-kit';\n{class}\nfunction main(): void {{ inspect(new Item()); }}\n"
+            ),
+        )
+        .unwrap();
+        let error = build(&entry, &dir.join("app"), &[], &[], &[], &registry, &[]).unwrap_err();
+        assert!(error.contains("value"), "{error}");
+        assert!(error.contains(expected_diagnostic), "{error}");
+        assert!(!error.contains("__thaw_class_identity"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A bare (non-`new`) factory function's declared return type names a
 /// real class only through a *generic type alias* (`type
 /// Transporter<T, D> = Mail; createTransport(): Transporter;`) rather
