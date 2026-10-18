@@ -826,6 +826,14 @@ impl<'a> FnLowerer<'a> {
                         "generic bound function `{name}` needs a call-site specialization before it can be used as a value"
                     ));
                 }
+                if matches!(
+                    self.generic_callable_template(&name),
+                    Some(GenericCallableTemplate::Named { .. })
+                ) {
+                    return Err(format!(
+                        "generic function template `{name}` needs a call-site specialization before it can be used as a value"
+                    ));
+                }
                 // A read of a `new Proxy(target, handler)`'s own `target`
                 // identifier, redirected to re-read the live QuickJS
                 // handle a `set` trap's mutation actually reaches (see

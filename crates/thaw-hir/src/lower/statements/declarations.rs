@@ -903,7 +903,23 @@ impl<'a> FnLowerer<'a> {
                         Some(HirType::Function(_, _) | HirType::CallableFunction(..)),
                     ) => {
                         let source = self.resolve_binding(identifier.sym.as_ref());
-                        if self.scope.contains_key(&source) {
+                        if matches!(
+                            self.generic_callable_template(&source),
+                            Some(GenericCallableTemplate::Named { .. })
+                        ) {
+                            let (params, ret) = match annotated.as_ref().unwrap() {
+                                HirType::Function(params, ret) => (params.clone(), ret.as_ref().clone()),
+                                HirType::CallableFunction(params, _, rest, ret) => {
+                                    let mut params = params.clone();
+                                    if let Some(rest) = rest {
+                                        params.push(HirType::Array(rest.clone()));
+                                    }
+                                    (params, ret.as_ref().clone())
+                                }
+                                _ => unreachable!("function type matched above"),
+                            };
+                            self.lower_promise_callback(init, &params, Some(&ret))?
+                        } else if self.scope.contains_key(&source) {
                             self.lower_expr(init)?
                         } else {
                             let signature = self.signatures.get(&source).ok_or_else(|| {
