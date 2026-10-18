@@ -442,6 +442,18 @@ fn named_generic_template_bind_checks_constraints() {
 }
 
 #[test]
+fn named_generic_template_bind_rejects_explicit_generic_this() {
+    for source in [
+        "function identify<T>(this: T): T { return this; } function main(): void { const bound = identify.bind(1); bound(); }",
+        "function identify<T>(this: T): T { return this; } function main(): void { const alias = identify; const bound = alias.bind(1); bound(); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(error, "generic function .bind() cannot specialize explicit generic this for `identify`");
+    }
+}
+
+#[test]
 fn named_generic_template_bind_rest_omission_uses_bound_type() {
     let module = thaw_parser::parse_typescript(r#"
         function collect<T>(first: T, ...rest: T[]): T { return first; }

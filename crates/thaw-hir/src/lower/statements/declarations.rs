@@ -302,6 +302,13 @@ impl<'a> FnLowerer<'a> {
         call: &swc_ecma_ast::CallExpr,
         target: GenericCallableTemplate,
     ) -> Result<Vec<HirStmt>, String> {
+        if let GenericCallableTemplate::Named { symbol } = &target {
+            if self.signatures.get(symbol).is_some_and(|signature| signature.generic_this_pattern.is_some()) {
+                return Err(format!(
+                    "generic function .bind() cannot specialize explicit generic this for `{symbol}`"
+                ));
+            }
+        }
         let mut statements = Vec::new();
         let (this_value, leading) = match call.args.split_first() {
             Some((this_arg, leading)) => {
