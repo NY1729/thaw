@@ -66,16 +66,21 @@ function side(n: number): number { log += n; return n; }
 function vtag(s: any, ...v: any[]): void { console.log(s.length, v.length); }
 function vtag2(s: string[], v: number): void { console.log(s.length, v); }
 function one(s: any): any { return s; }
+function makeTag(): (s: string[], v: number) => void { log += "t"; return vtag2; }
 function main() {
   vtag`a${1}x`;
-  vtag2`a${1}x`;
+  vtag2`a${side(1)}x${side(2)}y`;
+  console.log(log);
+  log = "";
+  makeTag()`a${side(3)}x${side(4)}y`;
+  console.log(log);
   const r = one`a${side(1)}b${side(2)}c`;
   console.log(log, r.length, r[0], r[1], r[2]);
 }
 "##;
     assert_eq!(
         compile_and_run(source, "s_contract_tagged_template_void"),
-        "2 1\n2 1\n12 3 a b c\n"
+        "2 1\n3 1\n12\n3 3\nt34\nt3412 3 a b c\n"
     );
 }
 
