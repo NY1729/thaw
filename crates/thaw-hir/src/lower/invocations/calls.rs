@@ -2304,6 +2304,19 @@ impl<'a> FnLowerer<'a> {
                         };
                         match console_read {
                             Some(read) => read,
+                            None if argument.spread.is_none()
+                                && has_dynamic_storage(argument.expr.span())
+                                && expected.is_some_and(|ty| matches!(ty, HirType::Object(_)) && class_name_from_type(ty).is_none())
+                                && signature.as_ref().is_some_and(|signature| signature.is_extern
+                                    && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)|
+                                        Self::is_ordinary_quickjs_typed_call(backend, &symbol)))
+                                && self.source_contract_type_for_expression(&argument.expr)
+                                    .is_some_and(|ty| class_name_from_type(&ty).is_some()) =>
+                            {
+                                self.validate_storage_source(&argument.expr, expected.expect("guarded expected type"))?;
+                                // Keep the physical class value for the live projection after source-shape validation.
+                                self.lower_expr(&argument.expr)?
+                            }
                             None => self.lower_expr_with_expected_type(&argument.expr, expected)?,
                         }
                     }
@@ -2824,10 +2837,10 @@ impl<'a> FnLowerer<'a> {
                             || direct_quickjs_typed_call && actual == HirType::Json
                         {
                             Ok(value)
-                        } else if quickjs_function_value {
-                            self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if class_object {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
+                        } else if quickjs_function_value {
+                            self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if user_function {
                             self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)

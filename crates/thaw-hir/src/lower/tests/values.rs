@@ -3501,8 +3501,89 @@ fn external_structural_argument_rejects_missing_and_incompatible_fields() {
         "#,
     ] {
         let module = thaw_parser::parse_typescript(source).expect("parse");
-        assert!(lower_module(&module).is_err(), "invalid class source shape should be rejected");
+        let error = lower_module(&module).expect_err("invalid class source shape should be rejected");
+        assert!(error.contains("value"), "{error}");
+        assert!(!error.contains("__thaw_class_identity_"), "{error}");
     }
+}
+
+#[test]
+fn external_structural_argument_recurses_through_nested_arrays_and_optional_fields() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {
+                child: { value: number };
+                children: { value: number }[];
+                pair: [number, string];
+                choice: number | string;
+                absent?: string;
+            }): void;
+            class Child { value: number = 1; extra: string = "ok"; }
+            class Holder {
+                child: Child = new Child();
+                children: Child[] = [];
+                pair: [number, string] = [1, "ok"];
+                choice: number | string = 1;
+                extra: boolean = true;
+            }
+            function main(): void {
+                const item = new Holder();
+                const alias = item;
+                __thaw_typed_js_7368617065(alias);
+            }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_ok(), "nested class fields should satisfy recursive structural targets");
+}
+
+#[test]
+fn external_structural_argument_reports_nested_public_field_on_mismatch() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { child: { value: number } }): void;
+            class Child { value: string = "wrong"; }
+            class Holder { child: Child = new Child(); }
+            function main(): void { __thaw_typed_js_7368617065(new Holder()); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("nested incompatible public field must fail");
+    assert!(error.contains("field `child`"), "{error}");
+    assert!(error.contains("field `value`"), "{error}");
+    assert!(!error.contains("__thaw_class_identity_"), "{error}");
+}
+
+#[test]
+fn external_structural_argument_preserves_nullable_and_undefined_contracts() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {
+                nullable: string | null;
+                optional: string | undefined;
+                nullish: string | null | undefined;
+                absent?: number;
+            }): void;
+            class Item {
+                nullable: string | null = null;
+                optional: string | undefined = undefined;
+                nullish: string | null | undefined = undefined;
+            }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_ok(), "matching nullable and undefined source contracts should pass");
+}
+
+#[test]
+fn external_structural_argument_does_not_drop_optional_source_to_required() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): void;
+            class Item { value?: number; }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("optional source cannot satisfy a required field");
+    assert!(error.contains("value"), "{error}");
 }
 
 #[test]
@@ -3514,5 +3595,6 @@ fn plain_object_does_not_satisfy_nominal_class_argument() {
             function main(): void { __thaw_typed_js_7368617065({ value: 1 }); }
         "#,
     ).expect("parse");
-    assert!(lower_module(&module).is_err(), "plain object must not acquire Item identity");
+    let error = lower_module(&module).expect_err("plain object must not acquire Item identity");
+    assert!(!error.contains("__thaw_class_identity_"), "{error}");
 }

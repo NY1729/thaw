@@ -1720,42 +1720,119 @@ impl FnLowerer<'_> {
         Ok(physical_type)
     }
 
-    fn validate_storage_source_type(&mut self, expected: &HirType, source: HirExpr) -> Result<(), String> {
-        if matches!(self.infer_expr_type(&source)?, HirType::Json | HirType::JsValue | HirType::Dynamic)
-            || matches!((&source, expected), (HirExpr::ArrayLit(elements), HirType::Array(_)) if elements.is_empty()) {
+    fn validate_source_assignable(&mut self, expected: &HirType, actual: &HirType) -> Result<(), String> {
+        if matches!(actual, HirType::Json | HirType::JsValue | HirType::Dynamic) {
+            return Ok(());
+        }
+        if let HirType::Union(members) = actual {
+            for member in members {
+                self.validate_source_assignable(expected, member)?;
+            }
             return Ok(());
         }
         if let HirType::Union(members) = expected {
-            for member in members {
-                if self.validate_storage_source_type(member, source.clone()).is_ok() {
-                    return Ok(());
-                }
+            if members.iter().any(|member| self.validate_source_assignable(member, actual).is_ok()) {
+                return Ok(());
             }
+            return Err(format!("value has type {actual:?}, expected {expected:?}"));
+        }
+        match (expected, actual) {
+            (HirType::Optional(_), HirType::Undefined)
+            | (HirType::Nullable(_), HirType::Null)
+            | (HirType::Nullish(_), HirType::Null | HirType::Undefined) => return Ok(()),
+            (HirType::Optional(expected), HirType::Optional(actual))
+            | (HirType::Nullable(expected), HirType::Nullable(actual))
+            | (HirType::Nullish(expected), HirType::Nullish(actual)) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Nullish(expected), HirType::Optional(actual) | HirType::Nullable(actual)) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Optional(expected), actual) => {
+                if matches!(actual, HirType::Nullable(_) | HirType::Nullish(_)) {
+                    return Err(format!("value has type {actual:?}, expected {expected:?} or undefined"));
+                }
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Nullable(expected), actual) if !matches!(actual, HirType::Nullish(_) | HirType::Optional(_)) && *actual != HirType::Null => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Nullish(expected), actual) if !matches!(actual, HirType::Null | HirType::Undefined) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Array(expected), HirType::Array(actual)) => {
+                return self.validate_source_assignable(expected, actual);
+            }
+            (HirType::Array(expected), HirType::Tuple(actual)) => {
+                for element in actual { self.validate_source_assignable(expected, element)?; }
+                return Ok(());
+            }
+            (HirType::Tuple(expected), HirType::Tuple(actual)) => {
+                let required = expected.iter().take_while(|ty| omitted_parameter_value(ty).is_err()).count();
+                if actual.len() < required || actual.len() > expected.len() {
+                    return Err(format!("value has tuple length {}, expected {}..={}", actual.len(), required, expected.len()));
+                }
+                for (expected, actual) in expected.iter().zip(actual) {
+                    self.validate_source_assignable(expected, actual)?;
+                }
+                return Ok(());
+            }
+            (HirType::Object(expected), HirType::Object(actual)) => {
+                if let Some(class) = class_name_from_type(&HirType::Object(expected.clone())) {
+                    return if class_type_has_identity(&HirType::Object(actual.clone()), class) {
+                        Ok(())
+                    } else {
+                        Err(format!("value has type {actual:?}, expected nominal class {class}"))
+                    };
+                }
+                let public = |name: &str| !name.starts_with("__thaw_class_identity_\u{1e}")
+                    && !name.starts_with("__thaw_private_") && !is_hidden_accessor_field(name);
+                for (name, expected_field) in expected.iter().filter(|(name, _)| public(name)) {
+                    if let Some((_, actual_field)) = actual.iter().find(|(actual_name, _)| actual_name == name && public(actual_name)) {
+                        self.validate_source_assignable(expected_field, actual_field)
+                            .map_err(|error| format!("field `{name}`: {error}"))?;
+                    } else if omitted_parameter_value(expected_field).is_err() {
+                        return Err(format!("missing required field `{name}`"));
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        self.coerce_to_declared(expected, HirExpr::TypedClosure(
+            actual.clone(), Box::new(HirExpr::Lit(HirLit::Undefined)),
+        )).map(|_| ())
+    }
+
+    fn validate_storage_source_type(&mut self, expected: &HirType, source: HirExpr) -> Result<(), String> {
+        let actual = self.infer_expr_type(&source)?;
+        if matches!(actual, HirType::Json | HirType::JsValue | HirType::Dynamic) { return Ok(()); }
+        if matches!((expected, &actual), (HirType::Tuple(_), HirType::Array(_))) {
             return self.coerce_to_declared(expected, source).map(|_| ());
         }
-        if let (HirType::Array(expected), HirExpr::ArrayLit(values)) = (expected, &source) {
-            for value in values {
-                if !matches!(value, HirExpr::Lit(HirLit::ArrayHole)) { self.validate_storage_source_type(expected, value.clone())?; }
+        if let (HirType::Object(expected_fields), HirExpr::ObjectLit(values)) = (expected, &source) {
+            if class_name_from_type(expected).is_some() {
+                return self.validate_source_assignable(expected, &actual);
             }
-            return Ok(());
-        }
-        if let (HirType::Array(expected), HirType::Array(actual)) = (expected, self.infer_expr_type(&source)?) {
-            return self.validate_storage_source_type(expected, HirExpr::TypedClosure(*actual, Box::new(HirExpr::Lit(HirLit::Undefined))));
-        }
-        if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, self.infer_expr_type(&source)?) {
             for (name, expected_field) in expected_fields {
-                if let Some((_, actual)) = actual_fields.iter().find(|(actual, _)| actual == name) {
-                    let value = if let HirExpr::ObjectLit(fields) = &source {
-                        fields.iter().find(|(field, _)| field == name).map(|(_, value)| value.clone())
-                    } else { None }.unwrap_or_else(|| HirExpr::TypedClosure(actual.clone(), Box::new(HirExpr::Lit(HirLit::Undefined))));
-                    self.validate_storage_source_type(expected_field, value)?;
+                if let Some((_, value)) = values.iter().find(|(field, _)| field == name) {
+                    self.validate_storage_source_type(expected_field, value.clone())
+                        .map_err(|error| format!("field `{name}`: {error}"))?;
                 } else if omitted_parameter_value(expected_field).is_err() {
-                    return self.coerce_to_declared(expected, source).map(|_| ());
+                    return Err(format!("missing required field `{name}`"));
                 }
             }
             return Ok(());
         }
-        self.coerce_to_declared(expected, source).map(|_| ())
+        if let (HirType::Array(element), HirExpr::ArrayLit(values)) = (expected, &source) {
+            for value in values {
+                if !matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
+                    self.validate_storage_source_type(element, value.clone())?;
+                }
+            }
+            return Ok(());
+        }
+        self.validate_source_assignable(expected, &actual)
     }
 
     fn validate_storage_source(&mut self, expression: &Expr, expected: &HirType) -> Result<(), String> {
