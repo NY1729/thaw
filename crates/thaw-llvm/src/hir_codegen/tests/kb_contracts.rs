@@ -202,6 +202,9 @@ const upper = function(this: string): string { const self = this; return self.to
 const bigintText = function(this: bigint): string { const self = this; return self.toString(); };
 const callOwner = { get method(): (n: number) => number { trace += "method "; return (n: number): number => n; } };
 const compound = function(this: { a: number }, rhs: () => number): number { this.a += rhs(); return 0; };
+const compoundAny = function(this: any, rhs: () => number): number { this.a += rhs(); return 0; };
+const computedCompoundAny = function(this: any, key: () => string, rhs: () => number): number { this[key()] += rhs(); return 0; };
+const indexedCompoundAny = function(this: any, rhs: () => number): number { this[0] += rhs(); return 0; };
 const update = function(this: { a: number }): number { this.a++; return 0; };
 const nested = function(this: { child: { a: number } }, rhs: () => number): number { this.child.a = rhs(); return 0; };
 const freeze = function(this: { a: number }, next: { a: number }): number { let self = this; self.a = (() => { self = next; return 7; })(); return this.a * 10 + self.a; };
@@ -231,6 +234,22 @@ function main(): void {
   console.log("call " + callOwner.method((() => { trace += "arg "; return 1; })()) + " " + trace);
   trace = "";
   try { compound.call(undefined as any, rhs); } catch (e: any) { console.log("compound " + e.message); }
+  trace = "";
+  try { compoundAny.call(undefined as any, rhs); } catch (e: any) { console.log("compound any undefined " + trace + e.message); }
+  trace = "";
+  try { compoundAny.call(null as any, rhs); } catch (e: any) { console.log("compound any null " + trace + e.message); }
+  trace = "";
+  try { computedCompoundAny.call(undefined as any, () => { trace += "key "; return "a"; }, rhs); } catch (e: any) { console.log("computed compound any " + trace + e.message); }
+  trace = "";
+  try { indexedCompoundAny.call(undefined as any, rhs); } catch (e: any) { console.log("indexed compound any " + trace + e.message); }
+  trace = "";
+  const compoundObject = { a: 2 };
+  compoundAny.call(compoundObject, () => { trace += "rhs "; return 3; });
+  console.log("compound any order " + trace + compoundObject.a);
+  const getterOwner: any = new Function("return { value: 1, reads: 0, writes: 0, get a() { this.reads++; return this.value; }, set a(value) { this.writes++; this.value = value; } }")();
+  let getterRhsCalls = 0;
+  compoundAny.call(getterOwner, () => { getterRhsCalls++; return 2; });
+  console.log("compound getter order " + getterOwner.value + " " + getterOwner.reads + " " + getterOwner.writes + " " + getterRhsCalls);
   try { update.call(undefined as any); } catch (e: any) { console.log("update " + e.message); }
   trace = "";
   try { nested.call(undefined as any, rhs); } catch (e: any) { console.log("nested " + trace + e.message); }
@@ -242,7 +261,7 @@ function main(): void {
 }"#;
     assert_eq!(
         compile_and_run(source, "kb_contract_this_assignment_and_call_order_matches_node"),
-        "undefined assign rhs Cannot set properties of undefined (setting 'a')\nnull assign rhs Cannot set properties of null (setting 'a')\nliteral assign rhs Cannot set properties of undefined (setting 'a')\ncopy Cannot read properties of undefined (reading 'b')\ncomputed key Cannot read properties of undefined (reading 'a')\ndynamic named rhs Cannot set properties of undefined (setting 'a')\ndynamic computed key rhs Cannot set properties of undefined (setting 'a')\ndynamic computed null key rhs Cannot set properties of null (setting 'a')\nthis method Cannot read properties of undefined (reading 'method')\nalias method Cannot read properties of undefined (reading 'method')\nalias builtin XY\nbigint builtin 3\ncall 1 method arg \ncompound Cannot read properties of undefined (reading 'a')\nupdate Cannot read properties of undefined (reading 'a')\nnested Cannot read properties of undefined (reading 'child')\nvalid copy 6\nvalid computed 6\nfrozen target 72 7 2\n"
+        "undefined assign rhs Cannot set properties of undefined (setting 'a')\nnull assign rhs Cannot set properties of null (setting 'a')\nliteral assign rhs Cannot set properties of undefined (setting 'a')\ncopy Cannot read properties of undefined (reading 'b')\ncomputed key Cannot read properties of undefined (reading 'a')\ndynamic named rhs Cannot set properties of undefined (setting 'a')\ndynamic computed key rhs Cannot set properties of undefined (setting 'a')\ndynamic computed null key rhs Cannot set properties of null (setting 'a')\nthis method Cannot read properties of undefined (reading 'method')\nalias method Cannot read properties of undefined (reading 'method')\nalias builtin XY\nbigint builtin 3\ncall 1 method arg \ncompound Cannot read properties of undefined (reading 'a')\ncompound any undefined Cannot read properties of undefined (reading 'a')\ncompound any null Cannot read properties of null (reading 'a')\ncomputed compound any key Cannot read properties of undefined (reading 'a')\nindexed compound any Cannot read properties of undefined (reading '0')\ncompound any order rhs 5\ncompound getter order 3 1 1 1\nupdate Cannot read properties of undefined (reading 'a')\nnested Cannot read properties of undefined (reading 'child')\nvalid copy 6\nvalid computed 6\nfrozen target 72 7 2\n"
     );
 }
 

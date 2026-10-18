@@ -1,4 +1,50 @@
 impl<'a> FnLowerer<'a> {
+    fn guard_private_json_receiver_access(
+        object: HirExpr,
+        key: HirExpr,
+        result: HirExpr,
+        write: bool,
+    ) -> HirExpr {
+        let receiver = object.with_non_arrow_this_access(NonArrowThisAccess::Value);
+        let is_nullish = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+            vec![receiver.clone()],
+        );
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+            vec![receiver],
+        );
+        let error = |kind: &str| {
+            let action = if write { "set" } else { "read" };
+            let preposition = if write { "setting" } else { "reading" };
+            let prefix = format!(
+                "\u{1}TypeError\u{1}Cannot {action} properties of {kind} ({preposition} '"
+            );
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                        vec![HirExpr::Lit(HirLit::Str(prefix)), key.clone()],
+                    ),
+                    HirExpr::Lit(HirLit::Str("')".into())),
+                ],
+            )
+        };
+        HirExpr::Block(vec![
+            HirStmt::If(
+                is_nullish,
+                vec![HirStmt::If(
+                    is_null,
+                    vec![HirStmt::Throw(error("null"))],
+                    vec![HirStmt::Throw(error("undefined"))],
+                )],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(result)),
+        ])
+    }
+
     /// `o.k op= r` / `o[k] ??= r` on a dynamic (`any`) target: the receiver and key are evaluated
     /// once into temporaries, then the assignment is rewritten as `t[k] = t[k] op r`
     /// (`t[k] || (t[k] = r)` for the short-circuiting forms) and lowered like any other.
@@ -73,6 +119,15 @@ impl<'a> FnLowerer<'a> {
         target: Target,
         value: HirExpr,
     ) -> Result<HirExpr, String> {
+        self.lower_assignment_target_write_with_guard(target, value, true)
+    }
+
+    fn lower_assignment_target_write_with_guard(
+        &mut self,
+        target: Target,
+        value: HirExpr,
+        private_json_write_guard: bool,
+    ) -> Result<HirExpr, String> {
         let mut bindings = Vec::new();
         // An object-literal setter stores a hidden `__thaw_setter_<field>`
         // closure; a write dispatches to it (receiver + value) instead of
@@ -143,11 +198,12 @@ impl<'a> FnLowerer<'a> {
         let private_json_write = match &target {
             Target::Dictionary(object, key, HirType::Json)
             | Target::DynamicProperty(object, key)
-                if matches!(object, HirExpr::NonArrowThis { .. }) =>
+                if private_json_write_guard && matches!(object, HirExpr::NonArrowThis { .. }) =>
             {
                 Some((object.clone(), (**key).clone()))
             }
-            Target::JsonIndex(object, index) if matches!(object, HirExpr::NonArrowThis { .. }) => {
+            Target::JsonIndex(object, index)
+                if private_json_write_guard && matches!(object, HirExpr::NonArrowThis { .. }) => {
                 Some((object.clone(), self.coerce_primitive_to_string((**index).clone())?))
             }
             _ => None,
@@ -167,40 +223,7 @@ impl<'a> FnLowerer<'a> {
         let Some((object, key)) = private_json_write else {
             return Ok(result);
         };
-        let receiver = object.with_non_arrow_this_access(NonArrowThisAccess::Value);
-        let is_nullish = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
-            vec![receiver.clone()],
-        );
-        let is_null = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
-            vec![receiver],
-        );
-        let error = |kind: &str| HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_string_concat".into())),
-            vec![
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_string_concat".into())),
-                    vec![
-                        HirExpr::Lit(HirLit::Str(format!("\u{1}TypeError\u{1}Cannot set properties of {kind} (setting '"))),
-                        key.clone(),
-                    ],
-                ),
-                HirExpr::Lit(HirLit::Str("')".into())),
-            ],
-        );
-        Ok(HirExpr::Block(vec![
-            HirStmt::If(
-                is_nullish,
-                vec![HirStmt::If(
-                    is_null,
-                    vec![HirStmt::Throw(error("null"))],
-                    vec![HirStmt::Throw(error("undefined"))],
-                )],
-                Vec::new(),
-            ),
-            HirStmt::Return(Some(result)),
-        ]))
+        Ok(Self::guard_private_json_receiver_access(object, key, result, true))
     }
 
     fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -227,8 +250,37 @@ impl<'a> FnLowerer<'a> {
             };
             return self.lower_fixed_object_property_read(object, fields, property);
         }
+        let private_json_read = match target {
+            Target::Dictionary(object, key, HirType::Json)
+                if matches!(object, HirExpr::NonArrowThis { .. }) =>
+            {
+                Some((object.clone(), (**key).clone()))
+            }
+            Target::JsonIndex(object, index)
+                if matches!(object, HirExpr::NonArrowThis { .. }) =>
+            {
+                Some((object.clone(), self.coerce_primitive_to_string((**index).clone())?))
+            }
+            _ => None,
+        };
         let Target::Index(array, index) = target else {
-            return target_to_read_expr(target);
+            let read_target = match (target, private_json_read.is_some()) {
+                (Target::Dictionary(object, key, element), true) => Target::Dictionary(
+                    object.clone().with_non_arrow_this_access(NonArrowThisAccess::Value),
+                    key.clone(),
+                    element.clone(),
+                ),
+                (Target::JsonIndex(object, index), true) => Target::JsonIndex(
+                    object.clone().with_non_arrow_this_access(NonArrowThisAccess::Value),
+                    index.clone(),
+                ),
+                _ => target.clone(),
+            };
+            let read = target_to_read_expr(&read_target)?;
+            let Some((object, key)) = private_json_read else {
+                return Ok(read);
+            };
+            return Ok(Self::guard_private_json_receiver_access(object, key, read, false));
         };
         let array_type = self.infer_expr_type(array)?;
         let HirType::Array(element) = &array_type else {
@@ -1187,34 +1239,44 @@ impl<'a> FnLowerer<'a> {
                     Target::Prop(HirExpr::Var(object_name), object_type, field)
                 }
                 Target::Dictionary(object, key, element) => {
-                    let object_name = format!("__thaw_assign_dictionary_{}", self.next_binding);
-                    self.next_binding += 1;
-                    let object_type = HirType::Dictionary(Box::new(element.clone()));
-                    self.scope.insert(object_name.clone(), object_type.clone());
-                    bindings.push((object_name.clone(), object_type, object));
+                    let object = if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object
+                    } else {
+                        let object_name = format!("__thaw_assign_dictionary_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let object_type = HirType::Dictionary(Box::new(element.clone()));
+                        self.scope.insert(object_name.clone(), object_type.clone());
+                        bindings.push((object_name.clone(), object_type, object));
+                        HirExpr::Var(object_name)
+                    };
 
                     let key_name = format!("__thaw_assign_key_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(key_name.clone(), HirType::Str);
                     bindings.push((key_name.clone(), HirType::Str, *key));
                     Target::Dictionary(
-                        HirExpr::Var(object_name),
+                        object,
                         Box::new(HirExpr::Var(key_name)),
                         element,
                     )
                 }
                 Target::JsonIndex(object, index) => {
-                    let object_name = format!("__thaw_assign_json_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(object_name.clone(), HirType::Json);
-                    bindings.push((object_name.clone(), HirType::Json, object));
+                    let object = if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object
+                    } else {
+                        let object_name = format!("__thaw_assign_json_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(object_name.clone(), HirType::Json);
+                        bindings.push((object_name.clone(), HirType::Json, object));
+                        HirExpr::Var(object_name)
+                    };
 
                     let index_name = format!("__thaw_assign_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
                     bindings.push((index_name.clone(), HirType::F64, *index));
                     Target::JsonIndex(
-                        HirExpr::Var(object_name),
+                        object,
                         Box::new(HirExpr::Var(index_name)),
                     )
                 }
@@ -1646,7 +1708,31 @@ impl<'a> FnLowerer<'a> {
             value
         };
 
-        let result = self.lower_assignment_target_write(target, value)?;
+        let target = if assign.op != AssignOp::Assign {
+            match target {
+                Target::Dictionary(object, key, element) => Target::Dictionary(
+                    if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object.with_non_arrow_this_access(NonArrowThisAccess::Value)
+                    } else {
+                        object
+                    },
+                    key,
+                    element,
+                ),
+                Target::JsonIndex(object, index) => Target::JsonIndex(
+                    if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object.with_non_arrow_this_access(NonArrowThisAccess::Value)
+                    } else {
+                        object
+                    },
+                    index,
+                ),
+                other => other,
+            }
+        } else {
+            target
+        };
+        let result = self.lower_assignment_target_write_with_guard(target, value, assign.op == AssignOp::Assign)?;
         if let Some((object, path, value, nested)) = assigned_function_property {
             let metadata = self
                 .object_function_property_discriminants
