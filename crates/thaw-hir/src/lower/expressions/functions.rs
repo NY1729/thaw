@@ -699,7 +699,7 @@ impl<'a> FnLowerer<'a> {
         {
             return self.lower_generator_arrow(arrow, source_params, Some(inferred_return), receiver);
         }
-        result
+        result.map(|closure| callable_aware_closure(&arrow.params, closure))
     }
 
     fn lower_generic_instantiation_expression(
@@ -900,6 +900,15 @@ impl<'a> FnLowerer<'a> {
                     Pat::Rest(rest) => &mut rest.type_ann,
                     Pat::Object(object) => &mut object.type_ann,
                     Pat::Array(array) => &mut array.type_ann,
+                    Pat::Assign(assignment) => match assignment.left.as_mut() {
+                        Pat::Ident(binding) => &mut binding.type_ann,
+                        _ => {
+                            return Err(
+                                "contextual generator defaults require an identifier binding"
+                                    .into(),
+                            )
+                        }
+                    },
                     _ => return Err("unsupported contextual generator parameter pattern".into()),
                 };
                 if annotation.as_ref().is_none_or(|annotation| {

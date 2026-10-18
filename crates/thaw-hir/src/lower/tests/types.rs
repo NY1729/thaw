@@ -2235,6 +2235,35 @@ fn non_generic_optional_arrow_bind_shifts_mask_and_keeps_rest_shape() {
 }
 
 #[test]
+fn generator_expressions_keep_optional_and_rest_callable_shape() {
+    let program = lower(
+        r#"function main(): void {
+            const optional = function* (value?: number): Generator<number | undefined> { yield value; };
+            const bound = optional.bind(null);
+            const rest = function* (...values: number[]): Generator<number> { yield values.length; };
+            const packed = rest.bind(null);
+            const contextual: (value?: number) => Generator<number> = function* (value: number = 7): Generator<number> { yield value; };
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let callable = |name: &str| {
+        main.body.iter().find_map(|statement| match statement {
+            HirStmt::Let(found, HirType::CallableFunction(params, optional, rest, _), _)
+                if found == name => Some((params, optional, rest)),
+            _ => None,
+        }).unwrap_or_else(|| panic!("callable `{name}` missing from HIR: {:#?}", main.body))
+    };
+    let (params, mask, rest) = callable("bound");
+    assert_eq!(params, &[HirType::Optional(Box::new(HirType::F64))]);
+    assert!(mask.contains(0));
+    assert!(rest.is_none());
+    let (params, mask, rest) = callable("packed");
+    assert!(params.is_empty());
+    assert!(mask.is_empty());
+    assert_eq!(rest.as_deref(), Some(&HirType::F64));
+}
+
+#[test]
 fn non_generic_optional_arrow_direct_call_keeps_omittable_parameter() {
     let program = lower(
         r#"function main(): void {
@@ -2287,6 +2316,17 @@ fn required_undefined_capable_parameter_stays_required_when_called_or_bound() {
     ] {
         let module = thaw_parser::parse_typescript(source).unwrap();
         assert!(lower_module(&module).is_err(), "omitted required argument was accepted: {source}");
+    }
+}
+
+#[test]
+fn required_undefined_generator_parameter_stays_required_when_called_or_bound() {
+    for source in [
+        r#"function main(): void { const required = function* (value: number | undefined): Generator<number | undefined> { yield value; }; required(); }"#,
+        r#"function main(): void { const required = function* (value: number | undefined): Generator<number | undefined> { yield value; }; const bound = required.bind(null); bound(); }"#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "omitted required generator argument was accepted: {source}");
     }
 }
 
