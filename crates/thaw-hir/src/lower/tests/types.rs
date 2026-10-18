@@ -60,17 +60,20 @@ fn required_callable_view_does_not_allow_omitting_its_argument() {
 }
 
 #[test]
-fn generic_named_function_required_view_remains_unsupported() {
+fn generic_named_function_specializes_to_a_monomorphic_required_view() {
     let module = thaw_parser::parse_typescript(
         r#"
         function identity<T>(value: T): T { return value; }
         function main(): void {
             const exact: (value: number) => number = identity;
+            const alias = identity;
+            const exactAlias: (value: string) => string = alias;
         }
         "#,
     )
     .unwrap();
-    assert!(lower_module(&module).is_err());
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]
@@ -550,6 +553,74 @@ fn named_generic_template_typeof_preserves_shadowing() {
     assert_eq!(format!("{:?}", local_templates.body).matches("Str(\"function\")").count(), 2);
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
     assert!(format!("{:?}", main.body).contains("Str(\"function\")"));
+}
+
+#[test]
+fn named_generic_template_rejects_unresolved_value_escapes() {
+    let escapes = [
+        (
+            "return",
+            "identity",
+            "function leak(): any { return identity; } function main(): void { leak(); }",
+        ),
+        (
+            "array",
+            "identity",
+            "function main(): void { const values = [identity]; }",
+        ),
+        (
+            "object value",
+            "identity",
+            "function main(): void { const values = { value: identity }; }",
+        ),
+        (
+            "object shorthand",
+            "identity",
+            "function main(): void { const values = { identity }; }",
+        ),
+        (
+            "any consumer",
+            "identity",
+            "function consume(value: any): void {} function main(): void { consume(identity); }",
+        ),
+        (
+            "alias return",
+            "alias",
+            "function leak(): any { const alias = identity; return alias; } function main(): void { leak(); }",
+        ),
+        (
+            "alias array",
+            "alias",
+            "function main(): void { const alias = identity; const values = [alias]; }",
+        ),
+        (
+            "alias object",
+            "alias",
+            "function main(): void { const alias = identity; const values = { value: alias }; }",
+        ),
+        (
+            "alias object shorthand",
+            "alias",
+            "function main(): void { const alias = identity; const values = { alias }; }",
+        ),
+        (
+            "alias any consumer",
+            "alias",
+            "function consume(value: any): void {} function main(): void { const alias = identity; consume(alias); }",
+        ),
+    ];
+    for (label, name, body) in escapes {
+        let source = format!(
+            "function identity<T>(value: T): T {{ return value; }} {body}"
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(
+            error,
+            format!("generic function template `{name}` needs a call-site specialization before it can be used as a value"),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]

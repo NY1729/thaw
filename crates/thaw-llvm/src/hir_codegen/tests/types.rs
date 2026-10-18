@@ -640,6 +640,32 @@ fn compiles_named_generic_template_aliases_and_alias_chains() {
 }
 
 #[test]
+fn compiles_named_generic_templates_in_monomorphic_contexts() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        async function main(): Promise<void> {
+            const numberIdentity: (value: number) => number = identity;
+            const alias = identity;
+            const stringIdentity: (value: string) => string = alias;
+            console.log(numberIdentity(19));
+            console.log(stringIdentity("context"));
+            const promised: number = await new Promise<number>((resolve, reject) => {
+                resolve(23);
+            }).then(identity);
+            const promisedAlias: string = await new Promise<string>((resolve, reject) => {
+                resolve("promise-context");
+            }).then(alias);
+            console.log(promised);
+            console.log(promisedAlias);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_contexts"),
+        "19\ncontext\n23\npromise-context\n"
+    );
+}
+
+#[test]
 fn compiles_generic_callbacks_for_user_functions() {
     let source = r#"
         function apply(callback: (value: number) => number, value: number): number {
