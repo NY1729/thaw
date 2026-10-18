@@ -1216,6 +1216,40 @@ fn diagnoses_uninferable_and_unsupported_generic_layouts() {
 }
 
 #[test]
+fn generic_class_identity_keeps_physical_json_layout_without_opening_json_objects() {
+    let class_value = thaw_parser::parse_typescript(
+        r#"
+        declare function __thaw_typed_js_7368617065(value: { value: number }): number;
+        class Item { value: number = 5; }
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const item = new Item();
+            __thaw_typed_js_7368617065(item);
+            const returned = identity(item);
+            returned.value = 13;
+            console.log(item.value);
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&class_value).is_ok());
+
+    let plain_json_field = thaw_parser::parse_typescript(
+        r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const value: { value: Json } = { value: JSON.parse("null") };
+            identity(value);
+        }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&plain_json_field).unwrap_err();
+    assert!(error.contains("cannot specialize for native layout"), "{error}");
+    assert!(error.contains("Json"), "{error}");
+}
+
+#[test]
 fn extern_generics_accept_json_collection_layouts() {
     let module = thaw_parser::parse_typescript(
         r#"

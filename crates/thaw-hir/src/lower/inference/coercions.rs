@@ -368,6 +368,77 @@ impl<'a> FnLowerer<'a> {
         is_async && matches!(declared, HirType::Promise(inner) if inner.as_ref() == ret)
     }
 
+    fn class_method_signature_compatible(
+        &self,
+        class: &str,
+        name: &str,
+        expected: &HirType,
+        source_contract: bool,
+    ) -> bool {
+        let symbol = class_method_symbol(class, name);
+        if *expected == HirType::Dynamic
+            && self.signatures.keys().any(|candidate| {
+                candidate == &symbol || candidate.starts_with(&format!("{symbol}__thaw_"))
+            })
+        {
+            return true;
+        }
+        let Some(signature) = self.signatures.get(&symbol) else {
+            return false;
+        };
+        let stored_params = signature.params.get(1..).unwrap_or_default();
+        let source_start = signature.source_range.0;
+        let params = if source_contract {
+            storage_source_callable_parameters(source_start, stored_params)
+        } else {
+            stored_params.to_vec()
+        };
+        let fixed = if signature.native_rest.is_some() {
+            &params[..params.len().saturating_sub(1)]
+        } else {
+            &params
+        };
+        let native_rest = if source_contract {
+            params.last().and_then(|parameter| match parameter {
+                HirType::Array(element) => Some(element.as_ref().clone()),
+                _ => None,
+            }).or_else(|| signature.native_rest.clone())
+        } else {
+            signature.native_rest.clone()
+        };
+        let ret = if source_contract {
+            storage_source_return_type(source_start).unwrap_or_else(|| signature.ret.clone())
+        } else {
+            signature.ret.clone()
+        };
+        match expected {
+            HirType::Dynamic if !signature.generic_type_params.is_empty() => true,
+            HirType::Function(expected_params, result) => {
+                fixed == expected_params
+                    && (&ret == result.as_ref()
+                        || Self::async_signature_returns(signature.is_async, &ret, result))
+            }
+            HirType::CallableFunction(expected_params, _, expected_rest, result) => {
+                fixed.len() == expected_params.len()
+                    && fixed.iter().zip(expected_params).all(|(actual, expected)| {
+                        matches!(expected, HirType::Optional(inner) if inner.as_ref() == actual)
+                            || expected == actual
+                    })
+                    && native_rest.as_ref() == expected_rest.as_deref()
+                    && (&ret == result.as_ref()
+                        || Self::async_signature_returns(signature.is_async, &ret, result))
+            }
+            _ => false,
+        }
+    }
+
+    fn class_method_signature_exists(&self, class: &str, name: &str) -> bool {
+        let symbol = class_method_symbol(class, name);
+        self.signatures.keys().any(|candidate| {
+            candidate == &symbol || candidate.starts_with(&format!("{symbol}__thaw_"))
+        })
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         if let HirType::Promise(target) = declared {
             if target.as_ref() == &HirType::Json {
@@ -711,43 +782,7 @@ impl<'a> FnLowerer<'a> {
                     {
                         return true;
                     }
-                    let symbol = class_method_symbol(class, name);
-                    if *expected == HirType::Dynamic
-                        && self.signatures.keys().any(|candidate| {
-                            candidate == &symbol
-                                || candidate.starts_with(&format!("{symbol}__thaw_"))
-                        })
-                    {
-                        return true;
-                    }
-                    let Some(signature) = self.signatures.get(&symbol) else {
-                        return false;
-                    };
-                    let params = signature.params.get(1..).unwrap_or_default();
-                    let fixed = if signature.native_rest.is_some() {
-                        &params[..params.len().saturating_sub(1)]
-                    } else {
-                        params
-                    };
-                    match expected {
-                        HirType::Dynamic if !signature.generic_type_params.is_empty() => true,
-                        HirType::Function(expected_params, result) => {
-                            fixed == expected_params
-                                && (&signature.ret == result.as_ref()
-                                    || Self::async_signature_returns(signature.is_async, &signature.ret, result))
-                        }
-                        HirType::CallableFunction(expected_params, _, expected_rest, result) => {
-                            fixed.len() == expected_params.len()
-                                && fixed.iter().zip(expected_params).all(|(actual, expected)| {
-                                    matches!(expected, HirType::Optional(inner) if inner.as_ref() == actual)
-                                        || expected == actual
-                                })
-                                && signature.native_rest.as_ref() == expected_rest.as_deref()
-                                && (&signature.ret == result.as_ref()
-                                    || Self::async_signature_returns(signature.is_async, &signature.ret, result))
-                        }
-                        _ => false,
-                    }
+                    self.class_method_signature_compatible(class, name, expected, false)
                 });
                 if compatible {
                     return Ok(value);

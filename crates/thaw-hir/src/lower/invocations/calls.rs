@@ -2035,6 +2035,12 @@ impl<'a> FnLowerer<'a> {
         let mut forwarded_rest_array = false;
         let mut method_argument_sources_aligned =
             call.args.iter().all(|argument| argument.spread.is_none());
+        let direct_jit_typed_call = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && method_argument_sources_aligned
+                && dynamic_symbol(&callee_name)
+                    .is_some_and(|(backend, _)| backend == DynamicBackend::Jit)
+        });
         let mut lowered = Vec::with_capacity(call.args.len());
         let generic_placeholder = signature
             .as_ref()
@@ -2304,6 +2310,20 @@ impl<'a> FnLowerer<'a> {
                         };
                         match console_read {
                             Some(read) => read,
+                            None if argument.spread.is_none()
+                                && method_argument_sources_aligned
+                                && expected.is_some_and(|ty| matches!(ty, HirType::Object(_)) && class_name_from_type(ty).is_none())
+                                && signature.as_ref().is_some_and(|signature| signature.is_extern
+                                    && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)|
+                                        backend == DynamicBackend::Jit
+                                            || Self::is_ordinary_quickjs_typed_call(backend, &symbol)))
+                                && self.source_contract_type_for_expression(&argument.expr)
+                                    .is_some_and(|ty| class_name_from_type(&ty).is_some()) =>
+                            {
+                                self.validate_storage_source(&argument.expr, expected.expect("guarded expected type"))?;
+                                // Keep the physical class value for the live projection after source-shape validation.
+                                self.lower_expr(&argument.expr)?
+                            }
                             None => self.lower_expr_with_expected_type(&argument.expr, expected)?,
                         }
                     }
@@ -2352,7 +2372,11 @@ impl<'a> FnLowerer<'a> {
                     .spread
                     .is_none()
                     .then_some(argument.expr.as_ref());
-                let actual = self.generic_call_argument_source_type(source, &value)?;
+                let actual = self.generic_call_argument_source_type(
+                    source,
+                    &value,
+                    signature.as_ref().is_some_and(|signature| !signature.is_extern),
+                )?;
                 let _ = match_generic_pattern(pattern, &actual, &mut generic_inferred);
             }
             if argument.spread.is_some() {
@@ -2779,6 +2803,10 @@ impl<'a> FnLowerer<'a> {
                         }
                         let class_object =
                             direct_quickjs_typed_call && class_name_from_type(&actual).is_some();
+                        let jit_structural_class_object = direct_jit_typed_call
+                            && class_name_from_type(&actual).is_some()
+                            && matches!(declared, HirType::Object(_))
+                            && class_name_from_type(declared).is_none();
                         let is_generated_wrapper =
                             callee_name.starts_with("__thaw_typed_wrapper_js_");
                         let value = if local_function.is_some()
@@ -2824,11 +2852,11 @@ impl<'a> FnLowerer<'a> {
                             || direct_quickjs_typed_call && actual == HirType::Json
                         {
                             Ok(value)
-                        } else if quickjs_function_value {
-                            self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if class_object {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
-                        } else if user_function {
+                        } else if jit_structural_class_object {
+                            self.coerce_jit_structural_class_argument(value, declared)
+                        } else if quickjs_function_value || user_function {
                             self.coerce_primitive_array_argument_aliasing(value, declared)
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)
                             && dynamic_symbol(&callee_name).is_none()
@@ -2976,6 +3004,7 @@ impl<'a> FnLowerer<'a> {
                         .any(|optional| *optional)
                 })
                 .unwrap_or(args.len());
+            let preserve_class_physical = !signature.is_extern;
             let mut actual = args
                 .iter()
                 .enumerate()
@@ -2996,9 +3025,17 @@ impl<'a> FnLowerer<'a> {
                             Expr::Lit(Lit::Str(value)) => Ok(HirType::StrLiteral(
                                 value.value.to_string_lossy().into_owned(),
                             )),
-                            _ => self.generic_call_argument_source_type(source, arg),
+                            _ => self.generic_call_argument_source_type(
+                                source,
+                                arg,
+                                preserve_class_physical,
+                            ),
                         },
-                        None => self.generic_call_argument_source_type(source, arg),
+                        None => self.generic_call_argument_source_type(
+                            source,
+                            arg,
+                            preserve_class_physical,
+                        ),
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -3116,6 +3153,8 @@ impl<'a> FnLowerer<'a> {
                 };
                 let direct_quickjs_typed_call =
                     Self::is_ordinary_quickjs_typed_call(backend, &symbol);
+                let direct_jit_typed_call =
+                    backend == DynamicBackend::Jit && method_argument_sources_aligned;
                 let quickjs_instance_typed_method = method_argument_sources_aligned
                     && Self::is_quickjs_instance_typed_method(backend, &symbol);
                 let ret = if direct_quickjs_typed_call
@@ -3166,6 +3205,19 @@ impl<'a> FnLowerer<'a> {
                         }
                         let class_object =
                             direct_quickjs_typed_call && class_name_from_type(&actual).is_some();
+                        let jit_structural_class_object = direct_jit_typed_call
+                            && class_name_from_type(&actual).is_some()
+                            && matches!(declared, HirType::Object(_))
+                            && class_name_from_type(declared).is_none();
+                        if jit_structural_class_object && method_argument_sources_aligned {
+                            if let Some(argument) = call
+                                .args
+                                .get(i)
+                                .filter(|argument| argument.spread.is_none())
+                            {
+                                self.validate_storage_source(&argument.expr, declared)?;
+                            }
+                        }
                         let promoted_typed_callback = direct_quickjs_typed_call
                             && matches!(
                                 value,
@@ -3192,6 +3244,8 @@ impl<'a> FnLowerer<'a> {
                             Ok(value)
                         } else if class_object {
                             self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
+                        } else if jit_structural_class_object {
+                            self.coerce_jit_structural_class_argument(value, declared)
                         } else if direct_quickjs_typed_call && actual == HirType::Json {
                             Ok(value)
                         } else {
