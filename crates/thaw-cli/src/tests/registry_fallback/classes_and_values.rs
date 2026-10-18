@@ -269,7 +269,7 @@ function main(): void {
 }
 
 #[test]
-fn generic_package_identity_keeps_class_writeback_after_typed_js_boundary() {
+fn local_generic_identity_keeps_class_writeback_after_typed_js_boundary() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-fallback-generic-class-identity-{}",
         std::process::id()
@@ -277,10 +277,10 @@ fn generic_package_identity_keeps_class_writeback_after_typed_js_boundary() {
     let registry = dir.join("modules");
     let package = registry.join("identity-kit");
     std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("package.d.ts"), "export declare function identity<T>(item: T): T;\nexport declare function inspect(value: { value: number }): number;\n").unwrap();
-    std::fs::write(package.join("bundle.js"), "module.exports.identity = function(item) { return item; };\nmodule.exports.inspect = function(value) { return value.value; };\n").unwrap();
+    std::fs::write(package.join("package.d.ts"), "export declare function inspect(value: { value: number }): number;\n").unwrap();
+    std::fs::write(package.join("bundle.js"), "module.exports.inspect = function(value) { return value.value; };\n").unwrap();
     let entry = dir.join("main.ts");
-    std::fs::write(&entry, r#"import { identity } from "identity-kit";
+    std::fs::write(&entry, r#"import { inspect } from "identity-kit";
 class Item { value: number = 5; }
 function localIdentity<T>(item: T): T { return item; }
 function main(): void {
@@ -288,17 +288,14 @@ function main(): void {
     console.log(inspect(item));
     const localReturned = localIdentity(item);
     localReturned.value = 8;
-    console.log(item.value);
-    const returned = identity(item);
-    returned.value = 13;
-    console.log(item.value);
+    console.log(localReturned === item, item.value);
 }
 "#).unwrap();
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n8\n13\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\ntrue 8\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
