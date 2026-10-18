@@ -2652,8 +2652,7 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
             const collection = new Map<string, number>(); collection.set("a", 1);
             console.log(native_storage_collection(collection), native_storage_calls());
             const validForeign: any = new Function("return new Map([['a', 1]])")();
-            try { native_storage_collection(validForeign); console.log("accepted JS collection"); }
-            catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
+            console.log(native_storage_collection(validForeign), native_storage_calls());
             const foreign: any = new Function("return new Map([[1, 'bad']])")();
             try { native_storage_collection(foreign); console.log("accepted collection"); }
             catch (error) { console.log(error instanceof TypeError, native_storage_calls()); }
@@ -2712,6 +2711,110 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\ntrue 1\n7 2\ntrue 2\ntrue 2\n8 1 3\n9 4\ntrue 4\n1 5\ntrue 5\ntrue 5\ntrue true bad\n11 false 6\ntrue 11 6\n1 7\ntrue object 1\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\ntrue 1\n7 2\ntrue 2\ntrue 2\n8 1 3\n9 4\ntrue 4\n1 5\n1 6\ntrue 6\ntrue true bad\n11 false 7\ntrue 11 7\n1 8\ntrue object 1\n");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
+    let source = r#"
+        declare function native_map_sum(value: Map<string, number>): number;
+        declare function native_set_sum(value: Set<number>): number;
+        declare function native_map_mutate(value: Map<string, number>): number;
+        declare function native_set_mutate(value: Set<number>): number;
+        declare function native_collection_calls(): number;
+        function main(): void {
+            const jsMap: any = new Function("return new Map([['a', 1], ['b', 2]])")();
+            const jsSet: any = new Function("return new Set([1, 2, 3])")();
+            try { console.log(native_map_sum(jsMap), native_collection_calls()); }
+            catch (error) { console.log("map rejected", error instanceof TypeError, native_collection_calls()); }
+            try { console.log(native_set_sum(jsSet), native_collection_calls()); }
+            catch (error) { console.log("set rejected", error instanceof TypeError, native_collection_calls()); }
+            try { native_map_mutate(jsMap); console.log(jsMap.get("changed"), native_collection_calls()); }
+            catch (error) { console.log("map mutate rejected", error instanceof TypeError, native_collection_calls()); }
+            try { native_set_mutate(jsSet); console.log(jsSet.has(9), native_collection_calls()); }
+            catch (error) { console.log("set mutate rejected", error instanceof TypeError, native_collection_calls()); }
+            const emptyMap: any = new Function("return new Map()")();
+            const emptySet: any = new Function("return new Set()")();
+            try { console.log(native_map_sum(emptyMap), native_collection_calls()); }
+            catch (error) { console.log("empty map rejected", error instanceof TypeError, native_collection_calls()); }
+            try { console.log(native_set_sum(emptySet), native_collection_calls()); }
+            catch (error) { console.log("empty set rejected", error instanceof TypeError, native_collection_calls()); }
+            const nativeMap = new Map<string, number>(); nativeMap.set("a", 4);
+            const nativeSet = new Set<number>(); nativeSet.add(5);
+            console.log(native_map_sum(nativeMap), native_set_sum(nativeSet), native_collection_calls());
+            const badKey: any = new Function("return new Map([[1, 2]])")();
+            const badValue: any = new Function("return new Map([['a', 1], ['b', 'bad']])")();
+            const plain: any = new Function("return {entries: []}")();
+            const forgedMap: any = new Function("return {__thaw_map_entries__: [['a', 1]]}")();
+            const forgedSet: any = new Function("return {__thaw_set_values__: [1]}")();
+            const wrongKind: any = new Function("return new Set([1])")();
+            try { native_map_sum(badKey); console.log("accepted invalid map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_map_sum(badValue); console.log("accepted invalid map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_map_sum(plain); console.log("accepted invalid map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_map_sum(forgedMap); console.log("accepted invalid map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_map_sum(wrongKind); console.log("accepted invalid map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_set_sum(forgedSet); console.log("accepted invalid set"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "ffi_js_collection_copyin");
+    compiler.compile_program(&program).unwrap();
+    let dir = std::env::temp_dir().join(format!("thaw-ffi-js-collection-copyin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let object = dir.join("program.o");
+    let native = dir.join("native.c");
+    let native_object = dir.join("native.o");
+    let executable = dir.join("program");
+    compiler.write_object_file(&object).unwrap();
+    std::fs::write(&native, r#"
+        #include <stdint.h>
+        #include <string.h>
+        static int calls;
+        static double sum_words(void *array) {
+            if (!array) return 0;
+            int64_t length; memcpy(&length, array, sizeof(length));
+            double total = 0;
+            for (int64_t i = 0; i < length; i++) {
+                uint64_t word; double value;
+                memcpy(&word, (uint8_t *)array + 8 + i * 8, sizeof(word));
+                memcpy(&value, &word, sizeof(value)); total += value;
+            }
+            return total;
+        }
+        extern void *thaw_map_snapshot_values(const void *map);
+        extern void *thaw_map_snapshot_keys(const void *map);
+        extern uint64_t thaw_map_str_set(const void *map, const char *key, uint64_t value);
+        extern uint64_t thaw_map_num_set(const void *map, double key, uint64_t value);
+        double native_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
+        double native_set_sum(void *set) { calls++; return sum_words(thaw_map_snapshot_keys(set)); }
+        double native_map_mutate(void *map) {
+            uint64_t bits; double value = 7; memcpy(&bits, &value, sizeof(bits));
+            calls++; thaw_map_str_set(map, "changed", bits); return calls;
+        }
+        double native_set_mutate(void *set) {
+            calls++; thaw_map_num_set(set, 9, 0); return calls;
+        }
+        double native_collection_calls(void) { return calls; }
+    "#).unwrap();
+    assert!(cc_command().arg("-c").arg(&native).arg("-o").arg(&native_object).status().unwrap().success());
+    let arena = build_staticlib("thaw-arena");
+    let std_lib = build_staticlib("thaw-std");
+    let runtime = build_staticlib("thaw-runtime");
+    let quickjs = build_staticlib("thaw-quickjs");
+    assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
+        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
+        .arg("-o").arg(&executable).status().unwrap().success());
+    let output = Command::new(&executable).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\n6 2\n3 undefined 3\n4 false 4\n0 0 6\n4 5 8\ntrue 8\ntrue 8\ntrue 8\ntrue 8\ntrue 8\ntrue 8\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
