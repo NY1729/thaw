@@ -643,12 +643,21 @@ fn compiles_named_generic_template_aliases_and_alias_chains() {
 fn compiles_named_generic_templates_in_monomorphic_contexts() {
     let source = r#"
         function identity<T>(value: T): T { return value; }
+        function optional<T = number>(value?: T): T | undefined { return value; }
+        function collect<T>(...values: T[]): T[] { return values; }
         async function main(): Promise<void> {
             const numberIdentity: (value: number) => number = identity;
             const alias = identity;
             const stringIdentity: (value: string) => string = alias;
+            const optionalNumber: (value?: number) => number | undefined = optional;
+            const collectAlias = collect;
+            const restNumbers: (...values: number[]) => number[] = collectAlias;
             console.log(numberIdentity(19));
             console.log(stringIdentity("context"));
+            console.log(optionalNumber());
+            console.log(optionalNumber(31));
+            console.log(restNumbers().length);
+            console.log(restNumbers(32, 33)[1]);
             const promised: number = await new Promise<number>((resolve, reject) => {
                 resolve(23);
             }).then(identity);
@@ -661,7 +670,7 @@ fn compiles_named_generic_templates_in_monomorphic_contexts() {
     "#;
     assert_eq!(
         compile_and_run(source, "named_generic_template_contexts"),
-        "19\ncontext\n23\npromise-context\n"
+        "19\ncontext\nundefined\n31\n0\n33\n23\npromise-context\n"
     );
 }
 
