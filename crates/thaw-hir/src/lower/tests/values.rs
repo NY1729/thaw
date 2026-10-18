@@ -3548,6 +3548,18 @@ fn external_structural_argument_rejects_missing_and_incompatible_fields() {
 }
 
 #[test]
+fn external_class_union_mismatch_diagnostic_hides_identity_marker() {
+    for target in ["{ name: string } | { count: number }", "Item | { name: string }"] {
+        let source = format!(
+            "declare function __thaw_typed_js_7368617065(value: {target}): void;\nclass Item {{ value: number = 1; }}\nclass Other {{ value: number = 1; }}\nfunction main(): void {{ __thaw_typed_js_7368617065(new Other()); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse");
+        let error = lower_module(&module).expect_err("incompatible class must not satisfy union target");
+        assert!(!error.contains("__thaw_class_identity_"), "{error}");
+    }
+}
+
+#[test]
 fn external_structural_argument_recurses_through_nested_arrays_and_optional_fields() {
     let module = thaw_parser::parse_typescript(
         r#"
