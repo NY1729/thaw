@@ -952,10 +952,14 @@ impl<'a> FnLowerer<'a> {
                 // path at all (`lower_dynamic_value_method_call` also
                 // requires `HirType::JsValue`, further down), regressing
                 // a working error into "call to undeclared function".
-                let receiver_is_dynamic = matches!(
-                    self.peek_type_without_lowering(&member.obj),
-                    Some(HirType::JsValue)
+                let receiver_type = self.peek_type_without_lowering(&member.obj);
+                let private_primitive_receiver = matches!(
+                    receiver_type.as_ref(),
+                    Some(HirType::NonArrowReceiver(inner))
+                        if matches!(inner.as_ref(), HirType::Str | HirType::I64)
                 );
+                let receiver_is_dynamic = receiver_type.as_ref() == Some(&HirType::JsValue)
+                    || private_primitive_receiver;
                 // Temporal instance methods. A receiver that's itself a
                 // Temporal-returning call (a chained `instant.add(...).toString()`)
                 // can't be typed by `peek_type_without_lowering`, so those
@@ -1079,6 +1083,35 @@ impl<'a> FnLowerer<'a> {
                 };
                 if let Some((object_expr, object_ty, object_label)) = lowered_object {
                     let requested_property = property.as_str();
+                    if matches!(object_expr, HirExpr::NonArrowThis { .. })
+                        || matches!(object_ty, HirType::NonArrowReceiver(_))
+                    {
+                        let callable_shape = match (&object_expr, &object_ty) {
+                            (HirExpr::NonArrowThis { declared, .. }, _) => declared,
+                            (_, HirType::NonArrowReceiver(inner)) => inner.as_ref(),
+                            (_, ty) => ty,
+                        };
+                        let plain_callable = matches!(callable_shape, HirType::Object(fields)
+                            if fields.iter().any(|(name, ty)| name == requested_property
+                                && matches!(ty, HirType::Function(..) | HirType::CallableFunction(..))));
+                        if plain_callable {
+                            return self.lower_dynamic_value_method_call(
+                                &member.obj,
+                                requested_property,
+                                &call.args,
+                                expected_return_hint.as_ref(),
+                            );
+                        }
+                        let primitive_receiver = matches!(callable_shape, HirType::Str | HirType::I64);
+                        if primitive_receiver && Self::is_native_instance_builtin(requested_property) {
+                            return self.lower_dynamic_value_method_call(
+                                &member.obj,
+                                requested_property,
+                                &call.args,
+                                expected_return_hint.as_ref(),
+                            );
+                        }
+                    }
                     let resolved_property = match (requested_property, call.args.len()) {
                         ("listen", 2) => "__listenWithCallback",
                         ("close", 1) => "__closeWithCallback",

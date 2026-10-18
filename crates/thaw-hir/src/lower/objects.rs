@@ -3051,18 +3051,78 @@ impl<'a> FnLowerer<'a> {
                     }
                     HirType::Json => {
                         let key = self.lower_expr(&computed.expr)?;
-                        match self.infer_expr_type(&key)? {
+                        let key_type = self.infer_expr_type(&key)?;
+                        if !matches!(obj, HirExpr::NonArrowThis { .. }) {
+                            return match key_type {
+                                HirType::Str | HirType::Symbol => {
+                                    Ok(HirExpr::JsonKey(Box::new(obj), Box::new(key)))
+                                }
+                                HirType::F64 => {
+                                    Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(key)))
+                                }
+                                other => Err(format!(
+                                    "JSON index expression must be string or number, got {other:?}"
+                                )),
+                            };
+                        }
+                        let suffix = self.next_binding;
+                        self.next_binding += 1;
+                        let receiver = format!("__thaw_computed_receiver_{suffix}");
+                        let key_name = format!("__thaw_computed_key_{suffix}");
+                        let read = match key_type {
                             // A symbol is stored under its private string token.
                             HirType::Str | HirType::Symbol => {
-                                Ok(HirExpr::JsonKey(Box::new(obj), Box::new(key)))
+                                HirExpr::JsonKey(Box::new(HirExpr::Var(receiver.clone())), Box::new(HirExpr::Var(key_name.clone())))
                             }
                             HirType::F64 => {
-                                Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(key)))
+                                HirExpr::JsonIndex(Box::new(HirExpr::Var(receiver.clone())), Box::new(HirExpr::Var(key_name.clone())))
                             }
-                            other => Err(format!(
+                            other => return Err(format!(
                                 "JSON index expression must be string or number, got {other:?}"
                             )),
-                        }
+                        };
+                        let receiver_var = HirExpr::Var(receiver.clone());
+                        let key_var = HirExpr::Var(key_name.clone());
+                        let property = if key_type == HirType::Str {
+                            key_var.clone()
+                        } else {
+                            self.coerce_primitive_to_string(key_var.clone())?
+                        };
+                        let error = |kind: &str| HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                            vec![
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                                    vec![
+                                        HirExpr::Lit(HirLit::Str(format!("\u{1}TypeError\u{1}Cannot read properties of {kind} (reading '"))),
+                                        property.clone(),
+                                    ],
+                                ),
+                                HirExpr::Lit(HirLit::Str("')".into())),
+                            ],
+                        );
+                        let is_nullish = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                            vec![receiver_var.clone()],
+                        );
+                        let is_null = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                            vec![receiver_var.clone()],
+                        );
+                        let result = HirExpr::Block(vec![
+                            HirStmt::If(is_nullish, vec![HirStmt::If(
+                                is_null,
+                                vec![HirStmt::Throw(error("null"))],
+                                vec![HirStmt::Throw(error("undefined"))],
+                            )], Vec::new()),
+                            HirStmt::Return(Some(read)),
+                        ]);
+                        self.scope.insert(receiver.clone(), HirType::Json);
+                        self.scope.insert(key_name.clone(), key_type.clone());
+                        self.wrap_call_argument_bindings(
+                            result,
+                            &[(receiver, HirType::Json, obj), (key_name, key_type, key)],
+                        )
                     }
                     HirType::JsValue | HirType::Dynamic => {
                         let key = self.lower_expr(&computed.expr)?;

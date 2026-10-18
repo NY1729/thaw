@@ -151,7 +151,28 @@ impl<'a> FnLowerer<'a> {
                         return Ok(Target::Var(symbol));
                     }
                 }
-                let object = self.lower_json_mutable_chain(&member.obj)?;
+                let mut object = self.lower_json_mutable_chain(&member.obj)?;
+                let mut object_type = self.infer_expr_type(&object)?;
+                if let HirType::NonArrowReceiver(declared) = object_type {
+                    let access = match &member.prop {
+                        MemberProp::Ident(property) => {
+                            NonArrowThisAccess::Write(property.sym.to_string())
+                        }
+                        MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Str(key)) => {
+                                NonArrowThisAccess::Write(key.value.to_string_lossy().into_owned())
+                            }
+                            _ => NonArrowThisAccess::Value,
+                        },
+                        _ => NonArrowThisAccess::Value,
+                    };
+                    object = HirExpr::NonArrowThis {
+                        payload: Box::new(object),
+                        declared: *declared.clone(),
+                        access,
+                    };
+                    object_type = *declared;
+                }
                 let object = if let (MemberProp::Ident(property), HirExpr::NonArrowThis { .. }) = (&member.prop, &object) {
                     object.with_non_arrow_this_access(NonArrowThisAccess::Write(property.sym.to_string()))
                 } else {
@@ -159,7 +180,7 @@ impl<'a> FnLowerer<'a> {
                 };
                 let object_type = match &object {
                     HirExpr::NonArrowThis { declared, .. } => declared.clone(),
-                    _ => self.infer_expr_type(&object)?,
+                    _ => object_type,
                 };
                 self.lower_member_target_from_receiver(member, object, object_type)
             }

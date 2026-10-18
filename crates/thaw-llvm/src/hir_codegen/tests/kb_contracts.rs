@@ -71,6 +71,84 @@ function main(): void {
 }
 
 #[test]
+fn kb_contract_this_assignment_and_call_order_matches_node() {
+    let source = r#"let trace = "";
+const assign = function(this: { a: number }, rhs: () => number): number { this.a = rhs(); return 0; };
+const literalAssign = function(this: { a: number }, rhs: () => number): number { this["a"] = rhs(); return 0; };
+const copy = function(this: { a: number, b: number }): number { this.a = this.b; return 0; };
+const computed = function(this: any, key: () => string): any { return this[key()]; };
+const dynamicNamedAssign = function(this: any, rhs: () => number): number { this.a = rhs(); return 0; };
+const dynamicComputedAssign = function(this: any, key: () => string, rhs: () => number): number { this[key()] = rhs(); return 0; };
+const invokeMethod = function(this: { method: (n: number) => number }, arg: () => number): number { return this.method(arg()); };
+const invokeAliasMethod = function(this: { method: (n: number) => number }, arg: () => number): number { const self = this; return self.method(arg()); };
+const upper = function(this: string): string { const self = this; return self.toUpperCase(); };
+const bigintText = function(this: bigint): string { const self = this; return self.toString(); };
+const callOwner = { get method(): (n: number) => number { trace += "method "; return (n: number): number => n; } };
+const compound = function(this: { a: number }, rhs: () => number): number { this.a += rhs(); return 0; };
+const update = function(this: { a: number }): number { this.a++; return 0; };
+const nested = function(this: { child: { a: number } }, rhs: () => number): number { this.child.a = rhs(); return 0; };
+const freeze = function(this: { a: number }, next: { a: number }): number { let self = this; self.a = (() => { self = next; return 7; })(); return this.a * 10 + self.a; };
+function main(): void {
+  const rhs = (): number => { trace += "rhs "; return 5; };
+  try { assign.call(undefined as any, rhs); } catch (e: any) { console.log("undefined assign " + trace + e.message); }
+  trace = "";
+  try { assign.call(null as any, rhs); } catch (e: any) { console.log("null assign " + trace + e.message); }
+  trace = "";
+  try { literalAssign.call(undefined as any, rhs); } catch (e: any) { console.log("literal assign " + trace + e.message); }
+  try { copy.call(undefined as any); } catch (e: any) { console.log("copy " + e.message); }
+  trace = "";
+  try { console.log("computed value " + computed.call(undefined as any, () => { trace += "key "; return "a"; })); } catch (e: any) { console.log("computed " + trace + e.message); }
+  trace = "";
+  try { dynamicNamedAssign.call(undefined as any, () => { trace += "rhs "; return 1; }); } catch (e: any) { console.log("dynamic named " + trace + e.message); }
+  trace = "";
+  try { dynamicComputedAssign.call(undefined as any, () => { trace += "key "; return "a"; }, () => { trace += "rhs "; return 1; }); } catch (e: any) { console.log("dynamic computed " + trace + e.message); }
+  trace = "";
+  try { dynamicComputedAssign.call(null as any, () => { trace += "key "; return "a"; }, () => { trace += "rhs "; return 1; }); } catch (e: any) { console.log("dynamic computed null " + trace + e.message); }
+  trace = "";
+  try { invokeMethod.call(undefined as any, () => { trace += "arg "; return 1; }); } catch (e: any) { console.log("this method " + trace + e.message); }
+  trace = "";
+  try { invokeAliasMethod.call(undefined as any, () => { trace += "alias arg "; return 1; }); } catch (e: any) { console.log("alias method " + trace + e.message); }
+  trace = "";
+  console.log("alias builtin " + upper.call("xy"));
+  console.log("bigint builtin " + bigintText.call(3n));
+  console.log("call " + callOwner.method((() => { trace += "arg "; return 1; })()) + " " + trace);
+  trace = "";
+  try { compound.call(undefined as any, rhs); } catch (e: any) { console.log("compound " + e.message); }
+  try { update.call(undefined as any); } catch (e: any) { console.log("update " + e.message); }
+  trace = "";
+  try { nested.call(undefined as any, rhs); } catch (e: any) { console.log("nested " + trace + e.message); }
+  try { const copyTarget: { a: number, b: number } = { a: 4, b: 6 }; copy.call(copyTarget); console.log("valid copy " + copyTarget.a); } catch (e: any) { console.log("valid copy error " + e.message); }
+  try { console.log("valid computed " + computed.call({ a: 6 }, () => "a")); } catch (e: any) { console.log("valid computed error " + e.message); }
+  const original: { a: number } = { a: 1 };
+  const next: { a: number } = { a: 2 };
+  console.log("frozen target " + freeze.call(original, next) + " " + original.a + " " + next.a);
+}"#;
+    assert_eq!(
+        compile_and_run(source, "kb_contract_this_assignment_and_call_order_matches_node"),
+        "undefined assign rhs Cannot set properties of undefined (setting 'a')\nnull assign rhs Cannot set properties of null (setting 'a')\nliteral assign rhs Cannot set properties of undefined (setting 'a')\ncopy Cannot read properties of undefined (reading 'b')\ncomputed key Cannot read properties of undefined (reading 'a')\ndynamic named rhs Cannot set properties of undefined (setting 'a')\ndynamic computed key rhs Cannot set properties of undefined (setting 'a')\ndynamic computed null key rhs Cannot set properties of null (setting 'a')\nthis method Cannot read properties of undefined (reading 'method')\nalias method Cannot read properties of undefined (reading 'method')\nalias builtin XY\nbigint builtin 3\ncall 1 method arg \ncompound Cannot read properties of undefined (reading 'a')\nupdate Cannot read properties of undefined (reading 'a')\nnested Cannot read properties of undefined (reading 'child')\nvalid copy 6\nvalid computed 6\nfrozen target 72 7 2\n"
+    );
+}
+
+#[test]
+fn kb_contract_valid_receiver_assignment_update_and_nested_targets() {
+    let source = r#"const assign = function(this: { a: number, b: number }, rhs: () => number): number { this.a = rhs(); return this.a; };
+const update = function(this: { a: number }): number { this.a++; return this.a; };
+const nested = function(this: { child: { a: number } }, rhs: () => number): number { this.child.a = rhs(); return this.child.a; };
+function main(): void {
+  const assigned = { a: 1, b: 2 };
+  console.log("assign", assign.call(assigned, () => 7), assigned.a, assigned.b);
+  const updated = { a: 2 };
+  console.log("update", update.call(updated), updated.a);
+  const parent = { child: { a: 3 } };
+  console.log("nested", nested.call(parent, () => 8), parent.child.a);
+}"#;
+    assert_eq!(
+        compile_and_run(source, "kb_contract_valid_receiver_assignment_update_and_nested_targets"),
+        "assign 7 7 2\nupdate 3 3\nnested 8 8\n"
+    );
+}
+
+#[test]
 fn kb_contract_object_method_receiver_is_deferred_until_body_access() {
     let source = r#"let effects = 0;
 const object = { value: 4, method(): number { effects++; console.log("method before " + effects); return this.value; } };

@@ -94,8 +94,29 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(receiver_name.clone(), object_type.clone());
                 self.scope.insert(value_name.clone(), value_type.clone());
-                bindings.push((receiver_name.clone(), object_type.clone(), object.clone()));
-                bindings.push((value_name.clone(), value_type, value));
+                let mut receiver_object = object.clone();
+                let deferred_receiver = if let HirExpr::NonArrowThis { payload, .. } = &mut receiver_object {
+                    if matches!(self.infer_expr_type(payload)?, HirType::NonArrowReceiver(_)) {
+                        let name = format!("__thaw_setter_payload_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let ty = self.infer_expr_type(payload)?;
+                        self.scope.insert(name.clone(), ty.clone());
+                        bindings.push((name.clone(), ty, (**payload).clone()));
+                        **payload = HirExpr::Var(name);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if deferred_receiver {
+                    bindings.push((value_name.clone(), value_type, value));
+                    bindings.push((receiver_name.clone(), object_type.clone(), receiver_object));
+                } else {
+                    bindings.push((receiver_name.clone(), object_type.clone(), receiver_object));
+                    bindings.push((value_name.clone(), value_type, value));
+                }
                 let receiver = HirExpr::Var(receiver_name);
                 let value = HirExpr::Var(value_name);
                 let argument = self.coerce_to_declared(&parameter_type, value.clone())?;
@@ -119,6 +140,18 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
         }
+        let private_json_write = match &target {
+            Target::Dictionary(object, key, HirType::Json)
+            | Target::DynamicProperty(object, key)
+                if matches!(object, HirExpr::NonArrowThis { .. }) =>
+            {
+                Some((object.clone(), (**key).clone()))
+            }
+            Target::JsonIndex(object, index) if matches!(object, HirExpr::NonArrowThis { .. }) => {
+                Some((object.clone(), self.coerce_primitive_to_string((**index).clone())?))
+            }
+            _ => None,
+        };
         let target = match target {
             Target::Prop(object, object_type, field) => {
                 let object = if matches!(&object, HirExpr::NonArrowThis { .. }) {
@@ -130,7 +163,44 @@ impl<'a> FnLowerer<'a> {
             }
             other => other,
         };
-        Ok(build_assign(target, value))
+        let result = build_assign(target, value);
+        let Some((object, key)) = private_json_write else {
+            return Ok(result);
+        };
+        let receiver = object.with_non_arrow_this_access(NonArrowThisAccess::Value);
+        let is_nullish = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+            vec![receiver.clone()],
+        );
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+            vec![receiver],
+        );
+        let error = |kind: &str| HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_concat".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                    vec![
+                        HirExpr::Lit(HirLit::Str(format!("\u{1}TypeError\u{1}Cannot set properties of {kind} (setting '"))),
+                        key.clone(),
+                    ],
+                ),
+                HirExpr::Lit(HirLit::Str("')".into())),
+            ],
+        );
+        Ok(HirExpr::Block(vec![
+            HirStmt::If(
+                is_nullish,
+                vec![HirStmt::If(
+                    is_null,
+                    vec![HirStmt::Throw(error("null"))],
+                    vec![HirStmt::Throw(error("undefined"))],
+                )],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(result)),
+        ]))
     }
 
     fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -930,6 +1000,41 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let mut target = self.lower_assign_target(&assign.left)?;
+        let mut target_bindings = Vec::new();
+        let target_object = match &mut target {
+            Target::Prop(object, _, _)
+            | Target::Dictionary(object, _, _)
+            | Target::JsonIndex(object, _)
+            | Target::DynamicProperty(object, _) => Some(object),
+            _ => None,
+        };
+        if let Some(HirExpr::NonArrowThis { payload, .. }) = target_object {
+            if matches!(self.infer_expr_type(payload)?, HirType::NonArrowReceiver(_)) {
+                let name = format!("__thaw_assignment_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                let ty = self.infer_expr_type(payload)?;
+                self.scope.insert(name.clone(), ty.clone());
+                target_bindings.push((name.clone(), ty, (**payload).clone()));
+                **payload = HirExpr::Var(name);
+            }
+        }
+        let deferred_private_write = assign.op == AssignOp::Assign
+            && target_object.is_some_and(|object| matches!(object, HirExpr::NonArrowThis { .. }));
+        if deferred_private_write {
+            let key_target = match &mut target {
+                Target::Dictionary(_, key, _) | Target::DynamicProperty(_, key) => Some(key),
+                Target::JsonIndex(_, index) => Some(index),
+                _ => None,
+            };
+            if let Some(key) = key_target {
+                let key_type = self.infer_expr_type(key)?;
+                let key_name = format!("__thaw_assignment_key_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(key_name.clone(), key_type.clone());
+                target_bindings.push((key_name.clone(), key_type, (**key).clone()));
+                **key = HirExpr::Var(key_name);
+            }
+        }
         if let Target::Var(name) = &target {
             if self.immutable_bindings.contains(name) {
                 return Err(format!("cannot assign to constant `{name}`"));
@@ -979,7 +1084,8 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         if let Target::DynamicProperty(object, key) = &target {
             if assign.op != AssignOp::Assign {
-                return self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone());
+                let result = self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone())?;
+                return self.wrap_call_argument_bindings(result, &target_bindings);
             }
             let object_name = format!("__thaw_dynamic_assign_object_{}", self.next_binding);
             self.next_binding += 1;
@@ -995,7 +1101,8 @@ impl<'a> FnLowerer<'a> {
                 &HirType::Json,
                 HirExpr::Var(value_name.clone()),
             )?;
-            let result = HirExpr::Block(vec![
+            let mut statements = Vec::new();
+            statements.extend([
                 HirStmt::Expr(HirExpr::Call(
                     Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
                     vec![
@@ -1006,14 +1113,22 @@ impl<'a> FnLowerer<'a> {
                 )),
                 HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
             ]);
-            return self.wrap_call_argument_bindings(
-                result,
-                &[
+            let result = HirExpr::Block(statements);
+            let mut dynamic_bindings = target_bindings;
+            if deferred_private_write {
+                dynamic_bindings.extend([
+                    (key_name, key_type, key.as_ref().clone()),
+                    (value_name, rhs_type, rhs),
+                    (object_name, HirType::JsValue, object.clone()),
+                ]);
+            } else {
+                dynamic_bindings.extend([
                     (object_name, HirType::JsValue, object.clone()),
                     (key_name, key_type, key.as_ref().clone()),
                     (value_name, rhs_type, rhs),
-                ],
-            );
+                ]);
+            }
+            return self.wrap_call_argument_bindings(result, &dynamic_bindings);
         }
         let assigned_variable = match &target {
             Target::Var(name) => Some(name.clone()),
@@ -1042,7 +1157,7 @@ impl<'a> FnLowerer<'a> {
                     self.expression_function_object_function_property_discriminants(&assign.right),
                 )
             });
-        let mut bindings = Vec::new();
+        let mut bindings = target_bindings;
         if let Some(name) = assigned_variable.as_ref() {
             self.record_binding_write(name);
         }
@@ -1067,6 +1182,7 @@ impl<'a> FnLowerer<'a> {
                     let object_name = format!("__thaw_assign_object_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(object_name.clone(), object_type.clone());
+                    let object = object.with_non_arrow_this_access(NonArrowThisAccess::Read(field.clone()));
                     bindings.push((object_name.clone(), object_type.clone(), object));
                     Target::Prop(HirExpr::Var(object_name), object_type, field)
                 }
@@ -1517,6 +1633,17 @@ impl<'a> FnLowerer<'a> {
                     "cannot assign to field `{field}` on value of type {other:?}"
                 ));
             }
+        };
+
+        let value = if deferred_private_write {
+            let value_type = self.infer_expr_type(&value)?;
+            let value_name = format!("__thaw_assignment_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(value_name.clone(), value_type.clone());
+            bindings.push((value_name.clone(), value_type, value));
+            HirExpr::Var(value_name)
+        } else {
+            value
         };
 
         let result = self.lower_assignment_target_write(target, value)?;
