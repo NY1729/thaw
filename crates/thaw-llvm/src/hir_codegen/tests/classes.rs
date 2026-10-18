@@ -3460,6 +3460,36 @@ fn generic_non_arrow_rest_this_operations() {
 }
 
 #[test]
+fn callable_apply_without_tuple_uses_empty_arguments() {
+    let source = r#"
+        function main(): void {
+            const zero = (): number => 7;
+            const optional = (value?: number): number | undefined => value;
+            const defaulted = (value: number = 7): number => value;
+            const rest = (...values: number[]): number => values.length;
+            const bound = optional.bind(null);
+            console.log(zero.apply(null));
+            console.log(optional.apply(null));
+            console.log(defaulted.apply(null));
+            console.log(rest.apply(null));
+            console.log(bound.apply(null));
+            let calls = 0;
+            function receiver(): null { calls++; return null; }
+            console.log(optional.apply(receiver()));
+            console.log(calls);
+            const usesThis = function(this: { value: number }, value?: number): number {
+                return this.value + (value ?? 0);
+            };
+            console.log(usesThis.apply({ value: 5 }));
+            console.log(Reflect.apply(zero, null, []));
+            const explicit = (value: number = 4): number => value;
+            console.log(explicit.apply(null, [9] as [number]));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "apply_omitted_array"), "7\nundefined\n7\n0\nundefined\nundefined\n1\n5\n7\n9\n");
+}
+
+#[test]
 fn generic_non_arrow_apply_runtime_nullish_tuple() {
     let source = r#"
         function main(): void {

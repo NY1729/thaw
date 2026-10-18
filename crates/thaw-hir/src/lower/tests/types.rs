@@ -2916,6 +2916,34 @@ fn generic_non_arrow_rest_this_operations_lower() {
 }
 
 #[test]
+fn callable_apply_without_tuple_uses_empty_arguments() {
+    lower(r#"function main(): void {
+        const zero = (): number => 7;
+        const optional = (value?: number): number | undefined => value;
+        const defaulted = (value: number = 7): number => value;
+        const rest = (...values: number[]): number => values.length;
+        const bound = optional.bind(null);
+        console.log(zero.apply(null), optional.apply(null), defaulted.apply(null), rest.apply(null), bound.apply(null));
+    }"#);
+}
+
+#[test]
+fn omitted_apply_tuple_still_checks_required_arguments_and_shape() {
+    for source in [
+        r#"function main(): void { const f = (value: number): number => value; f.apply(null); }"#,
+        r#"function main(): void { const f = (value: number | undefined): number => value ?? 0; f.apply(null); }"#,
+        r#"function main(): void { const f = (first: number, ...rest: number[]): number => first; f.apply(null); }"#,
+        r#"declare function f(this: number): number; function main(): void { f.apply("bad"); }"#,
+        r#"function main(): void { const f = (): number => 1; f.apply(...[null]); }"#,
+        r#"function main(): void { const f = (): number => 1; f.apply(null, [], []); }"#,
+        r#"function main(): void { const f = (): number => 1; f.apply(); }"#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "accepted invalid source: {source}");
+    }
+}
+
+#[test]
 fn generic_non_arrow_apply_runtime_nullish_tuple_preserves_order() {
     lower(r#"function main(): void {
         const order: string[] = [];
