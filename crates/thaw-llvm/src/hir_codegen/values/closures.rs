@@ -1,47 +1,3 @@
-// shortcut: complex bodies keep generic receiver errors; use runtime property checks for full parity.
-fn simple_this_receiver_access<'a>(body: &'a HirExpr, params: &[HirParam]) -> Option<(&'a str, bool)> {
-    fn this_payload(expr: &HirExpr) -> Option<&HirExpr> {
-        match expr {
-            HirExpr::NonArrowThis { payload, .. } => Some(payload),
-            other => Some(other),
-        }
-    }
-    fn is_this(expr: &HirExpr) -> bool {
-        matches!(this_payload(expr), Some(HirExpr::Var(name)) if name == "__thaw_this")
-    }
-    fn property(expr: &HirExpr) -> Option<&str> {
-        match expr {
-            HirExpr::PropAccess(object, HirType::Object(_), field)
-                if is_this(object)
-                    && !is_hidden_accessor_field(field) => Some(field),
-            _ => None,
-        }
-    }
-    let simple = |expr: &HirExpr| matches!(expr, HirExpr::Lit(_))
-        || matches!(expr, HirExpr::Var(name) if name != "__thaw_this" && params.iter().any(|param| &param.name == name));
-    let expression = match body {
-        HirExpr::Block(statements) => match statements.as_slice() {
-            [HirStmt::Return(Some(expr))] | [HirStmt::Expr(expr)]
-                | [HirStmt::Expr(expr), HirStmt::Return(None)] => expr,
-            _ => return None,
-        },
-        expression => expression,
-    };
-    match expression {
-        HirExpr::BinOp(_, left, right)
-            if (simple(left) || property(left).is_some()) && (simple(right) || property(right).is_some()) =>
-                property(left).or_else(|| property(right)).map(|field| (field, false)),
-        HirExpr::PropAssign(object, HirType::Object(_), field, value)
-            if is_this(object)
-                && !is_hidden_accessor_field(field) => {
-            if let Some(read) = property(value) { Some((read, false)) }
-            else if simple(value) { Some((field, true)) }
-            else { None }
-        }
-        _ => property(expression).map(|field| (field, false)),
-    }
-}
-
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_recursive_closure(
         &mut self,
@@ -497,7 +453,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(parent_block);
         let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
-            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name, None)?
+            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name)?
         } else {
             (adapter, self.compile_ignored_this_adapter(adapter, &param_types, &promise_type,
                 &format!("{adapter_name}__thaw_this_adapter"))?)
@@ -514,7 +470,6 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirParam],
         ret: &HirType,
         name: &str,
-        receiver_access: Option<(&str, bool)>,
     ) -> Result<(FunctionValue<'ctx>, FunctionValue<'ctx>), String> {
         let receiver = &params[0].ty;
         let visible = params[1..].iter().map(|param| param.ty.clone()).collect::<Vec<_>>();
@@ -536,7 +491,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or("undefined JsValue returned no value")?
         } else {
             self.compile_non_arrow_receiver_value(ordinary, receiver,
-                self.context.i8_type().const_zero(), self.context.i64_type().const_zero(), receiver_access)?
+                self.context.i8_type().const_zero(), self.context.i64_type().const_zero(), None)?
         };
         let mut args = vec![ordinary.get_nth_param(0).unwrap().into(), undefined.into()];
         args.extend(ordinary.get_param_iter().skip(1).map(BasicMetadataValueEnum::from));
@@ -549,7 +504,7 @@ impl<'ctx> HirCompiler<'ctx> {
         });
         self.builder.position_at_end(parent);
         let ordinary = ordinary_result?;
-        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name, receiver_access)?;
+        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name)?;
         Ok((ordinary, explicit))
     }
 
@@ -560,7 +515,6 @@ impl<'ctx> HirCompiler<'ctx> {
         receiver: &HirType,
         ret: &HirType,
         name: &str,
-        receiver_access: Option<(&str, bool)>,
     ) -> Result<FunctionValue<'ctx>, String> {
         let parent = self.builder.get_insert_block().ok_or("this entry needs a parent block")?;
         let entry_fn = self.module.add_function(&format!("{name}__thaw_this_adapter"),
@@ -576,7 +530,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = if matches!(receiver, HirType::NonArrowReceiver(_)) {
             self.compile_raw_non_arrow_receiver_payload(kind, word)?
         } else {
-            self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word, receiver_access)?
+            self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word, None)?
         };
         let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), value.into()];
         args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
@@ -1368,12 +1322,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
         let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
-            let receiver_access = if matches!(params[0].ty, HirType::NonArrowReceiver(_)) {
-                None
-            } else {
-                simple_this_receiver_access(body, params)
-            };
-            self.compile_non_arrow_entries(function, params, ret, &name, receiver_access)?
+            self.compile_non_arrow_entries(function, params, ret, &name)?
         } else {
             (function, self.compile_ignored_this_adapter(function, &param_types, ret,
                 &format!("{name}__thaw_this_adapter"))?)

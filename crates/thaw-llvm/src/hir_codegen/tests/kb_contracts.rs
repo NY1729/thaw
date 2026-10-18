@@ -1,4 +1,4 @@
-// Simple unconditional receiver accesses match Node 22; ambiguous bodies keep the generic error.
+// Receiver errors are selected at the property access that executes, like Node 22.
 
 #[test]
 fn kb_contract_bare_call_of_this_function_reports_first_property() {
@@ -19,16 +19,17 @@ async function main(): Promise<void> {
 
 #[test]
 fn kb_contract_receiver_messages_do_not_guess_from_compile_order() {
-    let source = r#"function main(): void {
-      const branch = function(this: {a:number,b:number}, flag:boolean):number { if(flag) return this.a; return this.b; };
-      const arrow = function(this: {a:number,b:number}):number { const unused = () => this.a; return this.b; };
-      const assign = function(this: {a:number,b:number}):void { this.a = this.b; };
-      try { branch(false); } catch(e:any) { console.log(e.message); }
-      try { arrow(); } catch(e:any) { console.log(e.message); }
-      try { assign(); } catch(e:any) { console.log(e.message); }
-    }"#;
+    let source = r#"let effects = 0;
+const branch = function(this: {a:number,b:number}, flag:boolean):number { effects++; if(flag) return this.a; return this.b; };
+const arrow = function(this: {a:number,b:number}):number { const unused = () => this.a; effects++; return this.b; };
+const assign = function(this: {a:number,b:number}):void { effects++; this.a = this.b; };
+function main(): void {
+  try { branch(false); } catch(e:any) { console.log("branch " + effects + " " + e.message); }
+  try { arrow(); } catch(e:any) { console.log("arrow " + effects + " " + e.message); }
+  try { assign(); } catch(e:any) { console.log("assign " + effects + " " + e.message); }
+}"#;
     assert_eq!(compile_and_run(source, "kb_contract_receiver_messages_do_not_guess_from_compile_order"),
-      "Incompatible function receiver\nIncompatible function receiver\nCannot read properties of undefined (reading 'b')\n");
+      "branch 1 Cannot read properties of undefined (reading 'b')\narrow 2 Cannot read properties of undefined (reading 'b')\nassign 3 Cannot read properties of undefined (reading 'b')\n");
 }
 
 #[test]
