@@ -2944,6 +2944,9 @@ impl<'a> FnLowerer<'a> {
                         if self.deferred_generic_binds.contains_key(&name) {
                             return Ok(HirExpr::Lit(HirLit::Str("function".into())));
                         }
+                        if self.generic_callable_template(&name).is_some() {
+                            return Ok(HirExpr::Lit(HirLit::Str("function".into())));
+                        }
                     }
                 }
                 // Implicit-return normalization inserts a dummy-span `void 0`
@@ -3186,51 +3189,35 @@ impl<'a> FnLowerer<'a> {
                         // Fallback function silently steal a shadowing parameter's `typeof`
                         // check, folding it to a constant and running the wrong branch at
                         // runtime.
-                        let operand_type = if let HirExpr::Var(name) = &value {
-                            self.generic_arrows
-                                .get(name)
-                                .map(|arrow| {
-                                    HirType::Function(
-                                        vec![HirType::Dynamic; arrow.params.len()],
-                                        Box::new(HirType::Dynamic),
-                                    )
-                                })
-                                .or_else(|| {
-                                    self.generic_named_templates.get(name).and_then(|target| {
-                                        self.signatures.get(target).map(|signature| {
-                                            HirType::Function(
-                                                signature.params.clone(),
-                                                Box::new(signature.ret.clone()),
-                                            )
-                                        })
-                                    })
-                                })
-                                .or_else(|| {
-                                    if self.scope.contains_key(name) {
-                                        return None;
-                                    }
-                                    self.signatures.get(name).map(|signature| {
-                                        let ret = if signature.is_async {
-                                            HirType::Promise(Box::new(signature.ret.clone()))
-                                        } else {
-                                            signature.ret.clone()
-                                        };
-                                        HirType::Function(signature.params.clone(), Box::new(ret))
-                                    })
-                                })
+                        let template = if let HirExpr::Var(name) = &value {
+                            self.generic_callable_template(name)
                         } else {
                             None
-                        }
-                        .map(Ok)
-                        .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        };
+                        let operand_type = match &template {
+                            Some(GenericCallableTemplate::Arrow { expression, .. }) => {
+                                HirType::Function(
+                                    vec![HirType::Dynamic; expression.params.len()],
+                                    Box::new(HirType::Dynamic),
+                                )
+                            }
+                            Some(GenericCallableTemplate::Named { symbol }) => {
+                                let signature = self.signatures.get(symbol).ok_or_else(|| {
+                                    format!("generic callable template `{symbol}` lost its signature")
+                                })?;
+                                let ret = if signature.is_async {
+                                    HirType::Promise(Box::new(signature.ret.clone()))
+                                } else {
+                                    signature.ret.clone()
+                                };
+                                HirType::Function(signature.params.clone(), Box::new(ret))
+                            }
+                            None => self.infer_expr_type(&value)?,
+                        };
                         // A generic arrow (or an alias forwarding to a generic template) has
                         // no runtime value to read a pointer from; it is always a function.
-                        if let HirExpr::Var(name) = &value {
-                            if self.generic_arrows.contains_key(name)
-                                || self.generic_named_templates.contains_key(name)
-                            {
-                                return Ok(HirExpr::Lit(HirLit::Str("function".into())));
-                            }
+                        if template.is_some() {
+                            return Ok(HirExpr::Lit(HirLit::Str("function".into())));
                         }
                         if Self::contains_function_value(&operand_type) {
                             let name =

@@ -329,6 +329,26 @@ fn named_generic_template_specialization_keys_remain_distinct() {
 }
 
 #[test]
+fn named_generic_template_typeof_preserves_shadowing() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function shadow(identity: number): string { return typeof identity; }
+        function localTemplates(): string {
+            const typed: <U>(value: U) => U = identity;
+            const arrow = <T>(value: T): T => value;
+            return typeof typed + typeof arrow;
+        }
+        function main(): string { return typeof identity; }
+    "#);
+    let shadow = program.functions.iter().find(|function| function.name == "shadow").unwrap();
+    assert!(format!("{:?}", shadow.body).contains("Str(\"number\")"), "shadowing typeof must retain the parameter's number type: {:?}", shadow.body);
+    let local_templates = program.functions.iter().find(|function| function.name == "localTemplates").unwrap();
+    assert_eq!(format!("{:?}", local_templates.body).matches("Str(\"function\")").count(), 2);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("Str(\"function\")"));
+}
+
+#[test]
 fn specializes_multiple_generic_arguments_as_one_call_tuple() {
     let program = lower(
         r#"

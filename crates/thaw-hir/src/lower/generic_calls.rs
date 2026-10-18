@@ -1,3 +1,38 @@
+#[derive(Clone)]
+enum GenericCallableTemplate {
+    Arrow {
+        binding: Symbol,
+        expression: swc_ecma_ast::ArrowExpr,
+    },
+    Named {
+        symbol: Symbol,
+    },
+}
+
+impl FnLowerer<'_> {
+    fn generic_callable_template(&self, name: &str) -> Option<GenericCallableTemplate> {
+        let binding = self.resolve_binding(name);
+        if let Some(expression) = self.generic_arrows.get(&binding) {
+            return Some(GenericCallableTemplate::Arrow {
+                binding,
+                expression: expression.clone(),
+            });
+        }
+        if let Some(symbol) = self.generic_named_templates.get(&binding) {
+            return Some(GenericCallableTemplate::Named {
+                symbol: symbol.clone(),
+            });
+        }
+        if self.scope.contains_key(&binding) {
+            return None;
+        }
+        self.signatures
+            .get(&binding)
+            .filter(|signature| !signature.generic_type_params.is_empty())
+            .map(|_| GenericCallableTemplate::Named { symbol: binding })
+    }
+}
+
 fn generic_argument_may_be_undefined(ty: &HirType) -> bool {
     match ty {
         HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Void

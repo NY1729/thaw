@@ -1493,15 +1493,18 @@ impl<'a> FnLowerer<'a> {
             return self.lower_dynamic_value_call_on(callee, &call.args);
         }
 
-        if let Some(arrow) = self.generic_arrows.get(&callee_name).cloned() {
-            return self.lower_generic_arrow_call(&callee_name, &arrow, call);
-        }
-        if let Some(target) = self.generic_named_templates.get(&callee_name).cloned() {
-            let mut forwarded = call.clone();
-            forwarded.callee = Callee::Expr(Box::new(Expr::Ident(
-                swc_ecma_ast::Ident::new_no_ctxt(target.into(), call.span),
-            )));
-            return self.lower_call(&forwarded);
+        match self.generic_callable_template(&callee_name) {
+            Some(GenericCallableTemplate::Arrow { binding, expression }) => {
+                return self.lower_generic_arrow_call(&binding, &expression, call);
+            }
+            Some(GenericCallableTemplate::Named { symbol }) if symbol != callee_name => {
+                let mut forwarded = call.clone();
+                forwarded.callee = Callee::Expr(Box::new(Expr::Ident(
+                    swc_ecma_ast::Ident::new_no_ctxt(symbol.into(), call.span),
+                )));
+                return self.lower_call(&forwarded);
+            }
+            Some(GenericCallableTemplate::Named { .. }) | None => {}
         }
 
         if matches!(callee_name.as_str(), "isNaN" | "isFinite") {
