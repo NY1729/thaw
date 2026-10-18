@@ -688,6 +688,23 @@ fn compiles_tagged_template_callable_metadata() {
 }
 
 #[test]
+fn compiles_zero_parameter_tagged_templates() {
+    let source = r#"
+        let log = "";
+        function side(n: number): number { log += n; return n; }
+        function tag(): number { return 7; }
+        function main(): void {
+            console.log(tag`plain`);
+            console.log(tag`a${side(1)}b${side(2)}c`, log);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "zero_parameter_tagged_templates"),
+        "7\n7 12\n"
+    );
+}
+
+#[test]
 fn compiles_native_string_split() {
     let source = r#"
         function printAll(parts: string[]): void {

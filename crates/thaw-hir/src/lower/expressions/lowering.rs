@@ -1823,6 +1823,9 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                     }
+                    if rest.is_none() {
+                        args.truncate(fixed_count);
+                    }
                     let trailing = if rest.is_some() && args.len() > fixed_count {
                         args.split_off(fixed_count)
                     } else {
