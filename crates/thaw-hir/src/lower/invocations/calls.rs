@@ -85,7 +85,7 @@ impl<'a> FnLowerer<'a> {
             return Err("typed-wrapper JSON ownership marker is compiler-private".into());
         }
         if matches!(call.callee, Callee::Super(_)) {
-            let (mut symbol, _base_type, base_name) = self
+            let (symbol, _base_type, base_name) = self
                 .super_initializer
                 .clone()
                 .ok_or("`super(...)` is only valid in a derived class constructor")?;
@@ -182,7 +182,7 @@ impl<'a> FnLowerer<'a> {
                     Vec::new(),
                 ));
             }
-            let mut signature = self
+            let signature = self
                 .signatures
                 .get(&symbol)
                 .cloned()
@@ -194,9 +194,8 @@ impl<'a> FnLowerer<'a> {
             let mut args = vec![HirExpr::Var(this_name)];
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, "base constructor")?;
-            let arguments = self.select_omitted_class_arguments(
-                &mut symbol,
-                &mut signature,
+            let arguments = self.pad_source_mask_arguments(
+                &signature,
                 arguments,
                 1,
                 "base constructor",
@@ -222,12 +221,12 @@ impl<'a> FnLowerer<'a> {
                         }
                     },
                 };
-                let mut symbol = if self.class_static_context {
+                let symbol = if self.class_static_context {
                     class_static_method_symbol(&base_name, &method_name)
                 } else {
                     class_method_symbol(&base_name, &method_name)
                 };
-                let mut signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
+                let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
                     format!("base class `{base_name}` has no method `{method_name}`")
                 })?;
                 if call.type_args.is_some() {
@@ -241,9 +240,8 @@ impl<'a> FnLowerer<'a> {
                 };
                 let label = format!("super method `{base_name}.{method_name}`");
                 let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
-                let arguments = self.select_omitted_class_arguments(
-                    &mut symbol,
-                    &mut signature,
+                let arguments = self.pad_source_mask_arguments(
+                    &signature,
                     arguments,
                     receiver_count,
                     &label,
@@ -1191,7 +1189,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let mut callee_name = match callee_expr.as_ref() {
+        let callee_name = match callee_expr.as_ref() {
             Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
             // Console methods have no dedicated HIR node; they are encoded as
             // synthetic names such as "console.log" and codegen special-cases them.
@@ -1817,7 +1815,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
 
-        let mut signature = self.signatures.get(&callee_name).cloned();
+        let signature = self.signatures.get(&callee_name).cloned();
         let local_function = self.scope.get(&callee_name).and_then(|ty| {
             let ty = match ty {
                 HirType::FunctionWithThis(_, visible) => visible.as_ref(),
@@ -2342,35 +2340,39 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        if let Some(full_signature) = signature.clone() {
-            let logical_param_count =
-                full_signature.params.len() - usize::from(full_signature.native_rest.is_some());
-            if full_signature.variadic.is_none() && lowered_arguments.len() <= logical_param_count {
-                let mut omitted_mask = HirOptionalMask::default();
-                for index in 0..logical_param_count {
-                    let omitted = match lowered_arguments.get(index) {
-                        None => true,
-                        Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
-                    };
-                    if omitted {
-                        omitted_mask.insert(index);
+        // Native rest arguments are packed into one ABI slot below. Fill
+        // omitted trailing fixed parameters first, while the rest values are
+        // still separate, so the packed array stays in its declared slot.
+        if native_rest_values.is_some() {
+            if let Some(signature) = signature
+                .as_ref()
+                .filter(|signature| signature.generic_type_params.is_empty())
+            {
+                let fixed_count = signature.params.len().saturating_sub(1);
+                for (index, ty) in signature
+                    .params
+                    .iter()
+                    .enumerate()
+                    .take(fixed_count)
+                    .skip(lowered_arguments.len())
+                {
+                    if signature.source_omittable.contains(index) {
+                        lowered_arguments.push(omitted_parameter_value(ty)?);
+                    } else if matches!(ty, HirType::Json | HirType::Dynamic | HirType::JsValue) {
+                        lowered_arguments.push(HirExpr::Lit(HirLit::Undefined));
+                    } else {
+                        break;
                     }
                 }
-                if !omitted_mask.is_empty() {
-                    let wrapper = omitted_parameter_symbol(&callee_name, &omitted_mask);
-                    if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
-                        method_argument_sources_aligned = false;
-                        lowered_arguments = lowered_arguments
-                            .into_iter()
-                            .enumerate()
-                            .filter_map(|(index, argument)| {
-                                (!omitted_mask.contains(index)).then_some(argument)
-                            })
-                            .collect();
-                        callee_name = wrapper;
-                        param_types = Some(wrapper_signature.params.clone());
-                        signature = Some(wrapper_signature);
-                    }
+            }
+        }
+
+        if let Some(signature) = signature.as_ref() {
+            for (index, argument) in lowered_arguments.iter_mut().enumerate() {
+                if signature.source_omittable.contains(index)
+                    && self.infer_expr_type(argument)? == HirType::Undefined
+                {
+                    *argument = omitted_parameter_value(&signature.params[index])?;
                 }
             }
         }
@@ -2401,19 +2403,6 @@ impl<'a> FnLowerer<'a> {
             lowered_arguments.push(native_rest_array(values, &element));
         }
 
-        if signature.as_ref().is_some_and(|signature| {
-            signature.variadic.is_none()
-                && signature.native_rest.is_none()
-                && lowered_arguments.len() != signature.params.len()
-        }) {
-            let wrapper = default_arity_symbol(&callee_name, lowered_arguments.len());
-            if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
-                callee_name = wrapper;
-                param_types = Some(wrapper_signature.params.clone());
-                signature = Some(wrapper_signature);
-            }
-        }
-
         if let Some(params) = &param_types {
             // JavaScript accepts fewer arguments than parameters (a missing
             // one is `undefined`). Pad the missing trailing parameters that
@@ -2426,17 +2415,15 @@ impl<'a> FnLowerer<'a> {
                     && sig.variadic.is_none()
                     && sig.native_rest.is_none()
             }) {
-                for ty in params[lowered_arguments.len().min(params.len())..].iter() {
-                    if matches!(
-                        ty,
-                        HirType::Json
-                            | HirType::Dynamic
-                            | HirType::JsValue
-                            | HirType::Optional(_)
-                            | HirType::Nullable(_)
-                            | HirType::Nullish(_)
-                            | HirType::Undefined
-                    ) {
+                let signature = signature.as_ref().expect("checked above");
+                for (index, ty) in params
+                    .iter()
+                    .enumerate()
+                    .skip(lowered_arguments.len().min(params.len()))
+                {
+                    if signature.source_omittable.contains(index) {
+                        lowered_arguments.push(omitted_parameter_value(ty)?);
+                    } else if matches!(ty, HirType::Json | HirType::Dynamic | HirType::JsValue) {
                         lowered_arguments.push(HirExpr::Lit(HirLit::Undefined));
                     } else {
                         break;

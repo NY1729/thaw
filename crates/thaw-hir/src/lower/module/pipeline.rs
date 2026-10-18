@@ -661,6 +661,16 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         ));
                     }
                 }
+                if !is_extern && generic_type_params.is_empty() {
+                    for (index, parameter) in func.params.iter().enumerate() {
+                        let physical_index = index + usize::from(func.this_param.is_some());
+                        if pattern_is_omittable(&parameter.pat)
+                            && !matches!(params[physical_index], HirType::Dynamic | HirType::Json)
+                        {
+                            params[physical_index] = optional_parameter_type(params[physical_index].clone());
+                        }
+                    }
+                }
                 let assertion_function = matches!(
                     func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
                     Some(TsType::TsTypePredicate(predicate)) if predicate.asserts
@@ -728,7 +738,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     }
                     _ => None,
                 };
-                let generates_call_wrappers = !is_extern && generic_type_params.is_empty();
                 // A plain non-ambient function's trailing
                 // `...rest: T[]` parameter reuses the exact same
                 // `native_rest` mechanism a native class constructor's
@@ -776,31 +785,20 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
                             })
                             .collect(),
+                        source_omittable: if is_extern {
+                            HirOptionalMask::default()
+                        } else {
+                            source_omission_mask(
+                                &func.params.iter().map(|parameter| parameter.pat.clone()).collect::<Vec<_>>(),
+                                usize::from(func.this_param.is_some()),
+                            )
+                        },
                         generic_this_pattern,
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                         generic_return_pattern,
                         type_predicate,
                     },
                 );
-                if generates_call_wrappers {
-                    let patterns = func
-                        .params
-                        .iter()
-                        .map(|parameter| parameter.pat.clone())
-                        .collect::<Vec<_>>();
-                    let receiver_count = usize::from(func.this_param.is_some());
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        for arity in default_start..patterns.len() {
-                            let total_arity = receiver_count + arity;
-                            let mut wrapper = signatures[&name].clone();
-                            wrapper.params.truncate(total_arity);
-                            signatures.insert(default_arity_symbol(&name, total_arity), wrapper);
-                        }
-                    }
-                    insert_omitted_parameter_signatures(
-                        &mut signatures, &name, &patterns, receiver_count,
-                    )?;
-                }
                 if !is_extern {
                     fn_decls.push(fn_decl);
                 }
@@ -838,7 +836,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|lowered| storage_parameter_type(&class_constructor_param_pattern(parameter), lowered.ty))
+                                .map(|lowered| {
+                                    let pattern = class_constructor_param_pattern(parameter);
+                                    let ty = storage_parameter_type(&pattern, lowered.ty);
+                                    if pattern_is_omittable(&pattern) {
+                                        optional_parameter_type(ty)
+                                    } else {
+                                        ty
+                                    }
+                                })
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -866,6 +872,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        source_omittable: constructors.first().map_or_else(
+                            HirOptionalMask::default,
+                            |constructor| source_omission_mask(
+                                &constructor.params.iter().map(class_constructor_param_pattern).collect::<Vec<_>>(),
+                                0,
+                            ),
+                        ),
                         type_predicate: None,
                     },
                 );
@@ -898,6 +911,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        source_omittable: mask_with_offset(
+                            &signatures[&class_constructor_symbol(&name)].source_omittable,
+                            1,
+                            signatures[&class_constructor_symbol(&name)].params.len() + 1,
+                        ),
                         type_predicate: None,
                     },
                 );
@@ -919,34 +937,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .get_mut(&initializer_symbol)
                         .expect("class initializer signature")
                         .native_rest = native_rest;
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        for arity in default_start..patterns.len() {
-                            let mut constructor_signature = signatures[&constructor_symbol].clone();
-                            constructor_signature.params.truncate(arity);
-                            signatures.insert(
-                                default_arity_symbol(&constructor_symbol, arity),
-                                constructor_signature,
-                            );
-                            let mut initializer_signature = signatures[&initializer_symbol].clone();
-                            initializer_signature.params.truncate(arity + 1);
-                            signatures.insert(
-                                default_arity_symbol(&initializer_symbol, arity + 1),
-                                initializer_signature,
-                            );
-                        }
-                    }
-                    insert_omitted_parameter_signatures(
-                        &mut signatures,
-                        &class_constructor_symbol(&name),
-                        &patterns,
-                        0,
-                    )?;
-                    insert_omitted_parameter_signatures(
-                        &mut signatures,
-                        &class_initializer_symbol(&name),
-                        &patterns,
-                        1,
-                    )?;
                 }
                 for member in &class_decl.class.body {
                     let ClassMember::Method(method) = member else {
@@ -997,6 +987,17 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     );
+                    if method.kind == MethodKind::Method {
+                        for (index, parameter) in method.function.params.iter().enumerate() {
+                            let physical_index = index + usize::from(!method.is_static);
+                            if pattern_is_omittable(&parameter.pat)
+                                && !matches!(params[physical_index], HirType::Dynamic | HirType::Json)
+                            {
+                                params[physical_index] =
+                                    optional_parameter_type(params[physical_index].clone());
+                            }
+                        }
+                    }
                     let ret = if method.kind == MethodKind::Setter {
                         HirType::Void
                     } else if method.function.is_generator {
@@ -1086,6 +1087,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
+                            source_omittable: source_omission_mask(
+                                &method.function.params.iter().map(|parameter| parameter.pat.clone()).collect::<Vec<_>>(),
+                                usize::from(!method.is_static),
+                            ),
                             type_predicate: None,
                         },
                     );
@@ -1111,41 +1116,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         let mut unbound = signatures[&symbol].clone();
                         if !method.is_static {
                             unbound.params.remove(0);
+                            unbound.source_omittable = unbound.source_omittable.shifted(1);
                         }
                         unbound.uses_this = false;
                         unbound.generic_this_pattern = None;
                         signatures.insert(unbound_symbol.clone(), unbound);
-                    }
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        let receiver_count = usize::from(!method.is_static);
-                        for arity in default_start..patterns.len() {
-                            let total_arity = arity + receiver_count;
-                            let mut wrapper = signatures[&symbol].clone();
-                            wrapper.params.truncate(total_arity);
-                            signatures.insert(default_arity_symbol(&symbol, total_arity), wrapper);
-                        }
-                    }
-                    insert_omitted_parameter_signatures(
-                        &mut signatures,
-                        &class_member_symbol(&name, method)?,
-                        &patterns,
-                        usize::from(!method.is_static),
-                    )?;
-                    if let Some(unbound_symbol) = unbound_symbol {
-                        if let Some(default_start) = trailing_omittable_start(&patterns) {
-                            for arity in default_start..patterns.len() {
-                                let mut wrapper = signatures[&unbound_symbol].clone();
-                                wrapper.params.truncate(arity);
-                                signatures
-                                    .insert(default_arity_symbol(&unbound_symbol, arity), wrapper);
-                            }
-                        }
-                        insert_omitted_parameter_signatures(
-                            &mut signatures,
-                            &unbound_symbol,
-                            &patterns,
-                            0,
-                        )?;
                     }
                 }
             }
@@ -1208,6 +1183,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     ))
                 }
             };
+            let base_omittable = signatures
+                .get(&base_symbol)
+                .map(|signature| signature.source_omittable.clone())
+                .unwrap_or_default();
             let constructor = signatures
                 .get_mut(&class_constructor_symbol(derived_name))
                 .expect("derived constructor signature");
@@ -1216,6 +1195,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 changed = true;
             }
             constructor.native_rest = base_native_rest.clone();
+            if constructor.source_omittable != base_omittable {
+                constructor.source_omittable = base_omittable.clone();
+                changed = true;
+            }
             let mut initializer_params = vec![interfaces[derived_name].clone()];
             initializer_params.extend(base_params.iter().cloned());
             let initializer = signatures
@@ -1223,59 +1206,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 .expect("derived initializer signature");
             initializer.params = initializer_params;
             initializer.native_rest = base_native_rest;
-            for arity in 0..base_params.len() {
-                let base_constructor =
-                    default_arity_symbol(&class_constructor_symbol(base.sym.as_ref()), arity);
-                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    signatures.insert(
-                        default_arity_symbol(&class_constructor_symbol(derived_name), arity),
-                        derived_wrapper,
-                    );
-                }
-                let base_initializer =
-                    default_arity_symbol(&class_initializer_symbol(base.sym.as_ref()), arity + 1);
-                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.params[0] = interfaces[derived_name].clone();
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    signatures.insert(
-                        default_arity_symbol(&class_initializer_symbol(derived_name), arity + 1),
-                        derived_wrapper,
-                    );
-                }
-            }
-            for mask in omitted_parameter_masks_in_signatures(&signatures, &base_symbol) {
-                let base_constructor = omitted_parameter_symbol(
-                    &base_symbol,
-                    &mask,
-                );
-                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    changed |= signatures.insert(
-                        omitted_parameter_symbol(&class_constructor_symbol(derived_name), &mask),
-                        derived_wrapper,
-                    ).is_none();
-                }
-                let initializer_mask = mask.offset_by(1);
-                let base_initializer = omitted_parameter_symbol(
-                    &class_initializer_symbol(base.sym.as_ref()),
-                    &initializer_mask,
-                );
-                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.params[0] = interfaces[derived_name].clone();
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    changed |= signatures.insert(
-                        omitted_parameter_symbol(
-                            &class_initializer_symbol(derived_name),
-                            &initializer_mask,
-                        ),
-                        derived_wrapper,
-                    ).is_none();
-                }
+            let initializer_omittable = mask_with_offset(
+                &base_omittable,
+                1,
+                base_params.len() + 1,
+            );
+            if initializer.source_omittable != initializer_omittable {
+                initializer.source_omittable = initializer_omittable;
+                changed = true;
             }
         }
         if !changed {
@@ -1381,6 +1319,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             let mut unbound = signature.clone();
                             if !method.is_static {
                                 unbound.params.remove(0);
+                                unbound.source_omittable = unbound.source_omittable.shifted(1);
                             }
                             unbound
                         });
@@ -1397,59 +1336,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     inherited_virtual_class_decls.push(inherited);
                 }
 
-                let patterns = method
-                    .function
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.pat.clone())
-                    .collect::<Vec<_>>();
-                let receiver_count = usize::from(!method.is_static);
-                if let Some(default_start) = trailing_omittable_start(&patterns) {
-                    for arity in default_start..patterns.len() {
-                        let total_arity = arity + receiver_count;
-                        let base_wrapper = default_arity_symbol(&base_symbol, total_arity);
-                        let derived_wrapper = default_arity_symbol(&derived_symbol, total_arity);
-                        let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned()
-                        else {
-                            continue;
-                        };
-                        if !method.is_static {
-                            wrapper_signature.params[0] = derived_type.clone();
-                        }
-                        signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
-                    }
-                }
-                for mask in omitted_parameter_masks(&patterns, receiver_count)? {
-                    let base_wrapper = omitted_parameter_symbol(&base_symbol, &mask);
-                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, &mask);
-                    let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned() else {
-                        continue;
-                    };
-                    if !method.is_static {
-                        wrapper_signature.params[0] = derived_type.clone();
-                    }
-                    signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
-                }
-                if method.kind == MethodKind::Method && signature.uses_this {
-                    let base_unbound = unbound_class_method_symbol(&base_symbol);
-                    let derived_unbound = unbound_class_method_symbol(&derived_symbol);
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        for arity in default_start..patterns.len() {
-                            let base_wrapper = default_arity_symbol(&base_unbound, arity);
-                            let derived_wrapper = default_arity_symbol(&derived_unbound, arity);
-                            if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
-                                signatures.insert(derived_wrapper, wrapper);
-                            }
-                        }
-                    }
-                    for mask in omitted_parameter_masks(&patterns, 0)? {
-                        let base_wrapper = omitted_parameter_symbol(&base_unbound, &mask);
-                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, &mask);
-                        if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
-                            signatures.insert(derived_wrapper, wrapper);
-                        }
-                    }
-                }
             }
             base_name = base
                 .class
@@ -1652,6 +1538,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        source_omittable: HirOptionalMask::default(),
                         type_predicate: None,
                     },
                 );
@@ -1724,6 +1611,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
+                            source_omittable: HirOptionalMask::default(),
                             type_predicate: None,
                         },
                     );
@@ -2182,43 +2070,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         if !signatures[&function.name].generic_type_params.is_empty() {
             continue;
         }
-        let patterns = fn_decl
-            .function
-            .params
-            .iter()
-            .map(|parameter| parameter.pat.clone())
-            .collect::<Vec<_>>();
-        let receiver_count = usize::from(fn_decl.function.this_param.is_some());
-        specialized.extend(lower_callable_default_wrappers(
-            &function.name,
-            &function.params,
-            &patterns,
-            receiver_count,
-            None,
-            &function.ret,
-            &signatures,
-            &interfaces,
-            &generic_interfaces,
-            &enum_values,
-            &enum_reverse_values,
-            &global_types,
-            &immutable_globals,
-        )?);
-        specialized.extend(lower_callable_omitted_parameter_wrappers(
-            &function.name,
-            &function.params,
-            &patterns,
-            receiver_count,
-            None,
-            &function.ret,
-            &signatures,
-            &interfaces,
-            &generic_interfaces,
-            &enum_values,
-            &enum_reverse_values,
-            &global_types,
-            &immutable_globals,
-        )?);
         specialized.push(function);
     }
     for declaration in &class_decls {

@@ -144,6 +144,8 @@ struct FnSignature {
     generic_type_defaults: Vec<Option<Box<TsType>>>,
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_param_optional: Vec<bool>,
+    /// Source syntax that allows omission, indexed in the physical ABI.
+    source_omittable: HirOptionalMask,
     /// Generic top-level explicit `this` metadata, when it can be represented
     /// by the generic matcher. `LegacyUnmatched` preserves accepted physical
     /// receiver annotations that the pattern grammar cannot express.

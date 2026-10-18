@@ -1,3 +1,61 @@
+#[test]
+fn constructor_defaults_and_parameter_properties_use_resolved_arguments() {
+    let source = r#"
+        let order = "";
+        let getterCalls = 0;
+        function mark(label: string, value: number): number { order += label; return value; }
+        function defaultObject(): { x: number } { order += "X"; return { x: 7 }; }
+        class Base {
+            field: number = mark("F", 1);
+            after: number;
+            constructor(readonly value: number = 4, { x }: { x: number } = defaultObject()) {
+                order += "B";
+                this.after = x;
+            }
+        }
+        class Middle extends Base {}
+        class Leaf extends Middle {}
+        class Derived extends Base {
+            own: number = mark("f", 2);
+            constructor(value: number = mark("d", 3)) { order += "s"; super(value); order += "a"; }
+        }
+        class Rest {
+            size: number;
+            constructor(...items: number[]) { this.size = items.length; }
+        }
+        class NullishCtor {
+            value: any;
+            constructor(value: any = 4) { this.value = value; }
+        }
+        class OptionalCtor {
+            value?: number;
+            constructor(value?: number) { this.value = value; }
+        }
+        function main(): void {
+            const omitted = new Base();
+            console.log(omitted.value, omitted.after, omitted.field, order);
+            order = "";
+            const explicitUndefined = new Base(undefined, { get x(): number { getterCalls++; return 9; } });
+            console.log(explicitUndefined.value, explicitUndefined.after, getterCalls, order);
+            order = "";
+            const derived = new Derived();
+            console.log(derived.value, derived.own, order);
+            order = "";
+            const inherited = new Leaf();
+            console.log(inherited.value, order);
+            console.log(new Rest(1, 2, 3).size);
+            console.log(new NullishCtor(null).value, new NullishCtor(undefined).value,
+                new OptionalCtor().value, new OptionalCtor(undefined).value,
+                new OptionalCtor(8).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "constructor_defaults_parameter_properties"),
+        "4 7 1 XFB\n4 9 1 FB\n3 2 dsXFBfa\n4 XFB\n3\nnull 4 undefined undefined 8\n",
+    );
+}
+
+
 
 #[test]
 fn mixed_json_add_respects_literal_optional_string_and_operand_order() {
@@ -1308,6 +1366,7 @@ fn compiles_and_runs_native_class_default_parameters() {
         class Box {
             constructor(public value: number = 40, public label: string = String(value)) {}
             add(delta: number = this.value): number { return this.value + delta; }
+            pick({ left }: { left: number } = { left: 3 }): number { return left; }
             static sum(left: number = 20, right: number = left + 22): number {
                 return left + right;
             }
@@ -1329,6 +1388,10 @@ fn compiles_and_runs_native_class_default_parameters() {
             console.log(fourth.label);
             console.log(first.add());
             console.log(first.add(undefined));
+            console.log(first.pick());
+            console.log(first.pick({ left: 12 }));
+            const add = first.add.bind(first);
+            console.log(add(undefined));
             console.log(Box.sum());
             console.log(Box.sum(21));
             console.log(Box.sum(undefined, 1));
@@ -1340,7 +1403,7 @@ fn compiles_and_runs_native_class_default_parameters() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_class_default_parameters"),
-        "40\n40\n41\nexplicit\n40\nexplicit-default\n80\n80\n62\n64\n21\n24\n21\n21\n22\n"
+        "40\n40\n41\nexplicit\n40\nexplicit-default\n80\n80\n3\n12\n80\n62\n64\n21\n24\n21\n21\n22\n"
     );
 }
 
@@ -4163,5 +4226,100 @@ fn native_error_identity_survives_quickjs_callback_roundtrip() {
     assert_eq!(
         compile_and_run(source, "native_error_callback_identity_roundtrip"),
         "true true identity\n",
+    );
+}
+#[test]
+fn bound_class_method_preserves_omitted_optional_arguments() {
+    let source = r#"
+        class Counter {
+            value: number;
+            constructor(value: number) { this.value = value; }
+            add(delta: number = 2, extra?: number): number {
+                return this.value + delta + (extra ?? 0);
+            }
+        }
+        function main(): void {
+            const counter = new Counter(10);
+            const bound = counter.add.bind(counter, undefined);
+            console.log(bound());
+            console.log(bound(5));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bound_class_method_omitted_optional"),
+        "12\n17\n"
+    );
+}
+
+#[test]
+fn static_class_method_assigns_to_optional_callable_type() {
+    let source = r#"
+        class Box {
+            static value(input: number = 7): number { return input; }
+            instance(input: number = 3): number { return input; }
+        }
+        function main(): void {
+            const value: (input?: number) => number = Box.value;
+            const instance: (input?: number) => number = new Box().instance;
+            console.log(value());
+            console.log(value(11));
+            console.log(instance());
+            console.log(instance(13));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "static_class_method_optional_callable"),
+        "7\n11\n3\n13\n"
+    );
+}
+
+#[test]
+fn bound_instance_class_method_preserves_rest_prefix_after_optional_fixed_parameter() {
+    let source = r#"
+        class Counter {
+            sum(first: number, base: number = 1, ...values: number[]): number {
+                let total = first + base;
+                for (const value of values) total += value;
+                return total;
+            }
+        }
+        function main(): void {
+            const counter = new Counter();
+            const bound = counter.sum.bind(counter, 5, undefined, 2, 3);
+            const noRestPrefix = counter.sum.bind(counter, 5);
+            console.log(bound());
+            console.log(bound(4, 5));
+            console.log(noRestPrefix(4, 5));
+            console.log(noRestPrefix());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bound_instance_method_rest_prefix"),
+        "11\n20\n14\n6\n"
+    );
+}
+
+#[test]
+fn bound_static_class_method_preserves_rest_prefix_after_optional_fixed_parameter() {
+    let source = r#"
+        class Counter {
+            static sum(first: number, base: number = 1, ...values: number[]): number {
+                let total = first + base;
+                for (const value of values) total += value;
+                return total;
+            }
+        }
+        function main(): void {
+            const bound = Counter.sum.bind(undefined, 5, undefined, 2, 3);
+            const noRestPrefix = Counter.sum.bind(undefined, 5);
+            console.log(bound());
+            console.log(bound(4, 5));
+            console.log(noRestPrefix(4, 5));
+            console.log(noRestPrefix());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bound_static_method_rest_prefix"),
+        "11\n20\n14\n6\n"
     );
 }
