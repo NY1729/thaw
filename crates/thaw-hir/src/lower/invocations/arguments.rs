@@ -174,16 +174,16 @@ impl<'a> FnLowerer<'a> {
         Ok((values, bindings))
     }
 
-    fn select_omitted_class_arguments(
+    fn pad_source_mask_arguments(
         &mut self,
-        symbol: &mut Symbol,
-        signature: &mut FnSignature,
+        signature: &FnSignature,
         mut arguments: Vec<HirExpr>,
         receiver_count: usize,
         label: &str,
     ) -> Result<Vec<HirExpr>, String> {
+        let logical_param_count = signature.params.len() - usize::from(signature.native_rest.is_some());
+        let fixed_argument_count = logical_param_count.saturating_sub(receiver_count);
         let native_rest_values = signature.native_rest.clone().map(|element| {
-            let fixed_argument_count = signature.params.len() - receiver_count - 1;
             let values = if arguments.len() > fixed_argument_count {
                 arguments.split_off(fixed_argument_count)
             } else {
@@ -191,41 +191,22 @@ impl<'a> FnLowerer<'a> {
             };
             (element, values)
         });
-        let logical_param_count =
-            signature.params.len() - usize::from(signature.native_rest.is_some());
-        if arguments.len() + receiver_count <= logical_param_count {
-            let mut omitted_mask = HirOptionalMask::default();
-            for index in receiver_count..logical_param_count {
-                let omitted = match arguments.get(index - receiver_count) {
-                    None => true,
-                    Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
-                };
-                if omitted {
-                    omitted_mask.insert(index);
-                }
-            }
-            let wrapper = omitted_parameter_symbol(symbol, &omitted_mask);
-            if !omitted_mask.is_empty() {
-                if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
-                    arguments = arguments
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(index, argument)| {
-                            (!omitted_mask.contains(index + receiver_count)).then_some(argument)
-                        })
-                        .collect();
-                    *symbol = wrapper;
-                    *signature = wrapper_signature;
+        if arguments.len() <= fixed_argument_count {
+            for index in arguments.len()..fixed_argument_count {
+                let parameter_index = index + receiver_count;
+                if signature.source_omittable.contains(parameter_index) {
+                    arguments.push(omitted_parameter_value(&signature.params[parameter_index])?);
+                } else {
+                    break;
                 }
             }
         }
-        if signature.native_rest.is_none()
-            && arguments.len() + receiver_count != signature.params.len()
-        {
-            let wrapper = default_arity_symbol(symbol, arguments.len() + receiver_count);
-            if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
-                *symbol = wrapper;
-                *signature = wrapper_signature;
+        for (index, argument) in arguments.iter_mut().enumerate() {
+            let parameter_index = index + receiver_count;
+            if signature.source_omittable.contains(parameter_index)
+                && self.infer_expr_type(argument)? == HirType::Undefined
+            {
+                *argument = omitted_parameter_value(&signature.params[parameter_index])?;
             }
         }
         if let Some((element, values)) = native_rest_values {

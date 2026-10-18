@@ -4228,3 +4228,47 @@ fn native_error_identity_survives_quickjs_callback_roundtrip() {
         "true true identity\n",
     );
 }
+#[test]
+fn bound_class_method_preserves_omitted_optional_arguments() {
+    let source = r#"
+        class Counter {
+            value: number;
+            constructor(value: number) { this.value = value; }
+            add(delta: number = 2, extra?: number): number {
+                return this.value + delta + (extra ?? 0);
+            }
+        }
+        function main(): void {
+            const counter = new Counter(10);
+            const bound = counter.add.bind(counter, undefined);
+            console.log(bound());
+            console.log(bound(5));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bound_class_method_omitted_optional"),
+        "12\n17\n"
+    );
+}
+
+#[test]
+fn static_class_method_assigns_to_optional_callable_type() {
+    let source = r#"
+        class Box {
+            static value(input: number = 7): number { return input; }
+            instance(input: number = 3): number { return input; }
+        }
+        function main(): void {
+            const value: (input?: number) => number = Box.value;
+            const instance: (input?: number) => number = new Box().instance;
+            console.log(value());
+            console.log(value(11));
+            console.log(instance());
+            console.log(instance(13));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "static_class_method_optional_callable"),
+        "7\n11\n3\n13\n"
+    );
+}

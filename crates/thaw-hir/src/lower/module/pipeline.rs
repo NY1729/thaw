@@ -937,36 +937,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .get_mut(&initializer_symbol)
                         .expect("class initializer signature")
                         .native_rest = native_rest;
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        for arity in default_start..patterns.len() {
-                            let mut constructor_signature = signatures[&constructor_symbol].clone();
-                            constructor_signature.params.truncate(arity);
-                            constructor_signature.source_omittable = HirOptionalMask::default();
-                            signatures.insert(
-                                default_arity_symbol(&constructor_symbol, arity),
-                                constructor_signature,
-                            );
-                            let mut initializer_signature = signatures[&initializer_symbol].clone();
-                            initializer_signature.params.truncate(arity + 1);
-                            initializer_signature.source_omittable = HirOptionalMask::default();
-                            signatures.insert(
-                                default_arity_symbol(&initializer_symbol, arity + 1),
-                                initializer_signature,
-                            );
-                        }
-                    }
-                    insert_omitted_parameter_signatures(
-                        &mut signatures,
-                        &class_constructor_symbol(&name),
-                        &patterns,
-                        0,
-                    )?;
-                    insert_omitted_parameter_signatures(
-                        &mut signatures,
-                        &class_initializer_symbol(&name),
-                        &patterns,
-                        1,
-                    )?;
                 }
                 for member in &class_decl.class.body {
                     let ClassMember::Method(method) = member else {
@@ -1152,39 +1122,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         unbound.generic_this_pattern = None;
                         signatures.insert(unbound_symbol.clone(), unbound);
                     }
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        let receiver_count = usize::from(!method.is_static);
-                        for arity in default_start..patterns.len() {
-                            let total_arity = arity + receiver_count;
-                            let mut wrapper = signatures[&symbol].clone();
-                            wrapper.params.truncate(total_arity);
-                            wrapper.source_omittable = HirOptionalMask::default();
-                            signatures.insert(default_arity_symbol(&symbol, total_arity), wrapper);
-                        }
-                    }
-                    insert_omitted_parameter_signatures(
-                        &mut signatures,
-                        &class_member_symbol(&name, method)?,
-                        &patterns,
-                        usize::from(!method.is_static),
-                    )?;
-                    if let Some(unbound_symbol) = unbound_symbol {
-                        if let Some(default_start) = trailing_omittable_start(&patterns) {
-                            for arity in default_start..patterns.len() {
-                                let mut wrapper = signatures[&unbound_symbol].clone();
-                                wrapper.params.truncate(arity);
-                                wrapper.source_omittable = HirOptionalMask::default();
-                                signatures
-                                    .insert(default_arity_symbol(&unbound_symbol, arity), wrapper);
-                            }
-                        }
-                        insert_omitted_parameter_signatures(
-                            &mut signatures,
-                            &unbound_symbol,
-                            &patterns,
-                            0,
-                        )?;
-                    }
                 }
             }
             // Already consumed by `resolve_interfaces` above.
@@ -1277,60 +1214,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             if initializer.source_omittable != initializer_omittable {
                 initializer.source_omittable = initializer_omittable;
                 changed = true;
-            }
-            for arity in 0..base_params.len() {
-                let base_constructor =
-                    default_arity_symbol(&class_constructor_symbol(base.sym.as_ref()), arity);
-                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    signatures.insert(
-                        default_arity_symbol(&class_constructor_symbol(derived_name), arity),
-                        derived_wrapper,
-                    );
-                }
-                let base_initializer =
-                    default_arity_symbol(&class_initializer_symbol(base.sym.as_ref()), arity + 1);
-                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.params[0] = interfaces[derived_name].clone();
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    signatures.insert(
-                        default_arity_symbol(&class_initializer_symbol(derived_name), arity + 1),
-                        derived_wrapper,
-                    );
-                }
-            }
-            for mask in omitted_parameter_masks_in_signatures(&signatures, &base_symbol) {
-                let base_constructor = omitted_parameter_symbol(
-                    &base_symbol,
-                    &mask,
-                );
-                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    changed |= signatures.insert(
-                        omitted_parameter_symbol(&class_constructor_symbol(derived_name), &mask),
-                        derived_wrapper,
-                    ).is_none();
-                }
-                let initializer_mask = mask.offset_by(1);
-                let base_initializer = omitted_parameter_symbol(
-                    &class_initializer_symbol(base.sym.as_ref()),
-                    &initializer_mask,
-                );
-                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
-                    let mut derived_wrapper = base_wrapper;
-                    derived_wrapper.params[0] = interfaces[derived_name].clone();
-                    derived_wrapper.ret = interfaces[derived_name].clone();
-                    changed |= signatures.insert(
-                        omitted_parameter_symbol(
-                            &class_initializer_symbol(derived_name),
-                            &initializer_mask,
-                        ),
-                        derived_wrapper,
-                    ).is_none();
-                }
             }
         }
         if !changed {
@@ -1453,59 +1336,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     inherited_virtual_class_decls.push(inherited);
                 }
 
-                let patterns = method
-                    .function
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.pat.clone())
-                    .collect::<Vec<_>>();
-                let receiver_count = usize::from(!method.is_static);
-                if let Some(default_start) = trailing_omittable_start(&patterns) {
-                    for arity in default_start..patterns.len() {
-                        let total_arity = arity + receiver_count;
-                        let base_wrapper = default_arity_symbol(&base_symbol, total_arity);
-                        let derived_wrapper = default_arity_symbol(&derived_symbol, total_arity);
-                        let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned()
-                        else {
-                            continue;
-                        };
-                        if !method.is_static {
-                            wrapper_signature.params[0] = derived_type.clone();
-                        }
-                        signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
-                    }
-                }
-                for mask in omitted_parameter_masks(&patterns, receiver_count)? {
-                    let base_wrapper = omitted_parameter_symbol(&base_symbol, &mask);
-                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, &mask);
-                    let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned() else {
-                        continue;
-                    };
-                    if !method.is_static {
-                        wrapper_signature.params[0] = derived_type.clone();
-                    }
-                    signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
-                }
-                if method.kind == MethodKind::Method && signature.uses_this {
-                    let base_unbound = unbound_class_method_symbol(&base_symbol);
-                    let derived_unbound = unbound_class_method_symbol(&derived_symbol);
-                    if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        for arity in default_start..patterns.len() {
-                            let base_wrapper = default_arity_symbol(&base_unbound, arity);
-                            let derived_wrapper = default_arity_symbol(&derived_unbound, arity);
-                            if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
-                                signatures.insert(derived_wrapper, wrapper);
-                            }
-                        }
-                    }
-                    for mask in omitted_parameter_masks(&patterns, 0)? {
-                        let base_wrapper = omitted_parameter_symbol(&base_unbound, &mask);
-                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, &mask);
-                        if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
-                            signatures.insert(derived_wrapper, wrapper);
-                        }
-                    }
-                }
             }
             base_name = base
                 .class

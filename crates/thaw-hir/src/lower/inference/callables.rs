@@ -61,15 +61,12 @@ impl<'a> FnLowerer<'a> {
                 ty: HirType::Array(rest.clone()),
             });
         }
-        // Class methods still have the legacy wrapper ABI in this task. The
-        // generated symbol prefix is the class-method discriminator; a method
-        // that does not read `this` still has a physical receiver parameter.
+        // Adapt only a physically compatible, receiver-free canonical ABI.
+        // Bound instance methods have already captured their receiver before
+        // they reach this path; named `this` functions remain unsupported.
         let source_signature = self
             .signatures
             .get(symbol)
-            .filter(|_| {
-                !symbol.starts_with("__thaw_class_") && !symbol.ends_with("__thaw_unbound")
-            })
             .filter(|signature| {
                 !signature.uses_this && signature.source_omittable == *optional
             });
@@ -80,13 +77,14 @@ impl<'a> FnLowerer<'a> {
                     source_params.iter().zip(fixed.iter()).enumerate()
                 {
                     let argument = HirExpr::Var(parameters[index].name.clone());
-                    if actual == expected {
-                        arguments.push(argument);
-                    } else if *actual == HirType::Json
-                        && *expected == HirType::Optional(Box::new(HirType::Json))
-                        && optional.contains(index)
-                    {
-                        arguments.push(HirExpr::Conditional(
+                    arguments.push(match (actual, expected) {
+                        (actual, expected) if actual == expected => argument,
+                        (
+                            HirType::Json,
+                            HirType::Optional(payload),
+                        ) if *payload.as_ref() == HirType::Json && optional.contains(index) =>
+                        {
+                            HirExpr::Conditional(
                             Box::new(HirExpr::OptionalIsNone(
                                 Box::new(argument.clone()),
                                 HirType::Json,
@@ -100,10 +98,20 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Json,
                             )),
                             HirType::Json,
-                        ));
-                    } else {
-                        return Ok(None);
-                    }
+                            )
+                        }
+                        (HirType::Optional(payload), expected)
+                            if *payload.as_ref() == *expected && optional.contains(index) =>
+                        {
+                            HirExpr::OptionalValue(Box::new(argument), payload.as_ref().clone())
+                        }
+                        (HirType::Nullish(payload), expected)
+                            if *payload.as_ref() == *expected && optional.contains(index) =>
+                        {
+                            HirExpr::NullishValue(Box::new(argument), payload.as_ref().clone())
+                        }
+                        _ => return Ok(None),
+                    });
                 }
                 if rest.is_some() {
                     arguments.push(HirExpr::Var("__thaw_callable_rest".into()));
@@ -126,144 +134,6 @@ impl<'a> FnLowerer<'a> {
                 )));
             }
         }
-        if optional.count() > 16 {
-            return Err("callable values support at most 16 omittable parameters".into());
-        }
-
-        let body = HirExpr::Block(self.build_callable_adapter_dispatch(
-            symbol,
-            fixed,
-            optional,
-            rest.as_deref(),
-            &parameters,
-            0,
-            HirOptionalMask::default(),
-        )?);
-        let closure = HirExpr::Lambda(Vec::new(), parameters, ret.as_ref().clone(), Box::new(body));
-        Ok(Some(HirExpr::TypedClosure(
-            declared.clone(),
-            Box::new(closure),
-        )))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_callable_adapter_dispatch(
-        &self,
-        symbol: &str,
-        fixed: &[HirType],
-        optional: &HirOptionalMask,
-        rest: Option<&HirType>,
-        parameters: &[HirParam],
-        index: usize,
-        omitted_mask: HirOptionalMask,
-    ) -> Result<Vec<HirStmt>, String> {
-        let Some(next) = optional
-            .first_at_or_after(index)
-            .filter(|next| *next < fixed.len())
-        else {
-            let target = if omitted_mask.is_empty() {
-                symbol.to_string()
-            } else {
-                omitted_parameter_symbol(symbol, &omitted_mask)
-            };
-            let signature = self.signatures.get(&target).ok_or_else(|| {
-                format!(
-                    "function `{symbol}` cannot use this optional callable shape: missing omission adapter `{target}`"
-                )
-            })?;
-            let mut arguments = Vec::with_capacity(signature.params.len());
-            let mut source_index = 0usize;
-            for (position, parameter) in parameters.iter().take(fixed.len()).enumerate() {
-                if omitted_mask.contains(position) {
-                    continue;
-                }
-                let expected = &signature.params[source_index];
-                source_index += 1;
-                let value = HirExpr::Var(parameter.name.clone());
-                let value = match (&parameter.ty, expected) {
-                    (HirType::Optional(payload), expected) if payload.as_ref() == expected => {
-                        HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone())
-                    }
-                    (HirType::Nullish(payload), expected) if payload.as_ref() == expected => {
-                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone())
-                    }
-                    (HirType::Nullish(payload), HirType::Nullable(expected))
-                        if payload.as_ref() == expected.as_ref() =>
-                    {
-                        HirExpr::Conditional(
-                            Box::new(HirExpr::NullishIsNull(
-                                Box::new(value.clone()),
-                                payload.as_ref().clone(),
-                            )),
-                            Box::new(HirExpr::NullableNone(expected.as_ref().clone())),
-                            Box::new(HirExpr::NullableSome(
-                                Box::new(HirExpr::NullishValue(
-                                    Box::new(value),
-                                    payload.as_ref().clone(),
-                                )),
-                                expected.as_ref().clone(),
-                            )),
-                            HirType::Nullable(expected.clone()),
-                        )
-                    }
-                    (actual, expected) if actual == expected => value,
-                    (actual, expected) => {
-                        return Err(format!(
-                            "callable adapter for `{symbol}` cannot convert parameter {} from {actual:?} to {expected:?}",
-                            position + 1
-                        ));
-                    }
-                };
-                arguments.push(value);
-            }
-            if rest.is_some() {
-                arguments.push(HirExpr::Var("__thaw_callable_rest".into()));
-            }
-            let call = HirExpr::Call(Box::new(HirExpr::Var(target)), arguments);
-            return Ok(if signature.ret == HirType::Void {
-                vec![HirStmt::Expr(call), HirStmt::Return(None)]
-            } else {
-                vec![HirStmt::Return(Some(call))]
-            });
-        };
-
-        let parameter = &parameters[next];
-        let condition = match &parameter.ty {
-            HirType::Optional(payload) => HirExpr::OptionalIsNone(
-                Box::new(HirExpr::Var(parameter.name.clone())),
-                payload.as_ref().clone(),
-            ),
-            HirType::Nullish(payload) => HirExpr::NullishIsUndefined(
-                Box::new(HirExpr::Var(parameter.name.clone())),
-                payload.as_ref().clone(),
-            ),
-            other => {
-                return Err(format!(
-                    "optional callable parameter {} has non-optional ABI type {other:?}",
-                    next + 1
-                ));
-            }
-        };
-        let mut absent_mask = omitted_mask.clone();
-        absent_mask.insert(next);
-        let absent = self.build_callable_adapter_dispatch(
-            symbol,
-            fixed,
-            optional,
-            rest,
-            parameters,
-            next + 1,
-            absent_mask,
-        )?;
-        let present = self.build_callable_adapter_dispatch(
-            symbol,
-            fixed,
-            optional,
-            rest,
-            parameters,
-            next + 1,
-            omitted_mask,
-        )?;
-        Ok(vec![HirStmt::If(condition, absent, present)])
+        Ok(None)
     }
 }

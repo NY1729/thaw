@@ -477,12 +477,18 @@ impl<'a> FnLowerer<'a> {
         } else {
             signature.ret.clone()
         };
-        let closure = HirExpr::Lambda(
+        let closure_type = HirType::CallableFunction(
+            parameters.iter().map(|parameter| parameter.ty.clone()).collect(),
+            signature.source_omittable.shifted(1 + leading_values.len()),
+            None,
+            Box::new(closure_return.clone()),
+        );
+        let closure = HirExpr::TypedClosure(closure_type, Box::new(HirExpr::Lambda(
             captures,
             parameters,
             closure_return,
             Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
-        );
+        )));
         self.wrap_call_argument_bindings(closure, &bindings)
             .map(Some)
     }
@@ -584,12 +590,18 @@ impl<'a> FnLowerer<'a> {
         } else {
             signature.ret.clone()
         };
-        let closure = HirExpr::Lambda(
+        let closure_type = HirType::CallableFunction(
+            parameters.iter().map(|parameter| parameter.ty.clone()).collect(),
+            signature.source_omittable.shifted(leading_values.len()),
+            None,
+            Box::new(result.clone()),
+        );
+        let closure = HirExpr::TypedClosure(closure_type, Box::new(HirExpr::Lambda(
             captures,
             parameters,
             result,
             Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
-        );
+        )));
         self.wrap_call_argument_bindings(closure, &bindings)
             .map(Some)
     }
@@ -857,13 +869,21 @@ impl<'a> FnLowerer<'a> {
             signature.ret.clone()
         };
         self.wrap_call_argument_bindings(
-            HirExpr::Lambda(
+            HirExpr::TypedClosure(
+                HirType::CallableFunction(
+                    parameters.iter().map(|parameter| parameter.ty.clone()).collect(),
+                    signature.source_omittable.shifted(receiver_count + leading_values.len()),
+                    None,
+                    Box::new(result.clone()),
+                ),
+                Box::new(HirExpr::Lambda(
                 captures,
                 parameters,
                 result,
                 Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var(method.symbol.clone())),
                     arguments,
+                )),
                 )),
             ),
             &bindings,
@@ -1305,17 +1325,16 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(selected_name.clone(), selected_type.clone());
             let label = format!("unbound native method `{}`", target.sym);
             let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
-            let mut symbol = unbound_class_method_symbol(&method.symbol);
-            let mut signature = self.signatures.get(&symbol).cloned().unwrap_or_else(|| {
+            let symbol = unbound_class_method_symbol(&method.symbol);
+            let signature = self.signatures.get(&symbol).cloned().unwrap_or_else(|| {
                 let mut signature = self.signatures[&method.symbol].clone();
                 if method.receiver.is_some() {
                     signature.params.remove(0);
                 }
                 signature
             });
-            let arguments = self.select_omitted_class_arguments(
-                &mut symbol,
-                &mut signature,
+            let arguments = self.pad_source_mask_arguments(
+                &signature,
                 arguments,
                 0,
                 &label,
@@ -1397,15 +1416,14 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(this_name.clone(), this_type.clone());
             let label = format!("saved static method `{}.{operation_name}`", target.sym);
             let (arguments, mut bindings) = self.lower_native_spread_values(&forwarded, &label)?;
-            let mut symbol = method.symbol.clone();
-            let mut signature = self
+            let symbol = method.symbol.clone();
+            let signature = self
                 .signatures
                 .get(&symbol)
                 .cloned()
                 .expect("saved static method retains its signature");
-            let arguments = self.select_omitted_class_arguments(
-                &mut symbol,
-                &mut signature,
+            let arguments = self.pad_source_mask_arguments(
+                &signature,
                 arguments,
                 0,
                 &label,
