@@ -745,9 +745,11 @@ fn named_nullable_default_adapter_preserves_null_and_values() {
             const direct = nullable;
             const bound = nullable.bind(null);
             console.log(direct(), direct(null), direct(3), bound(), bound(null), bound(3));
+            console.log(nullable.call(null), nullable.call(null, null), nullable.call(null, 3));
+            console.log(nullable.apply(null, [null]), nullable.apply(null, [3]));
         }
     "#;
-    assert_eq!(compile_and_run(source, "named_nullable_default_adapter"), "7 7 3 7 7 3\n");
+    assert_eq!(compile_and_run(source, "named_nullable_default_adapter"), "7 7 3 7 7 3\n7 7 3\n7 3\n");
 }
 
 #[test]
