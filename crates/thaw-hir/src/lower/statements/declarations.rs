@@ -675,9 +675,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         continue;
                     }
-                    if let Some(target) = self.generic_named_templates.get(&source_name).cloned() {
-                        let hir_name = self.bind_decl_local(&name, HirType::Dynamic, var_decl.kind == VarDeclKind::Const);
-                        self.generic_named_templates.insert(hir_name, target);
+                    if let Some(GenericCallableTemplate::Named { symbol }) =
+                        self.generic_callable_template(identifier.sym.as_ref())
+                    {
+                        if var_decl.kind != VarDeclKind::Const {
+                            return Err("generic function template aliases currently require an immutable binding".into());
+                        }
+                        let hir_name = self.bind_decl_local(&name, HirType::Dynamic, true);
+                        self.generic_named_templates.insert(hir_name, symbol);
                         continue;
                     }
                 }

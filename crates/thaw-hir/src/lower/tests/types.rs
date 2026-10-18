@@ -329,6 +329,63 @@ fn named_generic_template_specialization_keys_remain_distinct() {
 }
 
 #[test]
+fn named_generic_template_alias_and_chain_specialize_by_call_site() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const alias = identity;
+            const chain = alias;
+            chain(1);
+            chain("x");
+        }
+    "#);
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_f64"));
+    assert!(program.functions.iter().any(|function| function.name == "identity__thaw_str"));
+}
+
+#[test]
+fn named_generic_template_alias_lookup_respects_local_shadowing() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function shadow(identity: number): number {
+            const alias = identity;
+            return alias;
+        }
+        function main(): void {}
+    "#);
+    let shadow = program.functions.iter().find(|function| function.name == "shadow").unwrap();
+    assert_eq!(shadow.params[0].ty, HirType::F64);
+    assert!(format!("{:?}", shadow.body).contains("Var(\"identity\")"));
+}
+
+#[test]
+fn named_generic_template_aliases_reject_mutable_bindings() {
+    for source in [
+        "function identity<T>(value: T): T { return value; } function main(): void { let alias = identity; }",
+        "function identity<T>(value: T): T { return value; } function main(): void { const first = identity; let second = first; }",
+        "function identity<T>(value: T): T { return value; } function main(): void { var alias = identity; }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(error, "generic function template aliases currently require an immutable binding");
+    }
+}
+
+#[test]
+fn named_generic_template_alias_typeof_is_function() {
+    let program = lower(r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): string {
+            const alias = identity;
+            const chain = alias;
+            return typeof chain;
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("Str(\"function\")"));
+}
+
+#[test]
 fn named_generic_template_typeof_preserves_shadowing() {
     let program = lower(r#"
         function identity<T>(value: T): T { return value; }

@@ -535,6 +535,24 @@ fn compiles_local_generic_arrow_specializations() {
 }
 
 #[test]
+fn compiles_named_generic_template_aliases_and_alias_chains() {
+    let source = r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const alias = identity;
+            const chain = alias;
+            console.log(chain(17));
+            console.log(chain("alias"));
+            console.log(typeof chain);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_generic_template_aliases"),
+        "17\nalias\nfunction\n"
+    );
+}
+
+#[test]
 fn compiles_generic_callbacks_for_user_functions() {
     let source = r#"
         function apply(callback: (value: number) => number, value: number): number {
