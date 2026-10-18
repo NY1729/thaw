@@ -3487,6 +3487,46 @@ fn decorated_class_satisfies_external_structural_argument() {
 }
 
 #[test]
+fn external_structural_argument_accepts_class_prototype_method() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: {
+                bump(value?: number): number;
+                rest(...values: number[]): number;
+                asyncBump(): Promise<number>;
+            }): number;
+            class Item {
+                value: number = 1;
+                bump(value?: number): number { return this.value; }
+                rest(...values: number[]): number { return this.value; }
+                async asyncBump(): Promise<number> { return this.value; }
+            }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "class prototype methods should satisfy structural method contracts: {}", result.unwrap_err());
+}
+
+#[test]
+fn external_structural_argument_rejects_missing_or_incompatible_class_methods() {
+    for (class, diagnostic) in [
+        ("class Item { value: number = 1; }", "missing required field `bump`"),
+        ("class Item { value: number = 1; bump(value?: number): string { return 'wrong'; } }", "incompatible method signature"),
+        ("class Item { value: number = 1; bump(value: string): number { return 1; } }", "incompatible method signature"),
+    ] {
+        let source = format!(
+            "declare function __thaw_typed_js_7368617065(value: {{ bump(value?: number): number }}): number;\n{class}\nfunction main(): void {{ __thaw_typed_js_7368617065(new Item()); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse");
+        let error = lower_module(&module).expect_err("missing or incompatible method must be rejected");
+        assert!(error.contains("bump"), "{error}");
+        assert!(error.contains(diagnostic), "{error}");
+        assert!(!error.contains("__thaw_class_identity_"), "{error}");
+    }
+}
+
+#[test]
 fn external_structural_argument_rejects_missing_and_incompatible_fields() {
     for source in [
         r#"
