@@ -1839,6 +1839,22 @@ impl FnLowerer<'_> {
     fn validate_storage_source_type(&mut self, expected: &HirType, source: HirExpr) -> Result<(), String> {
         let actual = self.infer_expr_type(&source)?;
         if matches!(actual, HirType::Json | HirType::JsValue | HirType::Dynamic) { return Ok(()); }
+        if let HirType::Union(members) = expected {
+            for member in members {
+                if self.validate_storage_source_type(member, source.clone()).is_ok() {
+                    return Ok(());
+                }
+            }
+            return self.validate_source_assignable(expected, &actual);
+        }
+        if matches!(&source, HirExpr::ObjectLit(_) | HirExpr::ArrayLit(_)) {
+            if let HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) = expected {
+                return self.validate_storage_source_type(inner, source);
+            }
+        }
+        if matches!((expected, &source), (HirType::Dictionary(_), HirExpr::ObjectLit(_))) {
+            return self.coerce_to_declared(expected, source).map(|_| ());
+        }
         if matches!((expected, &actual), (HirType::Tuple(_), HirType::Array(_))) {
             return self.coerce_to_declared(expected, source).map(|_| ());
         }
