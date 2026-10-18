@@ -1251,8 +1251,12 @@ fn lowers_super_to_the_base_initializer_on_the_same_instance() {
         .unwrap();
     // The `super(...)` arguments are evaluated first (staged as `__thaw_native_arg_N`), then the
     // base initializer is invoked on the same `__thaw_this` instance.
-    let super_call = format!("{:?}", initializer.body[0]);
-    assert!(matches!(&initializer.body[0], HirStmt::Expr(HirExpr::Call(_, _))), "{super_call}");
+    let super_call_index = initializer
+        .body
+        .iter()
+        .position(|statement| matches!(statement, HirStmt::Expr(HirExpr::Call(_, _))))
+        .expect("base initializer call");
+    let super_call = format!("{:?}", initializer.body[super_call_index]);
     assert!(
         super_call.contains(
             "Call(Var(\"__thaw_class_Base_initialize\"), [Var(\"__thaw_this\"), Var(\"__thaw_native_arg_0\")])"
@@ -1260,7 +1264,7 @@ fn lowers_super_to_the_base_initializer_on_the_same_instance() {
         "{super_call}"
     );
     assert!(matches!(
-        &initializer.body[1],
+        &initializer.body[super_call_index + 1],
         HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "label"
     ));
 }
@@ -1957,7 +1961,7 @@ fn dollar_sign_in_class_name_does_not_split_nominal_ancestry() {
 }
 
 #[test]
-fn lowers_native_class_default_parameter_wrappers() {
+fn lowers_native_class_defaults_on_canonical_signatures() {
     let program = lower(
         r#"class Box {
             constructor(public value: number = 40, public label: string = String(value)) {}
@@ -1973,14 +1977,94 @@ fn lowers_native_class_default_parameter_wrappers() {
         }"#,
     );
     for symbol in [
-        default_arity_symbol(&class_constructor_symbol("Box"), 0),
-        default_arity_symbol(&class_method_symbol("Box", "add"), 1),
-        default_arity_symbol(&class_static_method_symbol("Box", "sum"), 0),
+        class_constructor_symbol("Box"),
+        class_initializer_symbol("Box"),
+        class_method_symbol("Box", "add"),
+        class_static_method_symbol("Box", "sum"),
     ] {
-        assert!(program
+        assert_eq!(
+            program.functions.iter().filter(|function| function.name == symbol).count(),
+            1,
+            "{symbol} should have one canonical definition"
+        );
+    }
+    assert!(program.functions.iter().all(|function| {
+        !function.name.contains("__thawdefault_arity_")
+            && !function.name.contains("__thawomitted_mask_")
+    }));
+}
+
+#[test]
+fn class_callable_defaults_have_linear_hir_growth() {
+    let mut small_size = 0;
+    for count in [8, 17, 65] {
+        let parameters = (0..count)
+            .map(|index| format!("p{index}: number = {index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let optional = (0..count)
+            .map(|index| format!("p{index}?: number"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let program = lower(&format!(
+            "class Box {{ constructor({parameters}) {{}} method({optional}): number {{ return 1; }} }} function main(): number {{ const box = new Box(); const method: ({}) => number = box.method; return method(); }}",
+            (0..count).map(|index| format!("p{index}?: number")).collect::<Vec<_>>().join(", ")
+        ));
+        assert_eq!(program.functions.len(), 4, "{count} class slots must not emit wrapper clones");
+        let debug_size = format!("{program:#?}").len();
+        if count == 8 {
+            small_size = debug_size;
+            assert!(debug_size < 100_000, "8 class slots should keep debug HIR bounded");
+        } else {
+            assert!(debug_size < small_size * count * 2 / 8, "{count} class slots should grow linearly: {debug_size} vs {small_size}");
+        }
+    }
+}
+
+#[test]
+fn required_undefined_class_arguments_remain_required() {
+    for source in [
+        "class Box { constructor(value: number | undefined) {} } function main(): void { new Box(); }",
+        "class Box { method(value: number | undefined): void {} } function main(): void { new Box().method(); }",
+        "class Box<T> { constructor(value: T | undefined) {} } function main(): void { new Box<number>(); }",
+        "class Box<T> { method(value: T | undefined): void {} } function main(): void { new Box<number>().method(); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn lowers_native_method_defaults_with_tagged_bound_and_unbound_parameters() {
+    let program = lower(
+        r#"class Box {
+            value: number = 40;
+            add(delta: number = this.value): number { return delta; }
+            pick({ left }: { left: number } = { left: 3 }): number { return left; }
+            static sum(left: number = 20, right: number = left + 22): number {
+                return left + right;
+            }
+        }
+        function main(): number { return new Box().add() + Box.sum(); }"#,
+    );
+    for symbol in [
+        class_method_symbol("Box", "add"),
+        unbound_class_method_symbol(&class_method_symbol("Box", "add")),
+        class_method_symbol("Box", "pick"),
+        class_static_method_symbol("Box", "sum"),
+    ] {
+        let function = program
             .functions
             .iter()
-            .any(|function| function.name == symbol));
+            .find(|function| function.name == symbol)
+            .unwrap_or_else(|| panic!("missing `{symbol}`"));
+        let parameter = function.params.last().expect("method source parameter");
+        if symbol == class_method_symbol("Box", "pick") {
+            assert!(matches!(parameter.ty, HirType::Optional(_)));
+        } else {
+            assert_eq!(parameter.ty, HirType::Optional(Box::new(HirType::F64)));
+        }
+        assert!(format!("{:?}", function.body).contains("OptionalIsNone"));
     }
 }
 

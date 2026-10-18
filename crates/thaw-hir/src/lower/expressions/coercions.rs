@@ -720,8 +720,13 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), lhs_type.clone());
                 let left = HirExpr::Var(name.clone());
+                let absence = self.function_observable_absence(left.clone(), &lhs_type);
                 let result = HirExpr::Block(vec![HirStmt::If(
-                    HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(absence),
+                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    ),
                     vec![HirStmt::Return(Some(fallback))],
                     vec![HirStmt::Return(Some(HirExpr::OptionalSome(
                         Box::new(HirExpr::OptionalValue(
@@ -748,8 +753,13 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), lhs_type.clone());
                 let left = HirExpr::Var(name.clone());
+                let absence = self.function_observable_absence(left.clone(), &lhs_type);
                 let result = HirExpr::Block(vec![HirStmt::If(
-                    HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(absence),
+                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    ),
                     vec![HirStmt::Return(Some(rhs))],
                     vec![HirStmt::Return(Some(HirExpr::OptionalValue(
                         Box::new(left),

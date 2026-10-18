@@ -1,339 +1,4 @@
 #[allow(clippy::too_many_arguments)]
-fn lower_callable_default_wrappers(
-    symbol: &str,
-    params: &[HirParam],
-    patterns: &[Pat],
-    receiver_count: usize,
-    unbound_context: Option<(&str, bool)>,
-    ret: &HirType,
-    signatures: &HashMap<Symbol, FnSignature>,
-    interfaces: &HashMap<Symbol, HirType>,
-    generic_interfaces: &GenericInterfaces,
-    enum_values: &EnumValues,
-    enum_reverse_values: &EnumReverseValues,
-    global_types: &HashMap<Symbol, HirType>,
-    immutable_globals: &HashSet<Symbol>,
-) -> Result<Vec<HirFunction>, String> {
-    let Some(default_start) = trailing_omittable_start(patterns) else {
-        return Ok(Vec::new());
-    };
-    let is_async = signatures
-        .get(symbol)
-        .or_else(|| {
-            symbol
-                .strip_suffix("__thaw_unbound")
-                .and_then(|original| signatures.get(original))
-        })
-        .ok_or_else(|| format!("missing class wrapper signature for `{symbol}`"))?
-        .is_async;
-    let mut wrappers = Vec::new();
-    for arity in default_start..patterns.len() {
-        let total_arity = receiver_count + arity;
-        let wrapper_params = params[..total_arity].to_vec();
-        let mut lowerer = FnLowerer::new(
-            signatures,
-            interfaces,
-            generic_interfaces,
-            enum_values,
-            enum_reverse_values,
-            ret.clone(),
-            None,
-        );
-        seed_global_scope(&mut lowerer, global_types, immutable_globals);
-        if let Some((class, is_static)) = unbound_context {
-            lowerer.class_context = Some(class.to_string());
-            lowerer.class_static_context = is_static;
-            lowerer.unbound_this_context = true;
-        }
-        for parameter in &wrapper_params {
-            lowerer
-                .scope
-                .insert(parameter.name.clone(), parameter.ty.clone());
-            lowerer
-                .bindings
-                .entry(parameter.name.clone())
-                .or_default()
-                .push(parameter.name.clone());
-        }
-        if receiver_count == 1 {
-            lowerer
-                .bindings
-                .entry("this".into())
-                .or_default()
-                .push(params[0].name.clone());
-        }
-        let mut body = Vec::new();
-        // A later default expression may name a binding destructured out of an
-        // earlier supplied parameter (`({ x }, y = x)`): bind those first.
-        for (index, pattern) in patterns.iter().enumerate().take(arity) {
-            let parameter = &params[receiver_count + index];
-            let destructured = match pattern {
-                Pat::Assign(default) => default.left.as_ref(),
-                other => other,
-            };
-            if matches!(destructured, Pat::Object(_) | Pat::Array(_)) {
-                lowerer.lower_binding_pattern(
-                    destructured,
-                    HirExpr::Var(parameter.name.clone()),
-                    &parameter.ty,
-                    &mut body,
-                )?;
-            }
-        }
-        for (index, pattern) in patterns.iter().enumerate().skip(arity) {
-            let parameter = &params[receiver_count + index];
-            let value = match pattern {
-                Pat::Assign(default) => {
-                    let value = lowerer.lower_expr(&default.right)?;
-                    lowerer.coerce_to_declared(&parameter.ty, value)?
-                }
-                Pat::Ident(binding) if binding.id.optional => match &parameter.ty {
-                    HirType::Optional(payload) => {
-                        HirExpr::OptionalNone(payload.as_ref().clone())
-                    }
-                    HirType::Nullish(payload) => {
-                        HirExpr::NullishUndefined(payload.as_ref().clone())
-                    }
-                    HirType::Json => lowerer.coerce_to_declared(
-                        &HirType::Json,
-                        HirExpr::Lit(HirLit::Undefined),
-                    )?,
-                    other => {
-                        return Err(format!(
-                            "optional parameter `{}` of `{symbol}` needs an undefined-capable type, got {other:?}",
-                            parameter.name
-                        ))
-                    }
-                },
-                _ => {
-                    return Err(format!(
-                        "omittable parameters of `{symbol}` must form a trailing sequence"
-                    ))
-                }
-            };
-            body.push(HirStmt::Let(
-                parameter.name.clone(),
-                parameter.ty.clone(),
-                value,
-            ));
-            lowerer
-                .scope
-                .insert(parameter.name.clone(), parameter.ty.clone());
-            lowerer
-                .bindings
-                .entry(parameter.name.clone())
-                .or_default()
-                .push(parameter.name.clone());
-            if let Pat::Assign(default) = pattern {
-                if matches!(default.left.as_ref(), Pat::Object(_) | Pat::Array(_)) {
-                    lowerer.lower_binding_pattern(
-                        default.left.as_ref(),
-                        HirExpr::Var(parameter.name.clone()),
-                        &parameter.ty,
-                        &mut body,
-                    )?;
-                }
-            }
-        }
-        let call = HirExpr::Call(
-            Box::new(HirExpr::Var(symbol.to_string())),
-            params
-                .iter()
-                .map(|parameter| HirExpr::Var(parameter.name.clone()))
-                .collect(),
-        );
-        let call = if is_async {
-            HirExpr::Await(Box::new(call))
-        } else {
-            call
-        };
-        if *ret == HirType::Void {
-            body.push(HirStmt::Expr(call));
-            body.push(HirStmt::Return(None));
-        } else {
-            body.push(HirStmt::Return(Some(call)));
-        }
-        wrappers.push(HirFunction {
-            name: default_arity_symbol(symbol, total_arity),
-            params: wrapper_params,
-            ret: ret.clone(),
-            is_async,
-            body,
-        });
-    }
-    Ok(wrappers)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_callable_omitted_parameter_wrappers(
-    symbol: &str,
-    params: &[HirParam],
-    patterns: &[Pat],
-    receiver_count: usize,
-    unbound_context: Option<(&str, bool)>,
-    ret: &HirType,
-    signatures: &HashMap<Symbol, FnSignature>,
-    interfaces: &HashMap<Symbol, HirType>,
-    generic_interfaces: &GenericInterfaces,
-    enum_values: &EnumValues,
-    enum_reverse_values: &EnumReverseValues,
-    global_types: &HashMap<Symbol, HirType>,
-    immutable_globals: &HashSet<Symbol>,
-) -> Result<Vec<HirFunction>, String> {
-    let masks = omitted_parameter_masks(patterns, receiver_count)?;
-    if masks.is_empty() {
-        return Ok(Vec::new());
-    }
-    let is_async = signatures
-        .get(symbol)
-        .or_else(|| {
-            symbol
-                .strip_suffix("__thaw_unbound")
-                .and_then(|original| signatures.get(original))
-        })
-        .ok_or_else(|| format!("missing class wrapper signature for `{symbol}`"))?
-        .is_async;
-    let mut wrappers = Vec::new();
-    for mask in masks {
-        let wrapper_params = params
-            .iter()
-            .enumerate()
-            .filter_map(|(index, parameter)| {
-                (!mask.contains(index)).then_some(parameter.clone())
-            })
-            .collect::<Vec<_>>();
-        let mut lowerer = FnLowerer::new(
-            signatures,
-            interfaces,
-            generic_interfaces,
-            enum_values,
-            enum_reverse_values,
-            ret.clone(),
-            None,
-        );
-        seed_global_scope(&mut lowerer, global_types, immutable_globals);
-        if let Some((class, is_static)) = unbound_context {
-            lowerer.class_context = Some(class.to_string());
-            lowerer.class_static_context = is_static;
-            lowerer.unbound_this_context = true;
-        }
-        if receiver_count == 1 {
-            lowerer
-                .scope
-                .insert(params[0].name.clone(), params[0].ty.clone());
-            lowerer
-                .bindings
-                .entry("this".into())
-                .or_default()
-                .push(params[0].name.clone());
-        }
-        let mut body = Vec::new();
-        for (index, pattern) in patterns.iter().enumerate() {
-            let parameter_index = receiver_count + index;
-            let parameter = &params[parameter_index];
-            if !mask.contains(parameter_index) {
-                lowerer
-                    .scope
-                    .insert(parameter.name.clone(), parameter.ty.clone());
-                lowerer
-                    .bindings
-                    .entry(parameter.name.clone())
-                    .or_default()
-                    .push(parameter.name.clone());
-                // Later defaults may name bindings destructured from this parameter.
-                let destructured = match pattern {
-                    Pat::Assign(default) => default.left.as_ref(),
-                    other => other,
-                };
-                if matches!(destructured, Pat::Object(_) | Pat::Array(_)) {
-                    lowerer.lower_binding_pattern(
-                        destructured,
-                        HirExpr::Var(parameter.name.clone()),
-                        &parameter.ty,
-                        &mut body,
-                    )?;
-                }
-                continue;
-            }
-            let value = match pattern {
-                Pat::Assign(default) => {
-                    let value = lowerer.lower_expr(&default.right)?;
-                    lowerer.coerce_to_declared(&parameter.ty, value)?
-                }
-                Pat::Ident(binding) if binding.id.optional => match &parameter.ty {
-                    HirType::Optional(payload) => {
-                        HirExpr::OptionalNone(payload.as_ref().clone())
-                    }
-                    HirType::Nullish(payload) => {
-                        HirExpr::NullishUndefined(payload.as_ref().clone())
-                    }
-                    HirType::Json => lowerer.coerce_to_declared(
-                        &HirType::Json,
-                        HirExpr::Lit(HirLit::Undefined),
-                    )?,
-                    other => {
-                        return Err(format!(
-                            "optional parameter `{}` of `{symbol}` needs an undefined-capable type, got {other:?}",
-                            parameter.name
-                        ))
-                    }
-                },
-                _ => unreachable!("omission masks contain only omittable parameters"),
-            };
-            body.push(HirStmt::Let(
-                parameter.name.clone(),
-                parameter.ty.clone(),
-                value,
-            ));
-            lowerer
-                .scope
-                .insert(parameter.name.clone(), parameter.ty.clone());
-            lowerer
-                .bindings
-                .entry(parameter.name.clone())
-                .or_default()
-                .push(parameter.name.clone());
-            if let Pat::Assign(default) = pattern {
-                if matches!(default.left.as_ref(), Pat::Object(_) | Pat::Array(_)) {
-                    lowerer.lower_binding_pattern(
-                        default.left.as_ref(),
-                        HirExpr::Var(parameter.name.clone()),
-                        &parameter.ty,
-                        &mut body,
-                    )?;
-                }
-            }
-        }
-        let call = HirExpr::Call(
-            Box::new(HirExpr::Var(symbol.to_string())),
-            params
-                .iter()
-                .map(|parameter| HirExpr::Var(parameter.name.clone()))
-                .collect(),
-        );
-        let call = if is_async {
-            HirExpr::Await(Box::new(call))
-        } else {
-            call
-        };
-        if *ret == HirType::Void {
-            body.push(HirStmt::Expr(call));
-            body.push(HirStmt::Return(None));
-        } else {
-            body.push(HirStmt::Return(Some(call)));
-        }
-        wrappers.push(HirFunction {
-            name: omitted_parameter_symbol(symbol, &mask),
-            params: wrapper_params,
-            ret: ret.clone(),
-            is_async,
-            body,
-        });
-    }
-    Ok(wrappers)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn lower_class_constructor(
     declaration: &ClassDecl,
     signatures: &HashMap<Symbol, FnSignature>,
@@ -363,7 +28,7 @@ fn lower_class_constructor(
         .unwrap_or_default();
     let has_implicit_constructor = constructor.is_none();
     let mut params = Vec::with_capacity(source_params.len());
-    for (index, parameter) in source_params.iter().enumerate() {
+    for parameter in source_params {
         let pattern = class_constructor_param_pattern(parameter);
         let mut parameter = lower_param(
             &pattern,
@@ -372,7 +37,9 @@ fn lower_class_constructor(
             false,
             &HashMap::new(),
         )?;
-        parameter.ty = signatures[&constructor_symbol].params[index].clone();
+        if !matches!(pattern, Pat::Assign(_)) {
+            parameter.ty = signatures[&constructor_symbol].params[params.len()].clone();
+        }
         params.push(parameter);
     }
     if constructor.is_none() && declaration.class.super_class.is_some() {
@@ -387,12 +54,33 @@ fn lower_class_constructor(
             .collect();
     }
 
+    let abi_params = if has_implicit_constructor {
+        params.clone()
+    } else {
+        signatures[&constructor_symbol]
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let pattern = class_constructor_param_pattern(&source_params[index]);
+                HirParam {
+                    name: if matches!(pattern, Pat::Ident(_)) {
+                        params[index].name.clone()
+                    } else {
+                        format!("__thaw_constructor_arg_{index}")
+                    },
+                    ty: ty.clone(),
+                }
+            })
+            .collect()
+    };
+
     let this_name = "__thaw_this".to_string();
     let mut initializer_params = vec![HirParam {
         name: this_name.clone(),
         ty: instance_type.clone(),
     }];
-    initializer_params.extend(params.iter().cloned());
+    initializer_params.extend(abi_params.iter().cloned());
 
     let mut lowerer = FnLowerer::new(
         signatures,
@@ -410,7 +98,10 @@ fn lower_class_constructor(
         };
         lowerer.super_initializer = Some((
             class_initializer_symbol(base.sym.as_ref()),
-            interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
+            interfaces
+                .get(base.sym.as_ref())
+                .cloned()
+                .unwrap_or(HirType::Void),
             base.sym.to_string(),
         ));
     }
@@ -419,22 +110,87 @@ fn lower_class_constructor(
         .entry("this".into())
         .or_default()
         .push(this_name.clone());
-    for parameter in &initializer_params {
-        lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
-        lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
-        lowerer
-            .scope
-            .insert(parameter.name.clone(), parameter.ty.clone());
-        lowerer
-            .bindings
-            .entry(parameter.name.clone())
-            .or_default()
-            .push(parameter.name.clone());
+    lowerer
+        .scope
+        .insert(this_name.clone(), instance_type.clone());
+    let mut initializer_body = Vec::new();
+    if has_implicit_constructor {
+        for parameter in &abi_params {
+            lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+            lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
+            lowerer
+                .scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+            lowerer
+                .bindings
+                .entry(parameter.name.clone())
+                .or_default()
+                .push(parameter.name.clone());
+        }
+    } else {
+        for (index, (source, parameter)) in source_params.iter().zip(&params).enumerate() {
+            let raw = &abi_params[index];
+            let pattern = class_constructor_param_pattern(source);
+            let (binding_pattern, default) = match &pattern {
+                Pat::Assign(assignment) => {
+                    (assignment.left.as_ref(), Some(assignment.right.as_ref()))
+                }
+                Pat::Rest(rest) => (rest.arg.as_ref(), None),
+                other => (other, None),
+            };
+            let value = if let Some(default) = default {
+                let default_value = lowerer.lower_expr(default)?;
+                let default_value = lowerer.coerce_to_declared(&parameter.ty, default_value)?;
+                let (missing, provided) = match &raw.ty {
+                    HirType::Optional(payload) => (
+                        HirExpr::OptionalIsNone(Box::new(HirExpr::Var(raw.name.clone())), payload.as_ref().clone()),
+                        HirExpr::OptionalValue(Box::new(HirExpr::Var(raw.name.clone())), payload.as_ref().clone()),
+                    ),
+                    HirType::Nullish(payload) => (
+                        HirExpr::NullishIsUndefined(Box::new(HirExpr::Var(raw.name.clone())), payload.as_ref().clone()),
+                        HirExpr::Var(raw.name.clone()),
+                    ),
+                    other => return Err(format!("defaulted constructor parameter needs an undefined-capable ABI type, got {other:?}")),
+                };
+                HirExpr::Conditional(
+                    Box::new(missing),
+                    Box::new(default_value),
+                    Box::new(provided),
+                    parameter.ty.clone(),
+                )
+            } else {
+                HirExpr::Var(raw.name.clone())
+            };
+            if matches!(binding_pattern, Pat::Ident(_)) {
+                if default.is_some() || raw.name != parameter.name {
+                    initializer_body.push(HirStmt::Let(
+                        parameter.name.clone(),
+                        parameter.ty.clone(),
+                        value,
+                    ));
+                }
+                lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+                lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
+                lowerer
+                    .scope
+                    .insert(parameter.name.clone(), parameter.ty.clone());
+                lowerer
+                    .bindings
+                    .entry(parameter.name.clone())
+                    .or_default()
+                    .push(parameter.name.clone());
+            } else {
+                lowerer.lower_binding_pattern(
+                    binding_pattern,
+                    value,
+                    &parameter.ty,
+                    &mut initializer_body,
+                )?;
+            }
+            lowerer.remember_source_parameter(&parameter.name, &pattern);
+        }
     }
 
-    for (pattern, parameter) in source_params.iter().map(class_constructor_param_pattern).zip(&params) {
-        lowerer.remember_source_parameter(&parameter.name, &pattern);
-    }
     let mut own_initializers = Vec::new();
     for member in &declaration.class.body {
         let ClassMember::ClassProp(property) = member else {
@@ -453,7 +209,9 @@ fn lower_class_constructor(
             .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
         let value = match property.value.as_deref() {
             Some(initializer) => {
-                if let Some(source) = storage_source_type(property.span).filter(|source| has_dynamic_storage(property.span) && *source != expected) {
+                if let Some(source) = storage_source_type(property.span)
+                    .filter(|source| has_dynamic_storage(property.span) && *source != expected)
+                {
                     lowerer.validate_storage_source(initializer, &source)?;
                 }
                 let value = lowerer.lower_expr(initializer)?;
@@ -481,15 +239,21 @@ fn lower_class_constructor(
             continue;
         };
         let field = parameter_property_binding(property)?.id.sym.to_string();
+        let HirType::Object(fields) = &instance_type else {
+            unreachable!("native class layouts are fixed objects")
+        };
+        let expected = fields
+            .iter()
+            .find_map(|(name, ty)| (name == &field).then(|| ty.clone()))
+            .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
+        let value = lowerer.coerce_to_declared(&expected, HirExpr::Var(parameter.name.clone()))?;
         own_initializers.push(HirStmt::Expr(HirExpr::PropAssign(
             Box::new(HirExpr::Var(this_name.clone())),
             instance_type.clone(),
             field,
-            Box::new(HirExpr::Var(parameter.name.clone())),
+            Box::new(value),
         )));
     }
-    let implicit_own_initializers = own_initializers.clone();
-    let mut initializer_body = Vec::new();
     if declaration.class.super_class.is_some() {
         if let Some(constructor) = constructor {
             let block = constructor.body.as_ref().ok_or_else(|| {
@@ -542,23 +306,23 @@ fn lower_class_constructor(
                 )));
                 initializer_body.append(&mut own_initializers);
             } else {
-            let signature = &signatures[&base_initializer];
-            if signature.params.len() != params.len() + 1 {
-                return Err(format!(
+                let signature = &signatures[&base_initializer];
+                if signature.params.len() != params.len() + 1 {
+                    return Err(format!(
                     "derived class `{class_name}` cannot forward its implicit constructor arguments to the base"
                 ));
-            }
-            let mut args = vec![HirExpr::Var(this_name.clone())];
-            args.extend(
-                params
-                    .iter()
-                    .map(|parameter| HirExpr::Var(parameter.name.clone())),
-            );
-            initializer_body.push(HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var(base_initializer)),
-                args,
-            )));
-            initializer_body.append(&mut own_initializers);
+                }
+                let mut args = vec![HirExpr::Var(this_name.clone())];
+                args.extend(
+                    params
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                initializer_body.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(base_initializer)),
+                    args,
+                )));
+                initializer_body.append(&mut own_initializers);
             }
         }
     } else {
@@ -574,13 +338,13 @@ fn lower_class_constructor(
 
     let mut initialize_args = vec![HirExpr::Var(this_name.clone())];
     initialize_args.extend(
-        params
+        abi_params
             .iter()
             .map(|parameter| HirExpr::Var(parameter.name.clone())),
     );
     let constructor = HirFunction {
         name: constructor_symbol.clone(),
-        params: params.clone(),
+        params: abi_params.clone(),
         ret: instance_type.clone(),
         is_async: false,
         body: vec![
@@ -602,214 +366,7 @@ fn lower_class_constructor(
         is_async: false,
         body: initializer_body,
     };
-    let patterns = source_params
-        .iter()
-        .map(class_constructor_param_pattern)
-        .collect::<Vec<_>>();
-    let mut functions = vec![constructor, initializer];
-    functions.extend(lower_callable_default_wrappers(
-        &constructor_symbol,
-        &params,
-        &patterns,
-        0,
-        None,
-        &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
-    )?);
-    functions.extend(lower_callable_omitted_parameter_wrappers(
-        &constructor_symbol,
-        &params,
-        &patterns,
-        0,
-        None,
-        &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
-    )?);
-    let mut initializer_wrapper_params = vec![HirParam {
-        name: this_name,
-        ty: instance_type.clone(),
-    }];
-    initializer_wrapper_params.extend(params.iter().cloned());
-    functions.extend(lower_callable_default_wrappers(
-        &initializer_symbol,
-        &initializer_wrapper_params,
-        &patterns,
-        1,
-        None,
-        &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
-    )?);
-    functions.extend(lower_callable_omitted_parameter_wrappers(
-        &initializer_symbol,
-        &initializer_wrapper_params,
-        &patterns,
-        1,
-        None,
-        &instance_type,
-        signatures,
-        interfaces,
-        generic_interfaces,
-        enum_values,
-        enum_reverse_values,
-        global_types,
-        immutable_globals,
-    )?);
-    if has_implicit_constructor {
-        if let Some(Expr::Ident(base)) = declaration.class.super_class.as_deref() {
-            for arity in 0..params.len() {
-                let derived_constructor_wrapper = default_arity_symbol(&constructor_symbol, arity);
-                let derived_initializer_wrapper =
-                    default_arity_symbol(&initializer_symbol, arity + 1);
-                if !signatures.contains_key(&derived_constructor_wrapper)
-                    || !signatures.contains_key(&derived_initializer_wrapper)
-                {
-                    continue;
-                }
-                let wrapper_params = params[..arity].to_vec();
-                let wrapper_this = "__thaw_this".to_string();
-                let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
-                initialize_args.extend(
-                    wrapper_params
-                        .iter()
-                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                );
-                functions.push(HirFunction {
-                    name: derived_constructor_wrapper,
-                    params: wrapper_params.clone(),
-                    ret: instance_type.clone(),
-                    is_async: false,
-                    body: vec![
-                        HirStmt::Let(
-                            wrapper_this.clone(),
-                            instance_type.clone(),
-                            HirExpr::ClassAlloc(instance_type.clone()),
-                        ),
-                        HirStmt::Return(Some(HirExpr::Call(
-                            Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
-                            initialize_args,
-                        ))),
-                    ],
-                });
-
-                let mut initializer_params = vec![HirParam {
-                    name: wrapper_this.clone(),
-                    ty: instance_type.clone(),
-                }];
-                initializer_params.extend(wrapper_params);
-                let base_initializer_wrapper =
-                    default_arity_symbol(&class_initializer_symbol(base.sym.as_ref()), arity + 1);
-                let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
-                base_args.extend(
-                    initializer_params[1..]
-                        .iter()
-                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                );
-                let mut body = vec![HirStmt::Expr(HirExpr::Call(
-                    Box::new(HirExpr::Var(base_initializer_wrapper)),
-                    base_args,
-                ))];
-                body.extend(implicit_own_initializers.iter().cloned());
-                body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
-                functions.push(HirFunction {
-                    name: derived_initializer_wrapper,
-                    params: initializer_params,
-                    ret: instance_type.clone(),
-                    is_async: false,
-                    body,
-                });
-            }
-            for mask in omitted_parameter_masks_in_signatures(signatures, &constructor_symbol) {
-                let derived_constructor_wrapper =
-                    omitted_parameter_symbol(&constructor_symbol, &mask);
-                let initializer_mask = mask.offset_by(1);
-                let derived_initializer_wrapper =
-                    omitted_parameter_symbol(&initializer_symbol, &initializer_mask);
-                if !signatures.contains_key(&derived_constructor_wrapper)
-                    || !signatures.contains_key(&derived_initializer_wrapper)
-                {
-                    continue;
-                }
-                let wrapper_params = params
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, parameter)| {
-                        (!mask.contains(index)).then_some(parameter.clone())
-                    })
-                    .collect::<Vec<_>>();
-                let wrapper_this = "__thaw_this".to_string();
-                let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
-                initialize_args.extend(
-                    wrapper_params
-                        .iter()
-                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                );
-                functions.push(HirFunction {
-                    name: derived_constructor_wrapper,
-                    params: wrapper_params.clone(),
-                    ret: instance_type.clone(),
-                    is_async: false,
-                    body: vec![
-                        HirStmt::Let(
-                            wrapper_this.clone(),
-                            instance_type.clone(),
-                            HirExpr::ClassAlloc(instance_type.clone()),
-                        ),
-                        HirStmt::Return(Some(HirExpr::Call(
-                            Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
-                            initialize_args,
-                        ))),
-                    ],
-                });
-
-                let mut initializer_params = vec![HirParam {
-                    name: wrapper_this.clone(),
-                    ty: instance_type.clone(),
-                }];
-                initializer_params.extend(wrapper_params);
-                let base_initializer_wrapper = omitted_parameter_symbol(
-                    &class_initializer_symbol(base.sym.as_ref()),
-                    &initializer_mask,
-                );
-                let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
-                base_args.extend(
-                    initializer_params[1..]
-                        .iter()
-                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                );
-                let mut body = vec![HirStmt::Expr(HirExpr::Call(
-                    Box::new(HirExpr::Var(base_initializer_wrapper)),
-                    base_args,
-                ))];
-                body.extend(implicit_own_initializers.iter().cloned());
-                body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
-                functions.push(HirFunction {
-                    name: derived_initializer_wrapper,
-                    params: initializer_params,
-                    ret: instance_type.clone(),
-                    is_async: false,
-                    body,
-                });
-            }
-        }
-    }
+    let functions = vec![constructor, initializer];
     Ok(functions)
 }
 
@@ -922,6 +479,30 @@ fn lower_class_methods(
                 .push("__thaw_this".into());
         }
         let mut lowered_body = Vec::new();
+        let prologue = (|| {
+            for (source, parameter) in method
+                .function
+                .params
+                .iter()
+                .zip(params.iter().skip(receiver_offset))
+            {
+                if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
+                    lowerer.lower_binding_pattern(
+                        &source.pat,
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut lowered_body,
+                    )?;
+                }
+            }
+            Ok::<_, String>(())
+        })();
+        if let Err(error) = prologue {
+            if tolerant {
+                continue;
+            }
+            return Err(error);
+        }
         // This whole function is also called from the convergence loop's
         // own *trial* pass (`module/pipeline.rs`), where a sibling
         // method's return type may not have converged yet -- e.g. `stepA
@@ -1017,6 +598,27 @@ fn lower_class_methods(
                     .push(parameter.name.clone());
             }
             let mut unbound_body = Vec::new();
+            let prologue = (|| {
+                for (source, parameter) in
+                    method.function.params.iter().zip(&unbound_params)
+                {
+                    if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
+                        unbound.lower_binding_pattern(
+                            &source.pat,
+                            HirExpr::Var(parameter.name.clone()),
+                            &parameter.ty,
+                            &mut unbound_body,
+                        )?;
+                    }
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(error) = prologue {
+                if tolerant {
+                    continue;
+                }
+                return Err(error);
+            }
             // Same tolerance as the bound variant above, and for the
             // identical reason.
             if let Err(error) = lower_function_statements(
@@ -1050,84 +652,7 @@ fn lower_class_methods(
                 body: unbound_body,
             });
         }
-        let patterns = method
-            .function
-            .params
-            .iter()
-            .map(|parameter| parameter.pat.clone())
-            .collect::<Vec<_>>();
-        functions.extend(lower_callable_default_wrappers(
-            &symbol,
-            &params,
-            &patterns,
-            receiver_offset,
-            None,
-            &method_ret,
-            signatures,
-            interfaces,
-            generic_interfaces,
-            enum_values,
-            enum_reverse_values,
-            global_types,
-            immutable_globals,
-        )?);
-        functions.extend(lower_callable_omitted_parameter_wrappers(
-            &symbol,
-            &params,
-            &patterns,
-            receiver_offset,
-            None,
-            &method_ret,
-            signatures,
-            interfaces,
-            generic_interfaces,
-            enum_values,
-            enum_reverse_values,
-            global_types,
-            immutable_globals,
-        )?);
-        // A method that returns its own class (`return this`) has no valid
-        // *detached* form: the unbound variant binds `this` to undefined, so
-        // the `return this` would be an `undefined` where the class is
-        // expected. Skip that variant (real example: a fluent `add(...): this`).
-        if method.kind == MethodKind::Method
-            && signature.uses_this
-            && signature.ret != instance_type
-        {
-            let unbound_symbol = unbound_class_method_symbol(&symbol);
-            let unbound_params = params[receiver_offset..].to_vec();
-            let unbound_context = Some((class_name.as_str(), method.is_static));
-            functions.extend(lower_callable_default_wrappers(
-                &unbound_symbol,
-                &unbound_params,
-                &patterns,
-                0,
-                unbound_context,
-                &method_ret,
-                signatures,
-                interfaces,
-                generic_interfaces,
-                enum_values,
-                enum_reverse_values,
-                global_types,
-                immutable_globals,
-            )?);
-            functions.extend(lower_callable_omitted_parameter_wrappers(
-                &unbound_symbol,
-                &unbound_params,
-                &patterns,
-                0,
-                unbound_context,
-                &method_ret,
-                signatures,
-                interfaces,
-                generic_interfaces,
-                enum_values,
-                enum_reverse_values,
-                global_types,
-                immutable_globals,
-            )?);
-        }
+
     }
     Ok(functions)
 }
