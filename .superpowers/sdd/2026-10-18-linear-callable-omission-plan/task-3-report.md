@@ -1,6 +1,6 @@
 # Task 3 report — canonical ABI and prologues for class methods
 
-Commit: `38ac96a2` (`feat(hir): canonicalize class method omission ABI`).
+Implementation commit: `8a484f98df8a05ebf78f21e11b831a645551c232` (`feat(hir): canonicalize class method omission ABI`).
 
 Source instance and static methods now give optional/defaulted parameters undefined-capable physical HIR slots, while retaining the hidden instance receiver at physical index 0. Existing source omission masks remain in physical coordinates; the existing unbound projection removes and shifts the receiver once, and inherited signatures continue to clone the projected base signature. Constructors and initializers were left unchanged.
 
