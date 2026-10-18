@@ -1142,10 +1142,8 @@ impl<'a> FnLowerer<'a> {
                     if let Some((params, method_ret, rest, optional, public_overloads)) = callable {
                         // Compile-time marker: keep ordinary function-valued
                         // properties distinct from receiver-aware methods.
-                        let receiver_parameter = params.first().is_some_and(|parameter| {
-                            matches!(parameter, HirType::Object(fields)
-                                if fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver"))
-                        });
+                        let receiver_parameter = params.first()
+                            .and_then(Self::object_method_receiver_fields).is_some();
                         let receiver_name = format!("__thaw_method_receiver_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(receiver_name.clone(), object_ty.clone());
@@ -1231,10 +1229,10 @@ impl<'a> FnLowerer<'a> {
                         bindings.insert(0, (receiver_name.clone(), object_ty.clone(), object_expr));
                         bindings.insert(1, (callee_name.clone(), callee_type, callee));
                         let mut copied_receiver = None;
+                        let mut copied_receiver_view_type = None;
                         if receiver_parameter {
-                            let HirType::Object(receiver_fields) = &params[0] else {
-                                unreachable!()
-                            };
+                            let receiver_fields = Self::object_method_receiver_fields(&params[0]).unwrap();
+                            let receiver_view_type = HirType::Object(receiver_fields.to_vec());
                             let (this_arg, view_binding) = self.native_object_method_receiver(
                                 receiver.clone(),
                                 &object_ty,
@@ -1242,18 +1240,23 @@ impl<'a> FnLowerer<'a> {
                             );
                             if let Some(binding) = view_binding {
                                 bindings.insert(2, binding);
-                                args.insert(0, this_arg);
+                                args.insert(0, HirExpr::NonArrowReceiverPack {
+                                    value: Box::new(this_arg), declared: receiver_view_type,
+                                });
                             } else {
                                 // The method got a copy of the owner (it uses `this` as a
                                 // value): bind it so the call can copy it back afterwards.
                                 let copy_name =
                                     format!("__thaw_method_receiver_copy_{}", self.next_binding);
                                 self.next_binding += 1;
-                                self.scope.insert(copy_name.clone(), params[0].clone());
+                                self.scope.insert(copy_name.clone(), receiver_view_type.clone());
                                 bindings
-                                    .insert(2, (copy_name.clone(), params[0].clone(), this_arg));
-                                args.insert(0, HirExpr::Var(copy_name.clone()));
+                                    .insert(2, (copy_name.clone(), receiver_view_type.clone(), this_arg));
+                                args.insert(0, HirExpr::NonArrowReceiverPack {
+                                    value: Box::new(HirExpr::Var(copy_name.clone())), declared: receiver_view_type.clone(),
+                                });
                                 copied_receiver = Some(copy_name);
+                                copied_receiver_view_type = Some(receiver_view_type);
                             }
                         }
                         if args.len() < params.len()
@@ -1320,7 +1323,7 @@ impl<'a> FnLowerer<'a> {
                                 &receiver_name,
                                 &object_ty,
                                 &copy_name,
-                                &params[0],
+                                copied_receiver_view_type.as_ref().expect("copied method has a receiver view"),
                                 &method_ret,
                             )?;
                         }

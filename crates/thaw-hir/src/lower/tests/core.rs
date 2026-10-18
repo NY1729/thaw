@@ -1398,8 +1398,11 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
             let HirType::Function(parameters, _) = method_type else {
                 panic!("methodOwner run retains its function type: {method_type:?}");
             };
-            let Some(HirType::Object(receiver)) = parameters.first() else {
-                panic!("methodOwner run retains an object receiver parameter: {parameters:?}");
+            let Some(HirType::NonArrowReceiver(receiver)) = parameters.first() else {
+                panic!("methodOwner run retains a private receiver parameter: {parameters:?}");
+            };
+            let HirType::Object(receiver) = receiver.as_ref() else {
+                panic!("private method receiver retains its marked object layout: {receiver:?}");
             };
             assert_eq!(receiver, &vec![
                 ("value".into(), HirType::F64),

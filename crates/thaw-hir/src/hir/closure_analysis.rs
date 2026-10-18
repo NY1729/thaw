@@ -37,6 +37,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::Var(_) | HirExpr::PostfixUpdate(_, _) => {}
         HirExpr::NonArrowThis { payload, .. } => collect_closure_captures_expr(payload, names),
+        HirExpr::NonArrowReceiverPack { value, .. } => collect_closure_captures_expr(value, names),
         HirExpr::Assign(_, value) => collect_closure_captures_expr(value, names),
         HirExpr::BinOp(_, left, right)
         | HirExpr::EvalThen(left, right)

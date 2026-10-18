@@ -102,9 +102,17 @@ impl<'a> FnLowerer<'a> {
                 let setter_value = HirExpr::PropAccess(
                     Box::new(receiver.clone()), object_type, setter,
                 );
+                let receiver_type = match setter_type {
+                    HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => params.first().cloned(),
+                    _ => None,
+                }.and_then(|ty| match ty { HirType::NonArrowReceiver(inner) => Some(*inner), _ => None })
+                    .ok_or("object setter has no private receiver parameter")?;
+                let packed_receiver = HirExpr::NonArrowReceiverPack {
+                    value: Box::new(receiver.clone()), declared: receiver_type,
+                };
                 let result = HirExpr::Block(vec![
                     HirStmt::Expr(HirExpr::Call(
-                        Box::new(setter_value), vec![receiver, argument],
+                        Box::new(setter_value), vec![packed_receiver, argument],
                     )),
                     HirStmt::Return(Some(value)),
                 ]);

@@ -1031,7 +1031,7 @@ impl<'a> FnLowerer<'a> {
         }
         let previous_receiver = std::mem::replace(
             &mut self.non_arrow_receiver,
-            receiver,
+            receiver.map(|ty| (ty, "__thaw_this".into())),
         );
         let lowered =
             self.lower_contextual_arrow(&specialized_arrow, &runtime_parameter_types, None);
@@ -1792,10 +1792,8 @@ impl<'a> FnLowerer<'a> {
                         },
                     _ => None,
                 });
-                let receiver_aware = method_payload.is_some_and(|params| params.first().is_some_and(|parameter| {
-                    matches!(parameter, HirType::Object(fields)
-                        if fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver"))
-                }));
+                let receiver_aware = method_payload.is_some_and(|params| params.first()
+                    .and_then(FnLowerer::object_method_receiver_fields).is_some());
                 if receiver_aware {
                     let receiver_name = format!("__thaw_optional_method_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1868,14 +1866,15 @@ impl<'a> FnLowerer<'a> {
             rest.as_ref(),
         )?;
         if let Some((receiver, receiver_type)) = receiver {
-            let HirType::Object(fields) = &params[0] else {
-                return Err("object method receiver has no object parameter".into());
-            };
+            let fields = Self::object_method_receiver_fields(&params[0])
+                .ok_or("object method receiver has no private receiver parameter")?;
             let (this_arg, view_binding) = self.native_object_method_receiver(
                 receiver.clone(), &receiver_type, fields,
             );
             if let Some(binding) = view_binding { spread_bindings.insert(0, binding); }
-            arguments.insert(0, this_arg);
+            arguments.insert(0, HirExpr::NonArrowReceiverPack {
+                value: Box::new(this_arg), declared: HirType::Object(fields.to_vec()),
+            });
         }
         if arguments.len() > params.len() && rest.is_none() {
             return Err(format!(

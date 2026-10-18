@@ -166,6 +166,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word, access)
             }
+            HirExpr::NonArrowReceiverPack { value, .. } => {
+                let actual = self.expr_hir_type(value)
+                    .ok_or("packed receiver value is missing its HIR type")?;
+                let value = self.compile_expr(value)?;
+                let (kind, word) = self.compile_receiver_parts(value, &actual)?;
+                self.tracks_owned_json_roots = true;
+                let payload = self.builder.build_call(
+                    self.module.get_function("thaw_non_arrow_receiver_new").unwrap(),
+                    &[kind.into(), word.into()], "non_arrow_receiver_payload",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("receiver payload helper returned no value")?;
+                self.compile_check_json_host_error(payload, None)
+            }
 
             HirExpr::Assign(name, value) => {
                 let (ptr, _ty) = *self

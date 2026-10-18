@@ -71,6 +71,35 @@ function main(): void {
 }
 
 #[test]
+fn kb_contract_object_method_receiver_is_deferred_until_body_access() {
+    let source = r#"let effects = 0;
+const object = { value: 4, method(): number { effects++; console.log("method before " + effects); return this.value; } };
+const extracted = object.method;
+function main(): void {
+  try { extracted(); } catch (error: any) { console.log(error.message); }
+  console.log("effects " + effects);
+  try { extracted.call(undefined as any); } catch (error: any) { console.log(error.message); }
+  console.log("effects " + effects);
+  const invoke: any = new Function("o", "return o.method.call(undefined)");
+  const invokeValid: any = new Function("o", "return o.method.call(o)");
+  try { invoke(object); } catch (error: any) { console.log("JS invoke error " + error.message); }
+  console.log("effects " + effects);
+  console.log("JS valid " + invokeValid(object));
+  const branch = { value: 9, method(run: boolean): number { if (!run) return 0; return this.value; } };
+  console.log("branch skip " + branch.method.call(undefined as any, false));
+  try { branch.method.call(null as any, true); } catch (error: any) { console.log("null read " + error.message); }
+  console.log("extracted valid " + extracted.call({ value: 7 } as any));
+  console.log("direct " + object.method());
+  const nested = { value: 5, method(): number { function own(): number { return this.value; } const arrow = () => this.value; return own.call({ value: 7 }) + arrow(); } };
+  console.log("nested " + nested.method());
+  const optionalRest = { value: 10, method(prefix: string = "x", ...values: number[]): number { return this.value + prefix.length + values.length; } };
+  console.log("optional/rest " + optionalRest.method() + " " + optionalRest.method("ab", 1, 2));
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_object_method_receiver_is_deferred_until_body_access"),
+        "method before 1\nCannot read properties of undefined (reading 'value')\neffects 1\nmethod before 2\nCannot read properties of undefined (reading 'value')\neffects 2\nmethod before 3\nJS invoke error Cannot read properties of undefined (reading 'value')\neffects 3\nmethod before 4\nJS valid 4\nbranch skip 0\nnull read Cannot read properties of null (reading 'value')\nmethod before 5\nextracted valid 7\nmethod before 6\ndirect 4\nnested 12\noptional/rest 11 14\n");
+}
+
+#[test]
 fn kb_contract_bare_this_value_preserves_nullish_receiver() {
     let source = r#"const value = function(this: { n: number }): any { return this; };
 function main(): void {

@@ -358,6 +358,7 @@ impl<'a> FnLowerer<'a> {
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{name}`")),
             HirExpr::NonArrowThis { declared, .. } => Ok(declared.clone()),
+            HirExpr::NonArrowReceiverPack { declared, .. } => Ok(HirType::NonArrowReceiver(Box::new(declared.clone()))),
             HirExpr::FunctionRef(_, params, ret) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }

@@ -93,6 +93,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(value, names);
         }
         HirExpr::NonArrowThis { payload, .. } => collect_referenced_bindings(payload, names),
+        HirExpr::NonArrowReceiverPack { value, .. } => collect_referenced_bindings(value, names),
         HirExpr::PostfixUpdate(name, _) => {
             names.insert(name.clone());
         }
@@ -292,6 +293,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::ArrayLen(value)
         | HirExpr::EnumReverseLookup(value, _)
         | HirExpr::NonArrowThis { payload: value, .. }
+        | HirExpr::NonArrowReceiverPack { value, .. }
         | HirExpr::PropAccess(value, _, _)
         | HirExpr::JsonGet(value, _)
         | HirExpr::JsonAsNumber(value)

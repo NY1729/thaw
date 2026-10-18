@@ -124,6 +124,11 @@ pub enum HirExpr {
         declared: HirType,
         access: NonArrowThisAccess,
     },
+    /// Converts a receiver's actual value to the private hidden-function ABI.
+    NonArrowReceiverPack {
+        value: Box<HirExpr>,
+        declared: HirType,
+    },
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     FunctionRefThis(String, HirType, Vec<HirType>, HirType),
