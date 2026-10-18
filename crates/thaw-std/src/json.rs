@@ -796,12 +796,12 @@ pub unsafe extern "C" fn thaw_non_arrow_receiver_new(kind: u8, word: u64) -> *mu
             });
             match host_query(&lease, 5) {
                 Some(undefined) if undefined == "1" => {
-                    drop(lease);
+                    unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
                     (0, 0, std::ptr::null_mut())
                 }
                 Some(_) => match host_query(&lease, 6) {
                     Some(nullish) if nullish == "1" => {
-                        drop(lease);
+                        unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
                         (1, 0, std::ptr::null_mut())
                     }
                     Some(_) => {
@@ -812,12 +812,12 @@ pub unsafe extern "C" fn thaw_non_arrow_receiver_new(kind: u8, word: u64) -> *mu
                         (8, word, owner)
                     }
                     None => {
-                        drop(lease);
+                        unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
                         return std::ptr::null_mut();
                     }
                 },
                 None => {
-                    drop(lease);
+                    unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
                     return std::ptr::null_mut();
                 }
             }
@@ -9262,6 +9262,13 @@ mod tests {
         1
     }
 
+    extern "C" fn raw_receiver_cleanup_error_release(handle: u64) -> u8 {
+        HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        HOST_ERROR.with(|error| *error.borrow_mut() = Some("release cleanup error".into()));
+        assert!(handle >= 100);
+        1
+    }
+
     extern "C" fn raw_receiver_test_query(handle: u64, operation: u8) -> HostTextResult {
         if handle == 199 && operation == 5 {
             return HostTextResult {
@@ -9281,6 +9288,11 @@ mod tests {
             (103, 5 | 6) => b"0",
             (104, 0) => b"object",
             (104, 5 | 6) => b"0",
+            (105, 0) => b"undefined",
+            (105, 5) => b"1",
+            (106, 0) => b"object",
+            (106, 5) => b"0",
+            (106, 6) => b"1",
             (199, 0) => b"object",
             (199, 6) => b"0",
             _ => panic!("unexpected receiver query {handle}/{operation}"),
@@ -9393,6 +9405,41 @@ mod tests {
                 correctly_failed,
                 "a failed nullish query must reject the payload"
             );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn raw_receiver_payload_cleanup_preserves_query_errors_and_discards_cleanup_errors() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            install_raw_receiver_test_host_operations();
+            HOST_OPERATIONS.with(|slot| {
+                let mut ops = slot.get().unwrap();
+                ops.release = raw_receiver_cleanup_error_release;
+                slot.set(Some(ops));
+            });
+
+            let undefined = unsafe { thaw_non_arrow_receiver_new(8, 105) };
+            assert!(!undefined.is_null());
+            assert_eq!(unsafe { *undefined }, 0);
+            assert!(HOST_ERROR.with(|error| error.borrow().is_none()));
+
+            let null = unsafe { thaw_non_arrow_receiver_new(8, 106) };
+            assert!(!null.is_null());
+            assert_eq!(unsafe { *null }, 1);
+            assert!(HOST_ERROR.with(|error| error.borrow().is_none()));
+
+            let failed = unsafe { thaw_non_arrow_receiver_new(8, 199) };
+            assert!(failed.is_null());
+            assert_eq!(
+                HOST_ERROR.with(|error| error.borrow().clone()),
+                Some("receiver query failed".into())
+            );
+            assert_eq!(HOST_RELEASES.with(Cell::get), 3);
+            HOST_OPERATIONS.with(|slot| slot.set(None));
         })
         .join()
         .unwrap();
