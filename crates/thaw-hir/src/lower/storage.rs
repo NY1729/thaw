@@ -1754,7 +1754,7 @@ impl FnLowerer<'_> {
             if members.iter().any(|member| self.validate_source_assignable(member, actual).is_ok()) {
                 return Ok(());
             }
-            return Err(format!("value has type {actual:?}, expected {expected:?}"));
+            return Err("value does not satisfy any member of the declared union".to_string());
         }
         match (expected, actual) {
             (HirType::Optional(_), HirType::Undefined)
