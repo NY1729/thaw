@@ -3484,9 +3484,23 @@ fn callable_apply_without_tuple_uses_empty_arguments() {
             console.log(Reflect.apply(zero, null, []));
             const explicit = (value: number = 4): number => value;
             console.log(explicit.apply(null, [9] as [number]));
+            let defaults = 0;
+            function fallback(): number { defaults++; return 11; }
+            const lazy = (value: number = fallback()): number => value;
+            const lazyBound = lazy.bind(null);
+            console.log(defaults);
+            console.log(lazy.apply(null));
+            console.log(defaults);
+            console.log(lazy.apply(null, [3] as [number]));
+            console.log(defaults);
+            console.log(lazyBound.apply(null));
+            console.log(defaults);
         }
     "#;
-    assert_eq!(compile_and_run(source, "apply_omitted_array"), "7\nundefined\n7\n0\nundefined\nundefined\n1\n5\n7\n9\n");
+    assert_eq!(
+        compile_and_run(source, "apply_omitted_array"),
+        "7\nundefined\n7\n0\nundefined\nundefined\n1\n5\n7\n9\n0\n11\n1\n3\n1\n11\n2\n"
+    );
 }
 
 #[test]
