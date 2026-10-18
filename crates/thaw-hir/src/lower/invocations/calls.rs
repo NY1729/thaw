@@ -2372,7 +2372,11 @@ impl<'a> FnLowerer<'a> {
                     .spread
                     .is_none()
                     .then_some(argument.expr.as_ref());
-                let actual = self.generic_call_argument_source_type(source, &value)?;
+                let actual = self.generic_call_argument_source_type(
+                    source,
+                    &value,
+                    signature.as_ref().is_some_and(|signature| !signature.is_extern),
+                )?;
                 let _ = match_generic_pattern(pattern, &actual, &mut generic_inferred);
             }
             if argument.spread.is_some() {
@@ -3002,6 +3006,7 @@ impl<'a> FnLowerer<'a> {
                         .any(|optional| *optional)
                 })
                 .unwrap_or(args.len());
+            let preserve_class_physical = !signature.is_extern;
             let mut actual = args
                 .iter()
                 .enumerate()
@@ -3022,9 +3027,17 @@ impl<'a> FnLowerer<'a> {
                             Expr::Lit(Lit::Str(value)) => Ok(HirType::StrLiteral(
                                 value.value.to_string_lossy().into_owned(),
                             )),
-                            _ => self.generic_call_argument_source_type(source, arg),
+                            _ => self.generic_call_argument_source_type(
+                                source,
+                                arg,
+                                preserve_class_physical,
+                            ),
                         },
-                        None => self.generic_call_argument_source_type(source, arg),
+                        None => self.generic_call_argument_source_type(
+                            source,
+                            arg,
+                            preserve_class_physical,
+                        ),
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;

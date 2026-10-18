@@ -1460,6 +1460,20 @@ impl FnLowerer<'_> {
     }
 }
 
+fn contains_native_class(ty: &HirType) -> bool {
+    match ty {
+        HirType::Object(fields) => {
+            class_name_from_type(ty).is_some() || fields.iter().any(|(_, ty)| contains_native_class(ty))
+        }
+        HirType::Array(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => contains_native_class(inner),
+        HirType::Tuple(types) | HirType::Union(types) => types.iter().any(contains_native_class),
+        _ => false,
+    }
+}
+
 fn storage_reference_type(ty: &TsType) -> bool {
     !matches!(ty, TsType::TsKeywordType(keyword)
         if !matches!(keyword.kind, TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsObjectKeyword | TsKeywordTypeKind::TsUnknownKeyword))
@@ -1601,20 +1615,6 @@ impl FnLowerer<'_> {
             }
         }
         let typed = |ty| HirExpr::TypedClosure(if uncertain(&ty) { HirType::Json } else { ty }, Box::new(HirExpr::Lit(HirLit::Undefined)));
-        fn contains_native_class(ty: &HirType) -> bool {
-            match ty {
-                HirType::Object(fields) => {
-                    class_name_from_type(ty).is_some()
-                        || fields.iter().any(|(_, ty)| contains_native_class(ty))
-                }
-                HirType::Array(inner)
-                | HirType::Optional(inner)
-                | HirType::Nullable(inner)
-                | HirType::Nullish(inner) => contains_native_class(inner),
-                HirType::Tuple(types) | HirType::Union(types) => types.iter().any(contains_native_class),
-                _ => false,
-            }
-        }
         let source_typed = |ty| {
             HirExpr::TypedClosure(
                 if contains_native_class(&ty) { ty } else if uncertain(&ty) { HirType::Json } else { ty },
@@ -1717,15 +1717,20 @@ impl FnLowerer<'_> {
         &self,
         source: Option<&Expr>,
         physical: &HirExpr,
+        preserve_class_physical: bool,
     ) -> Result<HirType, String> {
         let physical_type = self.infer_expr_type(physical)?;
+        if preserve_class_physical && contains_native_class(&physical_type) {
+            return Ok(physical_type);
+        }
         if physical_type != HirType::JsValue {
             if let Some(source) = source.filter(|source| has_dynamic_storage(source.span())) {
                 if let Some(source_type) = self
                     .source_value_hint(source)
                     .and_then(|hint| self.infer_expr_type(&hint).ok())
                     .filter(|source_type| {
-                        !matches!(source_type, HirType::Json | HirType::Dynamic | HirType::JsValue)
+                        !(preserve_class_physical && contains_native_class(source_type))
+                            && !matches!(source_type, HirType::Json | HirType::Dynamic | HirType::JsValue)
                     })
                 {
                     return Ok(source_type);
@@ -1797,7 +1802,10 @@ impl FnLowerer<'_> {
                     return if class_type_has_identity(&HirType::Object(actual.clone()), class) {
                         Ok(())
                     } else {
-                        Err(format!("value has type {actual:?}, expected nominal class {class}"))
+                        let actual_name = class_name_from_type(&HirType::Object(actual.clone()))
+                            .map(|name| format!("class `{name}`"))
+                            .unwrap_or_else(|| format!("value of type {actual:?}"));
+                        Err(format!("{actual_name} does not satisfy nominal class `{class}`"))
                     };
                 }
                 let public = |name: &str| !name.starts_with("__thaw_class_identity_\u{1e}")
