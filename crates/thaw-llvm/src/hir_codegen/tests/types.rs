@@ -46,6 +46,41 @@ fn compiles_nullable_undefined_and_tuple_callable_defaults() {
 }
 
 #[test]
+fn compiles_generator_callable_shapes_and_invocation_timing() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let calls = 0; let bodyRuns = 0;
+            const values = function* (value?: number): Generator<number> { yield value ?? -1; };
+            const alias = values;
+            const bound = values.bind(null);
+            console.log(alias().next().value); console.log(bound().next().value); console.log(bound(7).next().value);
+            const contextual: (value?: number) => Generator<number> = function* (value: number = 7): Generator<number> { yield value; };
+            console.log(contextual().next().value); console.log(contextual(3).next().value);
+            const defaults = async function* (value: number = (calls += 1, 7)): AsyncGenerator<number> {
+                bodyRuns += 1; yield value;
+            };
+            const deferred = defaults.bind(null);
+            console.log(calls); const iterator = deferred(); console.log(calls, bodyRuns);
+            console.log((await iterator.next()).value); console.log(calls, bodyRuns);
+            console.log((await defaults(3).next()).value); console.log(calls, bodyRuns);
+            const rest = async function* (...items: number[]): AsyncGenerator<number> { yield items.length; };
+            const boundRest = rest.bind(null);
+            console.log((await rest().next()).value); console.log((await rest(1, 2).next()).value);
+            console.log((await boundRest().next()).value); console.log((await boundRest(1, 2).next()).value);
+            const receiver = function* (this: { base: number }, value?: number): Generator<number> { yield this.base + (value ?? 0); };
+            const holder = { base: 4 };
+            const boundReceiver = receiver.bind(holder);
+            console.log(receiver.call(holder).next().value); console.log(receiver.call(holder, 3).next().value);
+            console.log(boundReceiver().next().value); console.log(boundReceiver(3).next().value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_callable_shapes_and_invocation_timing"),
+        "-1\n-1\n7\n7\n3\n0\n1 0\n7\n1 1\n3\n1 2\n0\n2\n0\n2\n4\n7\n4\n7\n"
+    );
+}
+
+#[test]
 fn compiles_mixed_nullish_and_optional_tuple_callable_defaults() {
     let source = r#"
         function main(): void {
