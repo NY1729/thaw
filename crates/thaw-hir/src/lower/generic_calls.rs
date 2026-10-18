@@ -822,6 +822,9 @@ impl<'a> FnLowerer<'a> {
                 .map(|annotation| annotation.type_ann.clone())
                 .or_else(|| inferred_generic_arrow_return_type(arrow)),
             generic_return_pattern: None,
+            source_omittable: HirOptionalMask::from_bools(
+                &arrow.params.iter().map(|parameter| matches!(parameter, Pat::Ident(binding) if binding.id.optional)).collect::<Vec<_>>(),
+            ),
             type_predicate: None,
         })
     }
@@ -988,6 +991,9 @@ impl<'a> FnLowerer<'a> {
                 .collect(),
             generic_return_type: Some(return_type.type_ann.clone()),
             generic_return_pattern: None,
+            source_omittable: HirOptionalMask::from_bools(
+                &call.params.iter().map(|parameter| matches!(parameter, TsFnParam::Ident(binding) if binding.id.optional)).collect::<Vec<_>>(),
+            ),
             type_predicate: None,
         })
     }
@@ -1115,6 +1121,9 @@ impl<'a> FnLowerer<'a> {
                 .collect(),
             generic_return_type: Some(Box::new(return_type.clone())),
             generic_return_pattern: None,
+            source_omittable: HirOptionalMask::from_bools(
+                &params.iter().map(|parameter| matches!(parameter, TsFnParam::Ident(binding) if binding.id.optional)).collect::<Vec<_>>(),
+            ),
             type_predicate: None,
         })
     }

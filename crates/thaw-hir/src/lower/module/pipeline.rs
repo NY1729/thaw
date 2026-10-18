@@ -776,6 +776,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
                             })
                             .collect(),
+                        source_omittable: if is_extern {
+                            HirOptionalMask::default()
+                        } else {
+                            source_omission_mask(
+                                &func.params.iter().map(|parameter| parameter.pat.clone()).collect::<Vec<_>>(),
+                                usize::from(func.this_param.is_some()),
+                            )
+                        },
                         generic_this_pattern,
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                         generic_return_pattern,
@@ -794,6 +802,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             let total_arity = receiver_count + arity;
                             let mut wrapper = signatures[&name].clone();
                             wrapper.params.truncate(total_arity);
+                            wrapper.source_omittable = HirOptionalMask::default();
                             signatures.insert(default_arity_symbol(&name, total_arity), wrapper);
                         }
                     }
@@ -866,6 +875,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        source_omittable: constructors.first().map_or_else(
+                            HirOptionalMask::default,
+                            |constructor| source_omission_mask(
+                                &constructor.params.iter().map(class_constructor_param_pattern).collect::<Vec<_>>(),
+                                0,
+                            ),
+                        ),
                         type_predicate: None,
                     },
                 );
@@ -898,6 +914,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        source_omittable: mask_with_offset(
+                            &signatures[&class_constructor_symbol(&name)].source_omittable,
+                            1,
+                            signatures[&class_constructor_symbol(&name)].params.len() + 1,
+                        ),
                         type_predicate: None,
                     },
                 );
@@ -923,12 +944,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         for arity in default_start..patterns.len() {
                             let mut constructor_signature = signatures[&constructor_symbol].clone();
                             constructor_signature.params.truncate(arity);
+                            constructor_signature.source_omittable = HirOptionalMask::default();
                             signatures.insert(
                                 default_arity_symbol(&constructor_symbol, arity),
                                 constructor_signature,
                             );
                             let mut initializer_signature = signatures[&initializer_symbol].clone();
                             initializer_signature.params.truncate(arity + 1);
+                            initializer_signature.source_omittable = HirOptionalMask::default();
                             signatures.insert(
                                 default_arity_symbol(&initializer_symbol, arity + 1),
                                 initializer_signature,
@@ -1086,6 +1109,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
+                            source_omittable: source_omission_mask(
+                                &method.function.params.iter().map(|parameter| parameter.pat.clone()).collect::<Vec<_>>(),
+                                usize::from(!method.is_static),
+                            ),
                             type_predicate: None,
                         },
                     );
@@ -1111,6 +1138,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         let mut unbound = signatures[&symbol].clone();
                         if !method.is_static {
                             unbound.params.remove(0);
+                            unbound.source_omittable = unbound.source_omittable.shifted(1);
                         }
                         unbound.uses_this = false;
                         unbound.generic_this_pattern = None;
@@ -1122,6 +1150,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             let total_arity = arity + receiver_count;
                             let mut wrapper = signatures[&symbol].clone();
                             wrapper.params.truncate(total_arity);
+                            wrapper.source_omittable = HirOptionalMask::default();
                             signatures.insert(default_arity_symbol(&symbol, total_arity), wrapper);
                         }
                     }
@@ -1136,6 +1165,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             for arity in default_start..patterns.len() {
                                 let mut wrapper = signatures[&unbound_symbol].clone();
                                 wrapper.params.truncate(arity);
+                                wrapper.source_omittable = HirOptionalMask::default();
                                 signatures
                                     .insert(default_arity_symbol(&unbound_symbol, arity), wrapper);
                             }
@@ -1208,6 +1238,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     ))
                 }
             };
+            let base_omittable = signatures
+                .get(&base_symbol)
+                .map(|signature| signature.source_omittable.clone())
+                .unwrap_or_default();
             let constructor = signatures
                 .get_mut(&class_constructor_symbol(derived_name))
                 .expect("derived constructor signature");
@@ -1216,6 +1250,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 changed = true;
             }
             constructor.native_rest = base_native_rest.clone();
+            if constructor.source_omittable != base_omittable {
+                constructor.source_omittable = base_omittable.clone();
+                changed = true;
+            }
             let mut initializer_params = vec![interfaces[derived_name].clone()];
             initializer_params.extend(base_params.iter().cloned());
             let initializer = signatures
@@ -1223,6 +1261,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 .expect("derived initializer signature");
             initializer.params = initializer_params;
             initializer.native_rest = base_native_rest;
+            let initializer_omittable = mask_with_offset(
+                &base_omittable,
+                1,
+                base_params.len() + 1,
+            );
+            if initializer.source_omittable != initializer_omittable {
+                initializer.source_omittable = initializer_omittable;
+                changed = true;
+            }
             for arity in 0..base_params.len() {
                 let base_constructor =
                     default_arity_symbol(&class_constructor_symbol(base.sym.as_ref()), arity);
@@ -1381,6 +1428,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             let mut unbound = signature.clone();
                             if !method.is_static {
                                 unbound.params.remove(0);
+                                unbound.source_omittable = unbound.source_omittable.shifted(1);
                             }
                             unbound
                         });
@@ -1652,6 +1700,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        source_omittable: HirOptionalMask::default(),
                         type_predicate: None,
                     },
                 );
@@ -1724,6 +1773,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
+                            source_omittable: HirOptionalMask::default(),
                             type_predicate: None,
                         },
                     );
