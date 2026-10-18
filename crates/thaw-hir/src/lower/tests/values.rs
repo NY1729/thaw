@@ -3598,3 +3598,43 @@ fn plain_object_does_not_satisfy_nominal_class_argument() {
     let error = lower_module(&module).expect_err("plain object must not acquire Item identity");
     assert!(!error.contains("__thaw_class_identity_"), "{error}");
 }
+
+#[test]
+fn another_class_does_not_satisfy_nominal_class_argument() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: Item): string;
+            class Item { value: number = 1; }
+            class Other { value: number = 1; }
+            function main(): void { __thaw_typed_js_7368617065(new Other()); }
+        "#,
+    ).expect("parse");
+    let error = lower_module(&module).expect_err("another class must not satisfy nominal Item");
+    assert!(error.contains("Other") || error.contains("Item"), "{error}");
+    assert!(!error.contains("__thaw_class_identity_"), "{error}");
+}
+
+#[test]
+fn getter_only_class_field_satisfies_structural_contract_without_evaluation() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }): string;
+            class Item { get value(): number { throw new Error("read"); } }
+            function main(): void { __thaw_typed_js_7368617065(new Item()); }
+        "#,
+    ).expect("parse");
+    let result = lower_module(&module);
+    assert!(result.is_ok(), "getter return type should satisfy structural contract without running getter: {:?}", result.err());
+}
+
+#[test]
+fn class_array_satisfies_top_level_structural_array_contract() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            declare function __thaw_typed_js_7368617065(value: { value: number }[]): string;
+            class Item { value: number = 1; extra: string = "ok"; }
+            function main(): void { __thaw_typed_js_7368617065([new Item()]); }
+        "#,
+    ).expect("parse");
+    assert!(lower_module(&module).is_ok(), "class instances should satisfy structural array elements");
+}
