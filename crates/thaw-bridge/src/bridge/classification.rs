@@ -276,6 +276,13 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
             }
             format!("({}) => {}", params.join(", "), render_ts_type(ret))
         }
+        // The physical callable is an implementation detail; ambient
+        // declarations must preserve each public overload signature.
+        HirType::OverloadedFunction(overloads, _) => overloads
+            .iter()
+            .map(|overload| format!("({})", render_ts_type(overload)))
+            .collect::<Vec<_>>()
+            .join(" & "),
         HirType::Map(key, value) => {
             format!("Map<{}, {}>", render_ts_type(key), render_ts_type(value))
         }
@@ -288,5 +295,27 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         HirType::FunctionWithThis(_, visible) => render_ts_type(visible),
         HirType::NativeException => "Error".to_string(),
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod classification_render_tests {
+    use super::render_ts_type;
+    use thaw_hir::HirType;
+
+    #[test]
+    fn renders_overloaded_function_public_signatures() {
+        let ty = HirType::OverloadedFunction(
+            vec![
+                HirType::Function(vec![HirType::Str], Box::new(HirType::Str)),
+                HirType::Function(vec![HirType::F64], Box::new(HirType::Bool)),
+            ],
+            Box::new(HirType::Function(vec![HirType::JsValue], Box::new(HirType::JsValue))),
+        );
+
+        assert_eq!(
+            render_ts_type(&ty),
+            "((arg0: string) => string) & ((arg0: number) => boolean)"
+        );
     }
 }

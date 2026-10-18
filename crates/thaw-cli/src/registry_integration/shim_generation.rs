@@ -58,6 +58,7 @@ fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
         | HirType::NativeException
         | HirType::Function(..)
         | HirType::CallableFunction(..)
+        | HirType::OverloadedFunction(..)
         | HirType::FunctionWithThis(..)
         | HirType::Dynamic => false,
     }
