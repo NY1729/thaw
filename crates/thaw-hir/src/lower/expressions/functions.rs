@@ -289,9 +289,10 @@ impl<'a> FnLowerer<'a> {
                 lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
                 lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
-                lowerer.scope.insert(name.clone(), receiver.clone());
+                let physical = HirType::NonArrowReceiver(Box::new(receiver.clone()));
+                lowerer.scope.insert(name.clone(), physical.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
-                params.push(HirParam { name, ty: receiver.clone() });
+                params.push(HirParam { name, ty: physical });
             }
             let mut destructuring = Vec::new();
             let json_iteration_callback = std::mem::take(&mut lowerer.native_iteration_callback)
@@ -632,9 +633,10 @@ impl<'a> FnLowerer<'a> {
                 lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
                 lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
-                lowerer.scope.insert(name.clone(), receiver.clone());
+                let physical = HirType::NonArrowReceiver(Box::new(receiver.clone()));
+                lowerer.scope.insert(name.clone(), physical.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
-                params.push(HirParam { name, ty: receiver.clone() });
+                params.push(HirParam { name, ty: physical });
             }
             for (pattern, param) in arrow.params.iter().zip(source_params.clone()) {
                 let name = lowerer.bind_local(&param.name, param.ty.clone());
@@ -1237,9 +1239,10 @@ impl<'a> FnLowerer<'a> {
                 lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
                 lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
-                lowerer.scope.insert(name.clone(), receiver.clone());
+                let physical = HirType::NonArrowReceiver(Box::new(receiver.clone()));
+                lowerer.scope.insert(name.clone(), physical.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
-                params.push(HirParam { name, ty: receiver.clone() });
+                params.push(HirParam { name, ty: physical });
             }
             let mut destructuring = Vec::new();
             for (index, (pat, ty)) in arrow.params.iter().zip(parameter_types).enumerate() {

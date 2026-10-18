@@ -3185,7 +3185,10 @@ impl<'a> FnLowerer<'a> {
                             )
                         });
                         Ok(HirType::FunctionWithThis(
-                            Box::new(params[0].ty.clone()),
+                            Box::new(match &params[0].ty {
+                                HirType::NonArrowReceiver(receiver) => receiver.as_ref().clone(),
+                                receiver => receiver.clone(),
+                            }),
                             Box::new(visible_type),
                         ))
                     }

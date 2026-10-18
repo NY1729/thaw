@@ -153,6 +153,7 @@ fn erase_ty(ty: &mut HirType) {
             erase_ty(receiver);
             erase_ty(signature);
         }
+        HirType::NonArrowReceiver(receiver) => erase_ty(receiver),
         HirType::CallableFunction(params, _, rest, ret) => {
             for param in params {
                 erase_ty(param);

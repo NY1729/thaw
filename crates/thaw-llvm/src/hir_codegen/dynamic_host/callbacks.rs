@@ -938,6 +938,9 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let mut callback_args = vec![context.into()];
         let mut argument_json = Vec::with_capacity(params.len() + holder_offset);
+        let tagged_method_receiver = method_mode && matches!(params.first(),
+            Some(HirType::Object(fields)) if !fields.first().is_some_and(|(name, _)|
+                name.starts_with("__thaw_class_identity_\u{1e}")));
         if let Some(holder) = holder_json {
             argument_json.push(holder);
             self.builder.build_store(argument_slots[0], holder)
@@ -998,7 +1001,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(argument_slots[graph_index], argument)
                 .map_err(|error| error.to_string())?;
             self.push_catch_target(conversion_failed);
-            let converted = if method_mode && index == 0 {
+            let converted = if tagged_method_receiver && index == 0 {
+                Ok(ptr_type.const_null().into())
+            } else if method_mode && index == 0 {
                 let HirType::Object(fields) = param else {
                     return Err("native method receiver requires an object type".into());
                 };
@@ -1036,9 +1041,6 @@ impl<'ctx> HirCompiler<'ctx> {
         // hides its receiver from the ordinary entry (slot 0 takes only the visible
         // parameters), so it must be entered through the tagged `this` entry: the
         // receiver is the borrowed host argument, kind 7, which that entry re-validates.
-        let tagged_method_receiver = method_mode && matches!(params.first(),
-            Some(HirType::Object(fields)) if !fields.first().is_some_and(|(name, _)|
-                name.starts_with("__thaw_class_identity_\u{1e}")));
         let code_slot = if (graph_mode && !method_mode) || tagged_method_receiver { unsafe {
             self.builder.build_in_bounds_gep(
                 self.context.i8_type(), context,

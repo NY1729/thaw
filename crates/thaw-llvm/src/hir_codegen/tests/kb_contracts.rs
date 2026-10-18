@@ -97,3 +97,29 @@ function main(): void {
         "undefined\nobject\nobject\n"
     );
 }
+
+#[test]
+fn kb_contract_ordinary_this_access_is_lazy_inside_body_catch() {
+    let source = r#"let effects = 0;
+const read = function(this: { value: number }, run: boolean): string {
+  effects++;
+  if (!run) return "skipped";
+  try { return String(this.value); }
+  catch (error: any) { return "caught " + error.message; }
+};
+const delayed = function(this: { value: number }): () => string {
+  const unused = () => this.value;
+  return () => {
+    try { return String(this.value); }
+    catch (error: any) { return "arrow caught " + error.message; }
+  };
+};
+function main(): void {
+  console.log(read.call(undefined as any, false) + " effects " + effects);
+  console.log(read.call(null as any, true) + " effects " + effects);
+  console.log(delayed.call(undefined as any)());
+  console.log(read.call({ value: 8 }, true));
+}"#;
+    assert_eq!(compile_and_run(source, "kb_contract_ordinary_this_access_is_lazy_inside_body_catch"),
+        "skipped effects 1\ncaught Cannot read properties of null (reading 'value') effects 2\narrow caught Cannot read properties of undefined (reading 'value')\n8\n");
+}

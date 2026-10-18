@@ -3564,7 +3564,7 @@ fn function_expression_this_is_hidden_from_public_signature() {
     assert_eq!(visible, &[HirType::F64]);
     let HirExpr::Lambda(_, params, _, _) = closure.as_ref() else { panic!("expected lambda body"); };
     assert_eq!(params[0].name, "__thaw_this");
-    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params[0].ty, HirType::NonArrowReceiver(Box::new(HirType::Json)));
     assert_eq!(params.len(), 2);
 }
 

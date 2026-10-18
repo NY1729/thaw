@@ -139,7 +139,33 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(ty, ptr, name)
                     .map_err(|e| e.to_string())
             }
-            HirExpr::NonArrowThis { payload, .. } => self.compile_expr(payload),
+            HirExpr::NonArrowThis { payload, declared, access } => {
+                let Some(HirType::NonArrowReceiver(_)) = self.expr_hir_type(payload) else {
+                    return self.compile_expr(payload);
+                };
+                let receiver = self.compile_expr(payload)?.into_pointer_value();
+                let words = self.context.ptr_type(AddressSpace::default());
+                let words = self.builder.build_pointer_cast(receiver, words, "non_arrow_receiver_words")
+                    .map_err(|error| error.to_string())?;
+                let zero = self.context.i64_type().const_zero();
+                let one = self.context.i64_type().const_int(1, false);
+                let kind_ptr = unsafe { self.builder.build_in_bounds_gep(self.context.i64_type(), words, &[zero], "non_arrow_receiver_kind_ptr") }
+                    .map_err(|error| error.to_string())?;
+                let word_ptr = unsafe { self.builder.build_in_bounds_gep(self.context.i64_type(), words, &[one], "non_arrow_receiver_word_ptr") }
+                    .map_err(|error| error.to_string())?;
+                let kind = self.builder.build_load(self.context.i64_type(), kind_ptr, "non_arrow_receiver_kind")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let kind = self.builder.build_int_truncate(kind, self.context.i8_type(), "non_arrow_receiver_kind_i8")
+                    .map_err(|error| error.to_string())?;
+                let word = self.builder.build_load(self.context.i64_type(), word_ptr, "non_arrow_receiver_word")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let access = match access {
+                    NonArrowThisAccess::Value => None,
+                    NonArrowThisAccess::Read(field) => Some((field.as_str(), false)),
+                    NonArrowThisAccess::Write(field) => Some((field.as_str(), true)),
+                };
+                self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word, access)
+            }
 
             HirExpr::Assign(name, value) => {
                 let (ptr, _ty) = *self

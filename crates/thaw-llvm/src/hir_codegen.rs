@@ -32,7 +32,7 @@ use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
     FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiRegisterClass,
     FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirInitStep, HirLit,
-    HirParam, HirProgram, HirStmt, HirType,
+    HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess,
 };
 
 #[derive(Clone)]
@@ -156,6 +156,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         | HirType::Function(_, _)
         | HirType::CallableFunction(..)
         | HirType::NativeException
+        | HirType::NonArrowReceiver(_)
         | HirType::FunctionWithThis(_, _) => Ok((8, 8)),
         HirType::OverloadedFunction(_, physical) => raw_value_layout(physical),
         HirType::Union(members) if !members.is_empty() => Ok((16, 8)),

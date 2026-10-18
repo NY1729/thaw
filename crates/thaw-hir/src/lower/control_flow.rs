@@ -947,6 +947,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         | HirType::Void
         | HirType::Dynamic
         | HirType::JsValue
+        | HirType::NonArrowReceiver(_)
         | HirType::NativeException => None,
     }
 }
