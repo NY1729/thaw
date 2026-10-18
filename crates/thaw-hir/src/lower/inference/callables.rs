@@ -1,4 +1,26 @@
 impl<'a> FnLowerer<'a> {
+    pub(in crate::lower) fn normalize_function_ref_value(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let HirExpr::FunctionRef(symbol, physical_params, ret) = &value else {
+            return Ok(value);
+        };
+        let logical = self.logical_function_ref_type(symbol, physical_params, ret);
+        let HirType::CallableFunction(fixed, _, rest, logical_ret) = &logical else {
+            return Ok(value);
+        };
+        let mut abi = fixed.clone();
+        if let Some(rest) = rest {
+            abi.push(HirType::Array(rest.clone()));
+        }
+        if abi == *physical_params && logical_ret.as_ref() == ret {
+            return Ok(HirExpr::TypedClosure(logical, Box::new(value)));
+        }
+        let adapted = self.coerce_to_declared(&logical, value.clone())?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+            vec![adapted, value],
+        ))
+    }
+
     fn adapt_named_function_to_callable(
         &self,
         declared: &HirType,
@@ -99,6 +121,25 @@ impl<'a> FnLowerer<'a> {
                     }
                     (HirType::Nullish(payload), expected) if payload.as_ref() == expected => {
                         HirExpr::NullishValue(Box::new(value), payload.as_ref().clone())
+                    }
+                    (HirType::Nullish(payload), HirType::Nullable(expected))
+                        if payload.as_ref() == expected.as_ref() =>
+                    {
+                        HirExpr::Conditional(
+                            Box::new(HirExpr::NullishIsNull(
+                                Box::new(value.clone()),
+                                payload.as_ref().clone(),
+                            )),
+                            Box::new(HirExpr::NullableNone(expected.as_ref().clone())),
+                            Box::new(HirExpr::NullableSome(
+                                Box::new(HirExpr::NullishValue(
+                                    Box::new(value),
+                                    payload.as_ref().clone(),
+                                )),
+                                expected.as_ref().clone(),
+                            )),
+                            HirType::Nullable(expected.clone()),
+                        )
                     }
                     (actual, expected) if actual == expected => value,
                     (actual, expected) => {
