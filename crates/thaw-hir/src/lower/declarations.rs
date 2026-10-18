@@ -922,6 +922,30 @@ fn lower_class_methods(
                 .push("__thaw_this".into());
         }
         let mut lowered_body = Vec::new();
+        let prologue = (|| {
+            for (source, parameter) in method
+                .function
+                .params
+                .iter()
+                .zip(params.iter().skip(receiver_offset))
+            {
+                if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
+                    lowerer.lower_binding_pattern(
+                        &source.pat,
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut lowered_body,
+                    )?;
+                }
+            }
+            Ok::<_, String>(())
+        })();
+        if let Err(error) = prologue {
+            if tolerant {
+                continue;
+            }
+            return Err(error);
+        }
         // This whole function is also called from the convergence loop's
         // own *trial* pass (`module/pipeline.rs`), where a sibling
         // method's return type may not have converged yet -- e.g. `stepA
@@ -1017,6 +1041,27 @@ fn lower_class_methods(
                     .push(parameter.name.clone());
             }
             let mut unbound_body = Vec::new();
+            let prologue = (|| {
+                for (source, parameter) in
+                    method.function.params.iter().zip(&unbound_params)
+                {
+                    if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
+                        unbound.lower_binding_pattern(
+                            &source.pat,
+                            HirExpr::Var(parameter.name.clone()),
+                            &parameter.ty,
+                            &mut unbound_body,
+                        )?;
+                    }
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(error) = prologue {
+                if tolerant {
+                    continue;
+                }
+                return Err(error);
+            }
             // Same tolerance as the bound variant above, and for the
             // identical reason.
             if let Err(error) = lower_function_statements(

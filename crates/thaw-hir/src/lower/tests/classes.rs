@@ -1985,6 +1985,40 @@ fn lowers_native_class_default_parameter_wrappers() {
 }
 
 #[test]
+fn lowers_native_method_defaults_with_tagged_bound_and_unbound_parameters() {
+    let program = lower(
+        r#"class Box {
+            value: number = 40;
+            add(delta: number = this.value): number { return delta; }
+            pick({ left }: { left: number } = { left: 3 }): number { return left; }
+            static sum(left: number = 20, right: number = left + 22): number {
+                return left + right;
+            }
+        }
+        function main(): number { return new Box().add() + Box.sum(); }"#,
+    );
+    for symbol in [
+        class_method_symbol("Box", "add"),
+        unbound_class_method_symbol(&class_method_symbol("Box", "add")),
+        class_method_symbol("Box", "pick"),
+        class_static_method_symbol("Box", "sum"),
+    ] {
+        let function = program
+            .functions
+            .iter()
+            .find(|function| function.name == symbol)
+            .unwrap_or_else(|| panic!("missing `{symbol}`"));
+        let parameter = function.params.last().expect("method source parameter");
+        if symbol == class_method_symbol("Box", "pick") {
+            assert!(matches!(parameter.ty, HirType::Optional(_)));
+        } else {
+            assert_eq!(parameter.ty, HirType::Optional(Box::new(HirType::F64)));
+        }
+        assert!(format!("{:?}", function.body).contains("OptionalIsNone"));
+    }
+}
+
+#[test]
 fn rejects_constructing_an_abstract_native_class() {
     let module = thaw_parser::parse_typescript(
         r#"abstract class Shape { abstract area(): number; }

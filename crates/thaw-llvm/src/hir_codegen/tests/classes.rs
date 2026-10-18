@@ -1308,6 +1308,7 @@ fn compiles_and_runs_native_class_default_parameters() {
         class Box {
             constructor(public value: number = 40, public label: string = String(value)) {}
             add(delta: number = this.value): number { return this.value + delta; }
+            pick({ left }: { left: number } = { left: 3 }): number { return left; }
             static sum(left: number = 20, right: number = left + 22): number {
                 return left + right;
             }
@@ -1329,6 +1330,10 @@ fn compiles_and_runs_native_class_default_parameters() {
             console.log(fourth.label);
             console.log(first.add());
             console.log(first.add(undefined));
+            console.log(first.pick());
+            console.log(first.pick({ left: 12 }));
+            const add = first.add.bind(first);
+            console.log(add(undefined));
             console.log(Box.sum());
             console.log(Box.sum(21));
             console.log(Box.sum(undefined, 1));
@@ -1340,7 +1345,7 @@ fn compiles_and_runs_native_class_default_parameters() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_class_default_parameters"),
-        "40\n40\n41\nexplicit\n40\nexplicit-default\n80\n80\n62\n64\n21\n24\n21\n21\n22\n"
+        "40\n40\n41\nexplicit\n40\nexplicit-default\n80\n80\n3\n12\n80\n62\n64\n21\n24\n21\n21\n22\n"
     );
 }
 

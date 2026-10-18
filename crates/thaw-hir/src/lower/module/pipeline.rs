@@ -1009,6 +1009,17 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     );
+                    if method.kind == MethodKind::Method {
+                        for (index, parameter) in method.function.params.iter().enumerate() {
+                            let physical_index = index + usize::from(!method.is_static);
+                            if pattern_is_omittable(&parameter.pat)
+                                && !matches!(params[physical_index], HirType::Dynamic | HirType::Json)
+                            {
+                                params[physical_index] =
+                                    optional_parameter_type(params[physical_index].clone());
+                            }
+                        }
+                    }
                     let ret = if method.kind == MethodKind::Setter {
                         HirType::Void
                     } else if method.function.is_generator {
