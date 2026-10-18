@@ -1557,6 +1557,30 @@ fn contextual_rest_callback_preserves_zero_and_fixed_prefix_rest_shapes() {
 }
 
 #[test]
+fn named_optional_function_identifier_is_normalized_to_callable_metadata() {
+    let program = lower(r#"
+        function named(value?: number): number { return value ?? 0; }
+        function main(): void { const alias = named; }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(main.body.iter().any(|statement| matches!(statement,
+        HirStmt::Let(name, HirType::CallableFunction(params, optional, rest, ret), _)
+            if name == "alias" && params == &vec![HirType::Optional(Box::new(HirType::F64))]
+                && optional.contains(0) && rest.is_none() && ret.as_ref() == &HirType::F64
+    )), "identifier reads retain source omission metadata: {:?}", main.body);
+}
+
+#[test]
+fn named_required_undefined_parameter_stays_required_through_alias() {
+    let source = thaw_parser::parse_typescript(r#"
+        function required(value: number | undefined): number { return value ?? 0; }
+        function main(): void { const alias = required; alias(); }
+    "#).unwrap();
+    let error = lower_module(&source).unwrap_err();
+    assert!(error.contains("expects argument 1") && error.contains("omitted"), "unexpected error: {error}");
+}
+
+#[test]
 fn dynamic_storage_object_literal_keeps_contextual_rest_callback_metadata() {
     let program = lower(
         r#"
