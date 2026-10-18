@@ -540,6 +540,10 @@ impl<'ctx> HirCompiler<'ctx> {
         getter_index: usize,
     ) -> Result<(BasicValueEnum<'ctx>, HirType), String> {
         let getter_type = &fields[getter_index].1;
+        let getter_type = match getter_type {
+            HirType::OverloadedFunction(_, physical) => physical.as_ref(),
+            other => other,
+        };
         let (params, ret) = match getter_type {
             HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {
                 (params, ret.as_ref())
@@ -814,6 +818,10 @@ impl<'ctx> HirCompiler<'ctx> {
         preserve_undefined: bool,
         owned: bool,
     ) -> Result<(), String> {
+        let field_type = match field_type {
+            HirType::OverloadedFunction(_, physical) => physical.as_ref(),
+            other => other,
+        };
         match field_type {
             HirType::Optional(payload) => {
                 return self.compile_json_object_set_tagged(
@@ -1314,6 +1322,10 @@ impl<'ctx> HirCompiler<'ctx> {
         element_type: &HirType,
         preserve_undefined: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        let element_type = match element_type {
+            HirType::OverloadedFunction(_, physical) => physical.as_ref(),
+            other => other,
+        };
         // `array` is a handle (see `compile_array_wrap`'s doc comment);
         // unwrap it once here so every existing byte-level access below
         // keeps working against the raw buffer unchanged.
