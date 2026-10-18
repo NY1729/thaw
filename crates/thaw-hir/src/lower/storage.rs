@@ -1815,6 +1815,15 @@ impl FnLowerer<'_> {
                         self.validate_source_assignable(expected_field, actual_field)
                             .map_err(|error| format!("field `{name}`: {error}"))?;
                     } else if omitted_parameter_value(expected_field).is_err() {
+                        let actual_class = HirType::Object(actual.clone());
+                        if let Some(class) = class_name_from_type(&actual_class) {
+                            if self.class_method_signature_compatible(class, name, expected_field, true) {
+                                continue;
+                            }
+                            if self.class_method_signature_exists(class, name) {
+                                return Err(format!("field `{name}` has an incompatible method signature"));
+                            }
+                        }
                         return Err(format!("missing required field `{name}`"));
                     }
                 }
