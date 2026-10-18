@@ -2340,6 +2340,33 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        // Native rest arguments are packed into one ABI slot below. Fill
+        // omitted trailing fixed parameters first, while the rest values are
+        // still separate, so the packed array stays in its declared slot.
+        if native_rest_values.is_some() {
+            if let Some(signature) = signature
+                .as_ref()
+                .filter(|signature| signature.generic_type_params.is_empty())
+            {
+                let fixed_count = signature.params.len().saturating_sub(1);
+                for (index, ty) in signature
+                    .params
+                    .iter()
+                    .enumerate()
+                    .take(fixed_count)
+                    .skip(lowered_arguments.len())
+                {
+                    if signature.source_omittable.contains(index) {
+                        lowered_arguments.push(omitted_parameter_value(ty)?);
+                    } else if matches!(ty, HirType::Json | HirType::Dynamic | HirType::JsValue) {
+                        lowered_arguments.push(HirExpr::Lit(HirLit::Undefined));
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
         if let Some(signature) = signature.as_ref() {
             for (index, argument) in lowered_arguments.iter_mut().enumerate() {
                 if signature.source_omittable.contains(index)

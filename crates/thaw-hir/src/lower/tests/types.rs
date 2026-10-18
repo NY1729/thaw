@@ -45,6 +45,35 @@ fn rejects_an_incompatible_local_callable_default() {
 }
 
 #[test]
+fn required_callable_view_does_not_allow_omitting_its_argument() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        function maybe(value: number | undefined): number { return value ?? 4; }
+        function main(): void {
+            const exact: (value: number) => number = maybe;
+            exact();
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
+fn generic_named_function_required_view_remains_unsupported() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        function identity<T>(value: T): T { return value; }
+        function main(): void {
+            const exact: (value: number) => number = identity;
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
 fn lowers_mixed_nullish_and_optional_tuple_callable_defaults() {
     lower(
         r#"

@@ -1,4 +1,42 @@
 impl<'a> FnLowerer<'a> {
+    pub(in crate::lower) fn adapt_named_function_to_required_function(
+        &self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::Function(params, ret) = declared else { return Ok(None) };
+        let HirExpr::FunctionRef(symbol, source_params, source_ret) = value else { return Ok(None) };
+        if source_ret != ret.as_ref() || source_params.len() != params.len() { return Ok(None) }
+        let Some(signature) = self.signatures.get(symbol).filter(|signature| !signature.uses_this) else {
+            return Ok(None);
+        };
+        if signature.params != *source_params || !signature.generic_type_params.is_empty() { return Ok(None) }
+        let mut arguments = Vec::with_capacity(params.len());
+        let mut adapter_params = Vec::with_capacity(params.len());
+        for (index, (source, target)) in source_params.iter().zip(params).enumerate() {
+            let name = format!("__thaw_required_callable_argument_{index}");
+            adapter_params.push(HirParam { name: name.clone(), ty: target.clone() });
+            let arg = HirExpr::Var(name);
+            match source {
+                HirType::Optional(inner) if inner.as_ref() == target =>
+                    arguments.push(HirExpr::OptionalSome(Box::new(arg), target.clone())),
+                HirType::Nullish(inner) if inner.as_ref() == target =>
+                    arguments.push(HirExpr::NullishSome(Box::new(arg), target.clone())),
+                _ if source == target => arguments.push(arg),
+                _ => return Ok(None),
+            }
+        }
+        let call = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), arguments);
+        let body = if **ret == HirType::Void {
+            HirExpr::Block(vec![HirStmt::Expr(call), HirStmt::Return(None)])
+        } else { HirExpr::Block(vec![HirStmt::Return(Some(call))]) };
+        let adapter = HirExpr::Lambda(Vec::new(), adapter_params, ret.as_ref().clone(), Box::new(body));
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+            vec![HirExpr::TypedClosure(declared.clone(), Box::new(adapter)), value.clone()],
+        )))
+    }
+
     pub(in crate::lower) fn normalize_function_ref_value(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         let HirExpr::FunctionRef(symbol, physical_params, ret) = &value else {
             return Ok(value);
