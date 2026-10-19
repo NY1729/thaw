@@ -156,13 +156,15 @@ fn source_value(source: &SharedObject) -> Value {
     Value::Object(source.clone())
 }
 
-fn commit_fills(fills: Vec<PendingFill>) {
+fn prepare_array_hole_capacity(fills: &[PendingFill]) {
     let hole_entries = fills
         .iter()
         .filter(|fill| matches!(fill, PendingFill::Array { holes, .. } if !holes.is_empty()))
         .count();
     ARRAY_HOLES.with(|entries| entries.borrow_mut().reserve(hole_entries));
+}
 
+fn commit_fills(fills: Vec<PendingFill>) {
     for fill in fills {
         match fill {
             PendingFill::Array {
@@ -182,6 +184,7 @@ fn commit_fills(fills: Vec<PendingFill>) {
 
 pub(super) fn clone_value(source: &Value, mode: CloneMode) -> Result<Value, ()> {
     let (root, fills) = GraphCloner::new(mode).discover(source)?;
+    prepare_array_hole_capacity(&fills);
     commit_fills(fills);
     Ok(root)
 }
