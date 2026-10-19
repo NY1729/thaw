@@ -637,6 +637,22 @@
       : operation === 6 ? thawGraphArrayFrom(thawGraphApply(thawGraphMapValues, value, []))
       : operation === 7 ? [...value]
       : operation === 8 ? [thawGraphGetPrototypeOf(value)]
+      : operation === 10 ? (() => {
+        const iterator = thawGraphApply(thawGraphMapEntries, value, []);
+        const items = [];
+        let step;
+        while (!(step = thawGraphApply(thawMapIteratorNext, iterator, [])).done)
+          thawGraphApply(thawGraphArrayPush, items, [step.value]);
+        return items;
+      })()
+      : operation === 11 ? (() => {
+        const iterator = thawGraphApply(thawGraphSetValues, value, []);
+        const items = [];
+        let step;
+        while (!(step = thawGraphApply(thawSetIteratorNext, iterator, [])).done)
+          thawGraphApply(thawGraphArrayPush, items, [step.value]);
+        return items;
+      })()
       : null;
     if (entries === null) throw new thawGraphTypeError('Invalid native host enumeration');
     return thawGraphEncode(entries, 0, true);

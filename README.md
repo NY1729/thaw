@@ -198,6 +198,14 @@ Native classes retain their actual class and private-field brands. Fresh, option
 callable and async method results preserve dynamically represented references across awaits.
 Programs whose values remain native keep their unboxed storage. Public native FFI layouts
 stay fixed; incompatible dynamic arguments throw `TypeError` before native code is invoked.
+Compatible JavaScript-owned `Map` and `Set` arguments are copied into temporary native
+collections for the call; compatible native collections keep the zero-copy path. C-side
+collection changes are not copied back to a JavaScript-owned collection. The declared key
+and value types must have a supported layout; JavaScript-owned collections with unsupported
+layouts, including object or class keys and bare `JsValue` entries, throw `TypeError` before
+the C function runs. JavaScript `Map` keys and `Set` elements support `number`, `string`, and
+`Json`/`any` layouts. `Json`/`any` entries retain JavaScript object identity, so copying the
+collection does not deep-clone its contents.
 Native array and record returns are copied into owned internal storage when dynamic storage
 is required; later dynamic writes do not change the original foreign memory. Class annotations
 do not give an unbranded foreign object a native class brand.
@@ -219,8 +227,10 @@ owner identity across chained calls, with mutations visible on the original obje
 Known gaps against Node semantics:
 
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
-- Native FFI collection parameters require an authenticated native collection with compatible
-  key and value types. A JavaScript-owned collection is rejected at that boundary.
+- Native FFI collection parameters require an authenticated native collection or a
+  JavaScript-owned `Map`/`Set` whose declared key and value types have a supported
+  copy-in layout. Unsupported JavaScript-owned collection layouts throw `TypeError`
+  before native code is invoked.
 
 ## Examples
 
