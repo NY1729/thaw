@@ -62,6 +62,51 @@ fn host_query_callable_slot_does_not_collide_with_number_conversion() {
 }
 
 #[test]
+fn host_collection_snapshots_use_captured_intrinsics_and_reject_non_collections() {
+    assert_eq!(
+        load(
+            r#"
+        globalThis.collectionSnapshotCases = function() {
+          let overrides = 0;
+          class CustomMap extends Map {
+            entries() { overrides++; throw new Error('entries override'); }
+            [Symbol.iterator]() { overrides++; throw new Error('iterator override'); }
+          }
+          class CustomSet extends Set {
+            values() { overrides++; throw new Error('values override'); }
+            [Symbol.iterator]() { overrides++; throw new Error('iterator override'); }
+          }
+          const map = new CustomMap([['first', 1], ['second', 2]]);
+          const set = new CustomSet(['first', 'second']);
+          const mapGraph = JSON.parse(__thaw_json_host_enumerate(map, 10));
+          const setGraph = JSON.parse(__thaw_json_host_enumerate(set, 11));
+          let fakeRejected = false;
+          try { __thaw_json_host_enumerate({ __thaw_map_entries__: [] }, 10); }
+          catch (error) { fakeRejected = error instanceof TypeError; }
+          let tagFakeRejected = false;
+          try { __thaw_json_host_enumerate({ [Symbol.toStringTag]: 'Map' }, 10); }
+          catch (error) { tagFakeRejected = error instanceof TypeError; }
+          let proxyRejected = false;
+          try { __thaw_json_host_enumerate(new Proxy(new Map(), {}), 10); }
+          catch (error) { proxyRejected = error instanceof TypeError; }
+          let wrongKindRejected = false;
+          try { __thaw_json_host_enumerate(new Map(), 11); }
+          catch (error) { wrongKindRejected = error instanceof TypeError; }
+          return [mapGraph.nodes[0].a.length, mapGraph.nodes.length,
+            setGraph.nodes[0].a.map(item => item.v), overrides,
+            fakeRejected, tagFakeRejected, proxyRejected, wrongKindRejected];
+        };
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("collectionSnapshotCases", "[]"),
+        r#"[2,3,["first","second"],0,true,true,true,true]"#
+    );
+}
+
+#[test]
 fn host_for_in_enumeration_filters_symbols_and_shadowed_keys() {
     std::thread::spawn(|| {
         assert_eq!(

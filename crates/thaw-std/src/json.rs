@@ -935,6 +935,52 @@ fn host_enumerate_values(lease: &HostLease, operation: u8) -> Vec<Value> {
     })
 }
 
+/// Copies a real host Map's entry pairs or Set's values into an owned root
+/// array. Operations 10/11 use captured collection intrinsics and iterator
+/// `next`, so this also authenticates the host value without user overrides.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_host_collection_snapshot(
+    value: *const Value,
+    expected_kind: u8,
+) -> *mut Value {
+    let Some(lease) = (unsafe { value.as_ref() }).and_then(|value| match value {
+        Value::Host(lease) => Some(lease),
+        _ => None,
+    }) else {
+        set_host_error("\u{1}TypeError\u{1}Expected a JavaScript Map or Set".into());
+        return std::ptr::null_mut();
+    };
+    let (kind, operation) = match expected_kind {
+        1 => ("map", 10),
+        2 => ("set", 11),
+        _ => {
+            set_host_error("\u{1}TypeError\u{1}Invalid JavaScript collection kind".into());
+            return std::ptr::null_mut();
+        }
+    };
+
+    if let Some(actual) = host_query(lease, 24) {
+        if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            return std::ptr::null_mut();
+        }
+        if !actual.is_empty() && actual != kind {
+            set_host_error(format!(
+                "\u{1}TypeError\u{1}Expected a JavaScript {}",
+                kind.to_uppercase()
+            ));
+            return std::ptr::null_mut();
+        }
+    } else if HOST_ERROR.with(|error| error.borrow().is_some()) {
+        return std::ptr::null_mut();
+    }
+
+    let items = host_enumerate_values(lease, operation);
+    if HOST_ERROR.with(|error| error.borrow().is_some()) {
+        return std::ptr::null_mut();
+    }
+    track_typed_decode_child(leak(Value::shared_array(items)))
+}
+
 fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
     let mut entries = Vec::new();
     for pair in host_enumerate_values(lease, 0) {
@@ -9533,6 +9579,65 @@ mod tests {
         }
     }
 
+    unsafe extern "C" {
+        fn thaw_map_new() -> *mut u8;
+        fn thaw_map_any_set(map: *mut u8, key: *mut u8, value: u64) -> u8;
+        fn thaw_map_any_has(map: *const u8, key: *mut u8) -> u8;
+        fn thaw_map_any_get_ptr(map: *const u8, key: *mut u8) -> *mut u8;
+    }
+
+    #[test]
+    fn native_map_word_edges_keep_tracked_json_key_and_value_across_safe_reset() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            thaw_arena::thaw_arena_enable_tracing();
+            let key = leak(Value::Host(Rc::new(HostLease {
+                handle: 920,
+                release: count_host_release,
+            })));
+            let value = leak(Value::Host(Rc::new(HostLease {
+                handle: 921,
+                release: count_host_release,
+            })));
+            assert_eq!(thaw_json_track_arena_owned_root(key), key);
+            assert_eq!(thaw_json_track_arena_owned_root(value), value);
+            let map = unsafe { thaw_map_new() };
+            assert!(!map.is_null());
+            let map_root = thaw_arena::ArenaRoot::new(map as usize);
+            assert_eq!(
+                unsafe { thaw_map_any_set(map, key.cast(), value as usize as u64) },
+                1
+            );
+
+            // The native entry storage contains the Json key and value pointer words. The
+            // arena traces those through their existing owned-Json root tokens.
+            thaw_arena::thaw_arena_reset();
+            assert_eq!(unsafe { thaw_map_any_has(map, key.cast()) }, 1);
+            assert_eq!(
+                unsafe { thaw_map_any_get_ptr(map, key.cast()) },
+                value.cast()
+            );
+            assert!(
+                ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(key as usize)))
+            );
+            assert!(
+                ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize)))
+            );
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+
+            drop(map_root);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 2));
+            assert!(
+                !ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(key as usize)))
+            );
+            assert!(!ARENA_OWNED_JSON_ROOTS
+                .with(|roots| roots.borrow().contains_key(&(value as usize))));
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn stale_owner_metadata_does_not_clear_reused_allocation_edges() {
         std::thread::spawn(|| {
@@ -12269,6 +12374,118 @@ mod tests {
             value: 0,
             error: thaw_arena::owned_string(b"proxy setter exploded").cast_const(),
         }
+    }
+
+    extern "C" fn collection_snapshot_query(handle: u64, operation: u8) -> HostTextResult {
+        let value = match (handle, operation) {
+            (901, 24) => b"map".as_slice(),
+            (902, 24) => b"set".as_slice(),
+            (904, 24) => b"map".as_slice(),
+            _ => b"".as_slice(),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(value),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn collection_snapshot_enumerate(handle: u64, operation: u8) -> HostTextResult {
+        let graph = match (handle, operation) {
+            (901, 10) => Some(br#"{"root":{"r":0},"nodes":[{"a":[{"v":"key"},{"v":3}],"p":[["0",{"v":"key"},7],["1",{"v":3},7],["length",{"v":2},1]]}],"leases":[],"napiLeases":[]}"#.as_slice()),
+            (902, 11) => Some(br#"{"root":{"r":0},"nodes":[{"a":[{"v":4},{"v":5}],"p":[["0",{"v":4},7],["1",{"v":5},7],["length",{"v":2},1]]}],"leases":[],"napiLeases":[]}"#.as_slice()),
+            _ => None,
+        };
+        if let Some(graph) = graph {
+            HostTextResult {
+                value: thaw_arena::owned_string(graph),
+                error: std::ptr::null(),
+            }
+        } else {
+            HostTextResult {
+                value: std::ptr::null(),
+                error: thaw_arena::owned_string(b"original intrinsic error"),
+            }
+        }
+    }
+
+    fn install_collection_snapshot_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: host_array_test_retain,
+                release: host_array_test_release,
+                get: host_array_test_get,
+                query: collection_snapshot_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: collection_snapshot_enumerate,
+            }))
+        });
+    }
+
+    #[test]
+    fn host_collection_snapshot_copies_root_and_preserves_intrinsic_errors() {
+        std::thread::spawn(|| {
+            install_collection_snapshot_operations();
+            let map = host_array_test_value(901);
+            let snapshot = unsafe { thaw_json_host_collection_snapshot(map, 1) };
+            assert!(!snapshot.is_null());
+            assert_eq!(unsafe { &*snapshot }.as_array().map(Vec::len), Some(2));
+            assert_eq!(
+                unsafe { &*snapshot }.as_array().unwrap()[0].as_str(),
+                Some("key")
+            );
+            assert!(thaw_json_take_host_error().is_null());
+            unsafe { thaw_json_destroy(snapshot) };
+
+            let set = host_array_test_value(902);
+            let set_snapshot = unsafe { thaw_json_host_collection_snapshot(set, 2) };
+            assert_eq!(unsafe { &*set_snapshot }.as_array().map(Vec::len), Some(2));
+            assert!(thaw_json_take_host_error().is_null());
+            unsafe { thaw_json_destroy(set_snapshot) };
+
+            let failed_map = host_array_test_value(904);
+            let failed = unsafe { thaw_json_host_collection_snapshot(failed_map, 1) };
+            assert!(failed.is_null());
+            let error = thaw_json_take_host_error();
+            assert_eq!(read_c_string(error), "original intrinsic error");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+            unsafe {
+                thaw_json_destroy(map);
+                thaw_json_destroy(set);
+                thaw_json_destroy(failed_map);
+            }
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_collection_snapshot_rejects_plain_json_and_missing_host_operations() {
+        std::thread::spawn(|| {
+            let plain = parse(r#"{"__thaw_map_entries__":[]}"#);
+            assert!(unsafe { thaw_json_host_collection_snapshot(plain, 1) }.is_null());
+            let error = thaw_json_take_host_error();
+            assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+            unsafe { thaw_json_destroy(plain) };
+
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+            HOST_RELEASES.with(|count| count.set(0));
+            let host = leak(Value::Host(Rc::new(HostLease {
+                handle: 903,
+                release: count_host_release,
+            })));
+            assert!(unsafe { thaw_json_host_collection_snapshot(host, 1) }.is_null());
+            let error = thaw_json_take_host_error();
+            assert_eq!(read_c_string(error), "Host operations unavailable");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+            unsafe { thaw_json_destroy(host) };
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

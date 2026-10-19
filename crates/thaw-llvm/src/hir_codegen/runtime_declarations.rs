@@ -2655,6 +2655,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_host_collection_snapshot",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_array_extend",
             self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
