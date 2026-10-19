@@ -298,27 +298,29 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(rejected);
-        let (key_ty, value_ty) = match ty {
-            HirType::Map(key, value) => (Some(key.as_ref()), Some(value.as_ref())),
-            HirType::Set(_) => (None, None),
+        let (key_ty, value_ty, is_set) = match ty {
+            HirType::Map(key, value) => (key.as_ref(), Some(value.as_ref()), false),
+            HirType::Set(element) => (element.as_ref(), None, true),
             _ => unreachable!(),
         };
-        if !self.validating_native_argument || matches!(ty, HirType::Set(_)) {
+        if !self.validating_native_argument {
             self.compile_throw_type_error("Expected a native collection with a compatible key and value type")?;
         } else {
-            let key_ty = key_ty.unwrap();
-            let value_ty = value_ty.unwrap();
-            if !Self::ffi_map_copyin_value_is_word_compatible(value_ty) {
+            if value_ty.is_some_and(|value| !Self::ffi_map_copyin_value_is_word_compatible(value)) {
                 self.compile_throw_type_error("JavaScript Map copy-in requires a single-word value type")?;
             } else if !matches!(key_ty, HirType::F64 | HirType::Str | HirType::Json) {
-                self.compile_throw_type_error("JavaScript Map copy-in supports number, string, or any keys")?;
+                self.compile_throw_type_error(if is_set {
+                    "JavaScript Set copy-in supports number, string, or any elements"
+                } else {
+                    "JavaScript Map copy-in supports number, string, or any keys"
+                })?;
             } else {
                 let snapshot = self.builder.build_call(
                     self.module.get_function("thaw_json_host_collection_snapshot").unwrap(),
-                    &[json.into(), self.context.i8_type().const_int(1, false).into()],
-                    "js_map_entry_snapshot",
+                    &[json.into(), self.context.i8_type().const_int(if is_set { 2 } else { 1 }, false).into()],
+                    "js_collection_snapshot",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                    .ok_or("Map snapshot returned no value")?.into_pointer_value();
+                    .ok_or("collection snapshot returned no value")?.into_pointer_value();
                 self.compile_check_json_host_error(snapshot.into(), Some("thaw_json_destroy"))?;
                 let snapshot_present = self.builder.build_is_not_null(snapshot, "js_map_snapshot_present")
                     .map_err(|error| error.to_string())?;
@@ -327,7 +329,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_conditional_branch(snapshot_present, snapshot_ok, snapshot_failed)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(snapshot_failed);
-                self.compile_throw_type_error("Expected a JavaScript Map")?;
+                self.compile_throw_type_error(if is_set { "Expected a JavaScript Set" } else { "Expected a JavaScript Map" })?;
                 self.builder.position_at_end(snapshot_ok);
 
                 let map = self.builder.build_call(self.module.get_function("thaw_map_new").unwrap(), &[], "ffi_copyin_map")
@@ -342,7 +344,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(map_failed);
                 self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[snapshot.into()], "destroy_failed_map_snapshot")
                     .map_err(|error| error.to_string())?;
-                self.compile_throw_type_error("Unable to allocate native Map")?;
+                self.compile_throw_type_error(if is_set { "Unable to allocate native Set" } else { "Unable to allocate native Map" })?;
                 self.builder.position_at_end(map_ok);
 
                 let length = self.builder.build_call(self.module.get_function("thaw_json_array_length").unwrap(), &[snapshot.into()], "js_map_entry_count")
@@ -364,15 +366,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.context.ptr_type(AddressSpace::default()).const_null().into()], "js_map_entry")
                     .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map entry index returned no value")?;
                 self.compile_check_json_host_error(entry, Some("thaw_json_destroy"))?;
-                let read_pair = |this: &mut Self, item: BasicValueEnum<'ctx>, at: f64, name: &str| -> Result<BasicValueEnum<'ctx>, String> {
-                    let value = this.builder.build_call(this.module.get_function("thaw_json_index").unwrap(), &[
-                        item.into(), this.context.f64_type().const_float(at).into(),
-                        this.context.ptr_type(AddressSpace::default()).const_null().into()], name)
-                        .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map pair index returned no value")?;
-                    this.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
-                    Ok(value)
+                let (key_json, value_json) = if is_set {
+                    (entry, None)
+                } else {
+                    let read_pair = |this: &mut Self, item: BasicValueEnum<'ctx>, at: f64, name: &str| -> Result<BasicValueEnum<'ctx>, String> {
+                        let value = this.builder.build_call(this.module.get_function("thaw_json_index").unwrap(), &[
+                            item.into(), this.context.f64_type().const_float(at).into(),
+                            this.context.ptr_type(AddressSpace::default()).const_null().into()], name)
+                            .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map pair index returned no value")?;
+                        this.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+                        Ok(value)
+                    };
+                    (read_pair(self, entry, 0.0, "js_map_key")?, Some(read_pair(self, entry, 1.0, "js_map_value")?))
                 };
-                let key_json = read_pair(self, entry, 0.0, "js_map_key")?;
                 self.compile_validate_native_argument(key_json, key_ty)?;
                 let key = self.compile_json_value_to_native(key_json, key_ty)?;
                 if matches!(key_ty, HirType::Json) {
@@ -380,32 +386,40 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("failed to root Json Map key")?;
                     self.compile_check_json_host_error(rooted, None)?;
                 }
-                let value_json = read_pair(self, entry, 1.0, "js_map_value")?;
-                self.compile_validate_native_argument(value_json, value_ty)?;
-                let value = self.compile_json_to_native(value_json, value_ty)?;
-                if matches!(value_ty, HirType::Json | HirType::Dictionary(_)) {
-                    let rooted = self.builder.build_call(self.module.get_function("thaw_json_track_arena_owned_root").unwrap(), &[value.into()], "root_ffi_map_value")
-                        .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("failed to root Json Map value")?;
-                    self.compile_check_json_host_error(rooted, None)?;
-                }
+                let value = if let (Some(value_json), Some(value_ty)) = (value_json, value_ty) {
+                    self.compile_validate_native_argument(value_json, value_ty)?;
+                    let value = self.compile_json_to_native(value_json, value_ty)?;
+                    if matches!(value_ty, HirType::Json | HirType::Dictionary(_)) {
+                        let rooted = self.builder.build_call(self.module.get_function("thaw_json_track_arena_owned_root").unwrap(), &[value.into()], "root_ffi_map_value")
+                            .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("failed to root Json Map value")?;
+                        self.compile_check_json_host_error(rooted, None)?;
+                    }
+                    value
+                } else {
+                    self.context.i64_type().const_zero().into()
+                };
                 let key_suffix = match key_ty { HirType::F64 => "num", HirType::Str => "str", _ => "any" };
                 let value_word = self.encode_word(value)?;
                 let set = self.builder.build_call(self.module.get_function(&format!("thaw_map_{key_suffix}_set")).unwrap(), &[
                     map.into(), key.into(), value_word.into()], "ffi_copyin_map_insert")
                     .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map insert returned no status")?.into_int_value();
-                self.compile_check_json_host_error(value_json, Some("thaw_json_destroy"))?;
+                self.compile_check_json_host_error(value_json.unwrap_or(key_json), Some("thaw_json_destroy"))?;
                 let inserted = self.builder.build_int_compare(IntPredicate::NE, set, self.context.i8_type().const_zero(), "ffi_copyin_map_inserted")
                     .map_err(|error| error.to_string())?;
                 let inserted_block = self.context.append_basic_block(function, "ffi_copyin_map_inserted");
                 let insert_failed = self.context.append_basic_block(function, "ffi_copyin_map_insert_failed");
                 self.builder.build_conditional_branch(inserted, inserted_block, insert_failed).map_err(|error| error.to_string())?;
                 self.builder.position_at_end(insert_failed);
-                self.compile_throw_type_error("Unable to grow native Map")?;
+                self.compile_throw_type_error(if is_set { "Unable to grow native Set" } else { "Unable to grow native Map" })?;
                 self.builder.position_at_end(inserted_block);
                 self.compile_destroy_decoded_owned_json(key_json, key_ty)?;
-                self.compile_destroy_decoded_owned_json(value_json, value_ty)?;
-                self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[entry.into()], "destroy_map_entry_pair")
-                    .map_err(|error| error.to_string())?;
+                if let (Some(value_json), Some(value_ty)) = (value_json, value_ty) {
+                    self.compile_destroy_decoded_owned_json(value_json, value_ty)?;
+                }
+                if !is_set {
+                    self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[entry.into()], "destroy_map_entry_pair")
+                        .map_err(|error| error.to_string())?;
+                }
                 let next = self.builder.build_int_add(index.as_basic_value().into_int_value(), self.context.i64_type().const_int(1, false), "js_map_next_index")
                     .map_err(|error| error.to_string())?;
                 let body_end = self.builder.get_insert_block().unwrap();

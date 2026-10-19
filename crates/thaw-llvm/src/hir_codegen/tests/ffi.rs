@@ -2728,6 +2728,12 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         declare function native_optional_json_map_empty(): Map<string, any | undefined>;
         declare function native_string_map_empty(): Map<string, number>;
         declare function native_set_sum(value: Set<number>): number;
+        declare function native_set_order(value: Set<number>): number;
+        declare function native_set_size(value: Set<number>): number;
+        declare function native_string_set_size(value: Set<string>): number;
+        declare function native_any_set_size(value: Set<any>): number;
+        declare function native_string_set_empty(): Set<string>;
+        declare function native_nested_set_sum(value: Map<string, Set<number>>): number;
         declare function native_map_mutate(value: Map<string, number>): number;
         declare function native_set_mutate(value: Set<number>): number;
         declare function native_collection_calls(): number;
@@ -2797,6 +2803,31 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
             catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
             try { native_set_sum(forgedSet); console.log("accepted invalid set"); }
             catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const duplicateSet: any = new Function("return new Set([1, 2, 2, 3])")();
+            console.log(native_set_sum(duplicateSet), native_collection_calls());
+            const numericSet: any = new Function("return new Set([NaN, NaN, -0, +0, 3])")();
+            console.log(native_set_size(numericSet), native_collection_calls());
+            const orderedSet: any = new Function("return new Set([11, 22])")();
+            console.log(native_set_order(orderedSet), native_collection_calls());
+            const nestedSet: any = new Function("return new Map([['inner', new Set([5, 7])]])")();
+            console.log(native_nested_set_sum(nestedSet), native_collection_calls());
+            const nestedBadSet: any = new Function("return new Map([['inner', new Set([5, 'bad'])]])")();
+            try { native_nested_set_sum(nestedBadSet); console.log("accepted nested set"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const badSetElement: any = new Function("return new Set([1, 'bad'])")();
+            try { native_set_sum(badSetElement); console.log("accepted invalid set"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const wrongSetKind: any = new Function("return new Map()")();
+            try { native_set_sum(wrongSetKind); console.log("accepted invalid set"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const wrongNativeSet: any = native_string_set_empty();
+            try { native_set_sum(wrongNativeSet); console.log("accepted wrong native set"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const stringSet: any = new Function("return new Set(['a', 'b', 'a'])")();
+            console.log(native_string_set_size(stringSet), native_collection_calls());
+            const anySet: any = new Function("return new Set([1, 1, 2])")();
+            console.log(native_any_set_size(anySet), native_collection_calls());
+            native_set_mutate(nativeSet); console.log(nativeSet.has(9), native_collection_calls());
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -2856,6 +2887,20 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         double native_optional_json_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
         void *native_optional_json_map_empty(void) { return thaw_map_new(); }
         double native_set_sum(void *set) { calls++; return sum_words(thaw_map_snapshot_keys(set)); }
+        double native_set_order(void *set) { calls++; return first_last(thaw_map_snapshot_keys(set)); }
+        static double set_size(void *set) {
+            calls++; void *keys = thaw_map_snapshot_keys(set); int64_t length;
+            memcpy(&length, keys, sizeof(length)); return length;
+        }
+        double native_set_size(void *set) { return set_size(set); }
+        double native_string_set_size(void *set) { return set_size(set); }
+        double native_any_set_size(void *set) { return set_size(set); }
+        void *native_string_set_empty(void) {
+            void *set = thaw_map_new(); thaw_map_str_set(set, "layout", 0); thaw_map_clear(set); return set;
+        }
+        double native_nested_set_sum(void *map) {
+            calls++; return sum_words(thaw_map_snapshot_keys(thaw_map_str_get_ptr(map, "inner")));
+        }
         double native_map_mutate(void *map) {
             uint64_t bits; double value = 7; memcpy(&bits, &value, sizeof(bits));
             calls++; thaw_map_str_set(map, "changed", bits); return calls;
@@ -2875,6 +2920,6 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\nset rejected true 1\nundefined 2\nset mutate rejected true 2\n0 3\nempty set rejected true 3\n1122 4\n6 5\n5 6\ntrue 6\n17 7\ntrue 7\n23 8\ntrue 8\ntrue 8\n0 9\n4 5 11\n7 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\n6 2\nundefined 3\nfalse 4\n0 5\n0 6\n1122 7\n6 8\n5 9\ntrue 9\n17 10\ntrue 10\n23 11\ntrue 11\ntrue 11\n0 12\n4 5 14\n7 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\n6 16\n3 17\n1122 18\n12 19\ntrue 19\ntrue 19\ntrue 19\ntrue 19\n2 20\n2 21\ntrue 22\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
