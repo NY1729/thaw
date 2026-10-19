@@ -183,18 +183,52 @@ impl GraphCloner {
                 self.fills.push(PendingFill::Object { target, fields });
             }
             CloneJob::HostArray { source, target } => {
-                let values = host_enumerate_values(&source, 3);
+                let length = match host_get_property(&source, b"length") {
+                    Value::Number(length) => length
+                        .as_u64()
+                        .and_then(|length| usize::try_from(length).ok()),
+                    _ => None,
+                };
                 if host_operation_failed() {
                     return Err(());
                 }
-                let values = values
-                    .iter()
-                    .map(|value| self.intern(value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let Some(length) = length else {
+                    set_host_error("Invalid host array length".into());
+                    return Err(());
+                };
+                let mut values = Vec::new();
+                if values.try_reserve_exact(length).is_err() {
+                    set_host_error("Unable to allocate host array".into());
+                    return Err(());
+                }
+                let mut holes = HashSet::new();
+                for index in 0..length {
+                    let key = index.to_string();
+                    if !host_property_predicate(&source, key.as_bytes(), 3) {
+                        if host_operation_failed() {
+                            return Err(());
+                        }
+                        values.push(napi_undefined_value());
+                        if holes.try_reserve(1).is_err() {
+                            set_host_error("Unable to allocate host array holes".into());
+                            return Err(());
+                        }
+                        holes.insert(index);
+                        continue;
+                    }
+                    if host_operation_failed() {
+                        return Err(());
+                    }
+                    let value = host_get_property(&source, key.as_bytes());
+                    if host_operation_failed() {
+                        return Err(());
+                    }
+                    values.push(self.intern(&value)?);
+                }
                 self.fills.push(PendingFill::Array {
                     target,
                     values,
-                    holes: HashSet::new(),
+                    holes,
                 });
             }
             CloneJob::HostObject { source, target } => {
@@ -346,6 +380,7 @@ mod tests {
         let value: &[u8] = match (handle, operation) {
             (706, 0) => b"number",
             (707..=709 | 713 | 714, 0) => b"string",
+            (715, 0) => b"number",
             (_, 0) => b"object",
             (_, 7 | 12) => b"0",
             (711, 4) => b"1",
@@ -356,6 +391,7 @@ mod tests {
             (709, 3) => br#""right""#,
             (713, 3) => br#""list""#,
             (714, 3) => br#""x""#,
+            (715, 10) => b"1",
             _ => panic!("unexpected clone query {handle}/{operation}"),
         };
         HostTextResult {
@@ -392,6 +428,8 @@ mod tests {
             (705, r#""1""#) => 706,
             (712, r#""0""#) => 713,
             (712, r#""1""#) => 711,
+            (711, r#""length""#) => 715,
+            (711, r#""0""#) => 710,
             _ => panic!("unexpected clone property {handle}/{key}"),
         };
         HostHandleResult {
@@ -498,6 +536,19 @@ mod tests {
         }
     }
 
+    extern "C" fn clone_test_predicate(
+        handle: u64,
+        key: *const c_char,
+        operation: u8,
+    ) -> HostHandleResult {
+        assert_eq!(handle, 711);
+        assert_eq!(operation, 3);
+        HostHandleResult {
+            value: u64::from(to_str(key) == r#""0""#),
+            error: std::ptr::null(),
+        }
+    }
+
     fn install_clone_test_host_operations() {
         HOST_ENUM_COUNTS.with(|counts| counts.borrow_mut().clear());
         HOST_RELEASE_COUNTS.with(|counts| counts.borrow_mut().clear());
@@ -511,7 +562,7 @@ mod tests {
                 query: clone_test_query,
                 date_set: unused_clone_date,
                 set: unused_clone_set,
-                predicate: unused_clone_predicate,
+                predicate: clone_test_predicate,
                 enumerate: clone_test_enumerate,
             }))
         });
@@ -686,7 +737,7 @@ mod tests {
         let Value::Object(left_fields) = left else {
             unreachable!()
         };
-        shared_object_ref_mut(&left_fields).insert(b"x".to_vec(), number_value(2.0));
+        shared_object_ref_mut(left_fields).insert(b"x".to_vec(), number_value(2.0));
         assert_eq!(
             source_left
                 .as_object()
@@ -741,10 +792,10 @@ mod tests {
             unreachable!()
         };
         assert!(!strict_identity(&list, &Value::Array(cloned_list.clone())));
-        assert!(strict_identity(&cloned, &shared_array_ref(&cloned_list)[0]));
-        assert!(!array_has_index(&cloned_list, 1));
-        assert!(array_has_index(&cloned_list, 2));
-        assert!(is_napi_undefined(&shared_array_ref(&cloned_list)[2]));
+        assert!(strict_identity(&cloned, &shared_array_ref(cloned_list)[0]));
+        assert!(!array_has_index(cloned_list, 1));
+        assert!(array_has_index(cloned_list, 2));
+        assert!(is_napi_undefined(&shared_array_ref(cloned_list)[2]));
         destroy(source);
         destroy(cloned);
     }
