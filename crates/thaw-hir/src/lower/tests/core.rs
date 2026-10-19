@@ -1058,7 +1058,8 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
                 walk_expr(no, visit);
             }
             HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
-            | HirExpr::NonArrowFunction(body) => walk_expr(body, visit),
+            | HirExpr::NonArrowFunction(body)
+            | HirExpr::NonArrowThis { payload: body, .. } => walk_expr(body, visit),
             HirExpr::Block(statements) => for statement in statements {
                 match statement {
                     HirStmt::Expr(value) | HirStmt::Throw(value)
@@ -1381,8 +1382,8 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
         assert!(map_get_optional_binding(map_actual, "values"),
             "{name} uses the same genuine Map.get Optional<Json> source route");
         let (_, _, comparison) = one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
-        assert_eq!(named_call(comparison, "__thaw_json_from_consumed_dynamic"), name == "nominal",
-            "plain classes retain nominal identity through a live view; unsafe plain method receivers stay outside that path");
+        assert!(named_call(comparison, "__thaw_json_from_consumed_dynamic"),
+            "declared classes and computed plain-method receivers use the live actual-value projection");
         if name == "methodOwner" {
             let (owner_binding, owner_actual, _) =
                 one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
@@ -1397,8 +1398,11 @@ fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner(
             let HirType::Function(parameters, _) = method_type else {
                 panic!("methodOwner run retains its function type: {method_type:?}");
             };
-            let Some(HirType::Object(receiver)) = parameters.first() else {
-                panic!("methodOwner run retains an object receiver parameter: {parameters:?}");
+            let Some(HirType::NonArrowReceiver(receiver)) = parameters.first() else {
+                panic!("methodOwner run retains a private receiver parameter: {parameters:?}");
+            };
+            let HirType::Object(receiver) = receiver.as_ref() else {
+                panic!("private method receiver retains its marked object layout: {receiver:?}");
             };
             assert_eq!(receiver, &vec![
                 ("value".into(), HirType::F64),

@@ -106,18 +106,25 @@ impl<'a> FnLowerer<'a> {
                 let MemberProp::Ident(property) = &member.prop else {
                     return None;
                 };
-                if !matches!(property.sym.as_ref(), "set" | "add") {
-                    return None;
-                }
                 let receiver_type = self.peek_type_without_lowering(&member.obj)?;
-                matches!(
-                    receiver_type,
+                if matches!(property.sym.as_ref(), "set" | "add") && matches!(
+                    &receiver_type,
                     HirType::Map(_, _)
                         | HirType::WeakMap(_, _)
                         | HirType::Set(_)
                         | HirType::WeakSet(_)
-                )
-                    .then_some(receiver_type)
+                ) { return Some(receiver_type); }
+                let HirType::Object(fields) = &receiver_type else { return None };
+                fields.iter().find_map(|(name, ty)| {
+                    if name != property.sym.as_ref() { return None; }
+                    let (params, ret) = match ty {
+                        HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => (params, ret),
+                        _ => return None,
+                    };
+                    let returns_receiver = params.first().and_then(FnLowerer::object_method_receiver_fields)
+                        .is_some_and(|receiver| **ret == HirType::Object(receiver.to_vec()));
+                    Some(if returns_receiver { receiver_type.clone() } else { ret.as_ref().clone() })
+                })
             }
             _ => None,
         }

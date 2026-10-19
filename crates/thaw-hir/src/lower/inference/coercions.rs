@@ -211,12 +211,15 @@ impl<'a> FnLowerer<'a> {
         let owner = format!("__thaw_full_native_owner_{}", self.next_binding);
         self.next_binding += 1;
         let previous = self.scope.insert(owner.clone(), full_type.clone());
+        let was_building_factory = std::mem::replace(&mut self.lowering_native_projection_factory, true);
         let projection = self.lower_fixed_object_as_dynamic_accessor_object(
             HirExpr::Var(owner.clone()), fields, true, true, false,
         );
+        self.lowering_native_projection_factory = was_building_factory;
+        let projection = projection?;
         let factory = HirExpr::Lambda(
             vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
-            Vec::new(), HirType::JsValue, Box::new(projection?),
+            Vec::new(), HirType::JsValue, Box::new(projection),
         );
         let register = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_register_native_object_projector".into())),
@@ -241,6 +244,50 @@ impl<'a> FnLowerer<'a> {
             None => { self.scope.remove(&owner); }
         }
         result
+    }
+
+    fn retain_optional_native_this_projection(
+        &mut self, value: HirExpr, fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let full_type = HirType::Object(fields.to_vec());
+        let owner = format!("__thaw_optional_this_owner_{}", self.next_binding);
+        self.next_binding += 1;
+        let previous = self.scope.insert(owner.clone(), full_type.clone());
+        let class_methods = self.live_projection_supported_with_classes(&full_type);
+        let was_building_factory = std::mem::replace(&mut self.lowering_native_projection_factory, true);
+        let projection = self.lower_fixed_object_as_dynamic_accessor_object(
+            HirExpr::Var(owner.clone()), fields, true, true, class_methods,
+        );
+        self.lowering_native_projection_factory = was_building_factory;
+        let projection = projection?;
+        let factory = HirExpr::Lambda(
+            vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
+            Vec::new(), HirType::JsValue, Box::new(projection),
+        );
+        let register = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_object_projector".into())),
+            vec![HirExpr::Var(owner.clone()),
+                HirExpr::Lit(HirLit::Str(crate::native_object_layout_token(fields))), factory],
+        );
+        let registered = format!("{owner}_layout_registered");
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(registered.clone(), HirType::Bool, HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_register_native_object_layout".into())),
+                vec![HirExpr::Var(owner.clone()), HirExpr::Lit(HirLit::Bool(false))],
+            )),
+            HirStmt::If(HirExpr::Var(registered), vec![HirStmt::Expr(register)], Vec::new()),
+            HirStmt::Return(Some(HirExpr::Var(owner.clone()))),
+        ]);
+        let wrapper = HirExpr::Lambda(
+            Vec::new(), vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
+            full_type.clone(), Box::new(body),
+        );
+        let result = HirExpr::Call(Box::new(wrapper), vec![value]);
+        match previous {
+            Some(previous) => { self.scope.insert(owner, previous); }
+            None => { self.scope.remove(&owner); }
+        }
+        Ok(result)
     }
 
     /// Permutes an (optionally evaluation-order-wrapped) accessor object
@@ -440,6 +487,42 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        if let HirType::NonArrowReceiver(receiver) = declared {
+            if let HirExpr::NonArrowThis {
+                payload,
+                declared: actual_receiver,
+                access: NonArrowThisAccess::Value,
+            } = &value
+            {
+                if actual_receiver == receiver.as_ref() {
+                    return Ok(payload.as_ref().clone());
+                }
+            }
+            let value = self.coerce_this_for_receiver(Some(receiver.as_ref()), value)?;
+            if self.infer_expr_type(&value)? == *declared {
+                return Ok(value);
+            }
+            return Ok(HirExpr::NonArrowReceiverPack {
+                value: Box::new(value),
+                declared: receiver.as_ref().clone(),
+            });
+        }
+        if let HirExpr::NonArrowThis {
+            payload,
+            declared: receiver_type,
+            access: NonArrowThisAccess::Value,
+        } = &value
+        {
+            if receiver_type == declared
+                && !matches!(declared, HirType::Json | HirType::Dictionary(_) | HirType::Dynamic)
+            {
+                return Ok(HirExpr::NonArrowThis {
+                    payload: payload.clone(),
+                    declared: receiver_type.clone(),
+                    access: NonArrowThisAccess::TypedValue,
+                });
+            }
+        }
         if let HirType::Promise(target) = declared {
             if target.as_ref() == &HirType::Json {
                 if let HirType::Promise(source) = self.infer_expr_type(&value)? {

@@ -561,6 +561,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 match value {
                     Some(expr) => {
+                        if self.current_function().get_type().get_return_type().is_none() {
+                            self.compile_expr(expr)?;
+                            self.emit_stack_promise_cleanup()?;
+                            self.builder.build_return(None).map_err(|e| e.to_string())?;
+                            return Ok(true);
+                        }
                         let expr_ty = self.expr_hir_type(expr);
                         let val = match expr_ty {
                             Some(result_type @ HirType::Promise(_)) => {

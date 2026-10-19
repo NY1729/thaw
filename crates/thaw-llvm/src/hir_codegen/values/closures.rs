@@ -1,38 +1,3 @@
-// shortcut: complex bodies keep generic receiver errors; use runtime property checks for full parity.
-fn simple_this_receiver_access<'a>(body: &'a HirExpr, params: &[HirParam]) -> Option<(&'a str, bool)> {
-    fn property(expr: &HirExpr) -> Option<&str> {
-        match expr {
-            HirExpr::PropAccess(object, HirType::Object(_), field)
-                if matches!(object.as_ref(), HirExpr::Var(name) if name == "__thaw_this")
-                    && !is_hidden_accessor_field(field) => Some(field),
-            _ => None,
-        }
-    }
-    let simple = |expr: &HirExpr| matches!(expr, HirExpr::Lit(_))
-        || matches!(expr, HirExpr::Var(name) if name != "__thaw_this" && params.iter().any(|param| &param.name == name));
-    let expression = match body {
-        HirExpr::Block(statements) => match statements.as_slice() {
-            [HirStmt::Return(Some(expr))] | [HirStmt::Expr(expr)]
-                | [HirStmt::Expr(expr), HirStmt::Return(None)] => expr,
-            _ => return None,
-        },
-        expression => expression,
-    };
-    match expression {
-        HirExpr::BinOp(_, left, right)
-            if (simple(left) || property(left).is_some()) && (simple(right) || property(right).is_some()) =>
-                property(left).or_else(|| property(right)).map(|field| (field, false)),
-        HirExpr::PropAssign(object, HirType::Object(_), field, value)
-            if matches!(object.as_ref(), HirExpr::Var(name) if name == "__thaw_this")
-                && !is_hidden_accessor_field(field) => {
-            if let Some(read) = property(value) { Some((read, false)) }
-            else if simple(value) { Some((field, true)) }
-            else { None }
-        }
-        _ => property(expression).map(|field| (field, false)),
-    }
-}
-
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_recursive_closure(
         &mut self,
@@ -488,7 +453,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(parent_block);
         let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
-            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name, None)?
+            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name)?
         } else {
             (adapter, self.compile_ignored_this_adapter(adapter, &param_types, &promise_type,
                 &format!("{adapter_name}__thaw_this_adapter"))?)
@@ -505,7 +470,6 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirParam],
         ret: &HirType,
         name: &str,
-        receiver_access: Option<(&str, bool)>,
     ) -> Result<(FunctionValue<'ctx>, FunctionValue<'ctx>), String> {
         let receiver = &params[0].ty;
         let visible = params[1..].iter().map(|param| param.ty.clone()).collect::<Vec<_>>();
@@ -515,7 +479,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let ordinary_result = isolated_codegen_scope!(self, {
         let entry = self.context.append_basic_block(ordinary, "entry");
         self.builder.position_at_end(entry);
-        let undefined = if *receiver == HirType::JsValue {
+        let undefined = if matches!(receiver, HirType::NonArrowReceiver(_)) {
+            self.compile_raw_non_arrow_receiver_payload(
+                self.context.i8_type().const_zero(), self.context.i64_type().const_zero())?
+        } else if *receiver == HirType::JsValue {
             let name = self.builder.build_global_string_ptr("undefined", "ordinary_this_name")
                 .map_err(|error| error.to_string())?;
             self.builder.build_call(self.module.get_function("thaw_js_get_global").unwrap(),
@@ -524,7 +491,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or("undefined JsValue returned no value")?
         } else {
             self.compile_non_arrow_receiver_value(ordinary, receiver,
-                self.context.i8_type().const_zero(), self.context.i64_type().const_zero(), receiver_access)?
+                self.context.i8_type().const_zero(), self.context.i64_type().const_zero(), None)?
         };
         let mut args = vec![ordinary.get_nth_param(0).unwrap().into(), undefined.into()];
         args.extend(ordinary.get_param_iter().skip(1).map(BasicMetadataValueEnum::from));
@@ -537,7 +504,7 @@ impl<'ctx> HirCompiler<'ctx> {
         });
         self.builder.position_at_end(parent);
         let ordinary = ordinary_result?;
-        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name, receiver_access)?;
+        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name)?;
         Ok((ordinary, explicit))
     }
 
@@ -548,7 +515,6 @@ impl<'ctx> HirCompiler<'ctx> {
         receiver: &HirType,
         ret: &HirType,
         name: &str,
-        receiver_access: Option<(&str, bool)>,
     ) -> Result<FunctionValue<'ctx>, String> {
         let parent = self.builder.get_insert_block().ok_or("this entry needs a parent block")?;
         let entry_fn = self.module.add_function(&format!("{name}__thaw_this_adapter"),
@@ -561,7 +527,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?.into_int_value();
         let word = self.builder.build_extract_value(tagged, 1, "receiver_word")
             .map_err(|error| error.to_string())?.into_int_value();
-        let value = self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word, receiver_access)?;
+        let value = if matches!(receiver, HirType::NonArrowReceiver(_)) {
+            self.compile_raw_non_arrow_receiver_payload(kind, word)?
+        } else {
+            self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word, None)?
+        };
         let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), value.into()];
         args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
         let call = self.builder.build_call(target, &args, "invoke_non_arrow_with_this")
@@ -573,6 +543,20 @@ impl<'ctx> HirCompiler<'ctx> {
         });
         self.builder.position_at_end(parent);
         adapter_result
+    }
+
+    fn compile_raw_non_arrow_receiver_payload(
+        &mut self,
+        kind: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.tracks_owned_json_roots = true;
+        let payload = self.builder.build_call(
+            self.module.get_function("thaw_non_arrow_receiver_new").unwrap(),
+            &[kind.into(), word.into()], "non_arrow_receiver_payload",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("receiver payload helper returned no value")?;
+        self.compile_check_json_host_error(payload, None)
     }
 
     /// Query only the private native-object wrapper metadata. The returned
@@ -676,12 +660,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn reject_non_arrow_receiver_message(&mut self, message: &str) -> Result<(), String> {
-        let saved_catch_context = self.take_catch_context();
-        let saved_async_completion = self.active_async_completion.take();
-        let thrown = self.compile_throw_type_error(message);
-        self.replace_catch_context(saved_catch_context);
-        self.active_async_completion = saved_async_completion;
-        thrown
+        self.compile_throw_type_error(message)
     }
 
     fn compile_non_arrow_receiver_value(
@@ -692,6 +671,73 @@ impl<'ctx> HirCompiler<'ctx> {
         word: IntValue<'ctx>,
         receiver_access: Option<(&str, bool)>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let Some((field, write)) = receiver_access {
+            let is_undefined = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                self.context.i8_type().const_zero(), "receiver_access_undefined")
+                .map_err(|error| error.to_string())?;
+            let is_null = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                self.context.i8_type().const_int(1, false), "receiver_access_null")
+                .map_err(|error| error.to_string())?;
+            let is_nullish = self.builder.build_or(is_undefined, is_null, "receiver_access_nullish")
+                .map_err(|error| error.to_string())?;
+            let rejected = self.context.append_basic_block(entry_fn, "receiver_access_nullish_error");
+            let accepted = self.context.append_basic_block(entry_fn, "receiver_access_valid");
+            self.builder.build_conditional_branch(is_nullish, rejected, accepted)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(rejected);
+            for (condition, receiver) in [(is_undefined, "undefined"), (is_null, "null")] {
+                let error = self.context.append_basic_block(entry_fn, "receiver_property_error");
+                let next = self.context.append_basic_block(entry_fn, "receiver_property_error_next");
+                self.builder.build_conditional_branch(condition, error, next)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error);
+                let message = if write {
+                    format!("Cannot set properties of {receiver} (setting '{field}')")
+                } else {
+                    format!("Cannot read properties of {receiver} (reading '{field}')")
+                };
+                self.reject_non_arrow_receiver_message(&message)?;
+                self.builder.position_at_end(next);
+            }
+            self.reject_non_arrow_receiver()?;
+            self.builder.position_at_end(accepted);
+        }
+        if let HirType::Object(fields) = receiver {
+            if let Some(marker) = fields.first().and_then(|(name, _)|
+                name.strip_prefix("__thaw_class_identity_\u{1e}")) {
+                let nonnull = self.builder.build_int_compare(IntPredicate::NE, word,
+                    self.context.i64_type().const_zero(), "native_class_receiver_nonnull")
+                    .map_err(|error| error.to_string())?;
+                let kind_matches = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                    self.context.i8_type().const_int(9, false), "native_class_receiver_kind")
+                    .map_err(|error| error.to_string())?;
+                let valid_tag = self.builder.build_and(nonnull, kind_matches, "native_class_receiver_tag_valid")
+                    .map_err(|error| error.to_string())?;
+                let check = self.context.append_basic_block(entry_fn, "native_class_receiver_check");
+                let rejected = self.context.append_basic_block(entry_fn, "native_class_receiver_rejected");
+                let accepted = self.context.append_basic_block(entry_fn, "native_class_receiver_accepted");
+                self.builder.build_conditional_branch(valid_tag, check, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(check);
+                let pointer = self.builder.build_int_to_ptr(word,
+                    self.context.ptr_type(AddressSpace::default()), "native_class_receiver_pointer")
+                    .map_err(|error| error.to_string())?;
+                let class = marker.split('\u{1f}').next().unwrap();
+                let expected = self.builder.build_global_string_ptr(class, "receiver_expected_class")
+                    .map_err(|error| error.to_string())?;
+                let identity = self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[pointer.into(), expected.as_pointer_value().into()], "receiver_class_identity")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("class identity returned no value")?.into_int_value();
+                self.builder.build_conditional_branch(identity, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.reject_non_arrow_receiver()?;
+                self.builder.position_at_end(accepted);
+                return Ok(pointer.into());
+            }
+        }
         match receiver {
             HirType::Object(fields) if !fields.first().is_some_and(|(name, _)|
                     name.starts_with("__thaw_class_identity_\u{1e}")) => {
@@ -701,6 +747,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 let direct = self.context.append_basic_block(entry_fn, "native_receiver_direct");
                 let check_host = self.context.append_basic_block(entry_fn, "native_receiver_check_host");
+                let rejected = self.context.append_basic_block(entry_fn, "native_receiver_rejected");
                 let join = self.context.append_basic_block(entry_fn, "native_receiver_join");
                 self.builder.build_conditional_branch(is_native, direct, check_host)
                     .map_err(|error| error.to_string())?;
@@ -709,42 +756,33 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(direct);
                 let direct_pointer = self.builder.build_int_to_ptr(word, ptr_type, "native_receiver_direct_pointer")
                     .map_err(|error| error.to_string())?;
-                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                let direct_present = self.builder.build_int_compare(IntPredicate::NE, word,
+                    self.context.i64_type().const_zero(), "native_receiver_direct_nonnull")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(direct_present, join, rejected)
+                    .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(check_host);
                 let is_host = self.builder.build_int_compare(IntPredicate::EQ, kind,
                     self.context.i8_type().const_int(7, false), "native_receiver_is_host")
                     .map_err(|error| error.to_string())?;
                 let host = self.context.append_basic_block(entry_fn, "native_receiver_host");
-                let rejected = self.context.append_basic_block(entry_fn, "native_receiver_rejected");
                 let accepted = self.context.append_basic_block(entry_fn, "native_receiver_accepted");
                 self.builder.build_conditional_branch(is_host, host, rejected)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(host);
+                let host_word_present = self.builder.build_int_compare(IntPredicate::NE, word,
+                    self.context.i64_type().const_zero(), "native_receiver_host_nonnull")
+                    .map_err(|error| error.to_string())?;
+                let query = self.context.append_basic_block(entry_fn, "native_receiver_host_query");
+                self.builder.build_conditional_branch(host_word_present, query, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(query);
                 let json = self.builder.build_int_to_ptr(word, ptr_type, "native_receiver_json")
                     .map_err(|error| error.to_string())?;
                 let (pointer, present) = self.query_native_object_receiver(json, fields)?;
                 self.builder.build_conditional_branch(present, accepted, rejected)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(rejected);
-                if let Some((field, write)) = receiver_access {
-                    for (tag, receiver) in [(0, "undefined"), (1, "null")] {
-                        let matches = self.builder.build_int_compare(IntPredicate::EQ, kind,
-                            self.context.i8_type().const_int(tag, false), "receiver_error_kind")
-                            .map_err(|error| error.to_string())?;
-                        let error = self.context.append_basic_block(entry_fn, "receiver_property_error");
-                        let next = self.context.append_basic_block(entry_fn, "receiver_other_kind");
-                        self.builder.build_conditional_branch(matches, error, next)
-                            .map_err(|error| error.to_string())?;
-                        self.builder.position_at_end(error);
-                        let message = if write {
-                            format!("Cannot set properties of {receiver} (setting '{field}')")
-                        } else {
-                            format!("Cannot read properties of {receiver} (reading '{field}')")
-                        };
-                        self.reject_non_arrow_receiver_message(&message)?;
-                        self.builder.position_at_end(next);
-                    }
-                }
                 self.reject_non_arrow_receiver()?;
                 self.builder.position_at_end(accepted);
                 let host_pointer = self.builder.build_int_to_ptr(pointer, ptr_type, "native_receiver_original_pointer")
@@ -949,6 +987,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 if let Some(block) = class_dispatch {
                     self.builder.position_at_end(block);
+                    let class_word_present = self.builder.build_int_compare(IntPredicate::NE, word,
+                        self.context.i64_type().const_zero(), "receiver_union_class_nonnull")
+                        .map_err(|error| error.to_string())?;
+                    let class_check = self.context.append_basic_block(entry_fn, "receiver_union_class_check");
+                    self.builder.build_conditional_branch(class_word_present, class_check, rejected)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(class_check);
                     // A derived identity also matches its ancestors. Test
                     // the deepest declared class first so Base | Derived
                     // selects Derived for a Derived instance.
@@ -1068,7 +1113,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.tracks_owned_json_roots = true;
         let join = self.context.append_basic_block(entry_fn, "receiver_json_ready");
         let rejected = self.context.append_basic_block(entry_fn, "receiver_json_rejected");
-        let cases = [0_u64, 1, 2, 3, 4, 5, 7, 8]
+        let cases = [0_u64, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             .map(|tag| (tag, self.context.append_basic_block(entry_fn, &format!("receiver_json_{tag}"))));
         let branches = cases.iter().map(|(tag, block)|
             (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
@@ -1112,6 +1157,50 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?.try_as_basic_value().basic()
                         .ok_or("string receiver constructor returned no value")?.into_pointer_value()
                 }
+                6 => {
+                    self.uses_quickjs = true;
+                    self.uses_quickjs_handles = true;
+                    let entry = entry_fn.get_first_basic_block().ok_or("receiver function has no entry block")?;
+                    let entry_builder = self.context.create_builder();
+                    if let Some(first) = entry.get_first_instruction() {
+                        entry_builder.position_before(&first);
+                    } else {
+                        entry_builder.position_at_end(entry);
+                    }
+                    let buffer = entry_builder.build_alloca(pointer, "receiver_symbol_handle_ledger")
+                        .map_err(|error| error.to_string())?;
+                    let capacity = entry_builder.build_alloca(self.context.i64_type(), "receiver_symbol_handle_capacity")
+                        .map_err(|error| error.to_string())?;
+                    entry_builder.build_store(buffer, pointer.const_null())
+                        .map_err(|error| error.to_string())?;
+                    entry_builder.build_store(capacity, self.context.i64_type().const_zero())
+                        .map_err(|error| error.to_string())?;
+                    let ledger = NativeHandleLedger { buffer, capacity };
+                    self.begin_live_native_projection_scope(ledger);
+
+                    let symbol = self.builder.build_int_to_ptr(word, pointer, "receiver_json_symbol")
+                        .map_err(|error| error.to_string())?;
+                    let placeholder = self.compile_live_symbol_json_placeholder(symbol, ledger)?
+                        .into_pointer_value();
+                    let handle = self.builder.build_call(
+                        self.module.get_function("thaw_json_borrowed_handle_id").unwrap(),
+                        &[placeholder.into()], "receiver_symbol_handle_id",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("symbol receiver placeholder has no borrowed handle")?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[placeholder.into()], "destroy_receiver_symbol_placeholder",
+                    ).map_err(|error| error.to_string())?;
+                    let converted = self.builder.build_call(
+                        self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                        &[handle.into()], "receiver_json_symbol_live",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("symbol receiver conversion returned no value")?;
+                    self.release_native_handle_ledger(ledger)?;
+                    self.finish_live_native_projection_scope()?;
+                    self.compile_check_json_host_error(converted, Some("thaw_json_destroy"))?
+                        .into_pointer_value()
+                }
                 7 => self.builder.build_int_to_ptr(word, pointer, "receiver_json_existing")
                     .map_err(|error| error.to_string())?,
                 8 => {
@@ -1119,12 +1208,54 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.uses_quickjs_handles = true;
                     self.compile_register_js_callback_host_operations()?;
                     let value = self.builder.build_call(
-                        self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
+                        self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
                         &[word.into()], "receiver_json_live_host")
                         .map_err(|error| error.to_string())?
                         .try_as_basic_value().basic()
                         .ok_or("live receiver conversion returned no value")?;
                     self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?
+                        .into_pointer_value()
+                }
+                9 => {
+                    self.uses_quickjs = true;
+                    self.uses_quickjs_handles = true;
+                    self.begin_fresh_event_key_argument_scope();
+                    let owner = self.builder.build_int_to_ptr(word, pointer, "receiver_native_object")
+                        .map_err(|error| error.to_string())?;
+                    let empty_layout = self.builder.build_global_string_ptr("", "receiver_full_projector_layout")
+                        .map_err(|error| error.to_string())?;
+                    let projector = self.builder.build_call(
+                        self.module.get_function("thaw_object_projector").unwrap(),
+                        &[owner.into(), empty_layout.as_pointer_value().into()], "receiver_full_projector",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("full native receiver projector lookup returned no value")?.into_pointer_value();
+                    let missing = self.builder.build_is_null(projector, "receiver_projector_missing")
+                        .map_err(|error| error.to_string())?;
+                    let function = self.current_function();
+                    let rejected = self.context.append_basic_block(function, "receiver_projector_rejected");
+                    let accepted = self.context.append_basic_block(function, "receiver_projector_ready");
+                    self.builder.build_conditional_branch(missing, rejected, accepted)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(rejected);
+                    self.reject_non_arrow_receiver()?;
+                    self.builder.position_at_end(accepted);
+                    let code = self.builder.build_load(pointer, projector, "receiver_projector_code")
+                        .map_err(|error| error.to_string())?.into_pointer_value();
+                    let factory = self.builder.build_indirect_call(
+                        self.function_type(&[], &HirType::JsValue)?, code, &[projector.into()],
+                        "call_receiver_projector",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("native receiver projector returned no handle")?.into_int_value();
+                    self.track_fresh_event_key_handle(factory)?;
+                    self.branch_on_pending_exception()?;
+                    let converted = self.builder.build_call(
+                        self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                        &[factory.into()], "receiver_projected_json",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("native receiver projection conversion returned no value")?;
+                    let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
+                    self.release_fresh_event_key_handles(&fresh_handles)?;
+                    self.compile_check_json_host_error(converted, Some("thaw_json_destroy"))?
                         .into_pointer_value()
                 }
                 _ => unreachable!(),
@@ -1144,12 +1275,7 @@ impl<'ctx> HirCompiler<'ctx> {
             incoming.push((value, exit));
         }
         self.builder.position_at_end(rejected);
-        let saved_catch_context = self.take_catch_context();
-        let saved_async_completion = self.active_async_completion.take();
-        let thrown = self.compile_throw_type_error("Incompatible function receiver");
-        self.replace_catch_context(saved_catch_context);
-        self.active_async_completion = saved_async_completion;
-        thrown?;
+        self.compile_throw_type_error("Incompatible function receiver")?;
         self.builder.position_at_end(join);
         let selected = self.builder.build_phi(pointer, "receiver_json_value")
             .map_err(|error| error.to_string())?;
@@ -1196,7 +1322,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
         let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
-            self.compile_non_arrow_entries(function, params, ret, &name, simple_this_receiver_access(body, params))?
+            self.compile_non_arrow_entries(function, params, ret, &name)?
         } else {
             (function, self.compile_ignored_this_adapter(function, &param_types, ret,
                 &format!("{name}__thaw_this_adapter"))?)

@@ -370,10 +370,33 @@ impl<'a> FnLowerer<'a> {
         // `expected`. Real example: `z.string().min(2).max(10)` -- `.max`'s
         // receiver is itself the *method call* `z.string().min(2)`, which
         // needs this same hint recursively for its own receiver in turn.
-        let receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
+        let private_receiver = matches!(
+            self.infer_member_receiver_type(receiver_expr),
+            Some(HirType::NonArrowReceiver(_))
+        );
+        let mut receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
+        if let HirType::NonArrowReceiver(inner) = self.infer_expr_type(&receiver)? {
+            receiver = HirExpr::NonArrowThis {
+                payload: Box::new(receiver),
+                declared: *inner,
+                access: crate::NonArrowThisAccess::Value,
+            };
+        }
+        let mut private_receiver_binding = None;
         // A `Json` receiver (a live native-owner wrapper) yields its host handle.
         let receiver = if self.infer_expr_type(&receiver)? == HirType::Json {
-            self.coerce_to_declared(&HirType::JsValue, receiver)?
+            if private_receiver {
+                let name = format!("__thaw_private_method_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Json);
+                private_receiver_binding = Some((name.clone(), receiver));
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("retainDynamicJson".into())),
+                    vec![HirExpr::Var(name)],
+                )
+            } else {
+                self.coerce_to_declared(&HirType::JsValue, receiver)?
+            }
         } else {
             receiver
         };
@@ -438,8 +461,50 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var(intrinsic.to_string())),
             vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
         );
-        if property == "toString" {
-            Ok(HirExpr::JsonAsString(Box::new(call)))
+        let call = if property == "toString" {
+            HirExpr::JsonAsString(Box::new(call))
+        } else {
+            call
+        };
+        if let Some((name, receiver)) = private_receiver_binding {
+            let receiver_var = HirExpr::Var(name.clone());
+            let is_nullish = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![receiver_var.clone()],
+            );
+            let is_null = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                vec![receiver_var],
+            );
+            let error = |kind: &str| HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                        vec![
+                            HirExpr::Lit(HirLit::Str(format!("\u{1}TypeError\u{1}Cannot read properties of {kind} (reading '"))),
+                            HirExpr::Lit(HirLit::Str(property.to_string())),
+                        ],
+                    ),
+                    HirExpr::Lit(HirLit::Str("')".into())),
+                ],
+            );
+            let result = HirExpr::Block(vec![
+                HirStmt::If(
+                    is_nullish,
+                    vec![HirStmt::If(
+                        is_null,
+                        vec![HirStmt::Throw(error("null"))],
+                        vec![HirStmt::Throw(error("undefined"))],
+                    )],
+                    Vec::new(),
+                ),
+                HirStmt::Return(Some(call)),
+            ]);
+            self.wrap_call_argument_bindings(
+                result,
+                &[(name, HirType::Json, receiver)],
+            )
         } else {
             Ok(call)
         }

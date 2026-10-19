@@ -513,6 +513,19 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let Some(receiver) = receiver else { return Ok(this_value) };
         let actual = self.infer_expr_type(&this_value)?;
+        if let HirType::Object(fields) = &actual {
+            let class_projection = self.live_projection_supported_with_classes(&actual);
+            if class_projection
+                || receiver_wants_json(receiver)
+                    && Self::fixed_object_supports_live_projection(&actual)
+            {
+                let this_value = self.retain_optional_native_this_projection(this_value, fields)?;
+                if actual == *receiver || !receiver_wants_json(receiver) {
+                    return Ok(this_value);
+                }
+                return self.coerce_to_declared(&HirType::Json, this_value);
+            }
+        }
         if receiver_wants_json(receiver)
             && actual != *receiver
             && matches!(actual, HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)

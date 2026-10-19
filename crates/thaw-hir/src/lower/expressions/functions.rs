@@ -28,7 +28,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let arrow = function_expression_as_arrow(expression)?;
         let receiver = self.function_expression_receiver_type(expression)?;
-        let previous = self.non_arrow_receiver.replace(receiver);
+        let previous = self.non_arrow_receiver.replace((receiver, "__thaw_this".into()));
         let lowered = match contextual {
             Some((params, ret)) => self.lower_contextual_arrow(&arrow, params, ret),
             None => self.lower_arrow(&arrow),
@@ -239,6 +239,7 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
+        let saved_active_non_arrow_this = self.active_non_arrow_this.clone();
         if arrow.type_params.is_some() {
             return Err("generic arrow functions are not supported yet".into());
         }
@@ -282,14 +283,15 @@ impl<'a> FnLowerer<'a> {
         let result = self.with_function_control_flow(|lowerer| {
             lowerer.remember_source_return(arrow.span);
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
-            if let Some(receiver) = &receiver {
+            if let Some((receiver, name)) = &receiver {
                 lowerer.class_static_context = false;
                 lowerer.class_context = None;
                 lowerer.unbound_this_context = false;
-                let name = "__thaw_this".to_string();
-                lowerer.scope.insert(name.clone(), receiver.clone());
+                lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
+                let physical = HirType::NonArrowReceiver(Box::new(receiver.clone()));
+                lowerer.scope.insert(name.clone(), physical.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
-                params.push(HirParam { name, ty: receiver.clone() });
+                params.push(HirParam { name: name.clone(), ty: physical });
             }
             let mut destructuring = Vec::new();
             let json_iteration_callback = std::mem::take(&mut lowerer.native_iteration_callback)
@@ -549,8 +551,10 @@ impl<'a> FnLowerer<'a> {
             lowerer.prepend_referenced_promise_snapshots_expr(&params, &mut body);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
-            if !referenced.contains("__thaw_this") {
-                params.retain(|param| param.name != "__thaw_this");
+            if let Some((_, name)) = &receiver {
+                if name == "__thaw_this" && !referenced.contains(name) {
+                    params.retain(|param| &param.name != name);
+                }
             }
             let captures = referenced
                 .into_iter()
@@ -582,6 +586,7 @@ impl<'a> FnLowerer<'a> {
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
+        self.active_non_arrow_this = saved_active_non_arrow_this;
         result
     }
 
@@ -590,7 +595,7 @@ impl<'a> FnLowerer<'a> {
         arrow: &swc_ecma_ast::ArrowExpr,
         source_params: Vec<HirParam>,
         inferred_return: Option<HirType>,
-        receiver: Option<HirType>,
+        receiver: Option<(HirType, Symbol)>,
     ) -> Result<HirExpr, String> {
         let ArrowFunctionBody::FunctionBody(block) = arrow.body.as_ref() else {
             return Err("generator function expression needs a body".into());
@@ -619,17 +624,19 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
+        let saved_active_non_arrow_this = self.active_non_arrow_this.clone();
         let result = self.with_function_control_flow(|lowerer| {
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
             let mut body = Vec::new();
-            if let Some(receiver) = &receiver {
+            if let Some((receiver, name)) = &receiver {
                 lowerer.class_static_context = false;
                 lowerer.class_context = None;
                 lowerer.unbound_this_context = false;
-                let name = "__thaw_this".to_string();
-                lowerer.scope.insert(name.clone(), receiver.clone());
+                lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
+                let physical = HirType::NonArrowReceiver(Box::new(receiver.clone()));
+                lowerer.scope.insert(name.clone(), physical.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
-                params.push(HirParam { name, ty: receiver.clone() });
+                params.push(HirParam { name: name.clone(), ty: physical });
             }
             for (pattern, param) in arrow.params.iter().zip(source_params.clone()) {
                 let name = lowerer.bind_local(&param.name, param.ty.clone());
@@ -655,8 +662,10 @@ impl<'a> FnLowerer<'a> {
             let expression = HirExpr::Block(body);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&expression, &mut referenced);
-            if !referenced.contains("__thaw_this") {
-                params.retain(|param| param.name != "__thaw_this");
+            if let Some((_, name)) = &receiver {
+                if name == "__thaw_this" && !referenced.contains(name) {
+                    params.retain(|param| &param.name != name);
+                }
             }
             let captures = referenced
                 .into_iter()
@@ -693,6 +702,7 @@ impl<'a> FnLowerer<'a> {
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
+        self.active_non_arrow_this = saved_active_non_arrow_this;
         if result.is_ok()
             && hir_type_contains_dynamic(&declared_return)
             && inferred_return != declared_return
@@ -780,7 +790,7 @@ impl<'a> FnLowerer<'a> {
             let concrete = infer_generic_type_tuple(&signature, parameter_types,
                 self.interfaces, self.generic_interfaces, expected_return)?;
             let receiver = self.specialized_generic_receiver(name, &signature, &concrete)?;
-            let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver);
+            let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver.map(|ty| (ty, "__thaw_this".into())));
             let closure = self.lower_contextual_arrow(arrow, parameter_types, expected_return);
             self.non_arrow_receiver = previous;
             let closure = closure?;
@@ -860,7 +870,7 @@ impl<'a> FnLowerer<'a> {
             .entry(internal.clone())
             .or_default()
             .push(self_name.clone());
-        let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver);
+        let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver.map(|ty| (ty, "__thaw_this".into())));
         let lowered = self.lower_contextual_arrow(arrow, &specialized_parameters, expected_return);
         self.non_arrow_receiver = previous;
         self.scope.remove(&self_name);
@@ -1210,6 +1220,7 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
+        let saved_active_non_arrow_this = self.active_non_arrow_this.clone();
         let saved_scope = self.scope.clone();
         let saved_source_scope = self.source_scope.clone();
         let saved_source_return = self.source_ret_type.clone();
@@ -1224,14 +1235,15 @@ impl<'a> FnLowerer<'a> {
                 lowerer.source_ret_type = source_return.clone();
             }
             let mut params = Vec::with_capacity(parameter_types.len() + usize::from(receiver.is_some()));
-            if let Some(receiver) = &receiver {
+            if let Some((receiver, name)) = &receiver {
                 lowerer.class_static_context = false;
                 lowerer.class_context = None;
                 lowerer.unbound_this_context = false;
-                let name = "__thaw_this".to_string();
-                lowerer.scope.insert(name.clone(), receiver.clone());
+                lowerer.active_non_arrow_this = Some((name.clone(), receiver.clone()));
+                let physical = HirType::NonArrowReceiver(Box::new(receiver.clone()));
+                lowerer.scope.insert(name.clone(), physical.clone());
                 lowerer.bindings.entry("this".into()).or_default().push(name.clone());
-                params.push(HirParam { name, ty: receiver.clone() });
+                params.push(HirParam { name: name.clone(), ty: physical });
             }
             let mut destructuring = Vec::new();
             for (index, (pat, ty)) in arrow.params.iter().zip(parameter_types).enumerate() {
@@ -1459,8 +1471,10 @@ impl<'a> FnLowerer<'a> {
             lowerer.prepend_referenced_promise_snapshots_expr(&params, &mut body);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
-            if !referenced.contains("__thaw_this") {
-                params.retain(|param| param.name != "__thaw_this");
+            if let Some((_, name)) = &receiver {
+                if name == "__thaw_this" && !referenced.contains(name) {
+                    params.retain(|param| &param.name != name);
+                }
             }
             let captures = referenced
                 .into_iter()
@@ -1492,6 +1506,7 @@ impl<'a> FnLowerer<'a> {
         self.class_static_context = saved_class_static_context;
         self.class_context = saved_class_context;
         self.unbound_this_context = saved_unbound_this_context;
+        self.active_non_arrow_this = saved_active_non_arrow_this;
         result
     }
 }
@@ -1527,22 +1542,26 @@ fn callable_aware_closure(source_parameters: &[Pat], closure: HirExpr) -> HirExp
     } else {
         (params.as_slice(), None)
     };
-    let receiver_offset = usize::from(fixed.first().is_some_and(|param| param.name == "__thaw_this"));
-    let fixed = &fixed[receiver_offset..];
+    let private_receiver = fixed.first().is_some_and(|param|
+        param.name != "__thaw_this" && matches!(param.ty, HirType::NonArrowReceiver(_)));
+    let receiver_offset = usize::from(private_receiver || fixed.first().is_some_and(|param| param.name == "__thaw_this"));
+    let visible_fixed = &fixed[usize::from(!private_receiver && receiver_offset == 1)..];
     let source_fixed = if has_rest {
         &source_parameters[..source_parameters.len() - 1]
     } else {
         source_parameters
     };
-    let optional = source_fixed
+    let mut optional = vec![false; usize::from(private_receiver)];
+    optional.extend(source_fixed
         .iter()
         .map(pattern_is_omittable)
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>());
     if !has_rest && !optional.iter().any(|optional| *optional) {
         return closure;
     }
     let callable = HirType::CallableFunction(
-        fixed.iter().map(|parameter| parameter.ty.clone()).collect(),
+        if private_receiver { fixed.iter().map(|parameter| parameter.ty.clone()).collect() }
+        else { visible_fixed.iter().map(|parameter| parameter.ty.clone()).collect() },
         optional_parameter_mask(&optional),
         rest,
         Box::new(ret.clone()),

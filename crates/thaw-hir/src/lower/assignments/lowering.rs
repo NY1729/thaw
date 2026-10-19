@@ -1,4 +1,59 @@
 impl<'a> FnLowerer<'a> {
+    fn guard_private_json_receiver_access(
+        &mut self,
+        object: HirExpr,
+        key: HirExpr,
+        result: HirExpr,
+        write: bool,
+    ) -> Result<HirExpr, String> {
+        let key = if self.infer_expr_type(&key)? == HirType::Symbol {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_symbol_to_string".into())),
+                vec![key],
+            )
+        } else {
+            self.coerce_primitive_to_string(key)?
+        };
+        let receiver = object.with_non_arrow_this_access(NonArrowThisAccess::Value);
+        let is_nullish = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+            vec![receiver.clone()],
+        );
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+            vec![receiver],
+        );
+        let error = |kind: &str| {
+            let action = if write { "set" } else { "read" };
+            let preposition = if write { "setting" } else { "reading" };
+            let prefix = format!(
+                "\u{1}TypeError\u{1}Cannot {action} properties of {kind} ({preposition} '"
+            );
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                        vec![HirExpr::Lit(HirLit::Str(prefix)), key.clone()],
+                    ),
+                    HirExpr::Lit(HirLit::Str("')".into())),
+                ],
+            )
+        };
+        Ok(HirExpr::Block(vec![
+            HirStmt::If(
+                is_nullish,
+                vec![HirStmt::If(
+                    is_null,
+                    vec![HirStmt::Throw(error("null"))],
+                    vec![HirStmt::Throw(error("undefined"))],
+                )],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(result)),
+        ]))
+    }
+
     /// `o.k op= r` / `o[k] ??= r` on a dynamic (`any`) target: the receiver and key are evaluated
     /// once into temporaries, then the assignment is rewritten as `t[k] = t[k] op r`
     /// (`t[k] || (t[k] = r)` for the short-circuiting forms) and lowered like any other.
@@ -9,6 +64,10 @@ impl<'a> FnLowerer<'a> {
         key: HirExpr,
     ) -> Result<HirExpr, String> {
         use swc_ecma_ast::{AssignExpr, BinExpr, BinaryOp, ComputedPropName, Ident, MemberExpr, MemberProp};
+        let private_jsvalue = matches!(
+            &object,
+            HirExpr::NonArrowThis { declared: HirType::JsValue, .. }
+        );
         let span = swc_common::DUMMY_SP;
         let object_name = format!("__thaw_dynamic_compound_object_{}", self.next_binding);
         self.next_binding += 1;
@@ -62,16 +121,39 @@ impl<'a> FnLowerer<'a> {
             }
         };
         let result = self.lower_expr(&rewritten)?;
-        self.wrap_call_argument_bindings(
-            result,
-            &[(object_name, HirType::JsValue, object), (key_name, key_type, key)],
-        )
+        if private_jsvalue {
+            let receiver = object.clone().with_non_arrow_this_access(NonArrowThisAccess::TypedValue);
+            let guarded = self.guard_private_json_receiver_access(
+                object,
+                HirExpr::Var(key_name.clone()),
+                HirExpr::Block(vec![
+                    HirStmt::Let(object_name, HirType::JsValue, receiver),
+                    HirStmt::Return(Some(result)),
+                ]),
+                false,
+            )?;
+            self.wrap_call_argument_bindings(guarded, &[(key_name, key_type, key)])
+        } else {
+            self.wrap_call_argument_bindings(
+                result,
+                &[(object_name, HirType::JsValue, object), (key_name, key_type, key)],
+            )
+        }
     }
 
     fn lower_assignment_target_write(
         &mut self,
         target: Target,
         value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        self.lower_assignment_target_write_with_guard(target, value, true)
+    }
+
+    fn lower_assignment_target_write_with_guard(
+        &mut self,
+        target: Target,
+        value: HirExpr,
+        private_json_write_guard: bool,
     ) -> Result<HirExpr, String> {
         let mut bindings = Vec::new();
         // An object-literal setter stores a hidden `__thaw_setter_<field>`
@@ -94,24 +176,81 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(receiver_name.clone(), object_type.clone());
                 self.scope.insert(value_name.clone(), value_type.clone());
-                bindings.push((receiver_name.clone(), object_type.clone(), object.clone()));
-                bindings.push((value_name.clone(), value_type, value));
+                let mut receiver_object = object.clone();
+                let deferred_receiver = if let HirExpr::NonArrowThis { payload, .. } = &mut receiver_object {
+                    if matches!(self.infer_expr_type(payload)?, HirType::NonArrowReceiver(_)) {
+                        let name = format!("__thaw_setter_payload_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let ty = self.infer_expr_type(payload)?;
+                        self.scope.insert(name.clone(), ty.clone());
+                        bindings.push((name.clone(), ty, (**payload).clone()));
+                        **payload = HirExpr::Var(name);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if deferred_receiver {
+                    bindings.push((value_name.clone(), value_type, value));
+                    bindings.push((receiver_name.clone(), object_type.clone(), receiver_object));
+                } else {
+                    bindings.push((receiver_name.clone(), object_type.clone(), receiver_object));
+                    bindings.push((value_name.clone(), value_type, value));
+                }
                 let receiver = HirExpr::Var(receiver_name);
                 let value = HirExpr::Var(value_name);
                 let argument = self.coerce_to_declared(&parameter_type, value.clone())?;
                 let setter_value = HirExpr::PropAccess(
                     Box::new(receiver.clone()), object_type, setter,
                 );
+                let receiver_type = match setter_type {
+                    HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => params.first().cloned(),
+                    _ => None,
+                }.and_then(|ty| match ty { HirType::NonArrowReceiver(inner) => Some(*inner), _ => None })
+                    .ok_or("object setter has no private receiver parameter")?;
+                let packed_receiver = HirExpr::NonArrowReceiverPack {
+                    value: Box::new(receiver.clone()), declared: receiver_type,
+                };
                 let result = HirExpr::Block(vec![
                     HirStmt::Expr(HirExpr::Call(
-                        Box::new(setter_value), vec![receiver, argument],
+                        Box::new(setter_value), vec![packed_receiver, argument],
                     )),
                     HirStmt::Return(Some(value)),
                 ]);
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
         }
-        Ok(build_assign(target, value))
+        let private_json_write = match &target {
+            Target::Dictionary(object, key, _)
+            | Target::DynamicProperty(object, key)
+                if private_json_write_guard && matches!(object, HirExpr::NonArrowThis { .. }) =>
+            {
+                Some((object.clone(), (**key).clone()))
+            }
+            Target::JsonIndex(object, index)
+                if private_json_write_guard && matches!(object, HirExpr::NonArrowThis { .. }) => {
+                Some((object.clone(), self.coerce_primitive_to_string((**index).clone())?))
+            }
+            _ => None,
+        };
+        let target = match target {
+            Target::Prop(object, object_type, field) => {
+                let object = if matches!(&object, HirExpr::NonArrowThis { .. }) {
+                    object.with_non_arrow_this_access(NonArrowThisAccess::Write(field.clone()))
+                } else {
+                    object
+                };
+                Target::Prop(object, object_type, field)
+            }
+            other => other,
+        };
+        let result = build_assign(target, value);
+        let Some((object, key)) = private_json_write else {
+            return Ok(result);
+        };
+        self.guard_private_json_receiver_access(object, key, result, true)
     }
 
     fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -131,10 +270,44 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_assignment_target_read(&mut self, target: &Target) -> Result<HirExpr, String> {
         if let Target::Prop(object, HirType::Object(fields), property) = target {
-            return self.lower_fixed_object_property_read(object.clone(), fields, property);
+            let object = if matches!(object, HirExpr::NonArrowThis { .. }) {
+                object.clone().with_non_arrow_this_access(NonArrowThisAccess::Read(property.clone()))
+            } else {
+                object.clone()
+            };
+            return self.lower_fixed_object_property_read(object, fields, property);
         }
+        let private_json_read = match target {
+            Target::Dictionary(object, key, _)
+                if matches!(object, HirExpr::NonArrowThis { .. }) =>
+            {
+                Some((object.clone(), (**key).clone()))
+            }
+            Target::JsonIndex(object, index)
+                if matches!(object, HirExpr::NonArrowThis { .. }) =>
+            {
+                Some((object.clone(), self.coerce_primitive_to_string((**index).clone())?))
+            }
+            _ => None,
+        };
         let Target::Index(array, index) = target else {
-            return target_to_read_expr(target);
+            let read_target = match (target, private_json_read.is_some()) {
+                (Target::Dictionary(object, key, element), true) => Target::Dictionary(
+                    object.clone().with_non_arrow_this_access(NonArrowThisAccess::Value),
+                    key.clone(),
+                    element.clone(),
+                ),
+                (Target::JsonIndex(object, index), true) => Target::JsonIndex(
+                    object.clone().with_non_arrow_this_access(NonArrowThisAccess::Value),
+                    index.clone(),
+                ),
+                _ => target.clone(),
+            };
+            let read = target_to_read_expr(&read_target)?;
+            let Some((object, key)) = private_json_read else {
+                return Ok(read);
+            };
+            return self.guard_private_json_receiver_access(object, key, read, false);
         };
         let array_type = self.infer_expr_type(array)?;
         let HirType::Array(element) = &array_type else {
@@ -906,6 +1079,41 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let mut target = self.lower_assign_target(&assign.left)?;
+        let mut target_bindings = Vec::new();
+        let target_object = match &mut target {
+            Target::Prop(object, _, _)
+            | Target::Dictionary(object, _, _)
+            | Target::JsonIndex(object, _)
+            | Target::DynamicProperty(object, _) => Some(object),
+            _ => None,
+        };
+        if let Some(HirExpr::NonArrowThis { payload, .. }) = target_object {
+            if matches!(self.infer_expr_type(payload)?, HirType::NonArrowReceiver(_)) {
+                let name = format!("__thaw_assignment_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                let ty = self.infer_expr_type(payload)?;
+                self.scope.insert(name.clone(), ty.clone());
+                target_bindings.push((name.clone(), ty, (**payload).clone()));
+                **payload = HirExpr::Var(name);
+            }
+        }
+        let deferred_private_write = assign.op == AssignOp::Assign
+            && target_object.is_some_and(|object| matches!(object, HirExpr::NonArrowThis { .. }));
+        if deferred_private_write {
+            let key_target = match &mut target {
+                Target::Dictionary(_, key, _) | Target::DynamicProperty(_, key) => Some(key),
+                Target::JsonIndex(_, index) => Some(index),
+                _ => None,
+            };
+            if let Some(key) = key_target {
+                let key_type = self.infer_expr_type(key)?;
+                let key_name = format!("__thaw_assignment_key_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(key_name.clone(), key_type.clone());
+                target_bindings.push((key_name.clone(), key_type, (**key).clone()));
+                **key = HirExpr::Var(key_name);
+            }
+        }
         if let Target::Var(name) = &target {
             if self.immutable_bindings.contains(name) {
                 return Err(format!("cannot assign to constant `{name}`"));
@@ -955,7 +1163,8 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         if let Target::DynamicProperty(object, key) = &target {
             if assign.op != AssignOp::Assign {
-                return self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone());
+                let result = self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone())?;
+                return self.wrap_call_argument_bindings(result, &target_bindings);
             }
             let object_name = format!("__thaw_dynamic_assign_object_{}", self.next_binding);
             self.next_binding += 1;
@@ -971,7 +1180,19 @@ impl<'a> FnLowerer<'a> {
                 &HirType::Json,
                 HirExpr::Var(value_name.clone()),
             )?;
-            let result = HirExpr::Block(vec![
+            let private_jsvalue = matches!(
+                object,
+                HirExpr::NonArrowThis { declared: HirType::JsValue, .. }
+            );
+            let mut statements = Vec::new();
+            if private_jsvalue {
+                statements.push(HirStmt::Let(
+                    object_name.clone(),
+                    HirType::JsValue,
+                    object.clone().with_non_arrow_this_access(NonArrowThisAccess::TypedValue),
+                ));
+            }
+            statements.extend([
                 HirStmt::Expr(HirExpr::Call(
                     Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
                     vec![
@@ -982,14 +1203,34 @@ impl<'a> FnLowerer<'a> {
                 )),
                 HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
             ]);
-            return self.wrap_call_argument_bindings(
-                result,
-                &[
+            let result = HirExpr::Block(statements);
+            let result = if private_jsvalue {
+                self.guard_private_json_receiver_access(
+                    object.clone(),
+                    HirExpr::Var(key_name.clone()),
+                    result,
+                    true,
+                )?
+            } else {
+                result
+            };
+            let mut dynamic_bindings = target_bindings;
+            if deferred_private_write {
+                dynamic_bindings.extend([
+                    (key_name, key_type, key.as_ref().clone()),
+                    (value_name, rhs_type, rhs),
+                ]);
+                if !private_jsvalue {
+                    dynamic_bindings.push((object_name, HirType::JsValue, object.clone()));
+                }
+            } else {
+                dynamic_bindings.extend([
                     (object_name, HirType::JsValue, object.clone()),
                     (key_name, key_type, key.as_ref().clone()),
                     (value_name, rhs_type, rhs),
-                ],
-            );
+                ]);
+            }
+            return self.wrap_call_argument_bindings(result, &dynamic_bindings);
         }
         let assigned_variable = match &target {
             Target::Var(name) => Some(name.clone()),
@@ -1018,7 +1259,7 @@ impl<'a> FnLowerer<'a> {
                     self.expression_function_object_function_property_discriminants(&assign.right),
                 )
             });
-        let mut bindings = Vec::new();
+        let mut bindings = target_bindings;
         if let Some(name) = assigned_variable.as_ref() {
             self.record_binding_write(name);
         }
@@ -1043,38 +1284,49 @@ impl<'a> FnLowerer<'a> {
                     let object_name = format!("__thaw_assign_object_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(object_name.clone(), object_type.clone());
+                    let object = object.with_non_arrow_this_access(NonArrowThisAccess::Read(field.clone()));
                     bindings.push((object_name.clone(), object_type.clone(), object));
                     Target::Prop(HirExpr::Var(object_name), object_type, field)
                 }
                 Target::Dictionary(object, key, element) => {
-                    let object_name = format!("__thaw_assign_dictionary_{}", self.next_binding);
-                    self.next_binding += 1;
-                    let object_type = HirType::Dictionary(Box::new(element.clone()));
-                    self.scope.insert(object_name.clone(), object_type.clone());
-                    bindings.push((object_name.clone(), object_type, object));
+                    let object = if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object
+                    } else {
+                        let object_name = format!("__thaw_assign_dictionary_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let object_type = HirType::Dictionary(Box::new(element.clone()));
+                        self.scope.insert(object_name.clone(), object_type.clone());
+                        bindings.push((object_name.clone(), object_type, object));
+                        HirExpr::Var(object_name)
+                    };
 
                     let key_name = format!("__thaw_assign_key_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(key_name.clone(), HirType::Str);
                     bindings.push((key_name.clone(), HirType::Str, *key));
                     Target::Dictionary(
-                        HirExpr::Var(object_name),
+                        object,
                         Box::new(HirExpr::Var(key_name)),
                         element,
                     )
                 }
                 Target::JsonIndex(object, index) => {
-                    let object_name = format!("__thaw_assign_json_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(object_name.clone(), HirType::Json);
-                    bindings.push((object_name.clone(), HirType::Json, object));
+                    let object = if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object
+                    } else {
+                        let object_name = format!("__thaw_assign_json_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(object_name.clone(), HirType::Json);
+                        bindings.push((object_name.clone(), HirType::Json, object));
+                        HirExpr::Var(object_name)
+                    };
 
                     let index_name = format!("__thaw_assign_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
                     bindings.push((index_name.clone(), HirType::F64, *index));
                     Target::JsonIndex(
-                        HirExpr::Var(object_name),
+                        object,
                         Box::new(HirExpr::Var(index_name)),
                     )
                 }
@@ -1495,7 +1747,42 @@ impl<'a> FnLowerer<'a> {
             }
         };
 
-        let result = self.lower_assignment_target_write(target, value)?;
+        let value = if deferred_private_write {
+            let value_type = self.infer_expr_type(&value)?;
+            let value_name = format!("__thaw_assignment_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(value_name.clone(), value_type.clone());
+            bindings.push((value_name.clone(), value_type, value));
+            HirExpr::Var(value_name)
+        } else {
+            value
+        };
+
+        let target = if assign.op != AssignOp::Assign {
+            match target {
+                Target::Dictionary(object, key, element) => Target::Dictionary(
+                    if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object.with_non_arrow_this_access(NonArrowThisAccess::Value)
+                    } else {
+                        object
+                    },
+                    key,
+                    element,
+                ),
+                Target::JsonIndex(object, index) => Target::JsonIndex(
+                    if matches!(object, HirExpr::NonArrowThis { .. }) {
+                        object.with_non_arrow_this_access(NonArrowThisAccess::Value)
+                    } else {
+                        object
+                    },
+                    index,
+                ),
+                other => other,
+            }
+        } else {
+            target
+        };
+        let result = self.lower_assignment_target_write_with_guard(target, value, assign.op == AssignOp::Assign)?;
         if let Some((object, path, value, nested)) = assigned_function_property {
             let metadata = self
                 .object_function_property_discriminants

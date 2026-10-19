@@ -1073,12 +1073,34 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(BasicValueEnum::into_pointer_value)
     }
 
+    fn object_accessor_signature(
+        &self,
+        fields: &[(String, HirType)],
+        property: &str,
+        setter: bool,
+    ) -> Result<Option<(Vec<HirType>, HirType)>, String> {
+        let prefix = if setter { "__thaw_setter_" } else { "__thaw_getter_" };
+        let Some(accessor) = fields
+            .iter()
+            .find_map(|(name, ty)| (name == &format!("{prefix}{property}")).then_some(ty))
+        else {
+            return Ok(None);
+        };
+        match accessor {
+            HirType::Function(params, ret) => Ok(Some((params.clone(), ret.as_ref().clone()))),
+            HirType::CallableFunction(params, _, _, ret) => {
+                Ok(Some((params.clone(), ret.as_ref().clone())))
+            }
+            other => Err(format!("object accessor `{property}` has non-callable type {other:?}")),
+        }
+    }
+
     fn compile_registered_accessor_call(
         &mut self,
         closure: PointerValue<'ctx>,
         params: &[HirType],
         ret: &HirType,
-        args: &[BasicMetadataValueEnum<'ctx>],
+        args: &[BasicValueEnum<'ctx>],
         name: &str,
     ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
         let function_pointer = self
@@ -1091,7 +1113,28 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .into_pointer_value();
         let mut compiled = vec![closure.into()];
-        compiled.extend_from_slice(args);
+        for (index, arg) in args.iter().enumerate() {
+            if index == 0 {
+                if let Some(HirType::NonArrowReceiver(receiver_type)) = params.first() {
+                    let (kind, word) = self.compile_receiver_parts(*arg, receiver_type)?;
+                    self.tracks_owned_json_roots = true;
+                    let payload = self
+                        .builder
+                        .build_call(
+                            self.module.get_function("thaw_non_arrow_receiver_new").unwrap(),
+                            &[kind.into(), word.into()],
+                            "accessor_receiver_payload",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("receiver payload helper returned no value")?;
+                    compiled.push(self.compile_check_json_host_error(payload, None)?.into());
+                    continue;
+                }
+            }
+            compiled.push((*arg).into());
+        }
         let call = self
             .builder
             .build_indirect_call(
@@ -1123,6 +1166,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string());
         }
         let getter = self.compile_object_accessor(object, field, false)?;
+        let (getter_params, getter_return) = self
+            .object_accessor_signature(fields, field, false)?
+            .unwrap_or_else(|| {
+                (
+                    vec![HirType::NonArrowReceiver(Box::new(object_type.clone()))],
+                    field_type.clone(),
+                )
+            });
         let function = self.current_function();
         let call_getter = self.context.append_basic_block(function, "object_getter");
         let load_field = self.context.append_basic_block(function, "object_data_read");
@@ -1139,8 +1190,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let getter_value = self
             .compile_registered_accessor_call(
                 getter,
-                std::slice::from_ref(object_type),
-                field_type,
+                &getter_params,
+                &getter_return,
                 &[object.into()],
                 "object_getter_call",
             )?

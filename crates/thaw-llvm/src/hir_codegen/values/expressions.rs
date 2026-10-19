@@ -139,6 +139,52 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(ty, ptr, name)
                     .map_err(|e| e.to_string())
             }
+            HirExpr::NonArrowThis { payload, declared, access } => {
+                let Some(HirType::NonArrowReceiver(_)) = self.expr_hir_type(payload) else {
+                    return self.compile_expr(payload);
+                };
+                let receiver = self.compile_expr(payload)?.into_pointer_value();
+                let words = self.context.ptr_type(AddressSpace::default());
+                let words = self.builder.build_pointer_cast(receiver, words, "non_arrow_receiver_words")
+                    .map_err(|error| error.to_string())?;
+                let zero = self.context.i64_type().const_zero();
+                let one = self.context.i64_type().const_int(1, false);
+                let kind_ptr = unsafe { self.builder.build_in_bounds_gep(self.context.i64_type(), words, &[zero], "non_arrow_receiver_kind_ptr") }
+                    .map_err(|error| error.to_string())?;
+                let word_ptr = unsafe { self.builder.build_in_bounds_gep(self.context.i64_type(), words, &[one], "non_arrow_receiver_word_ptr") }
+                    .map_err(|error| error.to_string())?;
+                let kind = self.builder.build_load(self.context.i64_type(), kind_ptr, "non_arrow_receiver_kind")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let kind = self.builder.build_int_truncate(kind, self.context.i8_type(), "non_arrow_receiver_kind_i8")
+                    .map_err(|error| error.to_string())?;
+                let word = self.builder.build_load(self.context.i64_type(), word_ptr, "non_arrow_receiver_word")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                match access {
+                    NonArrowThisAccess::Value =>
+                        self.compile_non_arrow_json_value(self.current_function(), kind, word).map(Into::into),
+                    NonArrowThisAccess::TypedValue =>
+                        self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word, None),
+                    NonArrowThisAccess::Read(field) =>
+                        self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word,
+                            Some((field.as_str(), false))),
+                    NonArrowThisAccess::Write(field) =>
+                        self.compile_non_arrow_receiver_value(self.current_function(), declared, kind, word,
+                            Some((field.as_str(), true))),
+                }
+            }
+            HirExpr::NonArrowReceiverPack { value, .. } => {
+                let actual = self.expr_hir_type(value)
+                    .ok_or("packed receiver value is missing its HIR type")?;
+                let value = self.compile_expr(value)?;
+                let (kind, word) = self.compile_receiver_parts(value, &actual)?;
+                self.tracks_owned_json_roots = true;
+                let payload = self.builder.build_call(
+                    self.module.get_function("thaw_non_arrow_receiver_new").unwrap(),
+                    &[kind.into(), word.into()], "non_arrow_receiver_payload",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("receiver payload helper returned no value")?;
+                self.compile_check_json_host_error(payload, None)
+            }
 
             HirExpr::Assign(name, value) => {
                 let (ptr, _ty) = *self
@@ -656,11 +702,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(call_setter);
+                let (setter_params, setter_return) = self
+                    .object_accessor_signature(fields, field, true)?
+                    .unwrap_or_else(|| {
+                        (
+                            vec![
+                                HirType::NonArrowReceiver(Box::new(object_ty.clone())),
+                                field_type.clone(),
+                            ],
+                            HirType::Void,
+                        )
+                    });
                 self.compile_registered_accessor_call(
                     setter,
-                    &[object_ty.clone(), field_type.clone()],
-                    &HirType::Void,
-                    &[object.into(), val.into()],
+                    &setter_params,
+                    &setter_return,
+                    &[object.into(), val],
                     "object_setter_call",
                 )?;
                 self.builder

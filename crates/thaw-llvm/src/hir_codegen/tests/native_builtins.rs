@@ -11590,6 +11590,42 @@ fn native_object_narrow_view_reuses_full_layout_and_later_wide_view() {
 }
 
 #[test]
+fn decoded_native_method_forwarder_uses_actual_receiver_projection_ir() {
+    let receiver = HirType::Object(vec![
+        ("value".into(), HirType::F64),
+        ("later".into(), HirType::F64),
+    ]);
+    let callback = HirType::Function(
+        vec![HirType::NonArrowReceiver(Box::new(receiver))],
+        Box::new(HirType::Json),
+    );
+    let owner = HirType::Object(vec![("method".into(), callback)]);
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "decode_method".into(),
+            params: vec![HirParam { name: "value".into(), ty: HirType::Json }],
+            ret: owner.clone(),
+            is_async: false,
+            body: vec![HirStmt::Return(Some(HirExpr::JsonAsNative(
+                Box::new(HirExpr::Var("value".into())), owner,
+            )))],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "decoded_native_method_forwarder_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let name = ir.rfind("@__thaw_js_method_forwarder_")
+        .expect("decoded private-receiver callback should generate a method forwarder");
+    let start = ir[..name].rfind("define ").unwrap();
+    let end = ir[start..].find("\n}").map(|offset| start + offset).unwrap();
+    let forwarder = &ir[start..end];
+    assert!(forwarder.contains("receiver_full_projector_layout"), "{forwarder}");
+    assert!(forwarder.contains("thaw_object_projector"), "{forwarder}");
+}
+
+#[test]
 fn native_object_nonprefix_alias_remains_native_only() {
     let source = r#"
         interface Narrow { later: number; value: number; }
@@ -11604,6 +11640,12 @@ fn native_object_nonprefix_alias_remains_native_only() {
         compile_and_run(source, "native_object_nonprefix_native_only"),
         "7 9 3\n"
     );
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_object_nonprefix_native_only_features");
+    compiler.compile_program(&program).unwrap();
+    assert!(!compiler.uses_quickjs(), "{}", compiler.print_to_string());
 }
 
 #[test]
@@ -11940,6 +11982,7 @@ fn native_projection_method_registration_retains_physical_receiver_hir_type() {
             HirExpr::Block(body) => visit_stmts(body, counts),
             HirExpr::Lambda(_, _, _, body)
             | HirExpr::NonArrowFunction(body)
+            | HirExpr::NonArrowThis { payload: body, .. }
             | HirExpr::TypedClosure(_, body)
             | HirExpr::OptionalSome(body, _)
             | HirExpr::OptionalValue(body, _)

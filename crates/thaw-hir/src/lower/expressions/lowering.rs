@@ -826,6 +826,13 @@ impl<'a> FnLowerer<'a> {
                         "generic bound function `{name}` needs a call-site specialization before it can be used as a value"
                     ));
                 }
+                if let Some(HirType::NonArrowReceiver(receiver)) = self.scope.get(&name) {
+                    return Ok(HirExpr::NonArrowThis {
+                        payload: Box::new(HirExpr::Var(name)),
+                        declared: receiver.as_ref().clone(),
+                        access: NonArrowThisAccess::Value,
+                    });
+                }
                 if matches!(
                     self.generic_callable_template(&name),
                     Some(GenericCallableTemplate::Named { .. })
@@ -1217,6 +1224,13 @@ impl<'a> FnLowerer<'a> {
                         signature.params.clone(),
                         result,
                     ));
+                }
+                if let Some((name, declared)) = &self.active_non_arrow_this {
+                    return Ok(HirExpr::NonArrowThis {
+                        payload: Box::new(HirExpr::Var(name.clone())),
+                        declared: declared.clone(),
+                        access: NonArrowThisAccess::Value,
+                    });
                 }
                 let name = self.resolve_binding("this");
                 if self.scope.contains_key(&name) {

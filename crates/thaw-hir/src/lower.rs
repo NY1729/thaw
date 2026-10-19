@@ -41,7 +41,7 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
     FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirInitStep, HirLit,
-    HirOptionalMask, HirParam, HirProgram, HirStmt, HirType, Symbol,
+    HirOptionalMask, HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess, Symbol,
 };
 
 type LoweredBinding = (Symbol, HirType, HirExpr);

@@ -1051,14 +1051,30 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty
                 };
+                let private_receiver_alias = if binding.type_ann.is_none() {
+                    match &value {
+                        HirExpr::NonArrowThis {
+                            payload,
+                            declared,
+                            access: crate::NonArrowThisAccess::Value,
+                        } => Some((payload.as_ref().clone(), declared.clone())),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 let sparse_index = self.is_primitive_array_index(init, &ty);
-                let mut value = if binding.type_ann.is_some() && sparse_index {
+                let mut value = if let Some((payload, _)) = &private_receiver_alias {
+                    payload.clone()
+                } else if binding.type_ann.is_some() && sparse_index {
                     self.coerce_primitive_array_argument(value, &ty)?
                 } else {
                     self.coerce_to_declared_aliasing(&ty, value)?
                 };
 
-                let storage_type = if class_name_from_type(&actual_type).is_some()
+                let storage_type = if let Some((_, receiver)) = &private_receiver_alias {
+                    HirType::NonArrowReceiver(Box::new(receiver.clone()))
+                } else if class_name_from_type(&actual_type).is_some()
                     && matches!(&ty, HirType::Object(fields) if fields.iter().any(|(_, field)| *field == HirType::Dynamic))
                 {
                     actual_type.clone()

@@ -85,6 +85,47 @@ impl<'ctx> HirCompiler<'ctx> {
         let i8_type = self.context.i8_type();
         let i64_type = self.context.i64_type();
         match ty {
+            HirType::NonArrowReceiver(_) => {
+                let payload = value.into_pointer_value();
+                let words = self.context.ptr_type(AddressSpace::default());
+                let words = self
+                    .builder
+                    .build_pointer_cast(payload, words, "forward_receiver_payload")
+                    .map_err(|error| error.to_string())?;
+                let kind_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        i64_type,
+                        words,
+                        &[i64_type.const_zero()],
+                        "forward_receiver_kind_ptr",
+                    )
+                }
+                .map_err(|error| error.to_string())?;
+                let word_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        i64_type,
+                        words,
+                        &[i64_type.const_int(1, false)],
+                        "forward_receiver_word_ptr",
+                    )
+                }
+                .map_err(|error| error.to_string())?;
+                let kind = self
+                    .builder
+                    .build_load(i64_type, kind_ptr, "forward_receiver_kind")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let kind = self
+                    .builder
+                    .build_int_truncate(kind, i8_type, "forward_receiver_kind_i8")
+                    .map_err(|error| error.to_string())?;
+                let word = self
+                    .builder
+                    .build_load(i64_type, word_ptr, "forward_receiver_word")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                return Ok((kind, word));
+            }
             HirType::Optional(inner) | HirType::Nullable(inner) => {
                 let tagged = value.into_struct_value();
                 let present = self.builder.build_extract_value(tagged, 0, "receiver_present")

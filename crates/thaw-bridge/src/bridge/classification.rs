@@ -293,6 +293,7 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         HirType::WeakSet(element) => format!("WeakSet<{}>", render_ts_type(element)),
         // The `this` type is not part of the declared TS signature.
         HirType::FunctionWithThis(_, visible) => render_ts_type(visible),
+        HirType::NonArrowReceiver(inner) => render_ts_type(inner),
         HirType::NativeException => "Error".to_string(),
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
@@ -316,6 +317,10 @@ mod classification_render_tests {
         assert_eq!(
             render_ts_type(&ty),
             "((arg0: string) => string) & ((arg0: number) => boolean)"
+        );
+        assert_eq!(
+            render_ts_type(&HirType::NonArrowReceiver(Box::new(HirType::F64))),
+            "number"
         );
     }
 }

@@ -95,6 +95,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             HirType::NativeException => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::NonArrowReceiver(receiver) => {
+                self.basic_type(receiver)?;
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
             HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Null => Ok(self.context.bool_type().into()),
             // A `this`-taking closure is the same closure pointer; the tagged

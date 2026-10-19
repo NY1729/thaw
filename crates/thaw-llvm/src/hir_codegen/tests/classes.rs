@@ -3596,7 +3596,7 @@ fn generic_non_arrow_apply_runtime_nullish_tuple() {
 }
 
 #[test]
-fn non_arrow_nullable_and_disjoint_union_receivers() {
+fn non_arrow_nullable_and_disjoint_union_receivers_observe_runtime_values() {
     let source = r#"
         function main(): void {
             const optional = function(this: number | undefined): string { return typeof this; };
@@ -3614,7 +3614,7 @@ fn non_arrow_nullable_and_disjoint_union_receivers() {
         }
     "#;
     assert_eq!(compile_and_run(source, "non_arrow_nullable_union_receiver"),
-        "undefined number undefined\nTypeError\nobject number\nundefined object number\nTypeError\nnumber string\nundefined object\n");
+        "undefined number undefined\nundefined\nobject number\nundefined object number\nundefined\nnumber string\nundefined object\n");
 }
 
 
@@ -3634,7 +3634,7 @@ fn non_arrow_receiver_union_routes_json_and_number_by_producer_kind() {
 }
 
 #[test]
-fn non_arrow_receiver_union_checks_each_native_class_identity() {
+fn non_arrow_receiver_union_typeof_keeps_unrecognized_class_receiver() {
     let source = r#"
         class Base { value: number; constructor(value: number) { this.value = value; } }
         class Derived extends Base { constructor(value: number) { super(value); } }
@@ -3650,23 +3650,40 @@ fn non_arrow_receiver_union_checks_each_native_class_identity() {
         }
     "#;
     assert_eq!(compile_and_run(source, "non_arrow_union_classes"),
-        "object object\nTypeError\nobject object\n");
+        "object object\nobject object\n");
 }
 
 #[test]
-fn non_arrow_string_literal_this_uses_string_receiver_abi() {
+fn non_arrow_receiver_union_checks_class_identity_at_typed_use() {
+    let source = r#"
+        class Base { value: number; constructor(value: number) { this.value = value; } }
+        class Other { value: number; constructor(value: number) { this.value = value; } }
+        class Stranger { value: number; constructor(value: number) { this.value = value; } }
+        function consume(value: Base | Other): number { return value.value; }
+        function main(): void {
+            const read = function(this: Base | Other): number { return consume(this); };
+            console.log(read.call(new Base(1)), read.call(new Other(2)));
+            try { console.log(read.call(new Stranger(3) as Base)); }
+            catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_union_typed_use"), "1 2\nTypeError\n");
+}
+
+#[test]
+fn non_arrow_string_literal_this_returns_actual_runtime_value() {
     let source = r#"
         function main(): void {
             const echo = function(this: "open"): string { return this; };
             console.log(echo.call("open"));
-            try { echo.call("closed" as "open"); }
+            try { console.log(echo.call("closed" as "open")); }
             catch (error) { console.log("TypeError"); }
         }
     "#;
-    assert_eq!(compile_and_run(source, "non_arrow_literal_this"), "open\nTypeError\n");
+    assert_eq!(compile_and_run(source, "non_arrow_literal_this"), "open\nclosed\n");
 }
 #[test]
-fn non_arrow_same_tag_string_union_selects_literal_and_fallback() {
+fn non_arrow_same_tag_string_union_typeof_observes_runtime_values() {
     let source = r#"
         type Choice<T> = "open" | T;
         type Plain = "open" | "closed";
@@ -3688,7 +3705,7 @@ fn non_arrow_same_tag_string_union_selects_literal_and_fallback() {
         }
     "#;
     assert_eq!(compile_and_run(source, "non_arrow_string_union"),
-        "string string\nTypeError\nstring string\nstring string\nstring string\nstring string\nstring string\n");
+        "string string\nstring string\nstring string\nstring string\nstring string\nstring string\n");
 }
 
 #[test]

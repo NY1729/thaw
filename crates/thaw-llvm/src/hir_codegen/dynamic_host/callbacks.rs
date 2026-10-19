@@ -51,6 +51,16 @@ impl<'ctx> HirCompiler<'ctx> {
         ret: &HirType,
         spread_last: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let Some(HirType::NonArrowReceiver(receiver_type)) = params.first() {
+            let visible = &params[1..];
+            let closure = self.compile_js_callback_from_json_spreading(
+                json, visible, ret, spread_last,
+            )?.into_pointer_value();
+            self.compile_js_method_receiver_forwarder(
+                closure, receiver_type, visible, ret,
+            )?;
+            return Ok(closure.into());
+        }
         // A decoded Function can escape through a global or capture. Tracing
         // must be enabled before module initialization allocates the closure.
         self.tracks_owned_json_roots = true;
@@ -244,6 +254,7 @@ impl<'ctx> HirCompiler<'ctx> {
             adapter,
             params,
             ret,
+            spread_last,
             &format!("{name}__thaw_this_adapter"),
         )?;
 
@@ -297,6 +308,171 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(closure.into())
     }
 
+    /// A method-valued JS callback has a private first native parameter. Its
+    /// physical entry forwards that receiver through the closure's existing
+    /// this-aware adapter; it is never serialized as a visible JS argument.
+    fn compile_js_method_receiver_forwarder(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        receiver_type: &HirType,
+        visible: &[HirType],
+        ret: &HirType,
+    ) -> Result<(), String> {
+        let parent = self.builder.get_insert_block()
+            .ok_or("method receiver forwarder needs a parent block")?;
+        let name = format!("__thaw_js_method_forwarder_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let adapter = self.module.add_function(
+            &name, self.function_type(
+                &std::iter::once(HirType::NonArrowReceiver(Box::new(receiver_type.clone())))
+                    .chain(visible.iter().cloned()).collect::<Vec<_>>(), ret,
+            )?, Some(Linkage::Internal),
+        );
+        let result = isolated_codegen_scope!(self, {
+            let entry = self.context.append_basic_block(adapter, "entry");
+            let cleanup_failed = self.context.append_basic_block(adapter, "cleanup_failed");
+            self.builder.position_at_end(entry);
+            let environment = adapter.get_first_param()
+                .ok_or("method receiver forwarder has no closure environment")?
+                .into_pointer_value();
+            let i64_type = self.context.i64_type();
+            let pointer_type = self.context.ptr_type(AddressSpace::default());
+            let owned_receiver_json_slot = self.builder.build_alloca(
+                pointer_type, "method_receiver_owned_json_slot",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_store(owned_receiver_json_slot, pointer_type.const_null())
+                .map_err(|error| error.to_string())?;
+            let payload = adapter.get_nth_param(1)
+                .ok_or("method receiver forwarder is missing its private receiver")?
+                .into_pointer_value();
+            let receiver_kind_slot = self.builder.build_alloca(
+                self.context.i8_type(), "method_receiver_forward_kind_slot",
+            ).map_err(|error| error.to_string())?;
+            let receiver_word_slot = self.builder.build_alloca(
+                i64_type, "method_receiver_forward_word_slot",
+            ).map_err(|error| error.to_string())?;
+            let kind_ptr = unsafe { self.builder.build_in_bounds_gep(
+                i64_type, payload,
+                &[i64_type.const_zero()], "method_receiver_kind_ptr",
+            ) }.map_err(|error| error.to_string())?;
+            let word_ptr = unsafe { self.builder.build_in_bounds_gep(
+                i64_type, payload,
+                &[i64_type.const_int(1, false)], "method_receiver_word_ptr",
+            ) }.map_err(|error| error.to_string())?;
+            let kind = self.builder.build_load(i64_type, kind_ptr, "method_receiver_kind")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let word = self.builder.build_load(i64_type, word_ptr, "method_receiver_word")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let is_native = if matches!(receiver_type, HirType::Object(_)) {
+                self.builder.build_int_compare(
+                    IntPredicate::EQ, kind, i64_type.const_int(9, false),
+                    "method_receiver_is_native_object",
+                ).map_err(|error| error.to_string())?
+            } else {
+                self.context.bool_type().const_zero()
+            };
+            let materialize = self.context.append_basic_block(adapter, "materialize_native_receiver");
+            let direct = self.context.append_basic_block(adapter, "forward_receiver");
+            let join = self.context.append_basic_block(adapter, "receiver_ready");
+            self.builder.build_conditional_branch(is_native, materialize, direct)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(materialize);
+            if matches!(receiver_type, HirType::Object(_)) {
+                self.push_catch_target(cleanup_failed);
+                // Keep the full native receiver as a live actual-kind Json
+                // projection. A declared-view snapshot loses fields and aliasing.
+                let json = self.compile_non_arrow_json_value(
+                    adapter, self.context.i8_type().const_int(9, false), word,
+                )?;
+                self.builder.build_store(owned_receiver_json_slot, json)
+                    .map_err(|error| error.to_string())?;
+                let json_word = self.builder.build_ptr_to_int(json, i64_type, "method_receiver_json_word")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(receiver_kind_slot, self.context.i8_type().const_int(7, false))
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(receiver_word_slot, json_word)
+                    .map_err(|error| error.to_string())?;
+            }
+            self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(direct);
+            let direct_kind = self.builder.build_int_truncate(kind, self.context.i8_type(), "method_receiver_direct_kind")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(receiver_kind_slot, direct_kind)
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(receiver_word_slot, word)
+                .map_err(|error| error.to_string())?;
+            self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(join);
+            let receiver_word = self.builder.build_load(i64_type, receiver_word_slot, "method_receiver_forward_word")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let receiver_kind = self.builder.build_load(self.context.i8_type(), receiver_kind_slot, "method_receiver_forward_kind")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let receiver = self.builder.build_insert_value(
+                self.receiver_type().get_undef(), receiver_kind, 0, "method_receiver_with_kind",
+            ).map_err(|error| error.to_string())?.into_struct_value();
+            let receiver = self.builder.build_insert_value(
+                receiver, receiver_word, 1, "method_receiver_with_word",
+            ).map_err(|error| error.to_string())?.into_struct_value();
+            let this_slot = unsafe { self.builder.build_in_bounds_gep(
+                self.context.i8_type(), environment,
+                &[i64_type.const_int(CLOSURE_THIS_ENTRY_OFFSET, false)], "method_callback_this_slot",
+            ) }.map_err(|error| error.to_string())?;
+            let this_entry = self.builder.build_load(
+                self.context.ptr_type(AddressSpace::default()), this_slot, "method_callback_this_entry",
+            ).map_err(|error| error.to_string())?.into_pointer_value();
+            let mut arguments = vec![
+                BasicMetadataValueEnum::from(environment),
+                BasicMetadataValueEnum::from(receiver),
+            ];
+            arguments.extend(adapter.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
+            let call = self.builder.build_indirect_call(
+                self.this_entry_function_type(visible, ret)?, this_entry, &arguments,
+                "invoke_js_method_with_private_receiver",
+            ).map_err(|error| error.to_string())?;
+            if matches!(receiver_type, HirType::Object(_)) {
+                self.branch_on_pending_exception()?;
+            }
+            if matches!(receiver_type, HirType::Object(_)) {
+                let owned = self.builder.build_load(pointer_type, owned_receiver_json_slot, "owned_method_receiver_json")
+                    .map_err(|error| error.to_string())?.into_pointer_value();
+                self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[owned.into()], "destroy_owned_method_receiver_json")
+                    .map_err(|error| error.to_string())?;
+            }
+            if *ret == HirType::Void {
+                self.builder.build_return(None).map_err(|error| error.to_string())?;
+            } else {
+                let value = call.try_as_basic_value().basic()
+                    .ok_or("JS method receiver forwarder returned no value")?;
+                self.builder.build_return(Some(&value)).map_err(|error| error.to_string())?;
+            }
+            if matches!(receiver_type, HirType::Object(_)) {
+                self.pop_catch_target();
+                self.builder.position_at_end(cleanup_failed);
+                let owned = self.builder.build_load(pointer_type, owned_receiver_json_slot, "failed_owned_method_receiver_json")
+                    .map_err(|error| error.to_string())?.into_pointer_value();
+                self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[owned.into()], "destroy_failed_method_receiver_json")
+                    .map_err(|error| error.to_string())?;
+                self.branch_on_pending_exception()?;
+                self.build_default_return()?;
+            }
+            Ok::<(), String>(())
+        });
+        self.builder.position_at_end(parent);
+        result?;
+        let entry_slot = unsafe { self.builder.build_in_bounds_gep(
+            self.context.i8_type(), closure,
+            &[self.context.i64_type().const_zero()], "method_callback_entry_slot",
+        ) }.map_err(|error| error.to_string())?;
+        self.builder.build_store(entry_slot, adapter.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     fn compile_register_js_callback_host_operations(&mut self) -> Result<(), String> {
         let operations = [
             "thaw_js_retain_handle", "thaw_js_release_handle",
@@ -336,6 +512,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ordinary: FunctionValue<'ctx>,
         params: &[HirType],
         ret: &HirType,
+        spread_last: bool,
         name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
         let adapter = self.module.add_function(
@@ -452,6 +629,21 @@ impl<'ctx> HirCompiler<'ctx> {
             for (index, ty) in params.iter().enumerate() {
                 let value = adapter.get_nth_param((index + 2) as u32)
                     .ok_or("JS callback this adapter is missing an argument")?;
+                if spread_last && index + 1 == params.len() {
+                    let HirType::Array(element) = ty else {
+                        return Err("rest callback this adapter expects a packed array in its final parameter".into());
+                    };
+                    let packed = self.compile_native_array_to_json(value.into_pointer_value(), element)?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_json_array_extend").unwrap(),
+                        &[arguments.into(), packed.into()], "spread_this_rest_arguments",
+                    ).map_err(|error| error.to_string())?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[packed.into()], "destroy_this_packed_rest_arguments",
+                    ).map_err(|error| error.to_string())?;
+                    continue;
+                }
                 self.compile_json_array_push_native(arguments, value, ty)?;
             }
             Ok(())
@@ -926,8 +1118,10 @@ impl<'ctx> HirCompiler<'ctx> {
             argument_slots.push(slot);
         }
         let mut handle_slots = Vec::with_capacity(params.len());
-        for param in params {
-            let slot = if *param == HirType::JsValue {
+        for (index, param) in params.iter().enumerate() {
+            let slot = if *param == HirType::JsValue
+                || (index == 0 && matches!(param,
+                    HirType::NonArrowReceiver(inner) if **inner == HirType::JsValue)) {
                 let slot = self.builder.build_alloca(self.context.i64_type(), "callback_argument_handle_slot")
                     .map_err(|error| error.to_string())?;
                 self.builder.build_store(slot, self.context.i64_type().const_zero())
@@ -938,6 +1132,13 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let mut callback_args = vec![context.into()];
         let mut argument_json = Vec::with_capacity(params.len() + holder_offset);
+        let tagged_method_receiver = method_mode && matches!(params.first(),
+            Some(HirType::Object(fields)) if !fields.first().is_some_and(|(name, _)|
+                name.starts_with("__thaw_class_identity_\u{1e}")));
+        let private_receiver_parameter = matches!(params.first(),
+            Some(HirType::NonArrowReceiver(inner)) if matches!(inner.as_ref(), HirType::JsValue)
+                || matches!(inner.as_ref(), HirType::Object(fields)
+                    if fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver")));
         if let Some(holder) = holder_json {
             argument_json.push(holder);
             self.builder.build_store(argument_slots[0], holder)
@@ -980,7 +1181,9 @@ impl<'ctx> HirCompiler<'ctx> {
             // parsed marker at *this* position is trusted by position, not
             // by content; the std readers only accept a branded marker.
             let argument = if !graph_mode && rest_start != Some(index)
-                && matches!(param, HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
+                && (matches!(param, HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
+                    || (index == 0 && matches!(param,
+                        HirType::NonArrowReceiver(inner) if **inner == HirType::JsValue)))
             {
                 self.builder.build_call(
                     self.module.get_function("thaw_json_brand_wrapper").unwrap(),
@@ -998,7 +1201,23 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(argument_slots[graph_index], argument)
                 .map_err(|error| error.to_string())?;
             self.push_catch_target(conversion_failed);
-            let converted = if method_mode && index == 0 {
+            let converted = if private_receiver_parameter && index == 0 {
+                if matches!(params.first(), Some(HirType::NonArrowReceiver(inner))
+                    if **inner == HirType::JsValue) {
+                    let handle = self.compile_json_value_to_native(argument.into(), &HirType::JsValue)?
+                        .into_int_value();
+                    self.builder.build_store(handle_slots[0].expect("private JsValue receiver has a handle slot"), handle)
+                        .map_err(|error| error.to_string())?;
+                    self.compile_raw_non_arrow_receiver_payload(self.context.i8_type().const_int(8, false), handle)
+                } else {
+                    self.tracks_owned_json_roots = true;
+                    let word = self.builder.build_ptr_to_int(argument, self.context.i64_type(), "callback_private_receiver_parameter_word")
+                        .map_err(|error| error.to_string())?;
+                    self.compile_raw_non_arrow_receiver_payload(self.context.i8_type().const_int(7, false), word)
+                }
+            } else if tagged_method_receiver && index == 0 {
+                Ok(ptr_type.const_null().into())
+            } else if method_mode && index == 0 {
                 let HirType::Object(fields) = param else {
                     return Err("native method receiver requires an object type".into());
                 };
@@ -1023,8 +1242,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pop_catch_target();
             let converted = converted?;
             if let Some(slot) = handle_slots[index] {
-                self.builder.build_store(slot, converted)
-                    .map_err(|error| error.to_string())?;
+                if !(private_receiver_parameter && index == 0
+                    && matches!(params.first(), Some(HirType::NonArrowReceiver(inner))
+                        if **inner == HirType::JsValue)) {
+                    self.builder.build_store(slot, converted)
+                        .map_err(|error| error.to_string())?;
+                }
             }
             callback_args.push(converted.into());
         }
@@ -1036,9 +1259,6 @@ impl<'ctx> HirCompiler<'ctx> {
         // hides its receiver from the ordinary entry (slot 0 takes only the visible
         // parameters), so it must be entered through the tagged `this` entry: the
         // receiver is the borrowed host argument, kind 7, which that entry re-validates.
-        let tagged_method_receiver = method_mode && matches!(params.first(),
-            Some(HirType::Object(fields)) if !fields.first().is_some_and(|(name, _)|
-                name.starts_with("__thaw_class_identity_\u{1e}")));
         let code_slot = if (graph_mode && !method_mode) || tagged_method_receiver { unsafe {
             self.builder.build_in_bounds_gep(
                 self.context.i8_type(), context,
@@ -1284,9 +1504,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_json_array_push_owned(result_json, result)?;
                 } else if graph_wire && matches!(ret,
                     HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _)
-                        if matches!(params.first(), Some(HirType::Object(fields))
-                            if fields.last().is_some_and(|(name, ty)|
-                                name == "__thaw_object_method_receiver" && *ty == HirType::Bool))) {
+                        if matches!(params.first(), Some(HirType::NonArrowReceiver(inner))
+                            if matches!(inner.as_ref(), HirType::JsValue)
+                                || matches!(inner.as_ref(), HirType::Object(fields)
+                                    if fields.last().is_some_and(|(name, ty)|
+                                        name == "__thaw_object_method_receiver" && *ty == HirType::Bool)))) {
                     // A function returned by a projected native field is a
                     // method. Preserve its actual call-time `this` through
                     // the graph callback ABI; ordinary snapshot encoders
@@ -1788,7 +2010,7 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(HirType::Function(params, ret)) => (params, *ret),
             _ => return Err("native object method callback requires a function".into()),
         };
-        if !matches!(params.first(), Some(HirType::Object(_))) {
+        if !matches!(params.first(), Some(HirType::Object(_) | HirType::NonArrowReceiver(_))) {
             return Err("native object method callback requires an object receiver".into());
         }
         let closure = self.compile_expr(closure_expr)?.into_pointer_value();
@@ -1807,6 +2029,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
+        let callback_has_this = matches!(
+            self.expr_hir_type(closure_expr),
+            Some(HirType::FunctionWithThis(_, _))
+        );
         let callback_type = match self.expr_hir_type(closure_expr) {
             Some(HirType::FunctionWithThis(_, visible)) => Some(*visible),
             other => other,
@@ -1869,7 +2095,8 @@ impl<'ctx> HirCompiler<'ctx> {
             matches!(inner, HirExpr::Call(callee, _)
                 if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias"))
         };
-        let graph_mode = graph_mode
+        // Graph callback framing carries JavaScript's call-time receiver into the hidden `this` entry.
+        let graph_mode = graph_mode || callback_has_this
             || (!aliased_adapter && json_callback_wants_graph(&params));
         let closure = self.compile_expr(closure_expr)?;
         if optional {
@@ -2039,11 +2266,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let jsvalue_param_mask: u64 = params
             .iter()
             .enumerate()
-            .filter(|(_, param)| {
+            .filter(|(index, param)| {
                 matches!(
                     param,
                     HirType::JsValue | HirType::Function(_, _) | HirType::CallableFunction(..)
-                )
+                ) || (*index == 0 && matches!(param,
+                    HirType::NonArrowReceiver(inner) if **inner == HirType::JsValue))
             })
             .map(|(index, _)| 1u64 << index)
             .sum();

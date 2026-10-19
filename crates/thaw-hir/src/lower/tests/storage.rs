@@ -137,6 +137,48 @@ fn source_contract_lookup_keeps_local_alias_and_nested_class_field_types() {
 }
 
 #[test]
+fn source_contract_for_this_hides_private_non_arrow_receiver_payload() {
+    let module = thaw_parser::parse_typescript("function f() { this; }").unwrap();
+    let _storage = StorageScope::enter(&module).unwrap();
+    let signatures = HashMap::new();
+    let interfaces = HashMap::new();
+    let generic_interfaces = GenericInterfaces::new();
+    let enum_values = EnumValues::new();
+    let enum_reverse_values = EnumReverseValues::new();
+    let declared = HirType::Object(vec![("value".into(), HirType::F64)]);
+    let mut lowerer = FnLowerer::new(
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+        HirType::Void,
+        None,
+    );
+    lowerer
+        .scope
+        .insert("this".into(), HirType::NonArrowReceiver(Box::new(declared.clone())));
+
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0] else {
+        panic!("expected source fixture function");
+    };
+    let Stmt::Expr(statement) = &function.function.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected `this` expression");
+    };
+    assert_eq!(
+        lowerer.source_contract_type_for_expression(&statement.expr),
+        Some(declared.clone()),
+    );
+
+    lowerer.source_scope.insert("this".into(), HirType::Json);
+    assert_eq!(
+        lowerer.source_contract_type_for_expression(&statement.expr),
+        Some(HirType::Json),
+        "an explicit source contract still takes precedence over the physical scope type",
+    );
+}
+
+#[test]
 fn storage_tracks_casts_late_writes_and_unknown_calls() {
     assert_eq!(
         storage_allocations(
@@ -1314,7 +1356,7 @@ fn storage_handoff_hidden_this_receiver_tracks_dynamic_escape() {
         "the hidden receiver must use Json storage when it escapes: {hir}"
     );
     assert!(
-        hir.contains("HirParam { name: \"__thaw_this\", ty: Json }"),
+        hir.contains("HirParam { name: \"__thaw_this\", ty: NonArrowReceiver(Json) }"),
         "generic receiver specialization must also use Json storage: {hir}"
     );
 }
