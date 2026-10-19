@@ -213,7 +213,8 @@ unsupported or incompatible layout may be copied or rejected.
 
 Bare calls of `this`-using function expressions report Node's property-specific `TypeError`
 at the property access that executes, including reads in an assignment's RHS. Extracted
-object-literal methods follow the same rule.
+object-literal methods follow the same rule. Object-literal methods returning `this` preserve
+owner identity across chained calls, with mutations visible on the original object.
 
 Known gaps against Node semantics:
 
