@@ -71,6 +71,9 @@ struct FnLowerer<'a> {
     /// Set by the `any` declaration/assignment sites: the next native array converted to
     /// `Json` is a live view that aliases the array instead of a copy.
     alias_native_arrays: bool,
+    /// While building a deferred projector factory, its generated method
+    /// callbacks must not recursively register another projector factory.
+    lowering_native_projection_factory: bool,
     conservative_sparse_arrays: HashSet<Symbol>,
     sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,
@@ -110,7 +113,8 @@ struct FnLowerer<'a> {
     class_static_context: bool,
     class_context: Option<Symbol>,
     unbound_this_context: bool,
-    non_arrow_receiver: Option<HirType>,
+    non_arrow_receiver: Option<(HirType, Symbol)>,
+    active_non_arrow_this: Option<(Symbol, HirType)>,
     /// A contextual type hint for the *next* call expression `lower_call`
     /// handles, consumed (taken, not just read) as its very first action
     /// so it can never leak into a nested/argument call's own inference --

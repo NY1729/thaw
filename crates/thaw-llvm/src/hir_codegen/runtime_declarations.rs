@@ -147,6 +147,11 @@ impl<'ctx> HirCompiler<'ctx> {
             arena_alloc_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_non_arrow_receiver_new",
+            i8_ptr.fn_type(&[i8_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
 
         let strlen_type = i64_type.fn_type(&[i8_ptr.into()], false);
         self.module.add_function("thaw_string_byte_length", strlen_type, Some(Linkage::External));

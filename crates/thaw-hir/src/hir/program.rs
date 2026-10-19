@@ -32,6 +32,8 @@ pub fn set_ffi_error_abi(
 
     fn visit_expr(expr: &mut HirExpr, symbol: &str, abi: &FfiErrorAbi, found: &mut bool) {
         match expr {
+            HirExpr::NonArrowThis { payload, .. } => visit_expr(payload, symbol, abi, found),
+            HirExpr::NonArrowReceiverPack { value, .. } => visit_expr(value, symbol, abi, found),
             HirExpr::FfiCall(signature, args) => {
                 if signature.symbol == symbol {
                     signature.error_abi = abi.clone();
@@ -264,6 +266,12 @@ pub fn set_ffi_ownership(
             }
         }
         match expr {
+            HirExpr::NonArrowThis { payload, .. } => {
+                update_expr(payload, symbol, returns, errors, found)
+            }
+            HirExpr::NonArrowReceiverPack { value, .. } => {
+                update_expr(value, symbol, returns, errors, found)
+            }
             HirExpr::FfiCall(_, args)
             | HirExpr::ArrayLit(args)
             | HirExpr::ArrayConcat(args, _)
@@ -516,6 +524,24 @@ pub fn set_ffi_string_abi(
             }
         }
         match expr {
+            HirExpr::NonArrowThis { payload, .. } => update_expr(
+                payload,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
+            HirExpr::NonArrowReceiverPack { value, .. } => update_expr(
+                value,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
             HirExpr::FfiCall(_, values)
             | HirExpr::ArrayLit(values)
             | HirExpr::ArrayConcat(values, _)

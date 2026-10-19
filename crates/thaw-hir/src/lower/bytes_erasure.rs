@@ -153,6 +153,7 @@ fn erase_ty(ty: &mut HirType) {
             erase_ty(receiver);
             erase_ty(signature);
         }
+        HirType::NonArrowReceiver(receiver) => erase_ty(receiver),
         HirType::CallableFunction(params, _, rest, ret) => {
             for param in params {
                 erase_ty(param);
@@ -384,6 +385,14 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_expr(closure);
         }
         HirExpr::NonArrowFunction(closure) => erase_expr(closure),
+        HirExpr::NonArrowThis { payload, declared, .. } => {
+            erase_expr(payload);
+            erase_ty(declared);
+        }
+        HirExpr::NonArrowReceiverPack { value, declared } => {
+            erase_expr(value);
+            erase_ty(declared);
+        }
         HirExpr::FunctionRef(_, types, ret) | HirExpr::MethodRef(_, _, types, ret, _, _) => {
             erase_tys(types);
             erase_ty(ret);

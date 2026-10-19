@@ -199,6 +199,9 @@ pub enum HirType {
     /// It is never interpreted as an Object; checked projections recover the
     /// original owner only after category and static-layout validation.
     NativeException,
+    /// Compiler-private pointer to an arena-owned raw non-arrow receiver
+    /// payload. The inner type is its declared, storage-canonical receiver.
+    NonArrowReceiver(Box<HirType>),
     Function(Vec<HirType>, Box<HirType>),
     /// Native callable with a separate physical `this` parameter. Its value
     /// is still one closure pointer; `signature` describes visible values

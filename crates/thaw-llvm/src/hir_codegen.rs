@@ -32,7 +32,7 @@ use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
     FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiRegisterClass,
     FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirInitStep, HirLit,
-    HirParam, HirProgram, HirStmt, HirType,
+    HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess,
 };
 
 #[derive(Clone)]
@@ -156,6 +156,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         | HirType::Function(_, _)
         | HirType::CallableFunction(..)
         | HirType::NativeException
+        | HirType::NonArrowReceiver(_)
         | HirType::FunctionWithThis(_, _) => Ok((8, 8)),
         HirType::OverloadedFunction(_, physical) => raw_value_layout(physical),
         HirType::Union(members) if !members.is_empty() => Ok((16, 8)),
@@ -579,19 +580,25 @@ fn is_proven_typed_quickjs_wrapper(function: &HirFunction) -> bool {
     valid && !falls_through
 }
 
-fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
-    fn stmts(body: &[HirStmt], name: &str) -> bool {
+#[derive(Clone, Copy)]
+enum HirPreflightQuery<'a> {
+    NamedCall(&'a str),
+    NonArrowThisValue,
+}
+
+fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'_>) -> bool {
+    fn stmts(body: &[HirStmt], query: HirPreflightQuery<'_>) -> bool {
         body.iter().any(|stmt| match stmt {
             HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
-                expr_has_call(expr, name)
+                expr_has_call(expr, query)
             }
-            HirStmt::Return(Some(expr)) => expr_has_call(expr, name),
+            HirStmt::Return(Some(expr)) => expr_has_call(expr, query),
             HirStmt::If(test, yes, no) => {
-                expr_has_call(test, name) || stmts(yes, name) || stmts(no, name)
+                expr_has_call(test, query) || stmts(yes, query) || stmts(no, query)
             }
-            HirStmt::While(test, body) => expr_has_call(test, name) || stmts(body, name),
-            HirStmt::Finally(body, _) => stmts(body, name),
-            HirStmt::Try(body, _, catch, _) => stmts(body, name) || stmts(catch, name),
+            HirStmt::While(test, body) => expr_has_call(test, query) || stmts(body, query),
+            HirStmt::Finally(body, _) => stmts(body, query),
+            HirStmt::Try(body, _, catch, _) => stmts(body, query) || stmts(catch, query),
             HirStmt::Return(None)
             | HirStmt::Break
             | HirStmt::Continue
@@ -600,7 +607,18 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
         })
     }
 
-    fn expr_has_call(expr: &HirExpr, name: &str) -> bool {
+    fn expr_has_call(expr: &HirExpr, query: HirPreflightQuery<'_>) -> bool {
+        if matches!(query, HirPreflightQuery::NonArrowThisValue)
+            && matches!(
+                expr,
+                HirExpr::NonArrowThis {
+                    access: NonArrowThisAccess::Value,
+                    ..
+                }
+            )
+        {
+            return true;
+        }
         match expr {
             HirExpr::Call(callee, args) => {
                 if matches!(callee.as_ref(), HirExpr::Var(target)
@@ -609,11 +627,14 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
                     // The deferred factory itself contains a projection, but
                     // never runs in a native-only program. Inspect only the
                     // owner expression at this registration site.
-                    return args.first().is_some_and(|owner| expr_has_call(owner, name));
+                    return args
+                        .first()
+                        .is_some_and(|owner| expr_has_call(owner, query));
                 }
-                matches!(callee.as_ref(), HirExpr::Var(target) if target == name)
-                    || expr_has_call(callee, name)
-                    || args.iter().any(|arg| expr_has_call(arg, name))
+                matches!((callee.as_ref(), query),
+                    (HirExpr::Var(target), HirPreflightQuery::NamedCall(name)) if target == name)
+                    || expr_has_call(callee, query)
+                    || args.iter().any(|arg| expr_has_call(arg, query))
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::EvalThen(left, right)
@@ -626,23 +647,23 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             | HirExpr::JsonKey(left, right)
             | HirExpr::JsonDelete(left, right)
             | HirExpr::JsonIndex(left, right) => {
-                expr_has_call(left, name) || expr_has_call(right, name)
+                expr_has_call(left, query) || expr_has_call(right, query)
             }
             HirExpr::JsonSet(object, key, value, _, _)
             | HirExpr::JsonIndexSet(object, key, value)
             | HirExpr::IndexAssign(object, key, value) => {
-                expr_has_call(object, name)
-                    || expr_has_call(key, name)
-                    || expr_has_call(value, name)
+                expr_has_call(object, query)
+                    || expr_has_call(key, query)
+                    || expr_has_call(value, query)
             }
             HirExpr::Conditional(test, yes, no, _) => {
-                expr_has_call(test, name) || expr_has_call(yes, name) || expr_has_call(no, name)
+                expr_has_call(test, query) || expr_has_call(yes, query) || expr_has_call(no, query)
             }
             HirExpr::FunctionCallWithThis(callee, receiver, args, _, _)
             | HirExpr::FunctionBindThis(callee, receiver, args, _, _) => {
-                expr_has_call(callee, name)
-                    || expr_has_call(receiver, name)
-                    || args.iter().any(|arg| expr_has_call(arg, name))
+                expr_has_call(callee, query)
+                    || expr_has_call(receiver, query)
+                    || args.iter().any(|arg| expr_has_call(arg, query))
             }
             HirExpr::DynamicCall(_, args)
             | HirExpr::FfiCall(_, args)
@@ -653,7 +674,7 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             | HirExpr::PromiseRace(args, _)
             | HirExpr::PromiseAny(args, _)
             | HirExpr::PromiseAllSettled(args, _) => {
-                args.iter().any(|arg| expr_has_call(arg, name))
+                args.iter().any(|arg| expr_has_call(arg, query))
             }
             HirExpr::Await(inner)
             | HirExpr::AwaitPromise(inner, _)
@@ -687,31 +708,33 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             | HirExpr::RecursiveClosure(_, _, inner)
             | HirExpr::TypedClosure(_, inner)
             | HirExpr::NonArrowFunction(inner)
+            | HirExpr::NonArrowThis { payload: inner, .. }
+            | HirExpr::NonArrowReceiverPack { value: inner, .. }
             | HirExpr::PromiseNew(inner, _, _, _)
             | HirExpr::PromiseNewMixed(inner, _, _)
             | HirExpr::PropAccess(inner, _, _)
-            | HirExpr::JsonGet(inner, _) => expr_has_call(inner, name),
-            HirExpr::Lambda(_, _, _, body) => expr_has_call(body, name),
+            | HirExpr::JsonGet(inner, _) => expr_has_call(inner, query),
+            HirExpr::Lambda(_, _, _, body) => expr_has_call(body, query),
             HirExpr::PromiseThen(source, callback, _, _, _, _)
             | HirExpr::PromiseFinally(source, callback, _, _) => {
-                expr_has_call(source, name) || expr_has_call(callback, name)
+                expr_has_call(source, query) || expr_has_call(callback, query)
             }
             HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
-                expr_has_call(source, name)
+                expr_has_call(source, query)
                     || fulfilled
                         .as_ref()
-                        .is_some_and(|callback| expr_has_call(callback, name))
-                    || expr_has_call(rejected, name)
+                        .is_some_and(|callback| expr_has_call(callback, query))
+                    || expr_has_call(rejected, query)
             }
             HirExpr::ThrowValue(error, fallback) => {
-                expr_has_call(error, name) || expr_has_call(fallback, name)
+                expr_has_call(error, query) || expr_has_call(fallback, query)
             }
-            HirExpr::Block(body) => stmts(body, name),
+            HirExpr::Block(body) => stmts(body, query),
             HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
-                fields.iter().any(|(_, value)| expr_has_call(value, name))
+                fields.iter().any(|(_, value)| expr_has_call(value, query))
             }
             HirExpr::PropAssign(object, _, _, value) => {
-                expr_has_call(object, name) || expr_has_call(value, name)
+                expr_has_call(object, query) || expr_has_call(value, query)
             }
             HirExpr::Lit(_)
             | HirExpr::Var(_)
@@ -732,16 +755,26 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
     program
         .globals
         .iter()
-        .any(|global| expr_has_call(&global.init, name))
+        .any(|global| expr_has_call(&global.init, query))
         || program.initializers.iter().any(|step| match step {
-            HirInitStep::StoreGlobal(_, expr) => expr_has_call(expr, name),
-            HirInitStep::Statement(stmt) => stmts(std::slice::from_ref(stmt), name),
+            HirInitStep::StoreGlobal(_, expr) => expr_has_call(expr, query),
+            HirInitStep::Statement(stmt) => stmts(std::slice::from_ref(stmt), query),
             HirInitStep::ExecutionBoundary(_) | HirInitStep::ModuleBoundary { .. } => false,
         })
         || program
             .functions
             .iter()
-            .any(|function| stmts(&function.body, name))
+            .any(|function| stmts(&function.body, query))
+}
+
+fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
+    hir_contains_preflight_query(program, HirPreflightQuery::NamedCall(name))
+}
+
+fn hir_contains_non_arrow_this_value(program: &HirProgram) -> bool {
+    // Reuse the full HIR preflight walk; its special registration handling
+    // deliberately skips deferred projector factory bodies.
+    hir_contains_preflight_query(program, HirPreflightQuery::NonArrowThisValue)
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -798,7 +831,8 @@ impl<'ctx> HirCompiler<'ctx> {
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.projects_native_objects =
-            hir_contains_named_call(program, "__thaw_build_native_object_wrapper");
+            hir_contains_named_call(program, "__thaw_build_native_object_wrapper")
+                || hir_contains_non_arrow_this_value(program);
         self.tracks_physical_object_layouts =
             hir_contains_named_call(program, "__thaw_register_native_object_layout");
         self.tracks_object_integrity =
@@ -1446,7 +1480,11 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::EnumReverseLookup(obj, _)
             | HirExpr::JsonAsNumber(obj)
             | HirExpr::JsonAsString(obj)
-            | HirExpr::JsonAsBool(obj) => self.expr_awaits_frame_source(obj, frame_functions),
+            | HirExpr::JsonAsBool(obj)
+            | HirExpr::NonArrowThis { payload: obj, .. }
+            | HirExpr::NonArrowReceiverPack { value: obj, .. } => {
+                self.expr_awaits_frame_source(obj, frame_functions)
+            }
             HirExpr::PropAssign(obj, _, _, value)
             | HirExpr::JsonIndex(obj, value)
             | HirExpr::JsonKey(obj, value)

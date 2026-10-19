@@ -1578,7 +1578,9 @@ fn thaw_rethrow_cleanup_scan_effect_expr(
             }
             counts
         }
-        HirExpr::TypedClosure(_, value) | HirExpr::NonArrowFunction(value) => {
+        HirExpr::TypedClosure(_, value)
+        | HirExpr::NonArrowFunction(value)
+        | HirExpr::NonArrowThis { payload: value, .. } => {
             thaw_rethrow_cleanup_scan_effect_expr(value, target, outer)
         }
         HirExpr::OptionalSome(value, _)

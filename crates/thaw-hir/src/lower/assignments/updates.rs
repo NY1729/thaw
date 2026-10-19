@@ -527,7 +527,15 @@ impl<'a> FnLowerer<'a> {
                             }
                             MemberProp::Ident(prop) => {
                                 let object = self.lower_expr(&member.obj)?;
-                                let object_type = self.infer_expr_type(&object)?;
+                                let object = if matches!(member.obj.as_ref(), Expr::This(_)) {
+                                    object.with_non_arrow_this_access(NonArrowThisAccess::Read(prop.sym.to_string()))
+                                } else {
+                                    object
+                                };
+                                let object_type = match &object {
+                                    HirExpr::NonArrowThis { declared, .. } => declared.clone(),
+                                    _ => self.infer_expr_type(&object)?,
+                                };
                                 match &object_type {
                                     HirType::Object(fields)
                                         if fields.iter().any(|(name, ty)| {
@@ -584,7 +592,15 @@ impl<'a> FnLowerer<'a> {
                         }
                         MemberProp::Ident(prop) => {
                             let object = self.lower_expr(&member.obj)?;
-                            let object_type = self.infer_expr_type(&object)?;
+                            let object = if matches!(member.obj.as_ref(), Expr::This(_)) {
+                                object.with_non_arrow_this_access(NonArrowThisAccess::Read(prop.sym.to_string()))
+                            } else {
+                                object
+                            };
+                            let object_type = match &object {
+                                HirExpr::NonArrowThis { declared, .. } => declared.clone(),
+                                _ => self.infer_expr_type(&object)?,
+                            };
                             match &object_type {
                                 HirType::Object(fields)
                                     if fields.iter().any(|(name, ty)| {

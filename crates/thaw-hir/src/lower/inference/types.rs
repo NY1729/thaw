@@ -357,6 +357,9 @@ impl<'a> FnLowerer<'a> {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{name}`")),
+            HirExpr::NonArrowThis { access: NonArrowThisAccess::Value, .. } => Ok(HirType::Json),
+            HirExpr::NonArrowThis { declared, .. } => Ok(declared.clone()),
+            HirExpr::NonArrowReceiverPack { declared, .. } => Ok(HirType::NonArrowReceiver(Box::new(declared.clone()))),
             HirExpr::FunctionRef(_, params, ret) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
@@ -3184,7 +3187,10 @@ impl<'a> FnLowerer<'a> {
                             )
                         });
                         Ok(HirType::FunctionWithThis(
-                            Box::new(params[0].ty.clone()),
+                            Box::new(match &params[0].ty {
+                                HirType::NonArrowReceiver(receiver) => receiver.as_ref().clone(),
+                                receiver => receiver.clone(),
+                            }),
                             Box::new(visible_type),
                         ))
                     }

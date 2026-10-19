@@ -2694,6 +2694,44 @@ fn function_expression_receiver_provenance_survives_contextual_lowering() {
 }
 
 #[test]
+fn non_arrow_this_is_explicit_at_each_site_and_lexical_captures() {
+    let program = lower(r#"function main(): void {
+            const ordinary = function(this: { a: number, b: number }, flag: boolean): () => number {
+                if (flag) { this.a; } else { this.b; }
+                this.a = this.b;
+                const consume = (value: any): any => value;
+                consume(this);
+                const lexical = () => this.a;
+                const nested = function(this: { a: number }): number { return this.a; };
+                return lexical;
+            };
+        }"#);
+    let debug = format!("{:#?}", program.functions);
+    let accesses = debug.lines().collect::<Vec<_>>();
+    for property in ["a", "b"] {
+        assert!(accesses.windows(2).any(|lines| {
+            lines[0].contains("access: Read(") && lines[1].trim() == format!("\"{property}\",")
+        }), "missing independent read for {property}: {debug}");
+    }
+    assert!(accesses.windows(2).any(|lines| {
+        lines[0].contains("access: Write(") && lines[1].trim() == "\"a\","
+    }), "missing write metadata: {debug}");
+    assert!(debug.contains("access: Value"), "missing bare value access: {debug}");
+    assert!(debug.match_indices("Lambda(\n").any(|(offset, _)| {
+        debug[offset..]
+            .split_once("],\n")
+            .is_some_and(|(captures, _)| captures.contains("name: \"__thaw_this\""))
+    }), "lexical arrow did not capture this: {debug}");
+    let ordinary = debug.matches("name: \"__thaw_this\"").count();
+    assert!(ordinary >= 3, "expected outer and nested ordinary receiver bindings: {debug}");
+    let native = lower("class Native { value: number = 1; read(): number { return this.value; } } function main(): void {}");
+    assert!(
+        !format!("{:#?}", native.functions).contains("NonArrowThis {"),
+        "class-native `this` must stay native"
+    );
+}
+
+#[test]
 fn named_function_assigned_to_local_callback_keeps_native_scalar_return() {
     let program = lower(
         r#"function captureFunction(): () => boolean {
@@ -3526,7 +3564,7 @@ fn function_expression_this_is_hidden_from_public_signature() {
     assert_eq!(visible, &[HirType::F64]);
     let HirExpr::Lambda(_, params, _, _) = closure.as_ref() else { panic!("expected lambda body"); };
     assert_eq!(params[0].name, "__thaw_this");
-    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params[0].ty, HirType::NonArrowReceiver(Box::new(HirType::Json)));
     assert_eq!(params.len(), 2);
 }
 

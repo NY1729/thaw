@@ -102,6 +102,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .get(name)
                 .cloned()
                 .or_else(|| self.planning_var_types.borrow().get(name).cloned()),
+            HirExpr::NonArrowThis { declared, access, .. } => Some(match access {
+                NonArrowThisAccess::Value => HirType::Json,
+                NonArrowThisAccess::TypedValue => declared.clone(),
+                NonArrowThisAccess::Read(_) | NonArrowThisAccess::Write(_) => declared.clone(),
+            }),
             HirExpr::Assign(_, value)
             | HirExpr::IndexAssign(_, _, value)
             | HirExpr::PropAssign(_, _, _, value) => self.expr_hir_type(value),

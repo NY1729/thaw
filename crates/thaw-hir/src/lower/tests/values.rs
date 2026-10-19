@@ -92,7 +92,8 @@ fn flat_map_snapshots_each_shared_callback_array_inside_the_map_loop() {
                 for arg in args { visit_expr(arg, visit); }
             }
             HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
-            | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body) => visit_expr(body, visit),
+            | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body)
+            | HirExpr::NonArrowThis { payload: body, .. } => visit_expr(body, visit),
             HirExpr::Block(statements) => {
                 for statement in statements { visit_stmt(statement, visit); }
             }
@@ -371,7 +372,8 @@ fn flat_map_normalizes_sparse_wrapped_json_before_runtime_flattening() {
                 }
                 visit_expr(body, observed, collect_allocations);
             }
-            HirExpr::TypedClosure(_, body) | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body) => {
+            HirExpr::TypedClosure(_, body) | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body)
+            | HirExpr::NonArrowThis { payload: body, .. } => {
                 visit_expr(body, observed, collect_allocations);
             }
             HirExpr::Call(callee, arguments) => {
@@ -2984,7 +2986,7 @@ fn optional_object_method_call_keeps_receiver_parameter() {
 }
 
 #[test]
-fn object_method_returning_this_copies_back_and_returns_the_owner() {
+fn object_method_returning_this_keeps_the_actual_receiver_value() {
     let program = lower(r#"
         function main(): boolean {
             const o = { n: 0, inc() { this.n++; return this; } };
@@ -2993,7 +2995,8 @@ fn object_method_returning_this_copies_back_and_returns_the_owner() {
     "#);
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
     let lowered = format!("{:?}", main.body);
-    assert!(lowered.contains("__thaw_method_receiver_copy_"), "{lowered}");
+    assert!(lowered.contains("access: Value"), "{lowered}");
+    assert!(!lowered.contains("__thaw_method_receiver_copy_"), "{lowered}");
     assert!(lowered.contains("PropAssign"), "{lowered}");
 }
 
@@ -3161,7 +3164,8 @@ fn array_and_string_end_arguments_default_only_for_undefined() {
                 visit_expr(callee, visit); visit_expr(this_arg, visit); for arg in args { visit_expr(arg, visit); }
             }
             HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
-            | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body) => visit_expr(body, visit),
+            | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body)
+            | HirExpr::NonArrowThis { payload: body, .. } => visit_expr(body, visit),
             HirExpr::Block(statements) => for statement in statements { visit_stmt(statement, visit); },
             HirExpr::Conditional(test, yes, no, _) => { visit_expr(test, visit); visit_expr(yes, visit); visit_expr(no, visit); }
             HirExpr::BinOp(_, left, right) | HirExpr::EvalThen(left, right)

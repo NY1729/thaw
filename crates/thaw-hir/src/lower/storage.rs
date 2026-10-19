@@ -1582,7 +1582,22 @@ impl FnLowerer<'_> {
             }
             Expr::This(_) => {
                 let name = self.resolve_binding("this");
-                self.source_scope.get(&name).cloned().or_else(|| self.scope.get(&name).cloned()).map(restore)
+                self.source_scope
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| {
+                        self.active_non_arrow_this
+                            .as_ref()
+                            .filter(|(active, _)| active == &name)
+                            .map(|(_, declared)| declared.clone())
+                    })
+                    .or_else(|| {
+                        self.scope.get(&name).cloned().map(|ty| match ty {
+                            HirType::NonArrowReceiver(receiver) => *receiver,
+                            other => other,
+                        })
+                    })
+                    .map(restore)
             }
             Expr::Paren(value) => self.source_contract_type_for_expression(&value.expr),
             Expr::TsNonNull(value) => self.source_contract_type_for_expression(&value.expr),

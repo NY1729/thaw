@@ -727,6 +727,115 @@ pub extern "C" fn thaw_json_from_borrowed_handle(handle: u64) -> *mut Value {
     }
 }
 
+/// Owns the raw receiver word used by deferred non-arrow `this` validation.
+/// The three arena words are `[kind, word, owner_box]`.
+///
+/// # Safety
+/// For tag 7, `word` must be null or point to a valid `Value`; tags 5, 6, and 9
+/// must contain native words with valid provenance for their eventual consumer.
+/// Callers that let the payload escape an invocation must enable arena tracing.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_non_arrow_receiver_new(kind: u8, word: u64) -> *mut u64 {
+    let payload = thaw_arena::thaw_arena_alloc(3 * std::mem::size_of::<u64>(), 8).cast::<u64>();
+    if payload.is_null() {
+        set_host_error("Unable to retain non-arrow receiver".into());
+        return std::ptr::null_mut();
+    }
+    unsafe { std::ptr::write_bytes(payload, 0, 3) };
+
+    let (kind, word, owner) = match kind {
+        0 | 1 => (kind, 0, std::ptr::null_mut()),
+        2..=6 | 9 => (kind, word, std::ptr::null_mut()),
+        7 => {
+            if word == 0 {
+                set_host_error("Invalid JSON receiver pointer".into());
+                return std::ptr::null_mut();
+            }
+            let source = word as *const Value;
+            let value = unsafe { &*source };
+            let nullish_kind = match value {
+                Value::Host(lease) => match host_query(lease, 5) {
+                    Some(undefined) if undefined == "1" => Some(0),
+                    Some(_) => match host_query(lease, 6) {
+                        Some(nullish) if nullish == "1" => Some(1),
+                        Some(_) => None,
+                        None => return std::ptr::null_mut(),
+                    },
+                    None => return std::ptr::null_mut(),
+                },
+                value if is_napi_undefined(value) => Some(0),
+                Value::Null => Some(1),
+                _ => None,
+            };
+            if let Some(kind) = nullish_kind {
+                (kind, 0, std::ptr::null_mut())
+            } else {
+                let owned = thaw_json_track_arena_owned_root(leak(value.clone()));
+                if owned.is_null() {
+                    return std::ptr::null_mut();
+                }
+                (7, owned as u64, std::ptr::null_mut())
+            }
+        }
+        8 => {
+            if word == 0 {
+                set_host_error("Invalid host receiver handle".into());
+                return std::ptr::null_mut();
+            }
+            let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+                set_host_error("Host operations unavailable".into());
+                return std::ptr::null_mut();
+            };
+            if without_typed_decode_scope(|| (ops.retain)(word)) == 0 {
+                set_host_error("Unable to retain host receiver".into());
+                return std::ptr::null_mut();
+            }
+            let lease = Rc::new(HostLease {
+                handle: word,
+                release: ops.release,
+            });
+            match host_query(&lease, 5) {
+                Some(undefined) if undefined == "1" => {
+                    unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
+                    (0, 0, std::ptr::null_mut())
+                }
+                Some(_) => match host_query(&lease, 6) {
+                    Some(nullish) if nullish == "1" => {
+                        unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
+                        (1, 0, std::ptr::null_mut())
+                    }
+                    Some(_) => {
+                        let owner = thaw_json_track_arena_owned_root(leak(Value::Host(lease)));
+                        if owner.is_null() {
+                            return std::ptr::null_mut();
+                        }
+                        (8, word, owner)
+                    }
+                    None => {
+                        unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
+                        return std::ptr::null_mut();
+                    }
+                },
+                None => {
+                    unsafe { thaw_json_destroy(leak(Value::Host(lease))) };
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+        _ => {
+            set_host_error("Invalid non-arrow receiver kind".into());
+            return std::ptr::null_mut();
+        }
+    };
+
+    unsafe {
+        payload.write(kind as u64);
+        payload.add(1).write(word);
+        payload.add(2).write(owner as u64);
+    }
+    payload
+}
+
 fn host_key_json(key: &[u8]) -> CString {
     let mut encoded = Vec::new();
     write_json_string(key, &mut encoded);
@@ -9135,6 +9244,271 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    extern "C" fn raw_receiver_test_retain(handle: u64) -> u8 {
+        u8::from(handle != 198)
+    }
+
+    extern "C" fn raw_receiver_test_get(_: u64, _: *const c_char) -> HostHandleResult {
+        HostHandleResult {
+            value: 0,
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn raw_receiver_test_release(handle: u64) -> u8 {
+        HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        assert!(handle >= 100);
+        1
+    }
+
+    extern "C" fn raw_receiver_cleanup_error_release(handle: u64) -> u8 {
+        HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        HOST_ERROR.with(|error| *error.borrow_mut() = Some("release cleanup error".into()));
+        assert!(handle >= 100);
+        1
+    }
+
+    extern "C" fn raw_receiver_test_query(handle: u64, operation: u8) -> HostTextResult {
+        if handle == 199 && operation == 5 {
+            return HostTextResult {
+                value: std::ptr::null(),
+                error: thaw_arena::owned_string(b"receiver query failed"),
+            };
+        }
+        let value: &[u8] = match (handle, operation) {
+            (100, 0) => b"undefined",
+            (100, 5) => b"1",
+            (101, 0) => b"object",
+            (101, 5) => b"0",
+            (101, 6) => b"1",
+            (102, 0) => b"boolean",
+            (102, 5 | 6) => b"0",
+            (103, 0) => b"bigint",
+            (103, 5 | 6) => b"0",
+            (104, 0) => b"object",
+            (104, 5 | 6) => b"0",
+            (105, 0) => b"undefined",
+            (105, 5) => b"1",
+            (106, 0) => b"object",
+            (106, 5) => b"0",
+            (106, 6) => b"1",
+            (199, 0) => b"object",
+            (199, 6) => b"0",
+            _ => panic!("unexpected receiver query {handle}/{operation}"),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(value),
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_raw_receiver_test_host_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: raw_receiver_test_retain,
+                release: raw_receiver_test_release,
+                get: raw_receiver_test_get,
+                query: raw_receiver_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }));
+        });
+    }
+
+    #[test]
+    fn raw_receiver_payload_preserves_native_words_without_host_operations() {
+        std::thread::spawn(|| {
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+            for kind in [0, 1, 2, 3, 4, 5, 6, 9] {
+                let payload = unsafe { thaw_non_arrow_receiver_new(kind, 0x1234) };
+                assert!(!payload.is_null());
+                assert_eq!(unsafe { *payload }, kind as u64);
+                assert_eq!(
+                    unsafe { *payload.add(1) },
+                    if kind < 2 { 0 } else { 0x1234 }
+                );
+                assert_eq!(unsafe { *payload.add(2) }, 0);
+            }
+            let invalid = unsafe { thaw_non_arrow_receiver_new(10, 0) };
+            assert!(invalid.is_null());
+            assert!(HOST_ERROR.with(|error| error.borrow().is_some()));
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn raw_receiver_payload_owns_a_shared_json_box_after_source_destruction() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let source = leak(Value::shared_object(indexmap::IndexMap::new()));
+            let payload = unsafe { thaw_non_arrow_receiver_new(7, source as u64) };
+            assert!(!payload.is_null());
+            let owned = unsafe { *payload.add(1) as *mut Value };
+            assert_ne!(owned, source);
+            let (Value::Object(source_object), Value::Object(owned_object)) =
+                (unsafe { &*source }, unsafe { &*owned })
+            else {
+                panic!("JSON receiver should remain an object");
+            };
+            assert!(Rc::ptr_eq(source_object, owned_object));
+            unsafe { thaw_json_destroy(source) };
+            assert!(matches!(unsafe { &*owned }, Value::Object(_)));
+            assert_eq!(unsafe { *payload.add(2) }, 0);
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(owned).is_none());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn raw_receiver_payload_canonicalizes_boxed_nullish_values() {
+        for (source_value, expected_kind) in [(Value::Null, 1), (napi_undefined_value(), 0)] {
+            let source = leak(source_value);
+            let payload = unsafe { thaw_non_arrow_receiver_new(7, source as u64) };
+            assert!(!payload.is_null());
+            assert_eq!(unsafe { *payload }, expected_kind);
+            assert_eq!(unsafe { *payload.add(1) }, 0);
+            assert_eq!(unsafe { *payload.add(2) }, 0);
+            unsafe { thaw_json_destroy(source) };
+        }
+    }
+
+    #[test]
+    fn raw_receiver_payload_propagates_host_query_failure_for_json_values() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            install_raw_receiver_test_host_operations();
+            let source = leak(Value::Host(Rc::new(HostLease {
+                handle: 199,
+                release: raw_receiver_test_release,
+            })));
+            let payload = unsafe { thaw_non_arrow_receiver_new(7, source as u64) };
+            let correctly_failed = payload.is_null();
+            if !payload.is_null() {
+                unsafe { thaw_json_destroy(*payload.add(1) as *mut Value) };
+            }
+            unsafe { thaw_json_destroy(source) };
+            assert_eq!(HOST_RELEASES.with(Cell::get), 1);
+            assert_eq!(
+                HOST_ERROR.with(|error| error.borrow_mut().take()),
+                Some("receiver query failed".into())
+            );
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+            assert!(
+                correctly_failed,
+                "a failed nullish query must reject the payload"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn raw_receiver_payload_cleanup_preserves_query_errors_and_discards_cleanup_errors() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            install_raw_receiver_test_host_operations();
+            HOST_OPERATIONS.with(|slot| {
+                let mut ops = slot.get().unwrap();
+                ops.release = raw_receiver_cleanup_error_release;
+                slot.set(Some(ops));
+            });
+
+            let undefined = unsafe { thaw_non_arrow_receiver_new(8, 105) };
+            assert!(!undefined.is_null());
+            assert_eq!(unsafe { *undefined }, 0);
+            assert!(HOST_ERROR.with(|error| error.borrow().is_none()));
+
+            let null = unsafe { thaw_non_arrow_receiver_new(8, 106) };
+            assert!(!null.is_null());
+            assert_eq!(unsafe { *null }, 1);
+            assert!(HOST_ERROR.with(|error| error.borrow().is_none()));
+
+            let failed = unsafe { thaw_non_arrow_receiver_new(8, 199) };
+            assert!(failed.is_null());
+            assert_eq!(
+                HOST_ERROR.with(|error| error.borrow().clone()),
+                Some("receiver query failed".into())
+            );
+            assert_eq!(HOST_RELEASES.with(Cell::get), 3);
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn raw_receiver_payload_retains_any_host_kind_until_its_arena_root_dies() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            install_raw_receiver_test_host_operations();
+            thaw_arena::thaw_arena_enable_tracing();
+            for handle in [102, 103, 104] {
+                let payload = unsafe { thaw_non_arrow_receiver_new(8, handle) };
+                assert!(!payload.is_null());
+                assert_eq!(unsafe { *payload }, 8);
+                assert_eq!(unsafe { *payload.add(1) }, handle);
+                let owner = unsafe { *payload.add(2) as *mut Value };
+                assert!(matches!(unsafe { &*owner }, Value::Host(_)));
+                let cell = thaw_arena::thaw_arena_alloc(24, 8);
+                assert!(!cell.is_null());
+                unsafe { (cell as *mut u64).copy_from_nonoverlapping(payload, 3) };
+                let root = thaw_arena::ArenaRoot::new(cell as usize);
+                thaw_arena::thaw_arena_reset();
+                assert!(matches!(unsafe { &*owner }, Value::Host(_)));
+                drop(root);
+                thaw_arena::thaw_arena_reset();
+                assert!(arena_owned_json_root_token(owner).is_none());
+            }
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 3));
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn raw_receiver_payload_normalizes_host_nullish_and_releases_partial_leases() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            HOST_ERROR.with(|error| error.borrow_mut().take());
+            install_raw_receiver_test_host_operations();
+            let undefined = unsafe { thaw_non_arrow_receiver_new(8, 100) };
+            assert!(!undefined.is_null());
+            assert_eq!(unsafe { *undefined }, 0);
+            assert_eq!(unsafe { *undefined.add(1) }, 0);
+            assert_eq!(unsafe { *undefined.add(2) }, 0);
+            let null = unsafe { thaw_non_arrow_receiver_new(8, 101) };
+            assert!(!null.is_null());
+            assert_eq!(unsafe { *null }, 1);
+            assert_eq!(unsafe { *null.add(1) }, 0);
+            assert_eq!(unsafe { *null.add(2) }, 0);
+            assert_eq!(HOST_RELEASES.with(Cell::get), 2);
+            let failed = unsafe { thaw_non_arrow_receiver_new(8, 199) };
+            assert!(failed.is_null());
+            assert_eq!(HOST_RELEASES.with(Cell::get), 3);
+            assert_eq!(
+                HOST_ERROR.with(|error| error.borrow_mut().take()),
+                Some("receiver query failed".into())
+            );
+            assert!(unsafe { thaw_non_arrow_receiver_new(8, 198) }.is_null());
+            assert_eq!(HOST_RELEASES.with(Cell::get), 3);
+            assert!(unsafe { thaw_non_arrow_receiver_new(8, 0) }.is_null());
+            assert!(unsafe { thaw_non_arrow_receiver_new(7, 0) }.is_null());
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn framed_error_receiver_keeps_native_only_json_fallback() {
