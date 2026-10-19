@@ -125,6 +125,29 @@ function main(): void {
 }
 
 #[test]
+fn object_methods_returning_this_keep_identity_and_mutations() {
+    let source = r#"const o = {
+  n: 0,
+  inc() { this.n++; return this; },
+  dec() { this.n--; },
+  show() { return this.n; },
+};
+function main(): void {
+  console.log(o.inc() === o, o.n);
+  const r = o.inc();
+  r.inc();
+  console.log(o.n, r.n, o.inc().inc().n, o.n);
+  o.dec(); o.dec();
+  console.log(o.n, o.show());
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "object_methods_returning_this_keep_identity_and_mutations"),
+        "true 1\n3 3 5 5\n3 3\n"
+    );
+}
+
+#[test]
 fn kb_contract_async_receiver_access_is_lazy_across_await() {
     let source = r#"let trace = "";
 const read = async function(this: { n: number }): Promise<number> {
