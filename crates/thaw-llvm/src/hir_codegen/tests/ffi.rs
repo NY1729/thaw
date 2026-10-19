@@ -2737,16 +2737,25 @@ fn ffi_collection_copy_in_keeps_live_any_values_and_releases_temporary_handles()
             const returnedSet: any = native_any_set_alias(setSource);
             const values: any = new Function("return new Map(Array.from({length: 1024}, (_, i) => ['value' + i, i]))")();
             await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterWarm = liveHandles();
+            const failing: any = new Function("return new Map([['valid', 1], ['bad', 'wrong']])")();
+            try { native_number_map_sum(failing); } catch (_) {}
             await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterNoop = liveHandles();
+            const afterWarmFailure = liveHandles();
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            const afterNoopFailure = liveHandles();
+            for (let i = 0; i < 15; i++) {
+                try { native_number_map_sum(failing); } catch (_) {}
+            }
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            const afterFailures = liveHandles();
+            console.log(afterFailures - afterNoopFailure === afterNoopFailure - afterWarmFailure);
             native_number_map_sum(values);
             await new Promise<void>(resolve => setTimeout(resolve, 0));
             const afterFirst = liveHandles();
             for (let i = 0; i < 15; i++) native_number_map_sum(values);
             await new Promise<void>(resolve => setTimeout(resolve, 0));
             const afterMany = liveHandles();
-            console.log(afterMany - afterFirst === afterNoop - afterWarm);
+            console.log(afterMany - afterFirst === afterNoopFailure - afterWarmFailure);
             console.log(returned.get(key) === stored, returned.get(key).value, returnedSet.has(key));
             await new Promise<void>(resolve => setTimeout(resolve, 0));
             console.log(returned.get(key) === stored, returned.get(key).value, returnedSet.has(key));
@@ -2798,7 +2807,7 @@ fn ffi_collection_copy_in_keeps_live_any_values_and_releases_temporary_handles()
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\ntrue\ntrue 3 true\ntrue 3 true\n9\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\ntrue\ntrue\ntrue 3 true\ntrue 3 true\n9\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2813,6 +2822,7 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         declare function native_object_map_sum(value: Map<{value: number}, number>): number;
         declare function native_optional_json_map_sum(value: Map<string, any | undefined>): number;
         declare function native_optional_json_map_empty(): Map<string, any | undefined>;
+        declare function native_object_value_map(value: Map<string, {value: number}>): number;
         declare function native_string_map_empty(): Map<string, number>;
         declare function native_set_sum(value: Set<number>): number;
         declare function native_set_order(value: Set<number>): number;
@@ -2915,6 +2925,16 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
             const anySet: any = new Function("return new Set([1, 1, 2])")();
             console.log(native_any_set_size(anySet), native_collection_calls());
             native_set_mutate(nativeSet); console.log(nativeSet.has(9), native_collection_calls());
+
+            const proxy: any = new Function("return new Proxy(new Map(), {})")();
+            let intrinsicMessage = "";
+            try { Map.prototype.entries.call(proxy); } catch (error) { intrinsicMessage = (error as Error).message; }
+            try { native_map_sum(proxy); console.log("accepted proxy map"); }
+            catch (error) { console.log(error instanceof TypeError, (error as Error).message === intrinsicMessage, native_collection_calls()); }
+            const throwingValue: any = new Function("const sentinel = new Error('getter sentinel'); const value = {}; Object.defineProperty(value, 'value', {get() { throw sentinel; }}); return value")();
+            const throwingMap: any = new Function("value", "return new Map([['valid', {value: 1}], ['throws', value]])")(throwingValue);
+            try { native_object_value_map(throwingMap); console.log("accepted throwing value"); }
+            catch (error) { console.log(error instanceof Error, (error as Error).message === "getter sentinel", native_collection_calls()); }
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -2922,6 +2942,9 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_js_collection_copyin");
     compiler.compile_program(&program).unwrap();
+    let ir = compiler.module.print_to_string().to_string();
+    assert!(ir.contains("ffi_copyin_map_allocation_failed"), "Map allocation failure must branch before the native call");
+    assert!(ir.contains("ffi_copyin_map_insert_failed"), "Map insertion failure must branch before the native call");
     let dir = std::env::temp_dir().join(format!("thaw-ffi-js-collection-copyin-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let object = dir.join("program.o");
@@ -2972,6 +2995,7 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         double native_any_map_lookup(void *map, void *key) { calls++; return thaw_map_any_get_f64(map, key); }
         double native_object_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
         double native_optional_json_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
+        double native_object_value_map(void *map) { (void)map; calls++; return 0; }
         void *native_optional_json_map_empty(void) { return thaw_map_new(); }
         double native_set_sum(void *set) { calls++; return sum_words(thaw_map_snapshot_keys(set)); }
         double native_set_order(void *set) { calls++; return first_last(thaw_map_snapshot_keys(set)); }
@@ -3007,6 +3031,6 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\n6 2\nundefined 3\nfalse 4\n0 5\n0 6\n1122 7\n6 8\n5 9\ntrue 9\n17 10\ntrue 10\n23 11\ntrue 11\ntrue 11\n0 12\n4 5 14\n7 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\n6 16\n3 17\n1122 18\n12 19\ntrue 19\ntrue 19\ntrue 19\ntrue 19\n2 20\n2 21\ntrue 22\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\n6 2\nundefined 3\nfalse 4\n0 5\n0 6\n1122 7\n6 8\n5 9\ntrue 9\n17 10\ntrue 10\n23 11\ntrue 11\ntrue 11\n0 12\n4 5 14\n7 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\ntrue 15\n6 16\n3 17\n1122 18\n12 19\ntrue 19\ntrue 19\ntrue 19\ntrue 19\n2 20\n2 21\ntrue 22\ntrue true 22\ntrue true 22\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
