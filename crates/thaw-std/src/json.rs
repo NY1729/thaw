@@ -1221,16 +1221,6 @@ impl Value {
         structured_clone::clone_value(self, structured_clone::CloneMode::Snapshot)
             .expect("snapshot clone cannot invoke a failing host operation")
     }
-
-    /// `live`: materialize host objects into independent native copies (`structuredClone`).
-    fn deep_clone_mode(&self, live: bool) -> Value {
-        let mode = if live {
-            structured_clone::CloneMode::Structured
-        } else {
-            structured_clone::CloneMode::Snapshot
-        };
-        structured_clone::clone_value(self, mode).unwrap_or(Value::Null)
-    }
 }
 
 /// Display uses the same serializer as `JSON.stringify`, including UTF-16 keys.
@@ -2303,7 +2293,10 @@ pub unsafe extern "C" fn thaw_json_structured_clone(value: *const Value) -> *mut
     let Some(value) = (unsafe { value.as_ref() }) else {
         return leak(Value::Null);
     };
-    leak(value.deep_clone_mode(true))
+    match structured_clone::clone_value(value, structured_clone::CloneMode::Structured) {
+        Ok(clone) => leak(clone),
+        Err(()) => std::ptr::null_mut(),
+    }
 }
 
 fn number_value(value: f64) -> Value {

@@ -901,6 +901,75 @@ fn structured_clone_consumes_union_arrays_once_and_keeps_clones_independent() {
 }
 
 #[test]
+fn structured_clone_checks_host_error_before_using_the_result() {
+    use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
+
+    let clone = || HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_json_clone".into())),
+        vec![HirExpr::Var("value".into())],
+    );
+    let function = |name: &str, ret, body| HirFunction {
+        name: name.into(),
+        params: vec![HirParam { name: "value".into(), ty: HirType::Json }],
+        ret,
+        is_async: false,
+        body,
+    };
+    // Direct HIR keeps this test focused on the dynamic clone intrinsic, outside source-function wrappers.
+    let program = HirProgram {
+        globals: Vec::new(),
+        initializers: Vec::new(),
+        functions: vec![
+            function("discarded_clone", HirType::Void, vec![HirStmt::Expr(clone())]),
+            function("transferred_clone", HirType::Json, vec![
+                HirStmt::Let("clone".into(), HirType::Json, clone()),
+                HirStmt::Return(Some(HirExpr::Var("clone".into()))),
+            ]),
+        ],
+        extern_functions: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "structured_clone_host_error");
+    compiler.compile_program(&program).unwrap();
+    let discarded = inkwell::values::AnyValue::print_to_string(
+        &compiler.module.get_function("discarded_clone").unwrap(),
+    ).to_string();
+
+    let clone_call = discarded.find("call ptr @thaw_json_structured_clone").unwrap();
+    let after_clone = &discarded[clone_call..];
+    let host_error = after_clone.find("call ptr @thaw_json_take_host_error")
+        .expect("structured clone must check the host error immediately");
+    let instruction_count = after_clone[..host_error].lines().skip(1)
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.ends_with(':') && line != "}"
+        })
+        .count();
+    assert!(instruction_count <= 4,
+        "host-error check must be within four instructions after clone; found {instruction_count}");
+    let lines: Vec<_> = discarded.lines().collect();
+    let error_line = lines.iter().position(|line| line.contains("@thaw_json_take_host_error")).unwrap();
+    let failed_start = lines[error_line + 1..].iter().position(|line| line.trim().starts_with("json_host_failed:"))
+        .map(|index| error_line + index + 1).expect("host error failure block missing");
+    let failed_end = lines[failed_start + 1..].iter().position(|line| line.trim().ends_with(':'))
+        .map_or(lines.len(), |index| failed_start + index + 1);
+    let error_block = lines[failed_start..failed_end].join("\n");
+    assert!(error_block.contains("@thaw_json_destroy"),
+        "host-error failure block must destroy the owned result:\n{error_block}");
+    assert!(error_block.contains("br i1 %has_pending_exception"),
+        "host-error failure must branch through the pending-exception path");
+    assert!(discarded.contains("destroy_untransferred_json_result"),
+        "discarded successful clone must retain guarded owned-result cleanup:\n{discarded}");
+
+    let returned_body = inkwell::values::AnyValue::print_to_string(
+        &compiler.module.get_function("transferred_clone").unwrap(),
+    ).to_string();
+    assert!(returned_body.contains("call ptr @thaw_json_structured_clone"), "returned clone intrinsic missing");
+    assert!(!returned_body.contains("destroy_untransferred_json_result"),
+        "returning the clone must revoke discarded-result cleanup");
+}
+
+#[test]
 fn compiles_structured_clone_of_a_map_or_set() {
     // Builds a fresh Map/Set and recursively clones each entry, snapshotting
     // the source via the same conversion `[...map]`/`Array.from(map)` use.
