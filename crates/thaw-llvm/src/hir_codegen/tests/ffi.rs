@@ -2096,9 +2096,9 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
             }));
         }
     "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_nested_object_arrays");
     compiler.compile_program(&program).unwrap();
     let dir = std::env::temp_dir().join(format!(
@@ -2719,6 +2719,12 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
 fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
     let source = r#"
         declare function native_map_sum(value: Map<string, number>): number;
+        declare function native_map_order(value: Map<string, number>): number;
+        declare function native_num_map_sum(value: Map<number, number>): number;
+        declare function native_nested_map_sum(value: Map<string, Map<string, number>>): number;
+        declare function native_any_map_lookup(value: Map<any, number>, key: any): number;
+        declare function native_object_map_sum(value: Map<{value: number}, number>): number;
+        declare function native_string_map_empty(): Map<string, number>;
         declare function native_set_sum(value: Set<number>): number;
         declare function native_map_mutate(value: Map<string, number>): number;
         declare function native_set_mutate(value: Set<number>): number;
@@ -2740,16 +2746,41 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
             catch (error) { console.log("empty map rejected", error instanceof TypeError, native_collection_calls()); }
             try { console.log(native_set_sum(emptySet), native_collection_calls()); }
             catch (error) { console.log("empty set rejected", error instanceof TypeError, native_collection_calls()); }
+            const ordered: any = new Function("const m = new Map([['first', 11], ['last', 22]]); m.entries = () => { throw new Error('overridden entries'); }; m[Symbol.iterator] = () => { throw new Error('overridden iterator'); }; return m")();
+            console.log(native_map_order(ordered), native_collection_calls());
+            const numeric: any = new Function("return new Map([[NaN, 1], [NaN, 2], [-0, 3], [+0, 4]])")();
+            console.log(native_num_map_sum(numeric), native_collection_calls());
+            const nested: any = new Function("return new Map([['inner', new Map([['a', 5]])]])")();
+            console.log(native_nested_map_sum(nested), native_collection_calls());
+            const nestedBad: any = new Function("return new Map([['inner', new Map([['a', 5], ['b', 'bad']])]])")();
+            try { native_nested_map_sum(nestedBad); console.log("accepted nested map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const objectKey: any = new Function("return {}")();
+            const identityMap: any = new Function("key", "return new Map([[key, 17]])")(objectKey);
+            console.log(native_any_map_lookup(identityMap, objectKey), native_collection_calls());
+            const wrongNative: any = native_string_map_empty();
+            try { native_num_map_sum(wrongNative); console.log("accepted wrong native map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            const objectKeyMap: Map<{value: number}, number> = new Map<{value: number}, number>();
+            objectKeyMap.set({value: 1}, 23);
+            console.log(native_object_map_sum(objectKeyMap), native_collection_calls());
+            const foreignObjectKeyMap: any = new Function("return new Map([[{value: 1}, 23]])")();
+            try { native_object_map_sum(foreignObjectKeyMap); console.log("accepted object key"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
             const nativeMap = new Map<string, number>(); nativeMap.set("a", 4);
             const nativeSet = new Set<number>(); nativeSet.add(5);
             console.log(native_map_sum(nativeMap), native_set_sum(nativeSet), native_collection_calls());
+            native_map_mutate(nativeMap); console.log(nativeMap.get("changed"), native_collection_calls());
             const badKey: any = new Function("return new Map([[1, 2]])")();
+            const badLateKey: any = new Function("return new Map([['a', 1], [1, 2]])")();
             const badValue: any = new Function("return new Map([['a', 1], ['b', 'bad']])")();
             const plain: any = new Function("return {entries: []}")();
             const forgedMap: any = new Function("return {__thaw_map_entries__: [['a', 1]]}")();
             const forgedSet: any = new Function("return {__thaw_set_values__: [1]}")();
             const wrongKind: any = new Function("return new Set([1])")();
             try { native_map_sum(badKey); console.log("accepted invalid map"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_map_sum(badLateKey); console.log("accepted invalid map"); }
             catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
             try { native_map_sum(badValue); console.log("accepted invalid map"); }
             catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
@@ -2792,9 +2823,31 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         }
         extern void *thaw_map_snapshot_values(const void *map);
         extern void *thaw_map_snapshot_keys(const void *map);
+        extern void *thaw_map_new(void);
         extern uint64_t thaw_map_str_set(const void *map, const char *key, uint64_t value);
         extern uint64_t thaw_map_num_set(const void *map, double key, uint64_t value);
+        extern void thaw_map_clear(const void *map);
         double native_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
+        static double first_last(void *array) {
+            int64_t length; memcpy(&length, array, sizeof(length));
+            if (length < 2) return 0;
+            uint64_t first_bits, last_bits; double first, last;
+            memcpy(&first_bits, (uint8_t *)array + 8, sizeof(first_bits));
+            memcpy(&last_bits, (uint8_t *)array + 8 + (length - 1) * 8, sizeof(last_bits));
+            memcpy(&first, &first_bits, sizeof(first)); memcpy(&last, &last_bits, sizeof(last));
+            return first * 100 + last;
+        }
+        double native_map_order(void *map) { calls++; return first_last(thaw_map_snapshot_values(map)); }
+        void *native_string_map_empty(void) {
+            double one = 1; uint64_t bits; memcpy(&bits, &one, sizeof(bits));
+            void *map = thaw_map_new(); thaw_map_str_set(map, "layout", bits); thaw_map_clear(map); return map;
+        }
+        double native_num_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
+        extern void *thaw_map_str_get_ptr(const void *map, const char *key);
+        extern double thaw_map_any_get_f64(const void *map, const void *key);
+        double native_nested_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(thaw_map_str_get_ptr(map, "inner"))); }
+        double native_any_map_lookup(void *map, void *key) { calls++; return thaw_map_any_get_f64(map, key); }
+        double native_object_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
         double native_set_sum(void *set) { calls++; return sum_words(thaw_map_snapshot_keys(set)); }
         double native_map_mutate(void *map) {
             uint64_t bits; double value = 7; memcpy(&bits, &value, sizeof(bits));
@@ -2815,6 +2868,6 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\n6 2\n3 undefined 3\n4 false 4\n0 0 6\n4 5 8\ntrue 8\ntrue 8\ntrue 8\ntrue 8\ntrue 8\ntrue 8\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\nset rejected true 1\nundefined 2\nset mutate rejected true 2\n0 3\nempty set rejected true 3\n1122 4\n6 5\n5 6\ntrue 6\n17 7\ntrue 7\n23 8\ntrue 8\n4 5 10\n7 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\n");
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -288,13 +288,144 @@ impl<'ctx> HirCompiler<'ctx> {
         let function = self.current_function();
         let accepted = self.context.append_basic_block(function, "native_collection_accepted");
         let rejected = self.context.append_basic_block(function, "native_collection_rejected");
+        let done = self.context.append_basic_block(function, "native_collection_ready");
         self.builder.build_conditional_branch(valid, accepted, rejected)
             .map_err(|error| error.to_string())?;
-        self.builder.position_at_end(rejected);
-        self.compile_throw_type_error("Expected a native collection with a compatible key and value type")?;
         self.builder.position_at_end(accepted);
-        self.builder.build_int_to_ptr(pointer, self.context.ptr_type(AddressSpace::default()),
-            "native_collection_argument").map(Into::into).map_err(|error| error.to_string())
+        let native = self.builder.build_int_to_ptr(pointer, self.context.ptr_type(AddressSpace::default()),
+            "native_collection_argument").map_err(|error| error.to_string())?;
+        let native_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(rejected);
+        let (key_ty, value_ty) = match ty {
+            HirType::Map(key, value) => (Some(key.as_ref()), Some(value.as_ref())),
+            HirType::Set(_) => (None, None),
+            _ => unreachable!(),
+        };
+        if !self.validating_native_argument || matches!(ty, HirType::Set(_)) {
+            self.compile_throw_type_error("Expected a native collection with a compatible key and value type")?;
+        } else {
+            let key_ty = key_ty.unwrap();
+            if !matches!(key_ty, HirType::F64 | HirType::Str | HirType::Json) {
+                self.compile_throw_type_error("JavaScript Map copy-in supports number, string, or any keys")?;
+            } else {
+                let snapshot = self.builder.build_call(
+                    self.module.get_function("thaw_json_host_collection_snapshot").unwrap(),
+                    &[json.into(), self.context.i8_type().const_int(1, false).into()],
+                    "js_map_entry_snapshot",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Map snapshot returned no value")?.into_pointer_value();
+                self.compile_check_json_host_error(snapshot.into(), Some("thaw_json_destroy"))?;
+                let snapshot_present = self.builder.build_is_not_null(snapshot, "js_map_snapshot_present")
+                    .map_err(|error| error.to_string())?;
+                let snapshot_ok = self.context.append_basic_block(function, "js_map_snapshot_ok");
+                let snapshot_failed = self.context.append_basic_block(function, "js_map_snapshot_failed");
+                self.builder.build_conditional_branch(snapshot_present, snapshot_ok, snapshot_failed)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(snapshot_failed);
+                self.compile_throw_type_error("Expected a JavaScript Map")?;
+                self.builder.position_at_end(snapshot_ok);
+
+                let map = self.builder.build_call(self.module.get_function("thaw_map_new").unwrap(), &[], "ffi_copyin_map")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_map_new returned no value")?.into_pointer_value();
+                let allocated = self.builder.build_is_not_null(map, "ffi_copyin_map_allocated")
+                    .map_err(|error| error.to_string())?;
+                let map_ok = self.context.append_basic_block(function, "ffi_copyin_map_allocated");
+                let map_failed = self.context.append_basic_block(function, "ffi_copyin_map_allocation_failed");
+                self.builder.build_conditional_branch(allocated, map_ok, map_failed)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(map_failed);
+                self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[snapshot.into()], "destroy_failed_map_snapshot")
+                    .map_err(|error| error.to_string())?;
+                self.compile_throw_type_error("Unable to allocate native Map")?;
+                self.builder.position_at_end(map_ok);
+
+                let length = self.builder.build_call(self.module.get_function("thaw_json_array_length").unwrap(), &[snapshot.into()], "js_map_entry_count")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_array_length returned no value")?.into_int_value();
+                let loop_header = self.context.append_basic_block(function, "js_map_copyin_header");
+                let loop_body = self.context.append_basic_block(function, "js_map_copyin_body");
+                let loop_done = self.context.append_basic_block(function, "js_map_copyin_done");
+                self.builder.build_unconditional_branch(loop_header).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(loop_header);
+                let index = self.builder.build_phi(self.context.i64_type(), "js_map_copyin_index").map_err(|error| error.to_string())?;
+                index.add_incoming(&[(&self.context.i64_type().const_zero(), map_ok)]);
+                let has_entry = self.builder.build_int_compare(IntPredicate::ULT, index.as_basic_value().into_int_value(), length, "js_map_has_entry")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(has_entry, loop_body, loop_done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(loop_body);
+                let entry = self.builder.build_call(self.module.get_function("thaw_json_index").unwrap(), &[
+                    snapshot.into(), self.builder.build_unsigned_int_to_float(index.as_basic_value().into_int_value(), self.context.f64_type(), "js_map_entry_index").map_err(|error| error.to_string())?.into(),
+                    self.context.ptr_type(AddressSpace::default()).const_null().into()], "js_map_entry")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map entry index returned no value")?;
+                self.compile_check_json_host_error(entry, Some("thaw_json_destroy"))?;
+                let read_pair = |this: &mut Self, item: BasicValueEnum<'ctx>, at: f64, name: &str| -> Result<BasicValueEnum<'ctx>, String> {
+                    let value = this.builder.build_call(this.module.get_function("thaw_json_index").unwrap(), &[
+                        item.into(), this.context.f64_type().const_float(at).into(),
+                        this.context.ptr_type(AddressSpace::default()).const_null().into()], name)
+                        .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map pair index returned no value")?;
+                    this.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+                    Ok(value)
+                };
+                let key_json = read_pair(self, entry, 0.0, "js_map_key")?;
+                self.compile_validate_native_argument(key_json, key_ty)?;
+                let key = self.compile_json_value_to_native(key_json, key_ty)?;
+                if matches!(key_ty, HirType::Json) {
+                    let rooted = self.builder.build_call(self.module.get_function("thaw_json_track_arena_owned_root").unwrap(), &[key.into()], "root_ffi_map_key")
+                        .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("failed to root Json Map key")?;
+                    self.compile_check_json_host_error(rooted, None)?;
+                }
+                let value_json = read_pair(self, entry, 1.0, "js_map_value")?;
+                let value_ty = value_ty.unwrap();
+                self.compile_validate_native_argument(value_json, value_ty)?;
+                let value = self.compile_json_to_native(value_json, value_ty)?;
+                if matches!(value_ty, HirType::Json | HirType::Dictionary(_)) {
+                    let rooted = self.builder.build_call(self.module.get_function("thaw_json_track_arena_owned_root").unwrap(), &[value.into()], "root_ffi_map_value")
+                        .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("failed to root Json Map value")?;
+                    self.compile_check_json_host_error(rooted, None)?;
+                }
+                let key_suffix = match key_ty { HirType::F64 => "num", HirType::Str => "str", _ => "any" };
+                let value_word = self.encode_word(value)?;
+                let set = self.builder.build_call(self.module.get_function(&format!("thaw_map_{key_suffix}_set")).unwrap(), &[
+                    map.into(), key.into(), value_word.into()], "ffi_copyin_map_insert")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("Map insert returned no status")?.into_int_value();
+                self.compile_check_json_host_error(value_json, Some("thaw_json_destroy"))?;
+                let inserted = self.builder.build_int_compare(IntPredicate::NE, set, self.context.i8_type().const_zero(), "ffi_copyin_map_inserted")
+                    .map_err(|error| error.to_string())?;
+                let inserted_block = self.context.append_basic_block(function, "ffi_copyin_map_inserted");
+                let insert_failed = self.context.append_basic_block(function, "ffi_copyin_map_insert_failed");
+                self.builder.build_conditional_branch(inserted, inserted_block, insert_failed).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(insert_failed);
+                self.compile_throw_type_error("Unable to grow native Map")?;
+                self.builder.position_at_end(inserted_block);
+                self.compile_destroy_decoded_owned_json(key_json, key_ty)?;
+                self.compile_destroy_decoded_owned_json(value_json, value_ty)?;
+                self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[entry.into()], "destroy_map_entry_pair")
+                    .map_err(|error| error.to_string())?;
+                let next = self.builder.build_int_add(index.as_basic_value().into_int_value(), self.context.i64_type().const_int(1, false), "js_map_next_index")
+                    .map_err(|error| error.to_string())?;
+                let body_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(loop_header).map_err(|error| error.to_string())?;
+                index.add_incoming(&[(&next, body_end)]);
+                self.builder.position_at_end(loop_done);
+                self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(), &[snapshot.into()], "destroy_map_snapshot")
+                    .map_err(|error| error.to_string())?;
+                let copyin_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                let result = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "native_collection_result")
+                    .map_err(|error| error.to_string())?;
+                result.add_incoming(&[(&native, native_end), (&map, copyin_end)]);
+                return Ok(result.as_basic_value());
+            }
+        }
+        self.builder.position_at_end(done);
+        let result = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "native_collection_result")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&native, native_end)]);
+        Ok(result.as_basic_value())
     }
 
     fn compile_json_value_to_native(
