@@ -901,6 +901,75 @@ fn structured_clone_consumes_union_arrays_once_and_keeps_clones_independent() {
 }
 
 #[test]
+fn structured_clone_checks_host_error_before_using_the_result() {
+    use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
+
+    let clone = || HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_json_clone".into())),
+        vec![HirExpr::Var("value".into())],
+    );
+    let function = |name: &str, ret, body| HirFunction {
+        name: name.into(),
+        params: vec![HirParam { name: "value".into(), ty: HirType::Json }],
+        ret,
+        is_async: false,
+        body,
+    };
+    // Direct HIR keeps this test focused on the dynamic clone intrinsic, outside source-function wrappers.
+    let program = HirProgram {
+        globals: Vec::new(),
+        initializers: Vec::new(),
+        functions: vec![
+            function("discarded_clone", HirType::Void, vec![HirStmt::Expr(clone())]),
+            function("transferred_clone", HirType::Json, vec![
+                HirStmt::Let("clone".into(), HirType::Json, clone()),
+                HirStmt::Return(Some(HirExpr::Var("clone".into()))),
+            ]),
+        ],
+        extern_functions: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "structured_clone_host_error");
+    compiler.compile_program(&program).unwrap();
+    let discarded = inkwell::values::AnyValue::print_to_string(
+        &compiler.module.get_function("discarded_clone").unwrap(),
+    ).to_string();
+
+    let clone_call = discarded.find("call ptr @thaw_json_structured_clone").unwrap();
+    let after_clone = &discarded[clone_call..];
+    let host_error = after_clone.find("call ptr @thaw_json_take_host_error")
+        .expect("structured clone must check the host error immediately");
+    let instruction_count = after_clone[..host_error].lines().skip(1)
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.ends_with(':') && line != "}"
+        })
+        .count();
+    assert!(instruction_count <= 4,
+        "host-error check must be within four instructions after clone; found {instruction_count}");
+    let lines: Vec<_> = discarded.lines().collect();
+    let error_line = lines.iter().position(|line| line.contains("@thaw_json_take_host_error")).unwrap();
+    let failed_start = lines[error_line + 1..].iter().position(|line| line.trim().starts_with("json_host_failed:"))
+        .map(|index| error_line + index + 1).expect("host error failure block missing");
+    let failed_end = lines[failed_start + 1..].iter().position(|line| line.trim().ends_with(':'))
+        .map_or(lines.len(), |index| failed_start + index + 1);
+    let error_block = lines[failed_start..failed_end].join("\n");
+    assert!(error_block.contains("@thaw_json_destroy"),
+        "host-error failure block must destroy the owned result:\n{error_block}");
+    assert!(error_block.contains("br i1 %has_pending_exception"),
+        "host-error failure must branch through the pending-exception path");
+    assert!(discarded.contains("destroy_untransferred_json_result"),
+        "discarded successful clone must retain guarded owned-result cleanup:\n{discarded}");
+
+    let returned_body = inkwell::values::AnyValue::print_to_string(
+        &compiler.module.get_function("transferred_clone").unwrap(),
+    ).to_string();
+    assert!(returned_body.contains("call ptr @thaw_json_structured_clone"), "returned clone intrinsic missing");
+    assert!(!returned_body.contains("destroy_untransferred_json_result"),
+        "returning the clone must revoke discarded-result cleanup");
+}
+
+#[test]
 fn compiles_structured_clone_of_a_map_or_set() {
     // Builds a fresh Map/Set and recursively clones each entry, snapshotting
     // the source via the same conversion `[...map]`/`Array.from(map)` use.
@@ -962,6 +1031,112 @@ fn compiles_structured_clone_of_a_dynamic_value() {
     assert_eq!(
         compile_and_run(source, "structured_clone_dynamic_value"),
         "{\"a\":1,\"b\":\"x\",\"nested\":{\"d\":true}}\n{\"a\":999,\"b\":\"x\",\"nested\":{\"d\":true}}\nfalse\n"
+    );
+}
+
+#[test]
+fn structured_clone_preserves_cycles_and_shared_identity() {
+    let source = r#"
+        function main(): void {
+            const child: any = { value: 1 };
+            const original: any = { left: child, right: child };
+            original.self = original;
+            const clone: any = structuredClone(original);
+            clone.left.value = 9;
+            console.log(
+                clone !== original,
+                clone.self === clone,
+                clone.left === clone.right,
+                clone.left !== original.left,
+                original.left.value,
+                clone.right.value
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_cycles_and_shared_identity"),
+        "true true true true 1 9\n"
+    );
+}
+
+#[test]
+fn structured_clone_preserves_mixed_object_array_cycles() {
+    let source = r#"
+        function cloneDynamic(value: any): any { return structuredClone(value); }
+        function main(): void {
+            const original: any = {};
+            const list: any[] = [original, , 1];
+            list[2] = undefined;
+            original.list = list;
+            const clone: any = cloneDynamic(original);
+            console.log(
+                clone.list[0] === clone,
+                clone.list !== original.list,
+                1 in list,
+                2 in list,
+                1 in clone.list,
+                2 in clone.list,
+                clone.list[2] === undefined
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_mixed_object_array_cycles"),
+        "true true false true false true true\n"
+    );
+}
+
+#[test]
+fn structured_clone_preserves_live_host_cycles_and_shared_identity() {
+    let source = r#"
+        function cloneDynamic(value: any): any { return structuredClone(value); }
+        function main(): void {
+            loadScript(`
+                const child = { x: 1 };
+                const root = { left: child, right: child };
+                root.self = root;
+                globalThis.cloneSource = root;
+            `);
+            const original: any = getDynamicValue("cloneSource") as any;
+            const clone: any = cloneDynamic(original);
+            console.log(
+                clone.self === clone,
+                clone.left === clone.right,
+                clone.left !== original.left,
+                clone !== original
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_live_host_cycles_and_aliases"),
+        "true true true true\n"
+    );
+}
+
+#[test]
+fn structured_clone_propagates_host_getter_failure_without_stale_state() {
+    let source = r#"
+        function cloneDynamic(value: any): any { return structuredClone(value); }
+        function main(): void {
+            loadScript(`
+                globalThis.failingCloneSource = Object.defineProperty({}, "boom", {
+                    enumerable: true,
+                    get() { throw new TypeError("clone getter exploded"); }
+                });
+                globalThis.goodCloneSource = { ok: 1 };
+            `);
+            try {
+                cloneDynamic(getDynamicValue("failingCloneSource"));
+            } catch (error: any) {
+                console.log(error.name, error.message);
+            }
+            const good: any = cloneDynamic(getDynamicValue("goodCloneSource"));
+            console.log(good.ok);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_host_getter_failure"),
+        "TypeError clone getter exploded\n1\n"
     );
 }
 
