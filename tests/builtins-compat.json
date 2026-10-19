@@ -1387,6 +1387,12 @@
       "source": "function main(): void { const a: Uint8Array = new Uint8Array([1,2,3]); const c: Uint8Array = structuredClone(a) as Uint8Array; console.log(c.join(\",\")); }"
     },
     {
+      "group": "structuredClone",
+      "name": "structuredClone.cycle-and-shared-identity",
+      "expect": "matched",
+      "source": "function main(): void { const child: any = { value: 1 }; const original: any = { left: child, right: child }; original.self = original; const clone: any = structuredClone(original); clone.left.value = 9; console.log(clone !== original, clone.self === clone, clone.left === clone.right, clone.left !== original.left, original.left.value, clone.right.value); }"
+    },
+    {
       "group": "FinalizationRegistry",
       "name": "FinalizationRegistry.basic",
       "expect": "matched",

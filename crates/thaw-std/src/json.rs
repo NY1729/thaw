@@ -49,6 +49,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thaw_arena::NativeStr as CStr;
 
 mod native_links;
+mod structured_clone;
 
 /// A live-shared native array -- `Rc` gives every read of the same
 /// logical array (via `Value::clone`) a handle to the *same* underlying
@@ -981,8 +982,15 @@ pub unsafe extern "C" fn thaw_json_host_collection_snapshot(
     track_typed_decode_child(leak(Value::shared_array(items)))
 }
 
+fn drop_preserving_host_error<T>(value: T) {
+    let original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+    drop(value);
+    HOST_ERROR.with(|error| *error.borrow_mut() = original_host_error);
+}
+
 fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
     let mut entries = Vec::new();
+    let mut original_host_error = None;
     for pair in host_enumerate_values(lease, 0) {
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
             break;
@@ -993,23 +1001,32 @@ fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
         };
         let key = host_get_property(&pair, b"0");
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+            drop_preserving_host_error(pair);
             break;
         }
         let key_text = thaw_json_as_string(&key as *const Value as *mut Value);
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
             unsafe { thaw_arena::destroy_string(key_text.cast_mut()) };
+            original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+            drop_preserving_host_error(pair);
             break;
         }
         let key = canonical_key(unsafe { CStr::from_ptr(key_text) }.to_bytes());
         unsafe { thaw_arena::destroy_string(key_text.cast_mut()) };
         let value = host_get_property(&pair, b"1");
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+            drop_preserving_host_error(pair);
             break;
         }
         entries.push((key, value));
     }
-    if HOST_ERROR.with(|error| error.borrow().is_some()) {
+    if let Some(original) =
+        original_host_error.or_else(|| HOST_ERROR.with(|error| error.borrow_mut().take()))
+    {
         entries.clear();
+        HOST_ERROR.with(|error| *error.borrow_mut() = Some(original));
     }
     entries
 }
@@ -1201,79 +1218,9 @@ impl Value {
     /// so mutating the copy never observably affects the original.
     /// `structuredClone`'s own contract (`thaw_json_clone`).
     fn deep_clone(&self) -> Value {
-        self.deep_clone_mode(false)
+        structured_clone::clone_value(self, structured_clone::CloneMode::Snapshot)
+            .expect("snapshot clone cannot invoke a failing host operation")
     }
-
-    /// `live`: materialize host objects into independent native copies (`structuredClone`).
-    fn deep_clone_mode(&self, live: bool) -> Value {
-        match self {
-            Value::Null => Value::Null,
-            Value::Bool(value) => Value::Bool(*value),
-            Value::Number(value) => Value::Number(value.clone()),
-            Value::BigInt(value) => Value::BigInt(value.clone()),
-            Value::String(value) => Value::String(value.clone()),
-            Value::Wtf8(bytes) => Value::Wtf8(bytes.clone()),
-            Value::Array(items) => {
-                let copy = Value::shared_array(
-                    shared_array_ref(items)
-                        .iter()
-                        .map(|item| item.deep_clone_mode(live))
-                        .collect(),
-                );
-                if let Value::Array(target) = &copy {
-                    copy_array_holes(items, target, 0);
-                }
-                copy
-            }
-            Value::Object(fields) => {
-                let copy = Value::shared_object_with_lease(
-                    unsafe { &*fields.get() }
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.deep_clone_mode(live)))
-                        .collect(),
-                    fields.napi_lease.borrow().clone(),
-                );
-                if is_branded_wrapper(self) {
-                    brand_internal_value(copy)
-                } else {
-                    if is_graph_plain_object(self) {
-                        mark_graph_plain_object(&copy);
-                    }
-                    copy
-                }
-            }
-            // A host object cannot be cloned by walking native fields. Its
-            // clone operation must be delegated to the registered host.
-            Value::Host(lease) if live => host_deep_clone(lease),
-            Value::Host(lease) => Value::Host(Rc::clone(lease)),
-        }
-    }
-}
-
-/// `structuredClone` of a live host object: plain objects and arrays are
-/// copied into independent native containers (nested live values recurse);
-/// anything else (functions, Dates, Maps, ...) keeps sharing the host lease.
-fn host_deep_clone(lease: &Rc<HostLease>) -> Value {
-    let plain = host_query(lease, 0).as_deref() == Some("object")
-        && host_query(lease, 7).as_deref() == Some("0")
-        && host_query(lease, 12).as_deref() == Some("0");
-    if !plain {
-        return Value::Host(Rc::clone(lease));
-    }
-    if host_query(lease, 4).as_deref() == Some("1") {
-        return Value::shared_array(
-            host_enumerate_values(lease, 3)
-                .iter()
-                .map(|item| item.deep_clone_mode(true))
-                .collect(),
-        );
-    }
-    Value::shared_object(
-        host_enumerable_entries(lease)
-            .into_iter()
-            .map(|(key, value)| (key, value.deep_clone_mode(true)))
-            .collect(),
-    )
 }
 
 /// Display uses the same serializer as `JSON.stringify`, including UTF-16 keys.
@@ -1404,25 +1351,22 @@ fn mark_array_holes(items: &SharedArray, indices: impl IntoIterator<Item = usize
     });
 }
 
+fn install_array_holes(items: &SharedArray, holes: HashSet<usize>) {
+    ARRAY_HOLES.with(|entries| {
+        let previous = entries
+            .borrow_mut()
+            .insert(Rc::as_ptr(items) as usize, holes);
+        debug_assert!(
+            previous.is_none(),
+            "fresh clone array already has hole metadata"
+        );
+    });
+}
+
 fn mark_array_present(items: &SharedArray, index: usize) {
     ARRAY_HOLES.with(|holes| {
         if let Some(missing) = holes.borrow_mut().get_mut(&(Rc::as_ptr(items) as usize)) {
             missing.remove(&index);
-        }
-    });
-}
-
-fn copy_array_holes(source: &SharedArray, target: &SharedArray, skip: usize) {
-    ARRAY_HOLES.with(|holes| {
-        let mut holes = holes.borrow_mut();
-        if let Some(missing) = holes.get(&(Rc::as_ptr(source) as usize)).cloned() {
-            holes.insert(
-                Rc::as_ptr(target) as usize,
-                missing
-                    .into_iter()
-                    .filter_map(|index| index.checked_sub(skip))
-                    .collect(),
-            );
         }
     });
 }
@@ -2349,7 +2293,10 @@ pub unsafe extern "C" fn thaw_json_structured_clone(value: *const Value) -> *mut
     let Some(value) = (unsafe { value.as_ref() }) else {
         return leak(Value::Null);
     };
-    leak(value.deep_clone_mode(true))
+    match structured_clone::clone_value(value, structured_clone::CloneMode::Structured) {
+        Ok(clone) => leak(clone),
+        Err(()) => std::ptr::null_mut(),
+    }
 }
 
 fn number_value(value: f64) -> Value {

@@ -596,11 +596,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call("thaw_json_brand_wrapper", args, "JSON wrapper brand");
             }
             "__thaw_json_clone" => {
-                return self.compile_single_arg_call(
+                let result = self.compile_single_arg_call(
                     "thaw_json_structured_clone",
                     args,
                     "structuredClone",
-                );
+                )?;
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_set_prototype" => {
                 let [object, prototype] = args else {
