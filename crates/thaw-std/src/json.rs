@@ -982,8 +982,15 @@ pub unsafe extern "C" fn thaw_json_host_collection_snapshot(
     track_typed_decode_child(leak(Value::shared_array(items)))
 }
 
+fn drop_preserving_host_error<T>(value: T) {
+    let original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+    drop(value);
+    HOST_ERROR.with(|error| *error.borrow_mut() = original_host_error);
+}
+
 fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
     let mut entries = Vec::new();
+    let mut original_host_error = None;
     for pair in host_enumerate_values(lease, 0) {
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
             break;
@@ -994,23 +1001,32 @@ fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
         };
         let key = host_get_property(&pair, b"0");
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+            drop_preserving_host_error(pair);
             break;
         }
         let key_text = thaw_json_as_string(&key as *const Value as *mut Value);
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
             unsafe { thaw_arena::destroy_string(key_text.cast_mut()) };
+            original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+            drop_preserving_host_error(pair);
             break;
         }
         let key = canonical_key(unsafe { CStr::from_ptr(key_text) }.to_bytes());
         unsafe { thaw_arena::destroy_string(key_text.cast_mut()) };
         let value = host_get_property(&pair, b"1");
         if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            original_host_error = HOST_ERROR.with(|error| error.borrow_mut().take());
+            drop_preserving_host_error(pair);
             break;
         }
         entries.push((key, value));
     }
-    if HOST_ERROR.with(|error| error.borrow().is_some()) {
+    if let Some(original) =
+        original_host_error.or_else(|| HOST_ERROR.with(|error| error.borrow_mut().take()))
+    {
         entries.clear();
+        HOST_ERROR.with(|error| *error.borrow_mut() = Some(original));
     }
     entries
 }
@@ -1215,32 +1231,6 @@ impl Value {
         };
         structured_clone::clone_value(self, mode).unwrap_or(Value::Null)
     }
-}
-
-/// `structuredClone` of a live host object: plain objects and arrays are
-/// copied into independent native containers (nested live values recurse);
-/// anything else (functions, Dates, Maps, ...) keeps sharing the host lease.
-fn host_deep_clone(lease: &Rc<HostLease>) -> Value {
-    let plain = host_query(lease, 0).as_deref() == Some("object")
-        && host_query(lease, 7).as_deref() == Some("0")
-        && host_query(lease, 12).as_deref() == Some("0");
-    if !plain {
-        return Value::Host(Rc::clone(lease));
-    }
-    if host_query(lease, 4).as_deref() == Some("1") {
-        return Value::shared_array(
-            host_enumerate_values(lease, 3)
-                .iter()
-                .map(|item| item.deep_clone_mode(true))
-                .collect(),
-        );
-    }
-    Value::shared_object(
-        host_enumerable_entries(lease)
-            .into_iter()
-            .map(|(key, value)| (key, value.deep_clone_mode(true)))
-            .collect(),
-    )
 }
 
 /// Display uses the same serializer as `JSON.stringify`, including UTF-16 keys.

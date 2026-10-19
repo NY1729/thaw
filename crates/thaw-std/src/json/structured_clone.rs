@@ -6,7 +6,6 @@ pub(super) enum CloneMode {
     Structured,
 }
 
-#[allow(dead_code)]
 struct GraphCloner {
     mode: CloneMode,
     memo: HashMap<usize, Value>,
@@ -14,7 +13,6 @@ struct GraphCloner {
     fills: Vec<PendingFill>,
 }
 
-#[allow(dead_code)]
 enum CloneJob {
     NativeArray {
         source: SharedArray,
@@ -57,18 +55,44 @@ impl GraphCloner {
     }
 
     fn intern(&mut self, source: &Value) -> Result<Value, ()> {
-        if let Value::Host(lease) = source {
-            return Ok(if self.mode == CloneMode::Structured {
-                host_deep_clone(lease)
-            } else {
-                Value::Host(Rc::clone(lease))
-            });
-        }
         let Some(identity) = object_identity_key(source) else {
             return Ok(source.clone());
         };
         if let Some(value) = self.memo.get(&identity) {
             return Ok(value.clone());
+        }
+        if let Value::Host(lease) = source {
+            if self.mode == CloneMode::Snapshot {
+                return Ok(Value::Host(Rc::clone(lease)));
+            }
+            let kind = classify_host_for_clone(lease, self.mode)?;
+            let copy = match kind {
+                HostCloneKind::Shared => Value::Host(Rc::clone(lease)),
+                HostCloneKind::Array => {
+                    let target = Value::shared_array(Vec::new());
+                    let Value::Array(target_rc) = &target else {
+                        unreachable!()
+                    };
+                    self.jobs.push(CloneJob::HostArray {
+                        source: Rc::clone(lease),
+                        target: target_rc.clone(),
+                    });
+                    target
+                }
+                HostCloneKind::Object => {
+                    let target = Value::shared_object(indexmap::IndexMap::new());
+                    let Value::Object(target_rc) = &target else {
+                        unreachable!()
+                    };
+                    self.jobs.push(CloneJob::HostObject {
+                        source: Rc::clone(lease),
+                        target: target_rc.clone(),
+                    });
+                    target
+                }
+            };
+            self.memo.insert(identity, copy.clone());
+            return Ok(copy);
         }
         let copy = match source {
             Value::Array(source) => {
@@ -108,11 +132,25 @@ impl GraphCloner {
     }
 
     fn discover(mut self, source: &Value) -> Result<(Value, Vec<PendingFill>), ()> {
+        let result = self.discover_graph(source);
+        match result {
+            Ok(root) => Ok((root, std::mem::take(&mut self.fills))),
+            Err(()) => {
+                let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
+                self.fills.clear();
+                drop(self);
+                HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
+                Err(())
+            }
+        }
+    }
+
+    fn discover_graph(&mut self, source: &Value) -> Result<Value, ()> {
         let root = self.intern(source)?;
         while let Some(job) = self.jobs.pop() {
             self.process_job(job)?;
         }
-        Ok((root, self.fills))
+        Ok(root)
     }
 
     fn process_job(&mut self, job: CloneJob) -> Result<(), ()> {
@@ -144,12 +182,90 @@ impl GraphCloner {
                     .collect::<Result<indexmap::IndexMap<_, _>, ()>>()?;
                 self.fills.push(PendingFill::Object { target, fields });
             }
-            CloneJob::HostArray { .. } | CloneJob::HostObject { .. } => {
-                unreachable!("host jobs are handled by the structured clone extension")
+            CloneJob::HostArray { source, target } => {
+                let values = host_enumerate_values(&source, 3);
+                if host_operation_failed() {
+                    return Err(());
+                }
+                let values = values
+                    .iter()
+                    .map(|value| self.intern(value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.fills.push(PendingFill::Array {
+                    target,
+                    values,
+                    holes: HashSet::new(),
+                });
+            }
+            CloneJob::HostObject { source, target } => {
+                let entries = host_enumerable_entries(&source);
+                if host_operation_failed() {
+                    return Err(());
+                }
+                let fields = entries
+                    .into_iter()
+                    .map(|(key, value)| Ok((key, self.intern(&value)?)))
+                    .collect::<Result<indexmap::IndexMap<_, _>, ()>>()?;
+                self.fills.push(PendingFill::Object { target, fields });
             }
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostCloneKind {
+    Shared,
+    Array,
+    Object,
+}
+
+fn host_operation_failed() -> bool {
+    HOST_ERROR.with(|error| error.borrow().is_some())
+}
+
+fn classify_host_for_clone(lease: &Rc<HostLease>, _mode: CloneMode) -> Result<HostCloneKind, ()> {
+    let Some(kind) = host_query(lease, 0) else {
+        return Err(());
+    };
+    if host_operation_failed() {
+        return Err(());
+    }
+    if kind != "object" {
+        return Ok(HostCloneKind::Shared);
+    }
+
+    let Some(is_null) = host_query(lease, 7) else {
+        return Err(());
+    };
+    if host_operation_failed() {
+        return Err(());
+    }
+    if is_null != "0" {
+        return Ok(HostCloneKind::Shared);
+    }
+
+    let Some(is_non_plain) = host_query(lease, 12) else {
+        return Err(());
+    };
+    if host_operation_failed() {
+        return Err(());
+    }
+    if is_non_plain != "0" {
+        return Ok(HostCloneKind::Shared);
+    }
+
+    let Some(is_array) = host_query(lease, 4) else {
+        return Err(());
+    };
+    if host_operation_failed() {
+        return Err(());
+    }
+    Ok(if is_array == "1" {
+        HostCloneKind::Array
+    } else {
+        HostCloneKind::Object
+    })
 }
 
 fn source_value(source: &SharedObject) -> Value {
@@ -210,8 +326,310 @@ mod tests {
         }
     }
 
+    thread_local! {
+        static HOST_ENUM_COUNTS: RefCell<HashMap<u64, usize>> = RefCell::new(HashMap::new());
+        static HOST_RELEASE_COUNTS: RefCell<HashMap<u64, usize>> = RefCell::new(HashMap::new());
+        static HOST_RETAIN_COUNTS: RefCell<HashMap<u64, usize>> = RefCell::new(HashMap::new());
+    }
+
+    extern "C" fn clone_test_retain(handle: u64) -> u8 {
+        HOST_RETAIN_COUNTS.with(|counts| *counts.borrow_mut().entry(handle).or_default() += 1);
+        1
+    }
+
+    extern "C" fn clone_test_release(handle: u64) -> u8 {
+        HOST_RELEASE_COUNTS.with(|counts| *counts.borrow_mut().entry(handle).or_default() += 1);
+        1
+    }
+
+    extern "C" fn clone_test_query(handle: u64, operation: u8) -> HostTextResult {
+        let value: &[u8] = match (handle, operation) {
+            (706, 0) => b"number",
+            (707..=709 | 713 | 714, 0) => b"string",
+            (_, 0) => b"object",
+            (_, 7 | 12) => b"0",
+            (711, 4) => b"1",
+            (_, 4) => b"0",
+            (706, 10) => b"1",
+            (707, 3) => br#""self""#,
+            (708, 3) => br#""left""#,
+            (709, 3) => br#""right""#,
+            (713, 3) => br#""list""#,
+            (714, 3) => br#""x""#,
+            _ => panic!("unexpected clone query {handle}/{operation}"),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(value),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn clone_test_enumerate(handle: u64, operation: u8) -> HostTextResult {
+        HOST_ENUM_COUNTS.with(|counts| *counts.borrow_mut().entry(handle).or_default() += 1);
+        let wire: &[u8] = match (handle, operation) {
+            (700, 0) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"r":3}]},{"hdl":702},{"hdl":703},{"hdl":704}],"leases":[],"napiLeases":[]}"#,
+            (701, 0) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1}]},{"hdl":705}],"leases":[],"napiLeases":[]}"#,
+            (710, 0) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1}]},{"hdl":712}],"leases":[],"napiLeases":[]}"#,
+            (711, 3) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1}]},{"hdl":710}],"leases":[],"napiLeases":[]}"#,
+            _ => panic!("unexpected clone enumeration {handle}/{operation}"),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(wire),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn clone_test_get(handle: u64, key: *const c_char) -> HostHandleResult {
+        let key = to_str(key);
+        let value = match (handle, key.as_str()) {
+            (702, r#""0""#) => 707,
+            (702, r#""1""#) => 700,
+            (703, r#""0""#) => 708,
+            (703, r#""1""#) => 701,
+            (704, r#""0""#) => 709,
+            (704, r#""1""#) => 701,
+            (705, r#""0""#) => 714,
+            (705, r#""1""#) => 706,
+            (712, r#""0""#) => 713,
+            (712, r#""1""#) => 711,
+            _ => panic!("unexpected clone property {handle}/{key}"),
+        };
+        HostHandleResult {
+            value,
+            error: std::ptr::null(),
+        }
+    }
+    thread_local! {
+        static FAILURE_RELEASE_ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    extern "C" fn failure_clone_release(handle: u64) -> u8 {
+        HOST_RELEASE_COUNTS.with(|counts| *counts.borrow_mut().entry(handle).or_default() += 1);
+        if FAILURE_RELEASE_ARMED.with(Cell::get) {
+            HOST_ERROR.with(|error| *error.borrow_mut() = Some("cleanup reentry error".into()));
+        }
+        1
+    }
+
+    extern "C" fn failure_clone_query(handle: u64, operation: u8) -> HostTextResult {
+        let value: &[u8] = match (handle, operation) {
+            (_, 0) => b"object",
+            (_, 7 | 12 | 4) => b"0",
+            (728, 3) => br#""first""#,
+            (729, 3) => br#""boom""#,
+            _ => panic!("unexpected failure query {handle}/{operation}"),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(value),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn failure_clone_enumerate(handle: u64, operation: u8) -> HostTextResult {
+        assert_eq!((handle, operation), (720, 0));
+        let wire = br#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2}]},{"hdl":722},{"hdl":723}],"leases":[],"napiLeases":[]}"#;
+        HostTextResult {
+            value: thaw_arena::owned_string(wire),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn failure_clone_get(handle: u64, key: *const c_char) -> HostHandleResult {
+        let key = to_str(key);
+        match (handle, key.as_str()) {
+            (722, r#""0""#) => HostHandleResult {
+                value: 728,
+                error: std::ptr::null(),
+            },
+            (722, r#""1""#) => HostHandleResult {
+                value: 721,
+                error: std::ptr::null(),
+            },
+            (723, r#""0""#) => HostHandleResult {
+                value: 729,
+                error: std::ptr::null(),
+            },
+            (723, r#""1""#) => {
+                FAILURE_RELEASE_ARMED.with(|armed| armed.set(true));
+                HostHandleResult {
+                    value: 0,
+                    error: thaw_arena::owned_string(b"clone getter exploded"),
+                }
+            }
+            _ => panic!("unexpected failing property {handle}/{key}"),
+        }
+    }
+
+    fn install_failure_clone_host_operations() {
+        HOST_ERROR.with(|error| error.borrow_mut().take());
+        HOST_RELEASE_COUNTS.with(|counts| counts.borrow_mut().clear());
+        HOST_RETAIN_COUNTS.with(|counts| counts.borrow_mut().clear());
+        FAILURE_RELEASE_ARMED.with(|armed| armed.set(false));
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: clone_test_retain,
+                release: failure_clone_release,
+                get: failure_clone_get,
+                query: failure_clone_query,
+                date_set: unused_clone_date,
+                set: unused_clone_set,
+                predicate: unused_clone_predicate,
+                enumerate: failure_clone_enumerate,
+            }))
+        });
+    }
+
+    extern "C" fn unused_clone_date(_: u64, _: f64) -> HostTextResult {
+        HostTextResult {
+            value: std::ptr::null(),
+            error: std::ptr::null(),
+        }
+    }
+    extern "C" fn unused_clone_set(_: u64, _: *const c_char, _: *const c_char) -> HostHandleResult {
+        HostHandleResult {
+            value: 0,
+            error: std::ptr::null(),
+        }
+    }
+    extern "C" fn unused_clone_predicate(_: u64, _: *const c_char, _: u8) -> HostHandleResult {
+        HostHandleResult {
+            value: 0,
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_clone_test_host_operations() {
+        HOST_ENUM_COUNTS.with(|counts| counts.borrow_mut().clear());
+        HOST_RELEASE_COUNTS.with(|counts| counts.borrow_mut().clear());
+        HOST_RETAIN_COUNTS.with(|counts| counts.borrow_mut().clear());
+        HOST_ERROR.with(|error| error.borrow_mut().take());
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: clone_test_retain,
+                release: clone_test_release,
+                get: clone_test_get,
+                query: clone_test_query,
+                date_set: unused_clone_date,
+                set: unused_clone_set,
+                predicate: unused_clone_predicate,
+                enumerate: clone_test_enumerate,
+            }))
+        });
+    }
+
+    fn host_value(handle: u64) -> Value {
+        Value::Host(Rc::new(HostLease {
+            handle,
+            release: clone_test_release,
+        }))
+    }
+
+    fn host_cycle_red_worker(test_name: &str, env: &str) -> bool {
+        if std::env::var_os(env).is_some() {
+            return false;
+        }
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(env, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "Host cycle worker failed: {status}");
+        true
+    }
+
     fn destroy(value: Value) {
         unsafe { thaw_json_destroy(Box::into_raw(Box::new(value))) };
+    }
+
+    #[test]
+    fn structured_clone_materializes_each_plain_host_identity_once() {
+        const CHILD: &str = "THAW_STRUCTURED_CLONE_HOST_CYCLE_CHILD";
+        if host_cycle_red_worker("json::structured_clone::tests::structured_clone_materializes_each_plain_host_identity_once", CHILD) { return; }
+        install_clone_test_host_operations();
+        let source = host_value(700);
+        let cloned = super::clone_value(&source, CloneMode::Structured).unwrap();
+        let fields = cloned.as_object().unwrap();
+        assert!(strict_identity(
+            &cloned,
+            fields.get(b"self".as_slice()).unwrap()
+        ));
+        let left = fields.get(b"left".as_slice()).unwrap();
+        let right = fields.get(b"right".as_slice()).unwrap();
+        assert!(strict_identity(left, right));
+        assert!(matches!(left, Value::Object(_)));
+        HOST_ENUM_COUNTS.with(|counts| {
+            assert_eq!(counts.borrow().get(&700), Some(&1));
+            assert_eq!(counts.borrow().get(&701), Some(&1));
+        });
+        let released_before_source_drop =
+            HOST_RELEASE_COUNTS.with(|counts| counts.borrow().get(&700).copied().unwrap_or(0));
+        destroy(source);
+        assert_eq!(
+            HOST_RELEASE_COUNTS.with(|counts| counts.borrow().get(&700).copied()),
+            Some(released_before_source_drop + 1),
+            "the source lease stays alive until source destruction"
+        );
+        destroy(cloned);
+    }
+
+    #[test]
+    fn structured_clone_materializes_mutually_recursive_host_array_and_object() {
+        const CHILD: &str = "THAW_STRUCTURED_CLONE_HOST_MUTUAL_CYCLE_CHILD";
+        if host_cycle_red_worker("json::structured_clone::tests::structured_clone_materializes_mutually_recursive_host_array_and_object", CHILD) { return; }
+        install_clone_test_host_operations();
+        let source = host_value(710);
+        let cloned = super::clone_value(&source, CloneMode::Structured).unwrap();
+        let Value::Array(list) = cloned.as_object().unwrap().get(b"list".as_slice()).unwrap()
+        else {
+            panic!("expected native array")
+        };
+        assert!(strict_identity(&cloned, &shared_array_ref(list)[0]));
+        assert!(matches!(cloned, Value::Object(_)));
+        destroy(source);
+        destroy(cloned);
+    }
+
+    #[test]
+    fn structured_clone_host_failure_discards_uncommitted_shells_and_leases_once() {
+        install_failure_clone_host_operations();
+        let source = host_value(720);
+        let result = super::clone_value(&source, CloneMode::Structured);
+        assert!(result.is_err());
+        let error = thaw_json_take_host_error();
+        assert_eq!(
+            unsafe { CStr::from_ptr(error) }.to_string_lossy(),
+            "clone getter exploded"
+        );
+        unsafe {
+            thaw_arena::destroy_string(error.cast_mut());
+        }
+        assert!(FAILURE_RELEASE_ARMED.with(Cell::get));
+        HOST_RELEASE_COUNTS.with(|counts| {
+            assert_eq!(counts.borrow().get(&721), Some(&1));
+            assert_eq!(counts.borrow().get(&722), Some(&1));
+            assert_eq!(counts.borrow().get(&723), Some(&1));
+        });
+        HOST_RETAIN_COUNTS.with(|counts| {
+            assert_eq!(counts.borrow().get(&722), Some(&1));
+            assert_eq!(counts.borrow().get(&723), Some(&1));
+        });
+        assert!(thaw_json_take_host_error().is_null());
+        install_clone_test_host_operations();
+        let good_source = host_value(701);
+        let cloned = super::clone_value(&good_source, CloneMode::Structured).unwrap();
+        assert_eq!(
+            cloned
+                .as_object()
+                .unwrap()
+                .get(b"x".as_slice())
+                .unwrap()
+                .as_f64(),
+            Some(1.0)
+        );
+        FAILURE_RELEASE_ARMED.with(|armed| armed.set(false));
+        destroy(source);
+        destroy(good_source);
+        destroy(cloned);
     }
 
     #[test]
