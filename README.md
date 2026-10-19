@@ -211,13 +211,13 @@ parameters follow their declared source contract and may materialize the
 declared native layout; this does not imply JavaScript object identity. An
 unsupported or incompatible layout may be copied or rejected.
 
+Bare calls of `this`-using function expressions report Node's property-specific `TypeError`
+at the property access that executes, including reads in an assignment's RHS. Extracted
+object-literal methods follow the same rule.
+
 Known gaps against Node semantics:
 
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
-- A bare call of a `this`-using function expression with a simple unconditional property
-  access reports Node's property-specific `TypeError`, including reads in an assignment's RHS.
-  Complex bodies (branches, nested closures, suspended async functions) and extracted
-  object-literal methods still report `TypeError: Incompatible function receiver`.
 - Native FFI collection parameters require an authenticated native collection with compatible
   key and value types. A JavaScript-owned collection is rejected at that boundary.
 
