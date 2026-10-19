@@ -9579,6 +9579,65 @@ mod tests {
         }
     }
 
+    unsafe extern "C" {
+        fn thaw_map_new() -> *mut u8;
+        fn thaw_map_any_set(map: *mut u8, key: *mut u8, value: u64) -> u8;
+        fn thaw_map_any_has(map: *const u8, key: *mut u8) -> u8;
+        fn thaw_map_any_get_ptr(map: *const u8, key: *mut u8) -> *mut u8;
+    }
+
+    #[test]
+    fn native_map_word_edges_keep_tracked_json_key_and_value_across_safe_reset() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            thaw_arena::thaw_arena_enable_tracing();
+            let key = leak(Value::Host(Rc::new(HostLease {
+                handle: 920,
+                release: count_host_release,
+            })));
+            let value = leak(Value::Host(Rc::new(HostLease {
+                handle: 921,
+                release: count_host_release,
+            })));
+            assert_eq!(thaw_json_track_arena_owned_root(key), key);
+            assert_eq!(thaw_json_track_arena_owned_root(value), value);
+            let map = unsafe { thaw_map_new() };
+            assert!(!map.is_null());
+            let map_root = thaw_arena::ArenaRoot::new(map as usize);
+            assert_eq!(
+                unsafe { thaw_map_any_set(map, key.cast(), value as usize as u64) },
+                1
+            );
+
+            // The native entry storage contains the Json key and value pointer words. The
+            // arena traces those through their existing owned-Json root tokens.
+            thaw_arena::thaw_arena_reset();
+            assert_eq!(unsafe { thaw_map_any_has(map, key.cast()) }, 1);
+            assert_eq!(
+                unsafe { thaw_map_any_get_ptr(map, key.cast()) },
+                value.cast()
+            );
+            assert!(
+                ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(key as usize)))
+            );
+            assert!(
+                ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize)))
+            );
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+
+            drop(map_root);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 2));
+            assert!(
+                !ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(key as usize)))
+            );
+            assert!(!ARENA_OWNED_JSON_ROOTS
+                .with(|roots| roots.borrow().contains_key(&(value as usize))));
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn stale_owner_metadata_does_not_clear_reused_allocation_edges() {
         std::thread::spawn(|| {

@@ -2716,6 +2716,93 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
 }
 
 #[test]
+fn ffi_collection_copy_in_keeps_live_any_values_and_releases_temporary_handles() {
+    let source = r#"
+        declare function native_number_map_sum(value: Map<string, number>): number;
+        declare function native_any_map_alias(value: Map<any, any>): Map<any, any>;
+        declare function native_any_set_alias(value: Set<any>): Set<any>;
+        declare function native_jsvalue_map(value: Map<string, JsValue>): number;
+        declare function native_jsvalue_map_calls(): number;
+        async function main(): Promise<void> {
+            const liveHandles: any = new Function("return () => globalThis.__thaw_value_handle_live.reduce((count, live) => count + Number(live), 0)")();
+            const jsvalueMap: any = new Function("return new Map([['value', {}]])")();
+            try { native_jsvalue_map(jsvalueMap); console.log("accepted", native_jsvalue_map_calls()); }
+            catch (error) { console.log(error instanceof TypeError, native_jsvalue_map_calls()); }
+
+            const key: any = new Function("return {key: true}")();
+            const stored: any = new Function("return {value: 3}")();
+            const source: any = new Function("key", "value", "return new Map([[key, value]])")(key, stored);
+            const returned: any = native_any_map_alias(source);
+            const setSource: any = new Function("key", "return new Set([key])")(key);
+            const returnedSet: any = native_any_set_alias(setSource);
+            const values: any = new Function("return new Map(Array.from({length: 1024}, (_, i) => ['value' + i, i]))")();
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            const afterWarm = liveHandles();
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            const afterNoop = liveHandles();
+            native_number_map_sum(values);
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            const afterFirst = liveHandles();
+            for (let i = 0; i < 15; i++) native_number_map_sum(values);
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            const afterMany = liveHandles();
+            console.log(afterMany - afterFirst === afterNoop - afterWarm);
+            console.log(returned.get(key) === stored, returned.get(key).value, returnedSet.has(key));
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            console.log(returned.get(key) === stored, returned.get(key).value, returnedSet.has(key));
+            returned.get(key).value = 9;
+            console.log(stored.value);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "ffi_collection_copyin_ownership");
+    compiler.compile_program(&program).unwrap();
+    let dir = std::env::temp_dir().join(format!("thaw-ffi-collection-copyin-ownership-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let object = dir.join("program.o");
+    let native = dir.join("native.c");
+    let native_object = dir.join("native.o");
+    let executable = dir.join("program");
+    compiler.write_object_file(&object).unwrap();
+    std::fs::write(&native, r#"
+        #include <stdint.h>
+        #include <string.h>
+        static int jsvalue_calls;
+        double native_jsvalue_map(void *map) { (void)map; jsvalue_calls++; return 1; }
+        double native_jsvalue_map_calls(void) { return jsvalue_calls; }
+        static double sum_words(void *array) {
+            if (!array) return 0;
+            int64_t length; memcpy(&length, array, sizeof(length));
+            double total = 0;
+            for (int64_t i = 0; i < length; i++) {
+                uint64_t word; double value;
+                memcpy(&word, (uint8_t *)array + 8 + i * 8, sizeof(word));
+                memcpy(&value, &word, sizeof(value)); total += value;
+            }
+            return total;
+        }
+        extern void *thaw_map_snapshot_values(const void *map);
+        double native_number_map_sum(void *map) { return sum_words(thaw_map_snapshot_values(map)); }
+        void *native_any_map_alias(void *map) { return map; }
+        void *native_any_set_alias(void *set) { return set; }
+    "#).unwrap();
+    assert!(cc_command().arg("-c").arg(&native).arg("-o").arg(&native_object).status().unwrap().success());
+    let arena = build_staticlib("thaw-arena");
+    let std_lib = build_staticlib("thaw-std");
+    let runtime = build_staticlib("thaw-runtime");
+    let quickjs = build_staticlib("thaw-quickjs");
+    assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
+        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
+        .arg("-o").arg(&executable).status().unwrap().success());
+    let output = Command::new(&executable).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\ntrue\ntrue 3 true\ntrue 3 true\n9\n");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
     let source = r#"
         declare function native_map_sum(value: Map<string, number>): number;

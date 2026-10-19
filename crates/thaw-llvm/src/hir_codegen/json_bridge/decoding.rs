@@ -387,8 +387,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_check_json_host_error(rooted, None)?;
                 }
                 let value = if let (Some(value_json), Some(value_ty)) = (value_json, value_ty) {
-                    self.compile_validate_native_argument(value_json, value_ty)?;
-                    let value = self.compile_json_to_native(value_json, value_ty)?;
+                    let value = self.compile_json_value_to_native(value_json, value_ty)?;
                     if matches!(value_ty, HirType::Json | HirType::Dictionary(_)) {
                         let rooted = self.builder.build_call(self.module.get_function("thaw_json_track_arena_owned_root").unwrap(), &[value.into()], "root_ffi_map_value")
                             .map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("failed to root Json Map value")?;
@@ -449,7 +448,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// copy-in branch unless they have an existing single-word representation.
     fn ffi_map_copyin_value_is_word_compatible(ty: &HirType) -> bool {
         match ty {
-            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_) => false,
+            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_) | HirType::JsValue => false,
             HirType::OverloadedFunction(_, physical) => Self::ffi_map_copyin_value_is_word_compatible(physical),
             _ => true,
         }
