@@ -49,6 +49,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thaw_arena::NativeStr as CStr;
 
 mod native_links;
+mod structured_clone;
 
 /// A live-shared native array -- `Rc` gives every read of the same
 /// logical array (via `Value::clone`) a handle to the *same* underlying
@@ -1201,52 +1202,18 @@ impl Value {
     /// so mutating the copy never observably affects the original.
     /// `structuredClone`'s own contract (`thaw_json_clone`).
     fn deep_clone(&self) -> Value {
-        self.deep_clone_mode(false)
+        structured_clone::clone_value(self, structured_clone::CloneMode::Snapshot)
+            .expect("snapshot clone cannot invoke a failing host operation")
     }
 
     /// `live`: materialize host objects into independent native copies (`structuredClone`).
     fn deep_clone_mode(&self, live: bool) -> Value {
-        match self {
-            Value::Null => Value::Null,
-            Value::Bool(value) => Value::Bool(*value),
-            Value::Number(value) => Value::Number(value.clone()),
-            Value::BigInt(value) => Value::BigInt(value.clone()),
-            Value::String(value) => Value::String(value.clone()),
-            Value::Wtf8(bytes) => Value::Wtf8(bytes.clone()),
-            Value::Array(items) => {
-                let copy = Value::shared_array(
-                    shared_array_ref(items)
-                        .iter()
-                        .map(|item| item.deep_clone_mode(live))
-                        .collect(),
-                );
-                if let Value::Array(target) = &copy {
-                    copy_array_holes(items, target, 0);
-                }
-                copy
-            }
-            Value::Object(fields) => {
-                let copy = Value::shared_object_with_lease(
-                    unsafe { &*fields.get() }
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.deep_clone_mode(live)))
-                        .collect(),
-                    fields.napi_lease.borrow().clone(),
-                );
-                if is_branded_wrapper(self) {
-                    brand_internal_value(copy)
-                } else {
-                    if is_graph_plain_object(self) {
-                        mark_graph_plain_object(&copy);
-                    }
-                    copy
-                }
-            }
-            // A host object cannot be cloned by walking native fields. Its
-            // clone operation must be delegated to the registered host.
-            Value::Host(lease) if live => host_deep_clone(lease),
-            Value::Host(lease) => Value::Host(Rc::clone(lease)),
-        }
+        let mode = if live {
+            structured_clone::CloneMode::Structured
+        } else {
+            structured_clone::CloneMode::Snapshot
+        };
+        structured_clone::clone_value(self, mode).unwrap_or(Value::Null)
     }
 }
 
@@ -1408,21 +1375,6 @@ fn mark_array_present(items: &SharedArray, index: usize) {
     ARRAY_HOLES.with(|holes| {
         if let Some(missing) = holes.borrow_mut().get_mut(&(Rc::as_ptr(items) as usize)) {
             missing.remove(&index);
-        }
-    });
-}
-
-fn copy_array_holes(source: &SharedArray, target: &SharedArray, skip: usize) {
-    ARRAY_HOLES.with(|holes| {
-        let mut holes = holes.borrow_mut();
-        if let Some(missing) = holes.get(&(Rc::as_ptr(source) as usize)).cloned() {
-            holes.insert(
-                Rc::as_ptr(target) as usize,
-                missing
-                    .into_iter()
-                    .filter_map(|index| index.checked_sub(skip))
-                    .collect(),
-            );
         }
     });
 }
