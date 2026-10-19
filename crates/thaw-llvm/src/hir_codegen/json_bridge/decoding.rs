@@ -307,7 +307,10 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_throw_type_error("Expected a native collection with a compatible key and value type")?;
         } else {
             let key_ty = key_ty.unwrap();
-            if !matches!(key_ty, HirType::F64 | HirType::Str | HirType::Json) {
+            let value_ty = value_ty.unwrap();
+            if !Self::ffi_map_copyin_value_is_word_compatible(value_ty) {
+                self.compile_throw_type_error("JavaScript Map copy-in requires a single-word value type")?;
+            } else if !matches!(key_ty, HirType::F64 | HirType::Str | HirType::Json) {
                 self.compile_throw_type_error("JavaScript Map copy-in supports number, string, or any keys")?;
             } else {
                 let snapshot = self.builder.build_call(
@@ -378,7 +381,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_check_json_host_error(rooted, None)?;
                 }
                 let value_json = read_pair(self, entry, 1.0, "js_map_value")?;
-                let value_ty = value_ty.unwrap();
                 self.compile_validate_native_argument(value_json, value_ty)?;
                 let value = self.compile_json_to_native(value_json, value_ty)?;
                 if matches!(value_ty, HirType::Json | HirType::Dictionary(_)) {
@@ -426,6 +428,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         result.add_incoming(&[(&native, native_end)]);
         Ok(result.as_basic_value())
+    }
+
+    /// The native Map ABI stores one 64-bit word per value. Keep wrappers and
+    /// unions on the native-pointer fast path, but reject them in the JS
+    /// copy-in branch unless they have an existing single-word representation.
+    fn ffi_map_copyin_value_is_word_compatible(ty: &HirType) -> bool {
+        match ty {
+            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_) => false,
+            HirType::OverloadedFunction(_, physical) => Self::ffi_map_copyin_value_is_word_compatible(physical),
+            _ => true,
+        }
     }
 
     fn compile_json_value_to_native(

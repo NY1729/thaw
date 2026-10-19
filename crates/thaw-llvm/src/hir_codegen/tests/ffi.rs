@@ -2724,6 +2724,8 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         declare function native_nested_map_sum(value: Map<string, Map<string, number>>): number;
         declare function native_any_map_lookup(value: Map<any, number>, key: any): number;
         declare function native_object_map_sum(value: Map<{value: number}, number>): number;
+        declare function native_optional_json_map_sum(value: Map<string, any | undefined>): number;
+        declare function native_optional_json_map_empty(): Map<string, any | undefined>;
         declare function native_string_map_empty(): Map<string, number>;
         declare function native_set_sum(value: Set<number>): number;
         declare function native_map_mutate(value: Map<string, number>): number;
@@ -2767,6 +2769,9 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
             const foreignObjectKeyMap: any = new Function("return new Map([[{value: 1}, 23]])")();
             try { native_object_map_sum(foreignObjectKeyMap); console.log("accepted object key"); }
             catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            try { native_optional_json_map_sum(new Function("key", "return new Map([['held', key]])")(objectKey)); console.log("accepted wrapped value"); }
+            catch (error) { console.log(error instanceof TypeError, native_collection_calls()); }
+            console.log(native_optional_json_map_sum(native_optional_json_map_empty()), native_collection_calls());
             const nativeMap = new Map<string, number>(); nativeMap.set("a", 4);
             const nativeSet = new Set<number>(); nativeSet.add(5);
             console.log(native_map_sum(nativeMap), native_set_sum(nativeSet), native_collection_calls());
@@ -2848,6 +2853,8 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         double native_nested_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(thaw_map_str_get_ptr(map, "inner"))); }
         double native_any_map_lookup(void *map, void *key) { calls++; return thaw_map_any_get_f64(map, key); }
         double native_object_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
+        double native_optional_json_map_sum(void *map) { calls++; return sum_words(thaw_map_snapshot_values(map)); }
+        void *native_optional_json_map_empty(void) { return thaw_map_new(); }
         double native_set_sum(void *set) { calls++; return sum_words(thaw_map_snapshot_keys(set)); }
         double native_map_mutate(void *map) {
             uint64_t bits; double value = 7; memcpy(&bits, &value, sizeof(bits));
@@ -2868,6 +2875,6 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\nset rejected true 1\nundefined 2\nset mutate rejected true 2\n0 3\nempty set rejected true 3\n1122 4\n6 5\n5 6\ntrue 6\n17 7\ntrue 7\n23 8\ntrue 8\n4 5 10\n7 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\ntrue 11\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\nset rejected true 1\nundefined 2\nset mutate rejected true 2\n0 3\nempty set rejected true 3\n1122 4\n6 5\n5 6\ntrue 6\n17 7\ntrue 7\n23 8\ntrue 8\ntrue 8\n0 9\n4 5 11\n7 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\ntrue 12\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
