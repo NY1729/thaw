@@ -157,6 +157,12 @@ fn source_value(source: &SharedObject) -> Value {
 }
 
 fn commit_fills(fills: Vec<PendingFill>) {
+    let hole_entries = fills
+        .iter()
+        .filter(|fill| matches!(fill, PendingFill::Array { holes, .. } if !holes.is_empty()))
+        .count();
+    ARRAY_HOLES.with(|entries| entries.borrow_mut().reserve(hole_entries));
+
     for fill in fills {
         match fill {
             PendingFill::Array {
@@ -166,7 +172,7 @@ fn commit_fills(fills: Vec<PendingFill>) {
             } => {
                 *shared_array_ref_mut(&target) = values;
                 if !holes.is_empty() {
-                    mark_array_holes(&target, holes);
+                    install_array_holes(&target, holes);
                 }
             }
             PendingFill::Object { target, fields } => *shared_object_ref_mut(&target) = fields,

@@ -1371,6 +1371,18 @@ fn mark_array_holes(items: &SharedArray, indices: impl IntoIterator<Item = usize
     });
 }
 
+fn install_array_holes(items: &SharedArray, holes: HashSet<usize>) {
+    ARRAY_HOLES.with(|entries| {
+        let previous = entries
+            .borrow_mut()
+            .insert(Rc::as_ptr(items) as usize, holes);
+        debug_assert!(
+            previous.is_none(),
+            "fresh clone array already has hole metadata"
+        );
+    });
+}
+
 fn mark_array_present(items: &SharedArray, index: usize) {
     ARRAY_HOLES.with(|holes| {
         if let Some(missing) = holes.borrow_mut().get_mut(&(Rc::as_ptr(items) as usize)) {
