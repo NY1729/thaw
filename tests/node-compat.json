@@ -1723,6 +1723,11 @@
           "source": "function main(): void {\n  console.log(process.env.E1_UNSET_VAR_X ?? \"3000\");\n  console.log(process.env.E1_UNSET_VAR_X || \"fallback\");\n  console.log(process.env.E1_UNSET_VAR_X === undefined);\n  console.log(typeof process.env.E1_UNSET_VAR_X);\n  process.env.E1_SET_VAR_Y = \"hello\";\n  console.log(process.env.E1_SET_VAR_Y, typeof process.env.E1_SET_VAR_Y);\n  delete process.env.E1_SET_VAR_Y;\n  console.log(process.env.E1_SET_VAR_Y === undefined, process.env.E1_SET_VAR_Y ?? \"gone\");\n  console.log(Number(process.env.E1_UNSET_VAR_X) || 3000);\n  console.log(Object.keys(process.env).includes(\"E1_UNSET_VAR_X\"));\n}\n"
     },
     {
+        "name": "class toString, valueOf and toPrimitive drive string conversion in ToPrimitive order",
+        "expect": "matched",
+        "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
+    },
+    {
         "name": "subclass instance passes where its base class is expected",
         "expect": "matched",
         "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"

@@ -1305,6 +1305,11 @@ impl<'a> FnLowerer<'a> {
                     // Object]"` (`__thaw_object_to_string`) every other
                     // class/object literal already gets.
                     _ => {
+                        if let Some(result) = self.invoke_class_ordinary_to_primitive(
+                            value.clone(), &HirType::Object(fields.clone()), "string",
+                        )? {
+                            return Ok(HirExpr::JsonAsString(Box::new(result)));
+                        }
                         let tag_property = well_known_symbol_key("toStringTag");
                         if let Some(owner) = self.class_instance_accessor_owner(
                             &HirType::Object(fields.clone()), &tag_property,
@@ -1614,6 +1619,12 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
+        // Two statically numeric operands compare directly: the float compare is
+        // NaN-unequal and -0 == 0, exactly as Strict Equality. The general path below
+        // would bind both operands into call-argument closures on every evaluation.
+        if lhs_type == HirType::F64 && rhs_type == HirType::F64 {
+            return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
+        }
         // An `any` operand against a native object/array it may alias: compare the live views
         // (interned per native pointer), so `view === owner` holds like in Node.
         if lhs_type == HirType::Json && self.has_live_view_identity(&rhs_type) {
@@ -2849,6 +2860,9 @@ impl<'a> FnLowerer<'a> {
             return Ok((result, HirType::Json));
         }
         if let Some(result) = self.invoke_class_to_primitive(value.clone(), &ty, "default")? {
+            return Ok((result, HirType::Json));
+        }
+        if let Some(result) = self.invoke_class_ordinary_to_primitive(value.clone(), &ty, "default")? {
             return Ok((result, HirType::Json));
         }
         Err(format!(
