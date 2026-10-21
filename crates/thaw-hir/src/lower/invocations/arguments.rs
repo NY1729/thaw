@@ -120,7 +120,12 @@ impl<'a> FnLowerer<'a> {
             } else {
                 expected.get(if options.logical_argument_offsets { argument_offset } else { source_argument_index }).or(rest)
             };
-            let value = self.lower_expr_with_expected_type(&argument.expr, expected_type)?;
+            // An ambient QuickJS export passed by name keeps its real JS identity.
+            let ambient_value = self.ambient_js_export_argument(&argument.expr, argument.spread.is_some());
+            let value = match ambient_value {
+                Some(value) => value,
+                None => self.lower_expr_with_expected_type(&argument.expr, expected_type)?,
+            };
             if argument.spread.is_some() {
                 if let HirType::Tuple(elements) = self.infer_expr_type(&value)? {
                     argument_offset += elements.len();
