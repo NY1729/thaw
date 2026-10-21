@@ -1843,3 +1843,104 @@ pub fn normalize_default_parameter_closures(module: &Module) -> Module {
     module.visit_mut_with(&mut Rewriter);
     module
 }
+
+/// A parameter with a default and no type annotation takes the default's
+/// static type, as TypeScript infers it: literals, arithmetic on number
+/// operands, string concatenation, and earlier keyword-typed parameters
+/// (`function f(a: number, b = a * 2)`). Anything else is left unannotated,
+/// so the existing annotation error still applies.
+pub fn annotate_untyped_default_parameters(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    fn keyword_annotation(kind: TsKeywordTypeKind) -> Box<TsTypeAnn> {
+        Box::new(TsTypeAnn {
+            span: swc_common::DUMMY_SP,
+            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                span: swc_common::DUMMY_SP,
+                kind,
+            })),
+        })
+    }
+    fn keyword_of(annotation: &TsTypeAnn) -> Option<TsKeywordTypeKind> {
+        match annotation.type_ann.as_ref() {
+            TsType::TsKeywordType(keyword) => Some(keyword.kind),
+            _ => None,
+        }
+    }
+    fn expr_type(
+        expr: &Expr,
+        earlier: &HashMap<String, TsKeywordTypeKind>,
+    ) -> Option<TsKeywordTypeKind> {
+        use TsKeywordTypeKind::*;
+        match expr {
+            Expr::Paren(paren) => expr_type(&paren.expr, earlier),
+            Expr::Lit(Lit::Num(_)) => Some(TsNumberKeyword),
+            Expr::Lit(Lit::Str(_)) => Some(TsStringKeyword),
+            Expr::Lit(Lit::Bool(_)) => Some(TsBooleanKeyword),
+            Expr::Ident(ident) => earlier.get(&ident.sym.to_string()).cloned(),
+            Expr::Bin(bin) => {
+                let left = expr_type(&bin.left, earlier);
+                let right = expr_type(&bin.right, earlier);
+                let both_numbers = left == Some(TsNumberKeyword) && right == Some(TsNumberKeyword);
+                match bin.op {
+                    BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Exp
+                        if both_numbers =>
+                    {
+                        Some(TsNumberKeyword)
+                    }
+                    BinaryOp::Add if both_numbers => Some(TsNumberKeyword),
+                    BinaryOp::Add
+                        if left == Some(TsStringKeyword) || right == Some(TsStringKeyword) =>
+                    {
+                        Some(TsStringKeyword)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    fn annotate_params<'a>(params: impl Iterator<Item = &'a mut Pat>) {
+        let mut earlier: HashMap<String, TsKeywordTypeKind> = HashMap::new();
+        for pat in params {
+            let binding = match pat {
+                Pat::Ident(binding) => binding,
+                Pat::Assign(assign) => match assign.left.as_mut() {
+                    Pat::Ident(binding) => {
+                        if binding.type_ann.is_none() {
+                            if let Some(kind) = expr_type(&assign.right, &earlier) {
+                                binding.type_ann = Some(keyword_annotation(kind));
+                            }
+                        }
+                        binding
+                    }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if let Some(kind) = binding.type_ann.as_deref().and_then(keyword_of) {
+                earlier.insert(binding.id.sym.to_string(), kind);
+            }
+        }
+    }
+    struct Annotator;
+    impl swc_ecma_visit::VisitMut for Annotator {
+        fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
+            function.visit_mut_children_with(self);
+            annotate_params(function.params.iter_mut().map(|param| &mut param.pat));
+        }
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {
+            arrow.visit_mut_children_with(self);
+            annotate_params(arrow.params.iter_mut());
+        }
+        fn visit_mut_constructor(&mut self, constructor: &mut Constructor) {
+            constructor.visit_mut_children_with(self);
+            annotate_params(constructor.params.iter_mut().filter_map(|param| match param {
+                ParamOrTsParamProp::Param(param) => Some(&mut param.pat),
+                ParamOrTsParamProp::TsParamProp(_) => None,
+            }));
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Annotator);
+    module
+}

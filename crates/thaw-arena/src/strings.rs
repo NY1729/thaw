@@ -9,6 +9,27 @@ use std::sync::{Mutex, OnceLock};
 thread_local! {
     static LENGTHS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
     static OWNED_EXCEPTIONS: RefCell<HashMap<usize, Rc<crate::exception::ExceptionPacket>>> = RefCell::new(HashMap::new());
+    static NATIVE_ERROR_ALIASES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+/// Records that `copy` is the caught-Error text of the framed Error at `identity`.
+pub fn register_native_error_alias(copy: *const c_char, identity: usize) {
+    if copy.is_null() || identity == 0 {
+        return;
+    }
+    crate::register_reset_hook(clear_native_error_aliases);
+    NATIVE_ERROR_ALIASES.with(|table| {
+        table.borrow_mut().insert(copy as usize, identity);
+    });
+}
+
+/// The framed identity recorded for a caught-Error text copy, if any.
+pub fn native_error_alias(pointer: usize) -> Option<usize> {
+    NATIVE_ERROR_ALIASES.with(|table| table.borrow().get(&pointer).copied())
+}
+
+fn clear_native_error_aliases(_: bool) {
+    NATIVE_ERROR_ALIASES.with(|table| table.borrow_mut().clear());
 }
 
 /// Binds a private exception packet to one trusted owned result string.

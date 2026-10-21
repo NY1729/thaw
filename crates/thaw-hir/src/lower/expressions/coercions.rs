@@ -1310,6 +1310,11 @@ impl<'a> FnLowerer<'a> {
                     // Object]"` (`__thaw_object_to_string`) every other
                     // class/object literal already gets.
                     _ => {
+                        if let Some(result) = self.invoke_class_ordinary_to_primitive(
+                            value.clone(), &HirType::Object(fields.clone()), "string",
+                        )? {
+                            return Ok(HirExpr::JsonAsString(Box::new(result)));
+                        }
                         let tag_property = well_known_symbol_key("toStringTag");
                         if let Some(owner) = self.class_instance_accessor_owner(
                             &HirType::Object(fields.clone()), &tag_property,
@@ -1617,8 +1622,51 @@ impl<'a> FnLowerer<'a> {
     fn lower_strict_equality(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        // A caught Error keeps the framed text pointer of the thrown value. When the caught
+        // string member is that same allocation, the two are the same Error, so identity holds.
+        // Every other pair, including plain string equality, keeps the general comparison.
+        if !self.text_identity_pending {
+            let carrier = crate::caught_exception_carrier_type();
+            let is_var = |value: &HirExpr| matches!(value, HirExpr::Var(_));
+            let pair = (lhs_type == carrier && rhs_type == HirType::Str && is_var(&lhs) && is_var(&rhs))
+                .then_some((lhs.clone(), rhs.clone()))
+                .or_else(|| (rhs_type == carrier && lhs_type == HirType::Str && is_var(&lhs) && is_var(&rhs))
+                    .then_some((rhs.clone(), lhs.clone())));
+            if let Some((carrier_value, text_value)) = pair {
+                let HirType::Union(members) = carrier.clone() else { unreachable!() };
+                let index = members.iter().position(|m| m == &HirType::Str)
+                    .expect("caught exception carrier has a Str member");
+                self.text_identity_pending = true;
+                let general = self.lower_strict_equality(lhs.clone(), rhs.clone());
+                self.text_identity_pending = false;
+                let general = general?;
+                let active = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(Box::new(carrier_value.clone()), members.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                );
+                let text_member = HirExpr::UnionValue(Box::new(carrier_value), index, members);
+                let same = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_str_pointer_same".into())),
+                    vec![text_member, text_value],
+                );
+                let identical = HirExpr::Conditional(
+                    Box::new(same),
+                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                    Box::new(general.clone()),
+                    HirType::Bool,
+                );
+                return Ok(HirExpr::Conditional(Box::new(active), Box::new(identical), Box::new(general), HirType::Bool));
+            }
+        }
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
+        // Two statically numeric operands compare directly: the float compare is
+        // NaN-unequal and -0 == 0, exactly as Strict Equality. The general path below
+        // would bind both operands into call-argument closures on every evaluation.
+        if lhs_type == HirType::F64 && rhs_type == HirType::F64 {
+            return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
+        }
         // An `any` operand against a native object/array it may alias: compare the live views
         // (interned per native pointer), so `view === owner` holds like in Node.
         if lhs_type == HirType::Json && self.has_live_view_identity(&rhs_type) {
@@ -2854,6 +2902,9 @@ impl<'a> FnLowerer<'a> {
             return Ok((result, HirType::Json));
         }
         if let Some(result) = self.invoke_class_to_primitive(value.clone(), &ty, "default")? {
+            return Ok((result, HirType::Json));
+        }
+        if let Some(result) = self.invoke_class_ordinary_to_primitive(value.clone(), &ty, "default")? {
             return Ok((result, HirType::Json));
         }
         Err(format!(

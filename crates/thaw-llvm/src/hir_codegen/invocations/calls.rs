@@ -2150,6 +2150,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("native exception owner returned no value".into());
             }
+            "__thaw_str_pointer_same" => {
+                let [left, right] = args else { return Err(format!("{name} expects two strings")); };
+                let left = self.compile_expr(left)?.into_pointer_value();
+                let right = self.compile_expr(right)?.into_pointer_value();
+                let same = self.builder.build_call(
+                    self.module.get_function("thaw_str_pointer_same").unwrap(),
+                    &[left.into(), right.into()], "str_pointer_same",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("string pointer identity returned no value")?;
+                return self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE, same.into_int_value(),
+                    self.context.i8_type().const_zero(), "str_pointer_same_bool",
+                ).map(Into::into).map_err(|error| error.to_string());
+            }
             "__thaw_native_exception_owner_present" => {
                 let [owner] = args else { return Err(format!("{name} expects one owner")); };
                 let owner = self.compile_expr(owner)?.into_pointer_value();

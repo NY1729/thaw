@@ -372,6 +372,7 @@ fn packet_error_identity<'js>(ctx: &Ctx<'js>, pointer: *const c_char) -> rquickj
 fn owned_exception_error(error: BoundaryError) -> *mut c_char {
     let pointer = thaw_arena::owned_string(error.text.as_bytes());
     if let Some(packet) = error.packet {
+        thaw_arena::register_native_error_alias(pointer, packet.native_error_identity);
         if !thaw_arena::bind_owned_exception(pointer, packet) {
             unsafe { thaw_arena::destroy_string(pointer) };
             return thaw_arena::owned_string(b"native exception packet binding failed");
