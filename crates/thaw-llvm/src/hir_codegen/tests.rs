@@ -538,6 +538,7 @@ include!("tests/ia_contracts.rs");
 include!("tests/jb_contracts.rs");
 include!("tests/la_contracts.rs");
 include!("tests/ja_contracts.rs");
+include!("tests/h1_contracts.rs");
 include!("tests/na_contracts.rs");
 include!("tests/nb3_contracts.rs");
 include!("tests/nb4_contracts.rs");
