@@ -307,11 +307,16 @@
     const due = [...timers.entries()]
       .filter(([, timer]) => !timer.clock && timer.due <= now)
       .sort((a, b) => a[1].due - b[1].due || a[0] - b[0]);
+    // Every timer due at this moment runs in this call. The host drains nextTick and promise jobs
+    // after each callback (Node's microtask checkpoint), so the callbacks observe Node's order.
+    let ran = 0;
     for (const [id, timer] of due) {
       if (!timers.has(id) || timer.due > nativeDateNow()) continue;
       if (timer.repeat) timer.due = nativeDateNow() + timer.milliseconds;
       else timers.delete(id);
       invokeTimer(timer);
+      ran += 1;
+      globalThis.__thaw_run_pending_jobs?.();
     }
-    return due.length;
+    return ran;
   };

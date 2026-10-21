@@ -3453,6 +3453,13 @@ impl<'ctx> HirCompiler<'ctx> {
         pending: PointerValue<'ctx>,
         name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // An exception that came back from JavaScript is only a parked carrier: restore its complete
+        // tuple (type tag, owner, native descriptor) before re-publishing it, or the next catch sees an empty one.
+        self.compile_restore_parked_native_throw(pending)?;
+        let pending = self.builder
+            .build_load(self.context.ptr_type(AddressSpace::default()),
+                self.pending_exception().as_pointer_value(), "callback_restored_exception")
+            .map_err(|error| error.to_string())?.into_pointer_value();
         let load = |this: &Self, symbol: &str, ty: BasicTypeEnum<'ctx>, label: &str| {
             this.builder
                 .build_load(ty, this.pending_exception_value(symbol).as_pointer_value(), label)

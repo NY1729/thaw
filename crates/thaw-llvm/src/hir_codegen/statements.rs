@@ -1379,7 +1379,7 @@ impl<'ctx> HirCompiler<'ctx> {
 impl<'ctx> HirCompiler<'ctx> {
     /// A native throw that crossed JavaScript arrives as an authenticated private Error carrier.
     /// Restore its complete packet before the native catch binding snapshots the thrown value.
-    fn compile_restore_parked_native_throw(&mut self, thrown: PointerValue<'ctx>) -> Result<(), String> {
+    pub(crate) fn compile_restore_parked_native_throw(&mut self, thrown: PointerValue<'ctx>) -> Result<(), String> {
         let token = self.builder.build_call(
             self.module.get_function("thaw_exception_native_token").unwrap(),
             &[thrown.into()], "parked_native_throw_token",

@@ -16,7 +16,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let [
                         HirType::I64,
-                        HirType::Str,
+                        HirType::Json,
                         input_type,
                         return_channel @ HirType::Array(_),
                         return_request @ HirType::Array(_),
@@ -100,7 +100,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("generator `.throw()` does not accept a spread value".into());
                         }
                         let value = self.lower_expr(&argument.expr)?;
-                        let value = self.coerce_primitive_to_string(value)?;
+                        let value = self.coerce_to_declared(&HirType::Json, value)?;
                         let name = format!("__thaw_generator_throw_{}", self.next_binding);
                         self.next_binding += 1;
                         (vec![
@@ -114,11 +114,11 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(completion_name.clone()),
                             HirExpr::Var(request_name.clone()),
                             HirExpr::Var(forced_name.clone()),
-                        ], Some((name, HirType::Str, value)))
+                        ], Some((name, HirType::Json, value)))
                     } else if property.sym == *"return" {
                         (vec![
                             HirExpr::Lit(HirLit::I64(1)),
-                            HirExpr::Lit(HirLit::Str(String::new())),
+                            undefined_json_placeholder(),
                             generator_placeholder(input_type).ok_or_else(|| {
                                 format!(
                                     "generator input type {input_type:?} has no default value"
@@ -149,7 +149,7 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         (vec![
                             HirExpr::Lit(HirLit::I64(0)),
-                            HirExpr::Lit(HirLit::Str(String::new())),
+                            undefined_json_placeholder(),
                             HirExpr::Var(name.clone()),
                             HirExpr::Var(completion_name.clone()),
                             HirExpr::Var(request_name.clone()),
@@ -2313,4 +2313,9 @@ impl<'a> FnLowerer<'a> {
         statements.push(HirStmt::Return(Some(HirExpr::ArrayLen(Box::new(HirExpr::Var(receiver_name))))));
         Ok(Some(HirExpr::Block(statements)))
     }
+}
+
+/// The error channel of a generator resume is dynamic; `undefined` marks "no throw".
+fn undefined_json_placeholder() -> HirExpr {
+    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())
 }
