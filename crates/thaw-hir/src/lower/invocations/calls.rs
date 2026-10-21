@@ -1827,7 +1827,7 @@ impl<'a> FnLowerer<'a> {
                 // defers the call to a microtask, as PromiseResolveThenableJob does.
                 let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
                 let handle = HirExpr::Call(
-                    Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
+                    Box::new(HirExpr::Var("callDynamicMethodHandleRaw".to_string())),
                     vec![
                         HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".to_string())),

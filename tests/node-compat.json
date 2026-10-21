@@ -1751,6 +1751,11 @@
       "name": "plain string equality stays content based next to caught Errors",
       "expect": "matched",
       "source": "function main(): void {\n    const s: any = \"x\";\n    console.log(s === \"x\", s === \"y\");\n    const t: any = new Error(\"q\");\n    console.log(t === \"q\", t.name);\n}\n"
+    },
+    {
+      "name": "promise resolve of a thenable calls then after the synchronous code",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const events: string[] = [];\n  const thenable: any = {\n    get then() {\n      events.push(\"get\");\n      return function (resolve: any): void {\n        events.push(\"call\");\n        resolve(9);\n      };\n    },\n  };\n  events.push(\"before\");\n  const promise = Promise.resolve(thenable);\n  events.push(\"after\");\n  console.log(await promise, events.join(\",\"));\n}\n"
     }
   ]
 }
