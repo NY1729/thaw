@@ -2741,7 +2741,28 @@ fn make_native_graph_invoker<'js>(
     })
 }
 
+/// Runs every ready nextTick, promise and native continuation job; the host calls this between
+/// timer callbacks, the same checkpoint the event loop runs between turns.
+fn run_pending_jobs(ctx: &Ctx<'_>) {
+    loop {
+        let drained = matches!(drain_next_tick_queue(ctx), Ok(true));
+        let mut ran = false;
+        while ctx.execute_pending_job() {
+            ran = true;
+        }
+        let more_ready = {
+            let _active = ActiveNapiContext::enter(ctx);
+            poll_native_continuations()
+        };
+        if !drained && !ran && !more_ready {
+            break;
+        }
+    }
+}
+
 fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    ctx.globals().set("__thaw_run_pending_jobs",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>| run_pending_jobs(&ctx))?)?;
     ctx.globals().set("__thaw_retain_dynamic_value",
         Function::new(ctx.clone(), retain_dynamic_value_for_js)?)?;
     ctx.globals().set("__thaw_release_dynamic_value",
