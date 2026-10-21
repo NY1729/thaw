@@ -218,7 +218,7 @@ impl<'a> FnLowerer<'a> {
         };
         let [
             HirType::I64,
-            HirType::Str,
+            HirType::Json,
             input,
             completion,
             request,
@@ -360,7 +360,7 @@ impl<'a> FnLowerer<'a> {
         };
         let [
             HirType::I64,
-            HirType::Str,
+            HirType::Json,
             input,
             completion,
             request,

@@ -3154,13 +3154,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         let source_type = self.infer_expr_type(source)?;
                         if matches!(&source_type, HirType::Function(params, result)
-                            if matches!(params.as_slice(), [HirType::I64, HirType::Str, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
+                            if matches!(params.as_slice(), [HirType::I64, HirType::Json, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
                                 && matches!(result.as_ref(), HirType::Promise(generated) if matches!(generated.as_ref(), HirType::Array(_))))
                         {
                             return Err("`Iterator.from` does not accept an async generator".into());
                         }
                         let source = if matches!(&source_type, HirType::Function(params, result)
-                            if matches!(params.as_slice(), [HirType::I64, HirType::Str, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
+                            if matches!(params.as_slice(), [HirType::I64, HirType::Json, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
                                 && matches!(result.as_ref(), HirType::Array(_)))
                         {
                             let producer = format!("__thaw_iterator_producer_{}", self.next_binding);

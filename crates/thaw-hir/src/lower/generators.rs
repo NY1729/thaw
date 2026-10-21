@@ -272,7 +272,7 @@ pub(crate) fn is_generator_producer_type(ty: &HirType) -> bool {
     let HirType::Function(params, _) = ty else {
         return false;
     };
-    params.len() == 6 && params[0] == HirType::I64 && params[1] == HirType::Str
+    params.len() == 6 && params[0] == HirType::I64 && params[1] == HirType::Json
 }
 
 fn generator_emits_value(statement: &HirStmt, values: &str) -> bool {
@@ -360,7 +360,7 @@ fn lower_generator_state_machine(
     values: &str,
     state: &str,
     control: &str,
-    error: &str,
+    error_throw: &[HirStmt],
     initialized: &str,
     returns: &str,
     return_request: &str,
@@ -448,7 +448,7 @@ fn lower_generator_state_machine(
         if !block.forwards_control {
             selected.insert(
                 0,
-                generator_control_transition(control, error, values, state, cancel_target),
+                generator_control_transition(control, error_throw, values, state, cancel_target),
             );
             let resumed_cancel = vec![
                 HirStmt::Expr(HirExpr::Assign(
@@ -575,7 +575,7 @@ fn lower_generator_state_machine(
                                 Box::new(HirExpr::Var(control.into())),
                                 Box::new(HirExpr::Lit(HirLit::I64(2))),
                             ),
-                            vec![HirStmt::Throw(HirExpr::Var(error.into()))],
+                            error_throw.to_vec(),
                             vec![
                                 generator_transfer_return(return_request, forced_return),
                                 HirStmt::Return(Some(HirExpr::Var(values.into()))),
@@ -639,7 +639,7 @@ fn lower_generator_state_machine(
                             Box::new(HirExpr::Var(control.into())),
                             Box::new(HirExpr::Lit(HirLit::I64(2))),
                         ),
-                        vec![HirStmt::Throw(HirExpr::Var(error.into()))],
+                        error_throw.to_vec(),
                         Vec::new(),
                     ));
                     if let Some(pending_return) = pending_return {
@@ -717,7 +717,7 @@ fn generator_transfer_return_unless_completed(
 
 fn generator_control_transition(
     control: &str,
-    error: &str,
+    error_throw: &[HirStmt],
     values: &str,
     state: &str,
     cancel_target: usize,
@@ -748,13 +748,14 @@ fn generator_control_transition(
             Box::new(HirExpr::Var(control.into())),
             Box::new(HirExpr::Lit(HirLit::I64(2))),
         ),
-        vec![
-            HirStmt::Expr(HirExpr::Assign(
+        [
+            vec![HirStmt::Expr(HirExpr::Assign(
                 control.into(),
                 Box::new(HirExpr::Lit(HirLit::I64(0))),
-            )),
-            HirStmt::Throw(HirExpr::Var(error.into())),
-        ],
+            ))],
+            error_throw.to_vec(),
+        ]
+        .concat(),
         vec![cancel],
     )
 }

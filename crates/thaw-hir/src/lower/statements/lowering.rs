@@ -154,10 +154,13 @@ fn iterator_object_adapter(
             Box::new(HirExpr::Lit(HirLit::I64(2))),
         ),
         if throw_method {
+            // The thrown value is carried as Json; a string-typed `throw` must
+            // receive its text (JsonAsString), not a Json-to-Str reinterpretation.
+            let thrown = HirExpr::JsonAsString(Box::new(HirExpr::Var(error.clone())));
             result_statements(
                 lowerer,
                 format!("{result_name}_throw"),
-                call_method("throw", vec![HirExpr::Var(error.clone())]),
+                call_method("throw", vec![thrown]),
             )?
         } else {
             vec![HirStmt::Throw(HirExpr::Var(error.clone()))]
@@ -894,7 +897,7 @@ impl<'a> FnLowerer<'a> {
             };
             let [
                 HirType::I64,
-                HirType::Str,
+                HirType::Json,
                 input_type,
                 return_channel @ HirType::Array(return_type),
                 HirType::Array(_return_request),
@@ -932,6 +935,21 @@ impl<'a> FnLowerer<'a> {
                 return Err("a synchronous generator cannot delegate to an async generator".into());
             }
             let input = self.coerce_to_declared(input_type, HirExpr::Var(input.into()))?;
+            // The delegate's error channel is typed by the producer; a string
+            // channel (user iterator protocol) receives the converted text.
+            // The thrown-value binding is typed `Json` for the duration of this
+            // conversion only; leaving it in scope would make it a closure capture.
+            self.scope.insert("__thaw_generator_error".into(), HirType::Json);
+            // The thrown value is in scope only while converting it to the producer's
+            // error channel: leaving it registered would make it a closure capture.
+            self.scope.insert("__thaw_generator_error".into(), HirType::Json);
+            let error_channel = if params[1] == HirType::Str {
+                self.coerce_primitive_to_string(HirExpr::Var("__thaw_generator_error".into()))
+            } else {
+                self.coerce_to_declared(&params[1].clone(), HirExpr::Var("__thaw_generator_error".into()))
+            };
+            self.scope.remove("__thaw_generator_error");
+            let error_channel = error_channel?;
             let producer = format!("__thaw_yield_delegate_{}", self.next_binding);
             self.next_binding += 1;
             let chunk = format!("__thaw_yield_delegate_chunk_{}", self.next_binding);
@@ -992,7 +1010,7 @@ impl<'a> FnLowerer<'a> {
                                         )),
                                         vec![
                                             HirExpr::Var("__thaw_generator_control".into()),
-                                            HirExpr::Var("__thaw_generator_error".into()),
+                                            error_channel.clone(),
                                             input.clone(),
                                             HirExpr::Var(completion.clone()),
                                             HirExpr::Var(
@@ -1014,7 +1032,7 @@ impl<'a> FnLowerer<'a> {
                                 )),
                                 vec![
                                     HirExpr::Var("__thaw_generator_control".into()),
-                                    HirExpr::Var("__thaw_generator_error".into()),
+                                    error_channel.clone(),
                                     input.clone(),
                                     HirExpr::Var(completion.clone()),
                                     HirExpr::Var("__thaw_generator_return_request".into()),
