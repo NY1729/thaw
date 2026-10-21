@@ -289,6 +289,7 @@ impl<'a> FnLowerer<'a> {
             || actual == *expected
             || bytes_array_compatible(expected, &actual)
             || callable_compatible
+            || class_identity_subtype(expected, &actual)
             // A function whose return type is still the unresolved `Dynamic` placeholder (an
             // unannotated method read at top level before its body converged) accepts the
             // resolved return; the global's type is refined afterwards.
@@ -3205,5 +3206,30 @@ impl<'a> FnLowerer<'a> {
             HirExpr::ThrowValue(_, fallback) => self.infer_expr_type(fallback),
             HirExpr::Block(stmts) => self.infer_return_type(stmts),
         }
+    }
+}
+
+/// A subclass instance is a valid value where its base class is expected: the
+/// actual class identity marker lists the expected class among its ancestors,
+/// and the base's physical fields are a prefix of the subclass layout, so
+/// base-layout reads (including private fields) stay correct.
+fn class_identity_subtype(expected: &HirType, actual: &HirType) -> bool {
+    let identity = |ty: &HirType| match ty {
+        HirType::Object(fields) => fields.first().and_then(|(name, _)| {
+            name.strip_prefix("__thaw_class_identity_\u{1e}").map(str::to_owned)
+        }),
+        _ => None,
+    };
+    let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, actual) else {
+        return false;
+    };
+    match (identity(expected), identity(actual)) {
+        (Some(expected_identity), Some(actual_identity)) => {
+            let expected_name = expected_identity.split('\u{1f}').next().unwrap_or_default();
+            actual_identity.split('\u{1f}').any(|name| name == expected_name)
+                && expected_fields.len() <= actual_fields.len()
+                && expected_fields.iter().skip(1).zip(actual_fields.iter().skip(1)).all(|(e, a)| e == a)
+        }
+        _ => false,
     }
 }
