@@ -143,7 +143,7 @@ fn desugars_for_await_of_promise_array_to_awaited_items() {
 fn lowers_async_function_unwrapping_promise_and_await() {
     let program = lower(
         r#"async function fetchStage(): Promise<string> {
-            const s: string = process.env.STAGE;
+            const s: string = process.env.STAGE ?? "";
             return s;
         }
         async function main(): Promise<void> {

@@ -19,9 +19,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(str::to_string)
     }
 
-    /// `process.env.NAME`, via libc `getenv`. Returns an empty string
-    /// instead of a null pointer when the variable is unset, since Str
-    /// values elsewhere (puts/printf %s) assume a valid C string.
+    /// `process.env.NAME`, via libc `getenv`, as `string | undefined`. An unset
+    /// variable is `undefined` (tag false); the payload is a valid empty C string
+    /// so Str consumers that do not check the tag still see a safe pointer.
     fn compile_env_var(&mut self, name: &str) -> Result<BasicValueEnum<'ctx>, String> {
         let name_global = self
             .builder
@@ -76,7 +76,24 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_phi(ptr_ty, "envval")
             .map_err(|e| e.to_string())?;
         phi.add_incoming(&[(&empty.as_pointer_value(), null_bb), (&raw_ptr, notnull_bb)]);
-        Ok(phi.as_basic_value())
+        // `string | undefined`: the presence tag is "variable is set", the payload
+        // is the value (or the empty placeholder when unset, which is never read).
+        let present = self
+            .builder
+            .build_not(is_null, "env_present")
+            .map_err(|e| e.to_string())?;
+        let optional_type = self
+            .basic_type(&HirType::Optional(Box::new(HirType::Str)))?
+            .into_struct_type();
+        let tagged = self
+            .builder
+            .build_insert_value(optional_type.get_undef(), present, 0, "env_optional_tag")
+            .map_err(|e| e.to_string())?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(tagged, phi.as_basic_value(), 1, "env_optional_value")
+            .map(|value| value.into_struct_value().into())
+            .map_err(|e| e.to_string())
     }
 
     fn expr_is_string(&self, expr: &HirExpr) -> bool {
@@ -93,7 +110,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
             HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))
-            | HirExpr::EnvVar(_) | HirExpr::JsonAsString(_) => Some(HirType::Str),
+            | HirExpr::JsonAsString(_) => Some(HirType::Str),
+            HirExpr::EnvVar(_) => Some(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
