@@ -1728,6 +1728,11 @@
         "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
     },
     {
+        "name": "untyped default parameter takes the default type",
+        "expect": "matched",
+        "source": "function f(a: number, b = a * 2) { return a + b }\nfunction s(a: string, sep = \", \") { return a + sep + \"x\" }\nfunction t(flag = true, n = 3 + 4) { return flag ? n : -n }\nclass C { k: number; constructor(x: number, y = x - 1) { this.k = x + y } }\nconst h = (a: number, b = a * 3, c = b + 1) => a + b + c;\nasync function main(): Promise<void> {\n  console.log(f(1), f(1, 5), s(\"a\"), s(\"a\", \"-\"), t(), t(false, 2), new C(4).k, h(2), h(2, 1));\n}\n"
+    },
+    {
         "name": "subclass instance passes where its base class is expected",
         "expect": "matched",
         "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"
