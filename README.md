@@ -196,7 +196,12 @@ allocation. JavaScript-owned values retain reference identity when written throu
 alias, including plain objects in class-annotated arrays, self references and deep graphs.
 Native classes retain their actual class and private-field brands. Fresh, optional, tuple,
 callable and async method results preserve dynamically represented references across awaits.
-Programs whose values remain native keep their unboxed storage. Public native FFI layouts
+Programs whose values remain native keep their unboxed storage. A registry package function
+whose arguments or result cross a dynamic-storage boundary (for example an `any` value passed
+to a `number[]` or `Record<string, number>` parameter, or a `number[]` that the program also
+exposes as `any` while the function mutates it)
+runs through QuickJS instead of the JIT, because the JIT's dense arrays and dictionaries cannot
+share storage with dynamic values; its output is unchanged. Public native FFI layouts
 stay fixed; incompatible dynamic arguments throw `TypeError` before native code is invoked.
 Compatible JavaScript-owned `Map` and `Set` arguments are copied into temporary native
 collections for the call; compatible native collections keep the zero-copy path. C-side
