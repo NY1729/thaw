@@ -6369,6 +6369,43 @@ impl<'a> FnLowerer<'a> {
     /// (unlike the object-literal case): a native class method's own
     /// calling convention (`invocations/calls.rs`'s `obj.method(args)`
     /// rewrite) passes the receiver value directly as the first argument.
+    /// `OrdinaryToPrimitive` for a class instance with no `[Symbol.toPrimitive]`:
+    /// the user-defined `valueOf`/`toString` methods in spec order (`toString`
+    /// first for hint `"string"`, `valueOf` first otherwise), each with a
+    /// primitive declared return. Inherited `Object.prototype` methods are not
+    /// user-defined, so they are skipped. `None` means no such method exists and
+    /// the caller keeps its `[object Object]` fallback.
+    fn invoke_class_ordinary_to_primitive(
+        &mut self,
+        value: HirExpr,
+        object_type: &HirType,
+        hint: &str,
+    ) -> Result<Option<HirExpr>, String> {
+        let Some(class_name) = class_name_from_type(object_type) else {
+            return Ok(None);
+        };
+        let order: [&str; 2] = if hint == "string" { ["toString", "valueOf"] } else { ["valueOf", "toString"] };
+        for method in order {
+            let symbol = class_method_symbol(class_name, method);
+            let Some(signature) = self.signatures.get(&symbol).cloned() else {
+                continue;
+            };
+            if matches!(signature.ret, HirType::Object(_)) {
+                continue;
+            }
+            let call = HirExpr::Call(
+                Box::new(HirExpr::FunctionRef(
+                    symbol,
+                    signature.params.clone(),
+                    signature.ret.clone(),
+                )),
+                vec![value],
+            );
+            return Ok(Some(self.coerce_to_declared(&HirType::Json, call)?));
+        }
+        Ok(None)
+    }
+
     fn invoke_class_to_primitive(
         &mut self,
         value: HirExpr,

@@ -1726,6 +1726,41 @@
         "name": "generator resume with no argument makes ?? take the fallback",
         "expect": "matched",
         "source": "function* g() {\n  let i = 0;\n  while (i < 3) {\n    const got = yield i;\n    i += got ?? 1;\n  }\n}\nasync function main(): Promise<void> {\n  const it = g();\n  const a = it.next();\n  const b = it.next();\n  const c = it.next();\n  const d = it.next();\n  console.log(a.value, a.done, b.value, b.done, c.value, c.done, d.done);\n}\n"
+    },
+    {
+        "name": "class toString, valueOf and toPrimitive drive string conversion in ToPrimitive order",
+        "expect": "matched",
+        "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
+    },
+    {
+        "name": "untyped default parameter takes the default type",
+        "expect": "matched",
+        "source": "function f(a: number, b = a * 2) { return a + b }\nfunction s(a: string, sep = \", \") { return a + sep + \"x\" }\nfunction t(flag = true, n = 3 + 4) { return flag ? n : -n }\nclass C { k: number; constructor(x: number, y = x - 1) { this.k = x + y } }\nconst h = (a: number, b = a * 3, c = b + 1) => a + b + c;\nasync function main(): Promise<void> {\n  console.log(f(1), f(1, 5), s(\"a\"), s(\"a\", \"-\"), t(), t(false, 2), new C(4).k, h(2), h(2, 1));\n}\n"
+    },
+    {
+        "name": "subclass instance passes where its base class is expected",
+        "expect": "matched",
+        "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"
+    },
+    {
+      "name": "caught Error keeps identity through a callback invoked via any",
+      "expect": "matched",
+      "source": "function main(): void {\n    const err = new Error(\"x\");\n    const invoke: any = (cb: any): any => cb();\n    try {\n        invoke(() => { throw err; });\n    } catch (e: any) {\n        console.log(e === err, e.message, e.name);\n    }\n}\n"
+    },
+    {
+      "name": "rethrown caught Error keeps identity",
+      "expect": "matched",
+      "source": "function main(): void {\n    const err = new Error(\"boom\");\n    const invoke: any = (cb: any): any => cb();\n    try {\n        try {\n            invoke(() => { throw err; });\n        } catch (e: any) {\n            throw e;\n        }\n    } catch (outer: any) {\n        console.log(outer === err, outer.message);\n    }\n}\n"
+    },
+    {
+      "name": "plain string equality stays content based next to caught Errors",
+      "expect": "matched",
+      "source": "function main(): void {\n    const s: any = \"x\";\n    console.log(s === \"x\", s === \"y\");\n    const t: any = new Error(\"q\");\n    console.log(t === \"q\", t.name);\n}\n"
+    },
+    {
+      "name": "promise resolve of a thenable calls then after the synchronous code",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const events: string[] = [];\n  const thenable: any = {\n    get then() {\n      events.push(\"get\");\n      return function (resolve: any): void {\n        events.push(\"call\");\n        resolve(9);\n      };\n    },\n  };\n  events.push(\"before\");\n  const promise = Promise.resolve(thenable);\n  events.push(\"after\");\n  console.log(await promise, events.join(\",\"));\n}\n"
     }
   ]
 }
