@@ -229,6 +229,7 @@ struct NativeBundleOwner<'js> {
     then: Function<'js>,
     object_is: Function<'js>,
     array_is_array: Function<'js>,
+    handle_index: Function<'js>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
@@ -1053,6 +1054,8 @@ fn ensure_context() {
                     .expect("failed to capture intrinsic Object.is");
                 let intrinsic_array_is_array: Function = ctx.eval("Array.isArray")
                     .expect("failed to capture intrinsic Array.isArray");
+                let intrinsic_handle_index: Function = ctx.eval(HANDLE_INDEX_SOURCE)
+                    .expect("failed to capture the value handle index helper");
                 ctx.store_userdata(NativeBundleOwner {
                     next_sequence: Cell::new(0),
                     sources: RefCell::new(HashMap::new()),
@@ -1064,6 +1067,7 @@ fn ensure_context() {
                     then: intrinsic_then,
                     object_is: intrinsic_object_is,
                     array_is_array: intrinsic_array_is_array,
+                    handle_index: intrinsic_handle_index,
                 }).expect("native bundle owner userdata is already borrowed");
                 ctx.store_userdata(VmContexts::default()).expect("vm contexts userdata is already borrowed");
                 ctx.globals().prop("__thaw_register_native_bundle",
