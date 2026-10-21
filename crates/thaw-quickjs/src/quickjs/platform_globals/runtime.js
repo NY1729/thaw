@@ -2697,6 +2697,20 @@
   // `status`/`statusCode`/`expose`, which live on the error's *prototype*;
   // `for...in` walks the prototype chain. Used by `describe_tagged_
   // exception` (thaw-quickjs) and replayed by `__thaw_error_from_tagged`.
+  // `Promise.resolve(x)` on an `any`/`Json` value (PromiseResolveThenableJob semantics): read `then` once,
+  // now; a throwing getter becomes a rejection; a callable `then` is invoked in a microtask with the
+  // resolving functions. The result is a real promise, so no user code runs during the resolve itself.
+  globalThis.__thaw_defer_thenable = function (value) {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
+    let then;
+    try { then = value.then; } catch (error) { return Promise.reject(error); }
+    if (typeof then !== 'function') return value;
+    return new Promise((resolve, reject) => {
+      Promise.resolve().then(() => {
+        try { then.call(value, resolve, reject); } catch (error) { reject(error); }
+      });
+    });
+  };
   globalThis.__thaw_error_properties_json = function (error) {
     if (!error || (typeof error !== 'object' && typeof error !== 'function')) return '';
     const out = {};

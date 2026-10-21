@@ -1820,8 +1820,26 @@ impl<'a> FnLowerer<'a> {
                     "`{callee_name}` does not support a spread argument"
                 ));
             }
-            let value = self.lower_expr(&argument.expr)?;
-            let value_type = self.infer_expr_type(&value)?;
+            let mut value = self.lower_expr(&argument.expr)?;
+            let mut value_type = self.infer_expr_type(&value)?;
+            if !is_reject && matches!(value_type, HirType::Json | HirType::JsValue) {
+                // An `any` argument may be a thenable: `__thaw_defer_thenable` reads its `then` once now and
+                // defers the call to a microtask, as PromiseResolveThenableJob does.
+                let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
+                let handle = HirExpr::Call(
+                    Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
+                    vec![
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                            vec![HirExpr::Lit(HirLit::Str("globalThis".to_string()))],
+                        ),
+                        HirExpr::Lit(HirLit::Str("__thaw_defer_thenable".to_string())),
+                        arguments,
+                    ],
+                );
+                value = self.coerce_to_declared(&HirType::Json, handle)?;
+                value_type = HirType::Json;
+            }
             let value_name = format!("__thaw_promise_argument_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(value_name.clone(), value_type.clone());

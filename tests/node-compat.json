@@ -1691,6 +1691,31 @@
       "name": "Object.hasOwn sees a shadowed inherited static field",
       "expect": "matched",
       "source": "class Parent { static value: number = 1; }\nclass Child extends Parent {}\nfunction main(): void {\n    Child.value = 2;\n    console.log(Parent.value, Child.value, Object.hasOwn(Child, \"value\"));\n}\n"
+},
+    {
+      "name": "timers: each due timer gets a microtask checkpoint",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n    const events: string[] = [];\n    setTimeout(() => {\n        events.push(\"timer-1\");\n        Promise.resolve().then(() => {\n            events.push(\"promise\");\n        });\n    }, 0);\n    setTimeout(() => {\n        events.push(\"timer-2\");\n    }, 0);\n    await new Promise<void>((resolve) => setTimeout(resolve, 20));\n    console.log(events.join(\",\"));\n}\n"
+    },
+    {
+      "name": "marker object thrown through an any callback keeps identity",
+      "expect": "matched",
+      "source": "function main(): void {\n  const marker: any = { value: 1 };\n  const invoke: any = (callback: any): any => callback();\n  try {\n    invoke(() => { throw marker; });\n  } catch (error: any) {\n    const e: any = error;\n    console.log(e === marker, e.value);\n  }\n}\n"
+    },
+    {
+      "name": "generator throw keeps thrown object identity",
+      "expect": "matched",
+      "source": "function* generator(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const marker: any = { value: 42 };\n  const iterator = generator();\n  iterator.next();\n  const result = iterator.throw(marker);\n  console.log(result.value === marker, result.value.value, result.done);\n}\n"
+},
+    {
+      "name": "generator throw passes primitives and undefined",
+      "expect": "matched",
+      "source": "function* g(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const it = g();\n  it.next();\n  console.log(it.throw(7).value);\n  const it2 = g();\n  it2.next();\n  console.log(it2.throw(\"s\").value);\n  const it3 = g();\n  it3.next();\n  console.log(it3.throw(undefined).value);\n}\n"
+},
+    {
+      "name": "yield delegate forwards a thrown string to the inner generator",
+      "expect": "matched",
+      "source": "function* inner(): Generator<number> {\n  try { yield 1; }\n  catch (error) { console.log(error); yield 2; }\n}\nfunction* outer(): Generator<number> {\n  yield* inner();\n  yield 3;\n}\nfunction main(): void {\n  const iterator = outer();\n  console.log(iterator.next().value);\n  console.log(iterator.throw(\"boom\").value);\n  console.log(iterator.next().value);\n  console.log(iterator.next().done);\n}\n"
 }
   ]
 }
