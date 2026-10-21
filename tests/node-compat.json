@@ -1721,6 +1721,11 @@
           "name": "unset process.env variable is undefined",
           "expect": "matched",
           "source": "function main(): void {\n  console.log(process.env.E1_UNSET_VAR_X ?? \"3000\");\n  console.log(process.env.E1_UNSET_VAR_X || \"fallback\");\n  console.log(process.env.E1_UNSET_VAR_X === undefined);\n  console.log(typeof process.env.E1_UNSET_VAR_X);\n  process.env.E1_SET_VAR_Y = \"hello\";\n  console.log(process.env.E1_SET_VAR_Y, typeof process.env.E1_SET_VAR_Y);\n  delete process.env.E1_SET_VAR_Y;\n  console.log(process.env.E1_SET_VAR_Y === undefined, process.env.E1_SET_VAR_Y ?? \"gone\");\n  console.log(Number(process.env.E1_UNSET_VAR_X) || 3000);\n  console.log(Object.keys(process.env).includes(\"E1_UNSET_VAR_X\"));\n}\n"
+    },
+    {
+        "name": "generator resume with no argument makes ?? take the fallback",
+        "expect": "matched",
+        "source": "function* g() {\n  let i = 0;\n  while (i < 3) {\n    const got = yield i;\n    i += got ?? 1;\n  }\n}\nasync function main(): Promise<void> {\n  const it = g();\n  const a = it.next();\n  const b = it.next();\n  const c = it.next();\n  const d = it.next();\n  console.log(a.value, a.done, b.value, b.done, c.value, c.done, d.done);\n}\n"
     }
   ]
 }
