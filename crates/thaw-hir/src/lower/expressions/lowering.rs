@@ -5291,9 +5291,15 @@ impl<'a> FnLowerer<'a> {
                     // signature) was already handled above.
                     Expr::Ident(ident) => {
                         let name = self.resolve_binding(ident.sym.as_ref());
-                        self.scope.get(&name).is_some_and(|ty| {
-                            matches!(ty, HirType::JsValue | HirType::Dynamic | HirType::Json)
-                        })
+                        // The primitive wrapper constructors (`new Number(1)`)
+                        // are realm constructors with no typed lowering.
+                        let realm_wrapper = matches!(ident.sym.as_ref(), "Number" | "String" | "Boolean")
+                            && !self.scope.contains_key(&name)
+                            && !self.signatures.contains_key(&name);
+                        realm_wrapper
+                            || self.scope.get(&name).is_some_and(|ty| {
+                                matches!(ty, HirType::JsValue | HirType::Dynamic | HirType::Json)
+                            })
                     }
                     _ => true,
                 };
