@@ -184,7 +184,88 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     Ok(program)
 }
 
+/// TypeScript rejects a default parameter that reads itself or a later parameter outside a
+/// deferred closure (TS2373/TS2372); at run time that read is a TDZ `ReferenceError`, which a
+/// compiled call cannot reproduce, so it is a compile error here too.
+fn reject_forward_parameter_references(module: &Module) -> Result<(), String> {
+    struct Refs<'a> {
+        forbidden: &'a [String],
+        hit: Option<String>,
+    }
+    impl Visit for Refs<'_> {
+        fn visit_expr(&mut self, expression: &Expr) {
+            match expression {
+                Expr::Ident(name) if self.hit.is_none() && self.forbidden.iter().any(|f| f == name.sym.as_ref()) => {
+                    self.hit = Some(name.sym.to_string());
+                }
+                // A nested function body runs later, after every parameter is bound.
+                Expr::Fn(_) | Expr::Arrow(_) | Expr::Class(_) => {}
+                _ => expression.visit_children_with(self),
+            }
+        }
+    }
+    fn check(patterns: &[&Pat]) -> Result<(), String> {
+        let names: Vec<Option<String>> = patterns.iter().map(|pattern| match pattern {
+            Pat::Assign(assign) => match assign.left.as_ref() {
+                Pat::Ident(binding) => Some(binding.id.sym.to_string()),
+                _ => None,
+            },
+            Pat::Ident(binding) => Some(binding.id.sym.to_string()),
+            _ => None,
+        }).collect();
+        for (index, pattern) in patterns.iter().enumerate() {
+            let Pat::Assign(assign) = pattern else { continue };
+            let forbidden: Vec<String> = names[index..].iter().flatten().cloned().collect();
+            let mut refs = Refs { forbidden: &forbidden, hit: None };
+            assign.right.visit_with(&mut refs);
+            if let Some(hit) = refs.hit {
+                let owner = names[index].clone().unwrap_or_default();
+                return Err(if hit == owner {
+                    format!("Parameter `{owner}` cannot reference itself")
+                } else {
+                    format!("Parameter `{owner}` cannot reference identifier `{hit}` declared after it")
+                });
+            }
+        }
+        Ok(())
+    }
+    struct Walk { error: Option<String> }
+    impl Visit for Walk {
+        fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+            if self.error.is_none() {
+                let patterns: Vec<&Pat> = function.params.iter().map(|param| &param.pat).collect();
+                self.error = check(&patterns).err();
+            }
+            function.visit_children_with(self);
+        }
+        fn visit_constructor(&mut self, constructor: &swc_ecma_ast::Constructor) {
+            if self.error.is_none() {
+                let patterns: Vec<Option<&Pat>> = constructor.params.iter().map(|param| match param {
+                    swc_ecma_ast::ParamOrTsParamProp::Param(param) => Some(&param.pat),
+                    _ => None,
+                }).collect();
+                if patterns.iter().all(Option::is_some) {
+                    let patterns: Vec<&Pat> = patterns.into_iter().flatten().collect();
+                    self.error = check(&patterns).err();
+                }
+            }
+            constructor.visit_children_with(self);
+        }
+        fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+            if self.error.is_none() {
+                let patterns: Vec<&Pat> = arrow.params.iter().collect();
+                self.error = check(&patterns).err();
+            }
+            arrow.visit_children_with(self);
+        }
+    }
+    let mut walk = Walk { error: None };
+    module.visit_with(&mut walk);
+    walk.error.map_or(Ok(()), Err)
+}
+
 fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
+    reject_forward_parameter_references(module)?;
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
@@ -1637,6 +1718,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         HirStmt::Return(Some(parent_value)),
                     ]
                 };
+                let getter_signature = signatures[&getter].clone();
                 inherited_class_functions.push(HirFunction {
                     name: getter,
                     params: Vec::new(),
@@ -1673,6 +1755,20 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             type_predicate: None,
                         },
                     );
+                    // `Object.hasOwn(Derived, field)` reads the shadow flag through this accessor.
+                    let has_own = format!("__thaw_inherited_static_has_own_{derived_name}_{field}");
+                    let mut has_own_signature = getter_signature;
+                    has_own_signature.ret = HirType::Bool;
+                    signatures.insert(has_own.clone(), has_own_signature);
+                    inherited_class_functions.push(HirFunction {
+                        name: has_own,
+                        params: Vec::new(),
+                        ret: HirType::Bool,
+                        is_async: false,
+                        body: vec![HirStmt::Return(Some(HirExpr::Var(
+                            format!("__thaw_inherited_static_own_{derived_name}_{field}"),
+                        )))],
+                    });
                     let parameter = "__thaw_inherited_static_value".to_string();
                     inherited_class_functions.push(HirFunction {
                         name: setter,

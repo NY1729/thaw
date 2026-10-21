@@ -2652,3 +2652,23 @@ fn initialized_class_key_does_not_gain_a_synthetic_tdz_throw() {
     ));
     assert!(program.functions.iter().any(|function| function.name == class_method_symbol("C", "m")));
 }
+
+#[test]
+fn rejects_default_parameters_that_read_themselves_or_later_parameters() {
+    for (source, needle) in [
+        ("function f(first: any = second, second: any = 2): void {} function main(): void {}",
+         "Parameter `first` cannot reference identifier `second` declared after it"),
+        ("function f(value: any = value): void {} function main(): void {}",
+         "Parameter `value` cannot reference itself"),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains(needle), "{error}");
+    }
+    // Earlier parameters stay legal.
+    let module = thaw_parser::parse_typescript(
+        "function f(a: number = 1, b: number = a + 1): void {} function main(): void {}",
+    )
+    .unwrap();
+    lower_module(&module).unwrap();
+}
