@@ -530,6 +530,7 @@ include!("tests/fa_contracts.rs");
 include!("tests/fc_contracts.rs");
 include!("tests/fe_contracts.rs");
 include!("tests/ga_contracts.rs");
+include!("tests/e1_contracts.rs");
 include!("tests/gc_contracts.rs");
 include!("tests/gb_contracts.rs");
 include!("tests/hb_contracts.rs");

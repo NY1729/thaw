@@ -15,16 +15,22 @@ impl<'a> FnLowerer<'a> {
         let values = args
             .iter()
             .map(|argument| {
-                let value = match argument.expr.as_ref() {
-                    Expr::Arrow(arrow) => self.lower_contextual_arrow(
-                        arrow,
-                        &vec![HirType::JsValue; arrow.params.len()],
-                        None,
-                    )?,
-                    _ => self.lower_expr_with_expected_type(
-                        &argument.expr,
-                        Some(&HirType::JsValue),
-                    )?,
+                let value = if let Some(value) =
+                    self.ambient_js_export_argument(&argument.expr, argument.spread.is_some())
+                {
+                    value
+                } else {
+                    match argument.expr.as_ref() {
+                        Expr::Arrow(arrow) => self.lower_contextual_arrow(
+                            arrow,
+                            &vec![HirType::JsValue; arrow.params.len()],
+                            None,
+                        )?,
+                        _ => self.lower_expr_with_expected_type(
+                            &argument.expr,
+                            Some(&HirType::JsValue),
+                        )?,
+                    }
                 };
                 self.coerce_to_declared(&HirType::Json, value)
             })
@@ -789,6 +795,34 @@ fn arrow_returns_call_result(arrow: &swc_ecma_ast::ArrowExpr) -> bool {
             let mut finder = ReturnFinder(false);
             body.visit_with(&mut finder);
             finder.0
+        }
+    }
+}
+
+impl<'a> FnLowerer<'a> {
+    /// An ambient QuickJS export passed by bare name as a value argument
+    /// (`promisify(execFile)`) is the package's real JS function, fetched by its
+    /// registry key, so `promisify.custom` and identity survive. Any other use of
+    /// the name keeps the typed stub.
+    pub(super) fn ambient_js_export_argument(
+        &mut self,
+        expr: &swc_ecma_ast::Expr,
+        spread: bool,
+    ) -> Option<HirExpr> {
+        let swc_ecma_ast::Expr::Ident(ident) = expr else { return None };
+        if spread {
+            return None;
+        }
+        let name = self.resolve_binding(ident.sym.as_ref());
+        if self.scope.contains_key(&name) {
+            return None;
+        }
+        match crate::lower::dynamic_symbol(&name) {
+            Some((DynamicBackend::QuickJs, symbol)) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str(symbol))],
+            )),
+            _ => None,
         }
     }
 }

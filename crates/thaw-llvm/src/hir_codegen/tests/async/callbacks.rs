@@ -720,7 +720,7 @@ fn runs_module_init_before_lambda_handler() {
 fn compiles_async_functions_without_explicit_suspension() {
     let source = r#"
         async function computeStage(): Promise<string> {
-            const s: string = process.env.STAGE;
+            const s: string = process.env.STAGE ?? "";
             return s;
         }
 

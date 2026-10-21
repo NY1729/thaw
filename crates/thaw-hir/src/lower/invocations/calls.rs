@@ -2358,7 +2358,22 @@ impl<'a> FnLowerer<'a> {
                         })
                 })
                 .collect::<Vec<_>>();
-            let mut value = if let Some(value) = self.lower_literal_call_spread(
+            // An ambient QuickJS export passed by bare name to a generic or dynamic
+            // parameter (`promisify(execFile)`) is the package's real JS function
+            // (see `ambient_js_export_argument`), not the typed stub.
+            let ambient_value = if matches!(argument.expr.as_ref(), Expr::Ident(_))
+                && (!generic_placeholder)
+                    .then_some(expected)
+                    .flatten()
+                    .is_none_or(|ty| matches!(ty, HirType::Dynamic | HirType::Json | HirType::JsValue))
+            {
+                self.ambient_js_export_argument(&argument.expr, argument.spread.is_some())
+            } else {
+                None
+            };
+            let mut value = if let Some(value) = ambient_value {
+                value
+            } else if let Some(value) = self.lower_literal_call_spread(
                 argument,
                 &spread_expected,
                 rest_element,
