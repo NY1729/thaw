@@ -3292,14 +3292,15 @@ fn reads_process_env() {
 }
 
 #[test]
-fn unset_env_var_reads_as_empty_string_not_a_crash() {
+fn unset_env_var_reads_as_undefined_not_a_crash() {
     let source = r#"
         function main(): void {
             console.log(process.env.THAW_DEFINITELY_UNSET_VAR_XYZ);
             console.log("still alive");
         }
     "#;
-    assert_eq!(compile_and_run(source, "envvar_unset"), "\nstill alive\n");
+    // Node 22 prints `undefined` for an unset variable (was an empty line before E1).
+    assert_eq!(compile_and_run(source, "envvar_unset"), "undefined\nstill alive\n");
 }
 #[test]
 fn embedded_nuls_survive_native_strings_and_json_boundaries() {
