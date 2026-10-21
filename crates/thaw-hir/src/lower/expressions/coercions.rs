@@ -1614,6 +1614,12 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
+        // Two statically numeric operands compare directly: the float compare is
+        // NaN-unequal and -0 == 0, exactly as Strict Equality. The general path below
+        // would bind both operands into call-argument closures on every evaluation.
+        if lhs_type == HirType::F64 && rhs_type == HirType::F64 {
+            return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
+        }
         // An `any` operand against a native object/array it may alias: compare the live views
         // (interned per native pointer), so `view === owner` holds like in Node.
         if lhs_type == HirType::Json && self.has_live_view_identity(&rhs_type) {
