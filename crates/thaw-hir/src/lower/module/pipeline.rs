@@ -272,6 +272,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     let normalized = normalize_constructor_functions(&normalized)?;
+    let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
