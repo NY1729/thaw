@@ -1736,6 +1736,21 @@
         "name": "subclass instance passes where its base class is expected",
         "expect": "matched",
         "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"
+    },
+    {
+      "name": "caught Error keeps identity through a callback invoked via any",
+      "expect": "matched",
+      "source": "function main(): void {\n    const err = new Error(\"x\");\n    const invoke: any = (cb: any): any => cb();\n    try {\n        invoke(() => { throw err; });\n    } catch (e: any) {\n        console.log(e === err, e.message, e.name);\n    }\n}\n"
+    },
+    {
+      "name": "rethrown caught Error keeps identity",
+      "expect": "matched",
+      "source": "function main(): void {\n    const err = new Error(\"boom\");\n    const invoke: any = (cb: any): any => cb();\n    try {\n        try {\n            invoke(() => { throw err; });\n        } catch (e: any) {\n            throw e;\n        }\n    } catch (outer: any) {\n        console.log(outer === err, outer.message);\n    }\n}\n"
+    },
+    {
+      "name": "plain string equality stays content based next to caught Errors",
+      "expect": "matched",
+      "source": "function main(): void {\n    const s: any = \"x\";\n    console.log(s === \"x\", s === \"y\");\n    const t: any = new Error(\"q\");\n    console.log(t === \"q\", t.name);\n}\n"
     }
   ]
 }
