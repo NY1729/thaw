@@ -2475,7 +2475,12 @@ impl<'a> FnLowerer<'a> {
                     let result = native_builtin_match.unwrap_or_else(|| {
                         class_type_has_identity(&value_type, class.sym.as_ref())
                     });
-                    if native_builtin_match.is_none() && result {
+                    // The static type may name only the base (a subclass instance
+                    // is passed as its base), so a class-identity value always asks
+                    // the allocation identity table, which includes inherited classes.
+                    let class_identity_value = matches!(&value_type, HirType::Object(fields)
+                        if fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")));
+                    if native_builtin_match.is_none() && (result || class_identity_value) {
                         // A physical marker slot is not proof of nominal class
                         // ancestry. The native table is keyed by this object's
                         // allocation identity and includes inherited classes.
