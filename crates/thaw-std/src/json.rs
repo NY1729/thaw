@@ -4357,6 +4357,19 @@ pub unsafe extern "C" fn thaw_json_callback_error_tuple(
         &mut copied_strings,
         &mut owned_bytes,
     );
+    if native_error_identity != 0 {
+        // The caught Error's text is the pending message copy (its `message`) and the native
+        // text copy; both name the same thrown Error, so both map to its framed identity.
+        thaw_arena::register_reset_hook(reset_native_error_text_identity);
+        NATIVE_ERROR_TEXT_IDENTITY.with(|table| {
+            let mut table = table.borrow_mut();
+            for copy in [pending, native_text] {
+                if copy != 0 {
+                    table.insert(copy, native_error_identity);
+                }
+            }
+        });
+    }
     let packet = thaw_arena::exception::ExceptionPacket {
         id: 0,
         pending,
@@ -8217,6 +8230,34 @@ fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
 }
 
 const FRAMED_ERROR_NATIVE_LAYOUT: &[u8] = b"thaw.framed-error.v1\0";
+
+thread_local! {
+    /// Copied caught-Error text -> the framed identity pointer it was copied from. Valid until the
+    /// arena reset that frees the copy, which clears this table.
+    static NATIVE_ERROR_TEXT_IDENTITY: std::cell::RefCell<std::collections::HashMap<usize, usize>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn reset_native_error_text_identity(_: bool) {
+    NATIVE_ERROR_TEXT_IDENTITY.with(|table| table.borrow_mut().clear());
+}
+
+/// Pointer identity of two string values for `e === err`: a caught Error's text copy maps back to
+/// the framed pointer of the thrown Error, so the same Error compares equal; other strings compare
+/// by pointer only.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_str_pointer_same(left: *const u8, right: *const u8) -> u8 {
+    if left.is_null() || right.is_null() {
+        return 0;
+    }
+    let canonical = |pointer: usize| {
+        NATIVE_ERROR_TEXT_IDENTITY
+            .with(|table| table.borrow().get(&pointer).copied())
+            .or_else(|| thaw_arena::native_error_alias(pointer))
+            .unwrap_or(pointer)
+    };
+    u8::from(canonical(left as usize) == canonical(right as usize))
+}
 
 fn host_error_from_result(result: HostHandleResult, operation: &str) -> Option<u64> {
     if !result.error.is_null() {
