@@ -544,6 +544,7 @@ include!("tests/k3_contracts.rs");
 include!("tests/na_contracts.rs");
 include!("tests/nb3_contracts.rs");
 include!("tests/nb4_contracts.rs");
+include!("tests/d4_contracts.rs");
 include!("tests/nb_contracts.rs");
 include!("tests/kb_contracts.rs");
 
