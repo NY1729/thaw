@@ -2880,6 +2880,8 @@
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
   const nativeDateNow = Date.now.bind(Date);
+  // Timer deadlines use the monotonic process clock, so a wall-clock step cannot move them (Node does the same).
+  const timerNow = () => Number(thawProcessMonotonicClock()) / 1e6;
   const nativeDate = Date;
   const nativeReflectConstruct = Reflect.construct;
   const nativeReflectApply = Reflect.apply;
@@ -2924,7 +2926,7 @@
     refresh() {
       let timer = timers.get(id);
       if (!timer && record && !record.cancelled && !record.repeat) { timer = record; timers.set(id, timer); }
-      if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds;
+      if (timer && !timer.clock) timer.due = timerNow() + timer.milliseconds;
       return this;
     },
     close() { const timer = timers.get(id); if (timer) timer.cancelled = true; else if (record) record.cancelled = true; timers.delete(id); destroyTimerResource(timer || record); },
@@ -2939,7 +2941,7 @@
     const clock = forceReal ? null : activeMockClock(api);
     const record = { callback, args, repeat, milliseconds, refed,
                      asyncContext: thawAsyncContext.get(),
-                     clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
+                     clock, due: (clock ? clock.now : timerNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
     timers.set(id, record);
     const handle = timerHandle(id, record);
     const hookBus = globalThis.__thaw_async_hook_bus;
