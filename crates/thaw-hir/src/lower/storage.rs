@@ -327,6 +327,14 @@ impl StorageGraph {
             _ => {}
         }
     }
+    fn is_fresh_static_builtin(&self, member: &MemberExpr) -> bool {
+        let (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(property)) =
+            (member.obj.as_ref(), &member.prop) else { return false };
+        self.lookup(object.sym.as_ref()).is_none()
+            && matches!((object.sym.as_ref(), property.sym.as_ref()),
+                ("Object", "fromEntries" | "groupBy") | ("Map", "groupBy"))
+    }
+
     fn link(&mut self, left: Span, right: Span) {
         if left.is_dummy() || right.is_dummy() || left == right {
             return;
@@ -989,8 +997,13 @@ impl Visit for StorageGraph {
                         }
                     }
                     if let Expr::Member(member) = callee.as_ref() {
-                        self.link(span, member.obj.span());
-                        for argument in &call.args { self.contain(member.obj.span(), argument.expr.span()); }
+                        // A static builtin that builds a fresh container from its arguments
+                        // (`Object.fromEntries(..)`) does not alias the argument: its result
+                        // reaching `any` must not turn the argument literal dynamic.
+                        if !self.is_fresh_static_builtin(member) {
+                            self.link(span, member.obj.span());
+                            for argument in &call.args { self.contain(member.obj.span(), argument.expr.span()); }
+                        }
                     }
                 }
             }
