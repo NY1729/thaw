@@ -77,7 +77,7 @@ jobs:
           find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           cargo run -p thaw-cli -- node-compat tests/node-compat.json
           find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
-          for manifest in builtins path-contracts text-encoding-contracts; do
+          for manifest in builtins path-contracts process-credentials text-encoding-contracts; do
             cargo run -p thaw-cli -- node-compat tests/$manifest-compat.json
             find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           done
