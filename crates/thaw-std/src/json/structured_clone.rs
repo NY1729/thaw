@@ -13,6 +13,9 @@ struct GraphCloner {
     fills: Vec<PendingFill>,
 }
 
+/// Largest host array `structuredClone` materializes (dense storage).
+const MAX_CLONED_HOST_ARRAY_LENGTH: usize = 1 << 24;
+
 enum CloneJob {
     NativeArray {
         source: SharedArray,
@@ -29,6 +32,12 @@ enum CloneJob {
     HostObject {
         source: Rc<HostLease>,
         target: SharedObject,
+    },
+    /// A host `Map` (`is_map`) or `Set`, rebuilt as the native branded collection wrapper.
+    HostCollection {
+        source: Rc<HostLease>,
+        target: SharedObject,
+        is_map: bool,
     },
 }
 
@@ -87,6 +96,19 @@ impl GraphCloner {
                     self.jobs.push(CloneJob::HostObject {
                         source: Rc::clone(lease),
                         target: target_rc.clone(),
+                    });
+                    target
+                }
+                HostCloneKind::Map | HostCloneKind::Set => {
+                    let target =
+                        brand_internal_value(Value::shared_object(indexmap::IndexMap::new()));
+                    let Value::Object(target_rc) = &target else {
+                        unreachable!()
+                    };
+                    self.jobs.push(CloneJob::HostCollection {
+                        source: Rc::clone(lease),
+                        target: target_rc.clone(),
+                        is_map: kind == HostCloneKind::Map,
                     });
                     target
                 }
@@ -196,18 +218,50 @@ impl GraphCloner {
                     set_host_error("Invalid host array length".into());
                     return Err(());
                 };
+                // ponytail: arrays are dense Vec<Value>, so a host array with a huge
+                // sparse length cannot be represented; fail fast instead of allocating it.
+                if length > MAX_CLONED_HOST_ARRAY_LENGTH {
+                    let message = format!(
+                        "structuredClone of a host array longer than {MAX_CLONED_HOST_ARRAY_LENGTH} elements is not supported"
+                    );
+                    set_host_error(
+                        thaw_arena::error_wire::encode_tagged(
+                            b"RangeError",
+                            message.as_bytes(),
+                            None,
+                        )
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .unwrap_or(message),
+                    );
+                    return Err(());
+                }
                 let mut values = Vec::new();
                 if values.try_reserve_exact(length).is_err() {
                     set_host_error("Unable to allocate host array".into());
                     return Err(());
                 }
+                // One enumeration finds the present indices; probing every index costs two
+                // host calls per slot, which is unusable for sparse arrays.
+                let keys = host_enumerate_values(&source, 2);
+                if host_operation_failed() {
+                    return Err(());
+                }
+                let mut present: Vec<usize> = keys
+                    .iter()
+                    .filter_map(|key| match key {
+                        Value::String(text) => text
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|index| *index < length && index.to_string() == *text),
+                        _ => None,
+                    })
+                    .collect();
+                present.sort_unstable();
+                present.dedup();
+                let mut present = present.into_iter().peekable();
                 let mut holes = HashSet::new();
                 for index in 0..length {
-                    let key = index.to_string();
-                    if !host_property_predicate(&source, key.as_bytes(), 3) {
-                        if host_operation_failed() {
-                            return Err(());
-                        }
+                    if present.peek() != Some(&index) {
                         values.push(napi_undefined_value());
                         if holes.try_reserve(1).is_err() {
                             set_host_error("Unable to allocate host array holes".into());
@@ -216,10 +270,8 @@ impl GraphCloner {
                         holes.insert(index);
                         continue;
                     }
-                    if host_operation_failed() {
-                        return Err(());
-                    }
-                    let value = host_get_property(&source, key.as_bytes());
+                    present.next();
+                    let value = host_get_property(&source, index.to_string().as_bytes());
                     if host_operation_failed() {
                         return Err(());
                     }
@@ -230,6 +282,40 @@ impl GraphCloner {
                     values,
                     holes,
                 });
+            }
+            CloneJob::HostCollection {
+                source,
+                target,
+                is_map,
+            } => {
+                let (field, items) = if is_map {
+                    let keys = host_enumerate_values(&source, 4);
+                    let values = host_enumerate_values(&source, 6);
+                    if host_operation_failed() {
+                        return Err(());
+                    }
+                    let mut entries = Vec::with_capacity(keys.len());
+                    for (key, value) in keys.iter().zip(values.iter()) {
+                        entries.push(Value::shared_array(vec![
+                            self.intern(key)?,
+                            self.intern(value)?,
+                        ]));
+                    }
+                    (b"__thaw_map_entries__".as_slice(), entries)
+                } else {
+                    let values = host_enumerate_values(&source, 5);
+                    if host_operation_failed() {
+                        return Err(());
+                    }
+                    let items = values
+                        .iter()
+                        .map(|value| self.intern(value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (b"__thaw_set_values__".as_slice(), items)
+                };
+                let mut fields = indexmap::IndexMap::new();
+                fields.insert(field.to_vec(), Value::shared_array(items));
+                self.fills.push(PendingFill::Object { target, fields });
             }
             CloneJob::HostObject { source, target } => {
                 let entries = host_enumerable_entries(&source);
@@ -252,6 +338,8 @@ enum HostCloneKind {
     Shared,
     Array,
     Object,
+    Map,
+    Set,
 }
 
 fn host_operation_failed() -> bool {
@@ -263,6 +351,23 @@ fn classify_host_for_clone(lease: &Rc<HostLease>, _mode: CloneMode) -> Result<Ho
         return Err(());
     };
     if host_operation_failed() {
+        return Err(());
+    }
+    if kind == "function" || kind == "symbol" {
+        // HTML structured clone: functions and symbols are not cloneable.
+        let text = host_query(lease, 2).unwrap_or_default();
+        // A compiled callback reaches the host as a generated wrapper whose source is noise.
+        let text = if text.contains("__thaw_") {
+            kind.to_string()
+        } else {
+            text
+        };
+        let message = format!("{text} could not be cloned.");
+        set_host_error(
+            thaw_arena::error_wire::encode_tagged(b"DataCloneError", message.as_bytes(), None)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or(message),
+        );
         return Err(());
     }
     if kind != "object" {
@@ -277,6 +382,15 @@ fn classify_host_for_clone(lease: &Rc<HostLease>, _mode: CloneMode) -> Result<Ho
     }
     if is_null != "0" {
         return Ok(HostCloneKind::Shared);
+    }
+
+    match host_query(lease, 24).as_deref() {
+        Some("map") => return Ok(HostCloneKind::Map),
+        Some("set") => return Ok(HostCloneKind::Set),
+        _ => {}
+    }
+    if host_operation_failed() {
+        return Err(());
     }
 
     let Some(is_non_plain) = host_query(lease, 12) else {
@@ -380,10 +494,15 @@ mod tests {
         let value: &[u8] = match (handle, operation) {
             (706, 0) => b"number",
             (707..=709 | 713 | 714, 0) => b"string",
-            (715, 0) => b"number",
+            (715..=717, 0) => b"number",
+            (752, 0) => b"function",
+            (752, 2) => b"function f() {}",
             (_, 0) => b"object",
             (_, 7 | 12) => b"0",
-            (711, 4) => b"1",
+            (750, 24) => b"map",
+            (751, 24) => b"set",
+            (_, 24) => b"",
+            (711 | 760 | 761, 4) => b"1",
             (_, 4) => b"0",
             (706, 10) => b"1",
             (707, 3) => br#""self""#,
@@ -392,6 +511,8 @@ mod tests {
             (713, 3) => br#""list""#,
             (714, 3) => br#""x""#,
             (715, 10) => b"1",
+            (716, 10) => b"1000000",
+            (717, 10) => b"16777217",
             _ => panic!("unexpected clone query {handle}/{operation}"),
         };
         HostTextResult {
@@ -407,6 +528,11 @@ mod tests {
             (701, 0) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1}]},{"hdl":705}],"leases":[],"napiLeases":[]}"#,
             (710, 0) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1}]},{"hdl":712}],"leases":[],"napiLeases":[]}"#,
             (711, 3) => br#"{"root":{"r":0},"nodes":[{"a":[{"r":1}]},{"hdl":710}],"leases":[],"napiLeases":[]}"#,
+            (711, 2) => br#"{"root":{"r":0},"nodes":[{"a":[{"v":"0"}]}],"leases":[],"napiLeases":[]}"#,
+            (760, 2) => br#"{"root":{"r":0},"nodes":[{"a":[{"v":"7"},{"v":"999999"},{"v":"length"}]}],"leases":[],"napiLeases":[]}"#,
+            (750, 4) => br#"{"root":{"r":0},"nodes":[{"a":[{"v":1},{"v":2}]}],"leases":[],"napiLeases":[]}"#,
+            (750, 6) => br#"{"root":{"r":0},"nodes":[{"a":[{"v":"a"},{"v":"b"}]}],"leases":[],"napiLeases":[]}"#,
+            (751, 5) => br#"{"root":{"r":0},"nodes":[{"a":[{"v":3},{"v":4}]}],"leases":[],"napiLeases":[]}"#,
             _ => panic!("unexpected clone enumeration {handle}/{operation}"),
         };
         HostTextResult {
@@ -429,6 +555,10 @@ mod tests {
             (712, r#""0""#) => 713,
             (712, r#""1""#) => 711,
             (711, r#""length""#) => 715,
+            (760, r#""length""#) => 716,
+            (761, r#""length""#) => 717,
+            (760, r#""7""#) => 714,
+            (760, r#""999999""#) => 714,
             (711, r#""0""#) => 710,
             _ => panic!("unexpected clone property {handle}/{key}"),
         };
@@ -453,6 +583,7 @@ mod tests {
         let value: &[u8] = match (handle, operation) {
             (_, 0) => b"object",
             (_, 7 | 12 | 4) => b"0",
+            (_, 24) => b"",
             (728, 3) => br#""first""#,
             (729, 3) => br#""boom""#,
             _ => panic!("unexpected failure query {handle}/{operation}"),
@@ -590,6 +721,87 @@ mod tests {
 
     fn destroy(value: Value) {
         unsafe { thaw_json_destroy(Box::into_raw(Box::new(value))) };
+    }
+
+    #[test]
+    fn structured_clone_rebuilds_host_map_and_set_as_independent_native_collections() {
+        install_clone_test_host_operations();
+        let map = super::clone_value(&host_value(750), CloneMode::Structured).unwrap();
+        assert!(
+            is_branded_wrapper(&map),
+            "a cloned Map keeps the native collection brand"
+        );
+        let entries = map
+            .as_object()
+            .unwrap()
+            .get(b"__thaw_map_entries__".as_slice())
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        let first = entries[0].as_array().unwrap();
+        assert_eq!(first[0].as_f64(), Some(1.0));
+        assert_eq!(first[1].as_str(), Some("a"));
+        let set = super::clone_value(&host_value(751), CloneMode::Structured).unwrap();
+        assert!(is_branded_wrapper(&set));
+        let values = set
+            .as_object()
+            .unwrap()
+            .get(b"__thaw_set_values__".as_slice())
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(
+            values.iter().filter_map(Value::as_f64).collect::<Vec<_>>(),
+            [3.0, 4.0]
+        );
+        destroy(map);
+        destroy(set);
+    }
+
+    #[test]
+    fn structured_clone_rejects_host_functions_with_a_data_clone_error() {
+        install_clone_test_host_operations();
+        let result = super::clone_value(&host_value(752), CloneMode::Structured);
+        assert!(result.is_err());
+        let error = HOST_ERROR.with(|error| error.borrow_mut().take()).unwrap();
+        assert!(
+            error.starts_with('\u{1}'),
+            "the error carries a class tag: {error:?}"
+        );
+        assert!(error.contains("DataCloneError"));
+        assert!(error.contains("function f() {} could not be cloned."));
+    }
+
+    #[test]
+    fn structured_clone_rejects_host_arrays_beyond_dense_capacity_without_allocating() {
+        install_clone_test_host_operations();
+        assert!(super::clone_value(&host_value(761), CloneMode::Structured).is_err());
+        let error = HOST_ERROR.with(|error| error.borrow_mut().take()).unwrap();
+        assert!(error.contains("RangeError"), "{error:?}");
+        assert!(error.contains("longer than 16777216 elements"), "{error:?}");
+    }
+
+    #[test]
+    fn structured_clone_of_a_sparse_host_array_probes_only_present_indices() {
+        install_clone_test_host_operations();
+        // The mock panics on any property read other than the two present indices.
+        let cloned = super::clone_value(&host_value(760), CloneMode::Structured).unwrap();
+        let items = cloned.as_array().unwrap();
+        assert_eq!(items.len(), 1_000_000);
+        assert_eq!(items[7].as_str(), Some("x"));
+        assert_eq!(items[999_999].as_str(), Some("x"));
+        let holes = ARRAY_HOLES.with(|holes| {
+            holes
+                .borrow()
+                .get(
+                    &(Rc::as_ptr(match &cloned {
+                        Value::Array(array) => array,
+                        _ => unreachable!(),
+                    }) as usize),
+                )
+                .map(|holes| (holes.len(), holes.contains(&0), holes.contains(&7)))
+        });
+        assert_eq!(holes, Some((999_998, true, false)));
+        destroy(cloned);
     }
 
     #[test]

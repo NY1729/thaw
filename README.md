@@ -227,6 +227,12 @@ owner identity across chained calls, with mutations visible on the original obje
 Known gaps against Node semantics:
 
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
+- `structuredClone` of a host array longer than 16,777,216 elements throws `RangeError`: arrays
+  are dense, so a huge sparse length cannot be materialized. Node returns a sparse array.
+- A `structuredClone`d `Map`/`Set` is a native collection: its methods are callable, but
+  `typeof m.get` reports `undefined` (Node: `function`).
+- `structuredClone` of a function throws `DataCloneError` with a generic message
+  (`function could not be cloned.`); Node quotes the function source.
 - Native FFI collection parameters require an authenticated native collection or a
   JavaScript-owned `Map`/`Set` whose declared key and value types have a supported
   copy-in layout. Unsupported JavaScript-owned collection layouts throw `TypeError`
