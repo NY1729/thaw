@@ -231,6 +231,8 @@ owner identity across chained calls, with mutations visible on the original obje
 
 Known gaps against Node semantics:
 
+- A default parameter that reads itself or a later parameter outside a nested closure is a
+  compile error, as in TypeScript (TS2373); Node 22 throws a `ReferenceError` at run time instead.
 - Frozen native arrays always throw `TypeError` on writes (code is strict).
 - `structuredClone` of a host array longer than 16,777,216 elements throws `RangeError`: arrays
   are dense, so a huge sparse length cannot be materialized. Node returns a sparse array.

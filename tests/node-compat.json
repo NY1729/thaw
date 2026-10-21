@@ -1676,6 +1676,21 @@
       "name": "structuredClone clones a sparse host array without probing every index",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const a: any = new Array(50000);\n  a[5] = \"x\";\n  a[49999] = { k: 1 };\n  const c: any = structuredClone({ a });\n  console.log(c.a.length, 0 in c.a, 5 in c.a, c.a[5], c.a[49999].k, c.a[49999] !== a[49999]);\n  const b: any = [1, , 3, undefined];\n  const bc: any = structuredClone(b);\n  console.log(bc.length, 1 in bc, 3 in bc, bc[3], bc[2]);\n}\n"
-    }
+    },
+    {
+      "name": "static builtin results assigned to any keep their typed inputs",
+      "expect": "matched",
+      "source": "function main(): void {\n    const a: any = Object.fromEntries([[\"a\", 1], [\"b\", 2]]);\n    console.log(JSON.stringify(a));\n    const g: any = Object.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(JSON.stringify(g));\n    const m: any = Map.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(m.size, JSON.stringify(m.get(\"even\")));\n}\n"
+},
+    {
+      "name": "nested method call on a class instance built through an any constructor",
+      "expect": "matched",
+      "source": "class Counter {\n    count: number = 0;\n    increment(): void { this.count = this.count + 1; }\n    touch(): void { this.increment(); }\n}\nfunction main(): void {\n    const value: any = new (Counter as any)();\n    value.touch();\n    value.touch();\n    console.log(value.count);\n}\n"
+},
+    {
+      "name": "Object.hasOwn sees a shadowed inherited static field",
+      "expect": "matched",
+      "source": "class Parent { static value: number = 1; }\nclass Child extends Parent {}\nfunction main(): void {\n    Child.value = 2;\n    console.log(Parent.value, Child.value, Object.hasOwn(Child, \"value\"));\n}\n"
+}
   ]
 }

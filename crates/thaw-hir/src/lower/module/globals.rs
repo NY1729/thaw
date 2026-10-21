@@ -592,7 +592,17 @@ fn class_method_bridge_expr(
             ty: HirType::JsValue,
         },
     ];
-    let mut call_args = vec![HirExpr::Var(self_name.clone())];
+    // The receiver is decoded from the JavaScript `this` and carries no nominal identity yet;
+    // register the class so nested `this.method()` calls pass their receiver check.
+    let receiver_value = match &receiver_type {
+        HirType::Object(fields) if fields.first().is_some_and(|(name, _)|
+            name.starts_with("__thaw_class_identity_\u{1e}")) => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_set_class_identity".into())),
+            vec![HirExpr::Var(self_name.clone()), HirExpr::Lit(HirLit::Str(fields[0].0.clone()))],
+        ),
+        _ => HirExpr::Var(self_name.clone()),
+    };
+    let mut call_args = vec![receiver_value];
     for (index, ty) in method_params.iter().enumerate() {
         let name = format!("__thaw_bridge_arg_{index}");
         params.push(HirParam {

@@ -4752,6 +4752,26 @@ impl<'a> FnLowerer<'a> {
                                     call_arguments,
                                 ],
                             )));
+                            // A write through a derived class (`Child.value = 2`) creates an own
+                            // static property that only the native shadow flag records.
+                            let shadowed = match (call.args.first().map(|a| a.expr.as_ref()),
+                                call.args.get(1).map(|a| a.expr.as_ref())) {
+                                (Some(Expr::Ident(class)), Some(Expr::Lit(Lit::Str(key)))) => {
+                                    let accessor = format!("__thaw_inherited_static_has_own_{}_{}",
+                                        class.sym, key.value.to_string_lossy());
+                                    self.signatures.contains_key(&accessor).then_some(accessor)
+                                }
+                                _ => None,
+                            };
+                            let result = match shadowed {
+                                Some(accessor) => HirExpr::Conditional(
+                                    Box::new(HirExpr::Call(Box::new(HirExpr::Var(accessor)), Vec::new())),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                    Box::new(result),
+                                    HirType::Bool,
+                                ),
+                                None => result,
+                            };
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let result = self.lower_has_own_value(object_value, key_value.clone())?;
