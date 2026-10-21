@@ -1,0 +1,1741 @@
+{
+  "cases": [
+    {
+      "name": "path positional arguments",
+      "expect": "matched",
+      "source": "import { basename, join } from 'node:path'; function main(): void { console.log(join('a', 'b'), basename('/tmp/file.txt')); }"
+    },
+    {
+      "name": "filesystem sync round trip",
+      "expect": "matched",
+      "source": "import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'; function main(): void { const path: string = '/tmp/thaw-node-compat.txt'; writeFileSync(path, 'hello'); console.log(readFileSync(path, 'utf8')); unlinkSync(path); }"
+    },
+    {
+      "name": "event emitter",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.on('value', (value: number): void => console.log(value)); events.emit('value', 42); }"
+    },
+    {
+      "name": "buffer byte length",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.byteLength('雪')); }"
+    },
+    {
+      "name": "URL file conversion",
+      "expect": "matched",
+      "source": "import { fileURLToPath, pathToFileURL } from 'node:url'; function main(): void { console.log(fileURLToPath(pathToFileURL('/tmp/a b'))); }"
+    },
+    {
+      "name": "path helpers",
+      "expect": "matched",
+      "source": "import { dirname, extname, isAbsolute, relative } from 'node:path'; function main(): void { console.log(dirname('/a/b.txt'), extname('/a/b.txt'), isAbsolute('/a'), relative('/a/b', '/a/c')); }"
+    },
+    {
+      "name": "URL string conversion",
+      "expect": "matched",
+      "source": "import { fileURLToPath } from 'node:url'; function main(): void { console.log(fileURLToPath('file:///tmp/a%20b')); }"
+    },
+    {
+      "name": "event emitter multiple arguments",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.once('value', (left: number, right: string): void => console.log(left, right)); events.emit('value', 42, 'ok'); }"
+    },
+    {
+      "name": "buffer hex round trip",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.from('雪').toString('hex'), Buffer.from('e99baa', 'hex').toString()); }"
+    },
+    {
+      "name": "process and os metadata",
+      "expect": "matched",
+      "source": "import { cwd } from 'node:process'; import { platform } from 'node:os'; function main(): void { console.log(cwd().length > 0, platform()); }"
+    },
+    {
+      "name": "querystring round trip",
+      "expect": "matched",
+      "source": "import { parse, stringify } from 'node:querystring'; function main(): void { const encoded: string = stringify({ name: 'A B', page: 2 }); console.log(encoded, JSON.stringify(parse(encoded))); }"
+    },
+    {
+      "name": "util format",
+      "expect": "matched",
+      "source": "import { format } from 'node:util'; function main(): void { console.log(format('%s:%d:%j', 'value', 2, { ok: true })); }"
+    },
+    {
+      "name": "crypto hash",
+      "expect": "matched",
+      "source": "import { createHash } from 'node:crypto'; function main(): void { console.log(JSON.stringify(createHash('sha256').update('thaw').digest('hex'))); }"
+    },
+    {
+      "name": "path normalization",
+      "expect": "matched",
+      "source": "import { normalize, parse, format } from 'node:path'; function main(): void { const value = parse('/tmp/example.txt'); console.log(normalize('/a/../b//c'), value.dir, value.name, format(value)); }"
+    },
+    {
+      "name": "buffer base64 and subarray",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.from('hello'); console.log(value.toString('base64'), value.subarray(1, 4).toString()); }"
+    },
+    {
+      "name": "filesystem stats",
+      "expect": "matched",
+      "source": "import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs'; function main(): void { const path: string = '/tmp/thaw-node-compat-stat.txt'; writeFileSync(path, 'abc'); const stat = statSync(path); console.log(existsSync(path), stat.isFile(), stat.size); unlinkSync(path); }"
+    },
+    {
+      "name": "URL search parameters",
+      "expect": "matched",
+      "source": "import { URL } from 'node:url'; function main(): void { const url = new URL('https://example.com/a?x=1'); url.searchParams.append('x', '2'); console.log(url.hostname, url.pathname, JSON.stringify(url.searchParams.getAll('x'))); }"
+    },
+    {
+      "name": "assert strict success",
+      "expect": "matched",
+      "source": "import { deepStrictEqual, strictEqual } from 'node:assert'; function main(): void { strictEqual(1 + 1, 2); deepStrictEqual({ value: [1, 2] }, { value: [1, 2] }); console.log('ok'); }"
+    },
+    {
+      "name": "zlib gzip round trip",
+      "expect": "matched",
+      "source": "import { gzipSync, gunzipSync } from 'node:zlib'; function main(): void { const compressed = gzipSync('hello'); console.log(gunzipSync(compressed).toString(), compressed.toString('hex').slice(0, 4)); }"
+    },
+    {
+      "name": "timer callback ordering",
+      "expect": "matched",
+      "source": "import { setImmediate, setTimeout } from 'node:timers'; async function main(): Promise<void> { const values: string[] = []; await new Promise<void>((resolve) => { setTimeout(() => { values.push('timeout'); setImmediate(() => { values.push('immediate'); resolve(); }); }, 1); }); console.log(values.join(',')); }"
+    },
+    {
+      "name": "filesystem promises round trip",
+      "expect": "matched",
+      "source": "import { readFile, unlink, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const path: string = '/tmp/thaw-node-compat-promises.txt'; await writeFile(path, 'async'); console.log(await readFile(path, 'utf8')); await unlink(path); }"
+    },
+    {
+      "name": "crypto hmac",
+      "expect": "matched",
+      "source": "import { createHmac } from 'node:crypto'; function main(): void { console.log(JSON.stringify(createHmac('sha256', 'key').update('thaw').digest('hex'))); }"
+    },
+    {
+      "name": "timer promise value",
+      "expect": "matched",
+      "source": "import { setTimeout } from 'node:timers/promises'; async function main(): Promise<void> { console.log(JSON.stringify(await setTimeout(1, 'done'))); }"
+    },
+    {
+      "name": "buffer concatenation",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.concat([Buffer.from('a'), Buffer.from('b')]).toString()); }"
+    },
+    {
+      "name": "child process sync output",
+      "expect": "matched",
+      "source": "import { execFileSync } from 'node:child_process'; function main(): void { console.log(execFileSync('printf', ['child']).toString()); }"
+    },
+    {
+      "name": "event emitter listener removal",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const emitter = new EventEmitter(); let count: number = 0; const listener = (): void => { count += 1; }; emitter.on('tick', listener); emitter.emit('tick'); emitter.off('tick', listener); emitter.emit('tick'); console.log(count, emitter.listenerCount('tick')); }"
+    },
+    {
+      "name": "util type predicates",
+      "expect": "matched",
+      "source": "import { isDate, isMap, isRegExp, isSet } from 'node:util/types'; function main(): void { console.log(isDate(new Date(0)), isRegExp(/x/), isMap(new Map<string, number>()), isSet(new Set<number>())); }"
+    },
+    {
+      "name": "util inspect collections",
+      "expect": "matched",
+      "source": "import { inspect } from 'node:util'; function main(): void { const map = new Map<string, number>([['a', 1]]); const set = new Set<number>([2, 3]); console.log(inspect(map), inspect(set)); }"
+    },
+    {
+      "name": "win32 path semantics",
+      "expect": "matched",
+      "source": "import { basename, dirname, extname, join } from 'node:path/win32'; function main(): void { const value: string = join('C:\\\\tmp', 'a', '..', 'file.txt'); console.log(value, dirname(value), basename(value), extname(value)); }"
+    },
+    {
+      "name": "URL mutation",
+      "expect": "matched",
+      "source": "import { URL } from 'node:url'; function main(): void { const value = new URL('/a', 'https://example.com'); value.pathname = '/b'; value.searchParams.set('q', 'x'); console.log(value.hostname, value.pathname, value.searchParams.get('q')); }"
+    },
+    {
+      "name": "crypto random UUID shape",
+      "expect": "matched",
+      "source": "import { randomUUID } from 'node:crypto'; function main(): void { const value: string = String(randomUUID()); console.log(value.length, value.charAt(8), value.charAt(13), value.charAt(18), value.charAt(23)); }"
+    },
+    {
+      "name": "punycode domain conversion",
+      "expect": "matched",
+      "source": "import { toASCII, toUnicode } from 'node:punycode'; function main(): void { console.log(toASCII('mañana.com'), toUnicode('xn--maana-pta.com')); }"
+    },
+    {
+      "name": "net IP classification",
+      "expect": "matched",
+      "source": "import { isIP, isIPv4, isIPv6 } from 'node:net'; function main(): void { console.log(isIP('127.0.0.1'), isIPv4('127.0.0.1'), isIPv6('::1'), isIP('invalid')); }"
+    },
+    {
+      "name": "module builtin classification",
+      "expect": "matched",
+      "source": "import { isBuiltin } from 'node:module'; function main(): void { console.log(isBuiltin('node:fs'), isBuiltin('fs'), isBuiltin('not-a-module')); }"
+    },
+    {
+      "name": "string decoder split sequence",
+      "expect": "matched",
+      "source": "import { StringDecoder } from 'node:string_decoder'; import { Buffer } from 'node:buffer'; function main(): void { const decoder = new StringDecoder('utf8'); console.log(decoder.write(Buffer.from([0xe9, 0x9b])), decoder.end(Buffer.from([0xaa]))); }"
+    },
+    {
+      "name": "tty descriptor classification",
+      "expect": "matched",
+      "source": "import { isatty } from 'node:tty'; function main(): void { console.log(isatty(-1), isatty(999999)); }"
+    },
+    {
+      "name": "v8 serialization round trip",
+      "expect": "matched",
+      "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const invalid = new Date(NaN); const value = deserialize(serialize({ valid: new Date(1234), invalid, again: invalid })); console.log(value.valid.getTime(), Number.isNaN(value.invalid.getTime()), value.invalid === value.again); }"
+    },
+    {
+      "name": "crypto random bytes and timing safe equality",
+      "expect": "matched",
+      "source": "import { randomBytes, timingSafeEqual } from 'node:crypto'; import { Buffer } from 'node:buffer'; function main(): void { const value = randomBytes(8); console.log(value.length, timingSafeEqual(Buffer.from('same'), Buffer.from('same')), timingSafeEqual(Buffer.from('same'), Buffer.from('diff'))); }"
+    },
+    {
+      "name": "process high resolution time",
+      "expect": "matched",
+      "source": "import { hrtime } from 'node:process'; function main(): void { const start: number[] = hrtime(); const elapsed: number[] = hrtime(start); console.log(start.length, elapsed.length, start[0] >= 0, elapsed[0] >= 0); }"
+    },
+    {
+      "name": "zlib deflate round trip",
+      "expect": "matched",
+      "source": "import { deflateSync, inflateSync } from 'node:zlib'; function main(): void { const compressed = deflateSync('hello deflate'); console.log(inflateSync(compressed).toString(), compressed.length > 0); }"
+    },
+    {
+      "name": "buffer integer read write",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.alloc(8); value.writeUInt16LE(0x1234, 0); value.writeInt32BE(-123456, 2); console.log(value.readUInt16LE(0), value.readInt32BE(2)); }"
+    },
+    {
+      "name": "crypto pbkdf2 sync",
+      "expect": "matched",
+      "source": "import { pbkdf2Sync } from 'node:crypto'; function main(): void { console.log(pbkdf2Sync('password', 'salt', 2, 16, 'sha256').toString('hex')); }"
+    },
+    {
+      "name": "filesystem directory lifecycle",
+      "expect": "matched",
+      "source": "import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'; function main(): void { const dir: string = '/tmp/thaw-node-dir-compat'; rmSync(dir, { recursive: true, force: true }); mkdirSync(dir); writeFileSync(dir + '/b.txt', 'b'); writeFileSync(dir + '/a.txt', 'a'); console.log(readdirSync(dir).sort().join(',')); rmSync(dir, { recursive: true }); }"
+    },
+    {
+      "name": "event emitter introspection",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); const listener = (): void => {}; events.on('ready', listener); console.log(events.listenerCount('ready'), events.eventNames().join(',')); events.off('ready', listener); console.log(events.listenerCount('ready')); }"
+    },
+    {
+      "name": "process nextTick ordering",
+      "expect": "matched",
+      "source": "import process from 'node:process'; function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); }"
+    },
+    {
+      "name": "readable stream data flow",
+      "expect": "matched",
+      "source": "import { Readable } from 'node:stream'; function main(): void { const values: string[] = []; const stream = Readable.from(['a', 'b']); stream.on('data', (chunk: string): void => values.push(String(chunk))); stream.on('end', (): void => console.log(values.join(','))); }"
+    },
+    {
+      "name": "filesystem promises lifecycle",
+      "expect": "matched",
+      "source": "import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const dir: string = '/tmp/thaw-node-fsp-compat'; await rm(dir, { recursive: true, force: true }); await mkdir(dir); await writeFile(dir + '/a.txt', 'hello'); console.log(await readFile(dir + '/a.txt', 'utf8'), (await readdir(dir)).join(',')); await rm(dir, { recursive: true }); }"
+    },
+    {
+      "name": "events once promise",
+      "expect": "matched",
+      "source": "import { EventEmitter, once } from 'node:events'; async function main(): Promise<void> { const emitter = new EventEmitter(); const pending = once(emitter, 'ready'); emitter.emit('ready', 42, 'ok'); const values = await pending; console.log(values[0], values[1]); }"
+    },
+    {
+      "name": "util promisify callback",
+      "expect": "matched",
+      "source": "import { promisify } from 'node:util'; function add(left: number, right: number, callback: (error: unknown, value: number) => void): void { callback(null, left + right); } async function main(): Promise<void> { const promised = promisify(add); console.log(await promised(20, 22)); }"
+    },
+    {
+      "name": "crypto scrypt sync",
+      "expect": "matched",
+      "source": "import { scryptSync } from 'node:crypto'; function main(): void { console.log(scryptSync('password', 'salt', 16, { N: 16 }).length); }"
+    },
+    {
+      "name": "filesystem promises metadata and copy",
+      "expect": "matched",
+      "source": "import { copyFile, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const a = '/tmp/thaw-fsp-a'; const b = '/tmp/thaw-fsp-b'; const c = '/tmp/thaw-fsp-c'; await rm(a, { force: true }); await rm(b, { force: true }); await rm(c, { force: true }); await writeFile(a, 'abc'); await copyFile(a, b); await rename(b, c); const info = await stat(c); console.log(info.isFile(), info.size, await readFile(c, 'utf8')); await rm(a); await rm(c); }"
+    },
+    {
+      "name": "events helper listeners",
+      "expect": "matched",
+      "source": "import { EventEmitter, getEventListeners, getMaxListeners, setMaxListeners } from 'node:events'; function main(): void { const emitter = new EventEmitter(); const listener = (): void => {}; emitter.on('ready', listener); setMaxListeners(20, emitter); console.log(getEventListeners(emitter, 'ready').length, getMaxListeners(emitter)); }"
+    },
+    {
+      "name": "stream pipeline flow",
+      "expect": "matched",
+      "source": "import { Readable, Writable, pipeline } from 'node:stream'; function main(): void { let text: string = ''; const output = new Writable({ write(chunk, encoding, done) { text += String(chunk); done(); } }); pipeline(Readable.from(['a', 'b']), output, (error: unknown): void => { console.log(error === undefined, text); }); }"
+    },
+    {
+      "name": "crypto scrypt callback",
+      "expect": "matched",
+      "source": "import { scrypt } from 'node:crypto'; function main(): void { scrypt('password', 'salt', 8, { N: 16 }, (error: unknown, value): void => console.log(JSON.stringify(error), error === null, value.toString('hex'))); }"
+    },
+    {
+      "name": "util callbackify promise",
+      "expect": "matched",
+      "source": "import { callbackify } from 'node:util'; async function twice(value: number): Promise<number> { return value * 2; } function main(): void { const callback = callbackify(twice); callback(21, (error: unknown, value: number): void => console.log(JSON.stringify(error), error === null, value)); }"
+    },
+    {
+      "name": "filesystem promises append and access",
+      "expect": "matched",
+      "source": "import { access, appendFile, readFile, rm, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const path = '/tmp/thaw-fsp-append'; await rm(path, { force: true }); await writeFile(path, 'a'); await appendFile(path, 'b'); await access(path); console.log(await readFile(path, 'utf8')); await rm(path); }"
+    },
+    {
+      "name": "path parse and format",
+      "expect": "matched",
+      "source": "import { format, parse } from 'node:path'; function main(): void { const value = parse('/tmp/demo.txt'); console.log(value.dir, value.name, value.ext, format(value)); }"
+    },
+    {
+      "name": "crypto cipher round trip",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { createCipheriv, createDecipheriv } from 'node:crypto'; function main(): void { const key = Buffer.alloc(32); const iv = Buffer.alloc(16); const cipher = createCipheriv('aes-256-cbc', key, iv); cipher.update('hello'); const encrypted = cipher.final(); const decipher = createDecipheriv('aes-256-cbc', key, iv); decipher.update(encrypted); console.log(decipher.final().toString()); }"
+    },
+    {
+      "name": "stream finished completion",
+      "expect": "matched",
+      "source": "import { Readable, finished } from 'node:stream'; async function main(): Promise<void> { const input = Readable.from(['done']); const pending = new Promise<void>((resolve, reject) => { finished(input, (error: unknown): void => { if (error) reject(error); else resolve(); }); }); input.resume(); await pending; console.log('finished'); }"
+    },
+    {
+      "name": "util callbackify rejection",
+      "expect": "matched",
+      "source": "import { callbackify } from 'node:util'; async function fail(): Promise<number> { throw new Error('nope'); } function main(): void { const callback = callbackify(fail); callback((error: JsValue): void => console.log(String(error))); }"
+    },
+    {
+      "name": "util promisify rejection",
+      "expect": "matched",
+      "source": "import { promisify } from 'node:util'; function read(callback: (error: unknown) => void): void { callback(new Error('denied')); } async function main(): Promise<void> { const wrapped = promisify(read); try { await wrapped(); } catch (error) { console.log(String(error)); } }"
+    },
+    {
+      "name": "util callbackify falsy rejection metadata",
+      "expect": "matched",
+      "source": "import { callbackify } from 'node:util'; async function fail(): Promise<void> { throw 0; } function main(): void { const callback = callbackify(fail); callback((error: JsValue): void => console.log(error.name, error.code, error.message, String(error.reason))); }"
+    },
+    {
+      "name": "crypto cipher deterministic output",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { createCipheriv } from 'node:crypto'; function main(): void { const cipher = createCipheriv('aes-256-cbc', Buffer.alloc(32), Buffer.alloc(16)); const first = cipher.update('hello'); const last = cipher.final(); console.log(Buffer.concat([first, last]).toString('hex')); }"
+    },
+    {
+      "name": "crypto cipher streaming blocks",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { createCipheriv } from 'node:crypto'; function main(): void { const cipher = createCipheriv('aes-256-cbc', Buffer.alloc(32), Buffer.alloc(16)); const first = cipher.update('abcdefghijklmnopqrstuvwxyz012345'); const last = cipher.final(); console.log(first.length, last.length, Buffer.concat([first, last]).length); }"
+    },
+    {
+      "name": "crypto random integer range",
+      "expect": "matched",
+      "source": "import { randomInt } from 'node:crypto'; function main(): void { const value: number = randomInt(10, 20); console.log(value >= 10 && value < 20); }"
+    },
+    {
+      "name": "filesystem recursive copy",
+      "expect": "matched",
+      "source": "import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const source = '/tmp/thaw-cp-source'; const target = '/tmp/thaw-cp-target'; await rm(source, { recursive: true, force: true }); await rm(target, { recursive: true, force: true }); await mkdir(source); await writeFile(source + '/value.txt', 'copied'); await cp(source, target, { recursive: true }); console.log(await readFile(target + '/value.txt', 'utf8')); await rm(source, { recursive: true }); await rm(target, { recursive: true }); }"
+    },
+    {
+      "name": "readable resume drains",
+      "expect": "matched",
+      "source": "import { Readable } from 'node:stream'; async function main(): Promise<void> { const input = Readable.from(['done']); const ended = new Promise<void>((resolve) => { input.on('end', (): void => { resolve(); }); }); input.resume(); await ended; console.log('ended'); }"
+    },
+    {
+      "name": "stream promises finished",
+      "expect": "matched",
+      "source": "import { Readable } from 'node:stream'; import { finished } from 'node:stream/promises'; async function main(): Promise<void> { const input = Readable.from(['done']); const pending = finished(input); input.resume(); await pending; console.log('finished'); }"
+    },
+    {
+      "name": "stream transform pipeline",
+      "expect": "matched",
+      "source": "import { Readable, Transform } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const output: string[] = []; const marker = new Transform({ transform(_chunk, _encoding, callback): void { callback(null, 'X'); } }); marker.on('data', (chunk): void => { output.push(chunk.toString()); }); Readable.from(['ab', 'cd']).pipe(marker); await once(marker, 'end'); console.log(output.join('')); }"
+    },
+    {
+      "name": "stream pass through",
+      "expect": "matched",
+      "source": "import { PassThrough } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const values: string[] = []; const stream = new PassThrough(); stream.on('data', (chunk): void => { values.push(chunk.toString()); }); stream.end('hello'); await once(stream, 'end'); console.log(values.join('')); }"
+    },
+    {
+      "name": "stream duplex options",
+      "expect": "matched",
+      "source": "import { Duplex } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const writes: string[] = []; const stream = new Duplex({ read(): void {}, write(chunk, _encoding, callback): void { writes.push(chunk.toString()); callback(); } }); const reads: string[] = []; stream.on('data', (chunk): void => { reads.push(chunk.toString()); }); stream.push('read'); stream.push(null); stream.end('write'); await once(stream, 'end'); console.log(reads.join(''), writes.join('')); }"
+    },
+    {
+      "name": "stream transform flush",
+      "expect": "matched",
+      "source": "import { Readable, Transform } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const output: string[] = []; const stream = new Transform({ transform(_chunk, _encoding, callback): void { callback(null, 'x'); }, flush(callback): void { callback(null, 'z'); } }); stream.on('data', (chunk): void => { output.push(chunk.toString()); }); Readable.from(['a']).pipe(stream); await once(stream, 'end'); console.log(output.join('')); }"
+    },
+    {
+      "name": "buffer floating point io",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.alloc(16); value.writeFloatLE(1.5, 0); value.writeDoubleBE(-2.25, 4); console.log(value.readFloatLE(0), value.readDoubleBE(4)); }"
+    },
+    {
+      "name": "event emitter once method",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const emitter = new EventEmitter(); let count: number = 0; emitter.once('tick', (): void => { count += 1; }); emitter.emit('tick'); emitter.emit('tick'); console.log(count, emitter.listenerCount('tick')); }"
+    },
+    {
+      "name": "filesystem stream round trip",
+      "expect": "matched",
+      "source": "import { createReadStream, createWriteStream } from 'node:fs'; import { once } from 'node:events'; async function main(): Promise<void> { const path = '/tmp/thaw-fs-stream.txt'; const output = createWriteStream(path); output.end('streamed'); await once(output, 'finish'); const input = createReadStream(path, { encoding: 'utf8' }); let text: string = ''; input.on('data', (chunk: any): void => { text += String(chunk); }); await once(input, 'end'); console.log(text); }"
+    },
+    {
+      "name": "crypto hash copy",
+      "expect": "matched",
+      "source": "import { createHash } from 'node:crypto'; function main(): void { const base = createHash('sha256'); base.update('prefix'); const left = base.copy(); const right = base.copy(); console.log(left.update('a').digest('hex'), right.update('b').digest('hex')); }"
+    },
+    {
+      "name": "fluent external class assignment",
+      "expect": "matched",
+      "source": "import { createHash } from 'node:crypto'; function main(): void { const base = createHash('sha256').update('prefix'); console.log(base.copy().digest('hex')); }"
+    },
+    {
+      "name": "zlib brotli round trip",
+      "expect": "matched",
+      "source": "import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'; function main(): void { const compressed = brotliCompressSync('brotli value'); console.log(brotliDecompressSync(compressed).toString()); }"
+    },
+    {
+      "name": "stream consumer text",
+      "expect": "matched",
+      "source": "import { Readable } from 'node:stream'; import { text } from 'node:stream/consumers'; async function main(): Promise<void> { console.log(await text(Readable.from(['hello', ' ', 'world']))); }"
+    },
+    {
+      "name": "buffer byte swapping",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.from([0, 1, 2, 3]); console.log(value.swap16().toString('hex')); }"
+    },
+    {
+      "name": "crypto random fill range",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); randomFillSync(value, 2, 3); const hex: string = value.toString('hex'); console.log(hex.startsWith('0000'), hex.endsWith('000000'), hex.length); }"
+    },
+    {
+      "name": "crypto random fill identity",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); console.log(randomFillSync(value) === value); }"
+    },
+    {
+      "name": "util strip ansi",
+      "expect": "matched",
+      "source": "import { stripVTControlCharacters } from 'node:util'; function main(): void { console.log(stripVTControlCharacters('\u001b[31mred\u001b[0m')); }"
+    },
+    {
+      "name": "async local storage scope",
+      "expect": "matched",
+      "source": "import { AsyncLocalStorage } from 'node:async_hooks'; function main(): void { const storage = new AsyncLocalStorage(); storage.run('scope', (): void => { console.log(String(storage.getStore())); }); console.log(String(storage.getStore())); }"
+    },
+    {
+      "name": "module create require builtin",
+      "expect": "matched",
+      "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); const path = require('node:path'); console.log(path.basename('/tmp/example/value.txt')); }"
+    },
+    {
+      "name": "module create require resolve builtin",
+      "expect": "matched",
+      "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require.resolve('node:path')); }"
+    },
+    {
+      "name": "timer interval cancellation",
+      "expect": "matched",
+      "source": "import { setInterval, clearInterval } from 'node:timers'; function main(): void { let count: number = 0; const timer = setInterval((): void => { count += 1; console.log(count); if (count === 2) clearInterval(timer); }, 1); }"
+    },
+    {
+      "name": "assert deep strict failure",
+      "expect": "matched",
+      "source": "import { deepStrictEqual } from 'node:assert'; function main(): void { try { deepStrictEqual({ value: [1, 2] }, { value: [1, 3] }); } catch (error) { console.log(error instanceof Error, error.name); } }"
+    },
+    {
+      "name": "diagnostics channel publish subscribe",
+      "expect": "matched",
+      "source": "import { channel } from 'node:diagnostics_channel'; function main(): void { const events = channel('thaw.test'); const listener = (message: Json): void => { console.log(message.value); }; events.subscribe(listener); events.publish({ value: 42 }); events.unsubscribe(listener); console.log(events.hasSubscribers); }"
+    },
+    {
+      "name": "performance monotonic clock",
+      "expect": "matched",
+      "source": "import { performance } from 'node:perf_hooks'; function main(): void { const start: number = performance.now(); const end: number = performance.now(); console.log(end >= start, typeof performance.timeOrigin === 'number'); }"
+    },
+    {
+      "name": "vm run in new context",
+      "expect": "matched",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext('value * 2', { value: 21 })); }"
+    },
+    {
+      "name": "os resource metadata",
+      "expect": "matched",
+      "source": "import { arch, cpus, freemem, totalmem, uptime } from 'node:os'; function main(): void { console.log(arch().length > 0, cpus().length > 0, totalmem() > 0, freemem() >= 0, uptime() >= 0); }"
+    },
+    {
+      "name": "filesystem constants",
+      "expect": "matched",
+      "source": "import { F_OK, O_RDONLY, O_RDWR, O_WRONLY, R_OK, W_OK, X_OK } from 'node:constants'; function main(): void { console.log(F_OK === 0, R_OK > 0, W_OK > 0, X_OK > 0, O_RDONLY === 0, O_WRONLY > 0, O_RDWR > O_WRONLY); }"
+    },
+    {
+      "name": "web readable stream",
+      "expect": "matched",
+      "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new ReadableStream({ start(controller) { controller.enqueue('hello'); controller.close(); } }); const reader = stream.getReader(); const first = await reader.read(); const last = await reader.read(); console.log(first.value, first.done, last.done); }"
+    },
+    {
+      "name": "web transform stream",
+      "expect": "matched",
+      "source": "import { TransformStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new TransformStream({ transform(chunk, controller) { controller.enqueue(String(chunk).toUpperCase()); } }); const writer = stream.writable.getWriter(); const reader = stream.readable.getReader(); const pending = reader.read(); await writer.write('hello'); const value = await pending; await writer.close(); console.log(value.value, value.done); }"
+    },
+    {
+      "name": "web writable stream",
+      "expect": "matched",
+      "source": "import { WritableStream } from 'node:stream/web'; async function main(): Promise<void> { const values: string[] = []; const stream = new WritableStream({ write(chunk) { values.push(String(chunk)); }, close() { values.push('closed'); } }); const writer = stream.getWriter(); await writer.write('hello'); await writer.close(); console.log(values.join(',')); }"
+    },
+    {
+      "name": "file URL round trip",
+      "expect": "matched",
+      "source": "import { fileURLToPath, pathToFileURL } from 'node:url'; function main(): void { const url = pathToFileURL('/tmp/a b.txt'); console.log(url.protocol, url.pathname, fileURLToPath(url)); }"
+    },
+    {
+      "name": "web text encoder stream",
+      "expect": "matched",
+      "source": "import { TextEncoderStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new TextEncoderStream(); const writer = stream.writable.getWriter(); const reader = stream.readable.getReader(); const pending = reader.read(); await writer.write('Hi'); const result = await pending; await writer.close(); console.log(result.value.length, result.value[0], result.value[1]); }"
+    },
+    {
+      "name": "web text decoder stream",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { TextDecoderStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new TextDecoderStream(); const writer = stream.writable.getWriter(); const reader = stream.readable.getReader(); const pending = reader.read(); await writer.write(Buffer.from([72, 105])); const result = await pending; await writer.close(); console.log(result.value, result.done); }"
+    },
+    {
+      "name": "web compression stream round trip",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; import { CompressionStream, DecompressionStream, TextDecoderStream } from 'node:stream/web'; async function main(): Promise<void> { const compression = new CompressionStream('gzip'); const decompression = new DecompressionStream('gzip'); const decoder = new TextDecoderStream(); const output = compression.readable.pipeThrough(decompression).pipeThrough(decoder); const writer = compression.writable.getWriter(); const reader = output.getReader(); const pending = reader.read(); await writer.write(Buffer.from('hello')); await writer.close(); const result = await pending; console.log(result.value, result.done); }"
+    },
+    {
+      "name": "worker message channel",
+      "expect": "matched",
+      "source": "import { MessageChannel } from 'node:worker_threads'; async function main(): Promise<void> { const channel = new MessageChannel(); const received = new Promise<Json>((resolve) => { channel.port2.on('message', (value) => { resolve(value); }); }); channel.port1.postMessage({ value: 42 }); const value = await received; console.log(value.value); channel.port1.close(); channel.port2.close(); }"
+    },
+    {
+      "name": "worker environment data",
+      "expect": "matched",
+      "source": "import { getEnvironmentData, setEnvironmentData } from 'node:worker_threads'; function main(): void { setEnvironmentData('thaw.test', { value: 42 }); const stored = getEnvironmentData('thaw.test'); console.log(stored.value); }"
+    },
+    {
+      "name": "child process async output",
+      "expect": "matched",
+      "source": "import { execFile } from 'node:child_process'; async function main(): Promise<void> { await new Promise<void>((resolve, reject) => { execFile('printf', ['child'], (error, stdout) => { if (error) { reject(error); return; } console.log(String(stdout)); resolve(); }); }); }"
+    },
+    {
+      "name": "child process spawn events",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; async function main(): Promise<void> { const child = spawn('printf', ['spawn']); let output: string = ''; child.stdout.on('data', (chunk) => { output += String(chunk); }); await new Promise<void>((resolve) => { child.on('close', () => resolve()); }); console.log(output); }"
+    },
+    {
+      "name": "child process exec callback",
+      "expect": "matched",
+      "source": "import { exec } from 'node:child_process'; async function main(): Promise<void> { await new Promise<void>((resolve, reject) => { exec('printf exec', (error, stdout) => { if (error) { reject(error); return; } console.log(String(stdout)); resolve(); }); }); }"
+    },
+    {
+      "name": "http client response",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; import { get } from 'node:http'; function main(): void { const child = spawn('node', ['-e', \"const s=require('http').createServer((_q,r)=>r.end('ok'));s.listen(0,'127.0.0.1',()=>console.log(s.address().port))\"]); let started: boolean = false; child.stdout.on('data', (chunk) => { if (started) return; started = true; const port: string = String(chunk).trim(); get('http://127.0.0.1:' + port, (response) => { let body: string = ''; response.on('data', (part) => { body += String(part); }); response.on('end', () => { console.log(response.statusCode, body); child.kill(); }); }); }); }"
+    },
+    {
+      "name": "http streams delayed response chunks",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; import { get } from 'node:http'; function main(): void { const child = spawn('node', ['-e', \"const s=require('http').createServer((_q,r)=>{r.write('one');setTimeout(()=>r.end('two'),200)});s.listen(0,'127.0.0.1',()=>console.log(s.address().port))\"]); let started: boolean = false; child.stdout.on('data', (value) => { if (started) return; started = true; const port: string = String(value).trim(); get('http://127.0.0.1:' + port, (response) => { const chunks: string[] = []; response.setEncoding('utf8'); response.on('data', (chunk) => chunks.push(String(chunk))); response.on('end', () => { console.log(chunks.join('|'), response.complete); child.kill(); }); }); }); }"
+    },
+    {
+      "name": "http client request timeout",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; import { get } from 'node:http'; function main(): void { const child = spawn('node', ['-e', \"const s=require('http').createServer(()=>{});s.listen(0,'127.0.0.1',()=>console.log(s.address().port))\"]); let started: boolean = false; child.stdout.on('data', (value) => { if (started) return; started = true; const port: string = String(value).trim(); const request = get('http://127.0.0.1:' + port); request.on('error', () => {}); request.setTimeout(10, () => { console.log('timeout'); request.destroy(); child.kill(); }); }); }"
+    },
+    {
+      "name": "dns promise localhost lookup",
+      "expect": "matched",
+      "source": "import { lookup } from 'node:dns/promises'; async function main(): Promise<void> { const result = await lookup('localhost'); console.log(typeof result.address === 'string', result.family === 4 || result.family === 6); }"
+    },
+    {
+      "name": "querystring parse stringify",
+      "expect": "matched",
+      "source": "import { parse, stringify } from 'node:querystring'; function main(): void { const value = parse('name=Alice+Smith&tag=a&tag=b&empty='); console.log(value.name, JSON.stringify(value.tag), value.empty); console.log(stringify({ q: 'a b', page: 2, enabled: true })); }"
+    },
+    {
+      "name": "timers promises value",
+      "expect": "matched",
+      "source": "import { setTimeout } from 'node:timers/promises'; async function main(): Promise<void> { console.log(await setTimeout(1, 'done')); }"
+    },
+    {
+      "name": "abort controller state",
+      "expect": "matched",
+      "source": "function main(): void { const controller = new AbortController(); console.log(controller.signal.aborted); controller.abort('stop'); console.log(controller.signal.aborted, controller.signal.reason); }"
+    },
+    {
+      "name": "timers promises abort",
+      "expect": "matched",
+      "source": "import { setTimeout } from 'node:timers/promises'; async function main(): Promise<void> { const controller = new AbortController(); controller.abort(); try { await setTimeout(100, 'late', { signal: controller.signal }); } catch (error) { console.log(error.name); } }"
+    },
+    {
+      "name": "os common helpers",
+      "expect": "matched",
+      "source": "import { EOL, arch, availableParallelism, homedir, platform, tmpdir, type } from 'node:os'; function main(): void { console.log(typeof platform(), typeof arch(), typeof type(), tmpdir().length > 0, homedir().length > 0, availableParallelism() >= 1, EOL === '\\n' || EOL === '\\r\\n'); }"
+    },
+    {
+      "name": "URLSearchParams mutation and serialization",
+      "expect": "matched",
+      "source": "import { URLSearchParams } from 'node:url'; function main(): void { const params = new URLSearchParams('b=2&a=1&a=3'); console.log(params.has('a'), params.size); params.delete('a', '1'); params.sort(); console.log(params.toString(), params.has('a', '1'), params.has('a', '3')); }"
+    },
+    {
+      "name": "global text encoder decoder",
+      "expect": "matched",
+      "source": "function main(): void { const encoder = new TextEncoder(); const bytes = encoder.encode('雪'); const decoder = new TextDecoder(); console.log(bytes.length, bytes[0], decoder.decode(bytes)); }"
+    },
+    {
+      "name": "TextDecoder fatal error",
+      "expect": "matched",
+      "source": "function main(): void { const decoder = new TextDecoder('utf-8', { fatal: true }); try { decoder.decode(new Uint8Array([255])); } catch (error) { console.log(error.name); } }"
+    },
+    {
+      "name": "queueMicrotask ordering",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const order: string[] = []; queueMicrotask(() => order.push('microtask')); order.push('sync'); await Promise.resolve(); order.push('after'); console.log(order.join(',')); }"
+    },
+    {
+      "name": "queueMicrotask uncaught exception",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { process.once('uncaughtException', (error) => { console.log(error.message); }); queueMicrotask(() => { throw new Error('microtask boom'); }); await Promise.resolve(); }"
+    },
+    {
+      "name": "global timeout and clear",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const order: string[] = []; const cancelled = setTimeout(() => order.push('cancelled'), 0); clearTimeout(cancelled); await new Promise<void>((resolve) => setTimeout(() => { order.push('timeout'); resolve(); }, 1)); console.log(order.join(',')); }"
+    },
+    {
+      "name": "global interval and immediate",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let count: number = 0; await new Promise<void>((resolve) => { const handle = setInterval(() => { count += 1; if (count === 2) { clearInterval(handle); resolve(); } }, 1); }); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(count); }"
+    },
+    {
+      "name": "timer callback arguments",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { await new Promise<void>((resolve) => setTimeout((left, right) => { console.log(String(left) + ':' + String(right)); resolve(); }, 1, 'x', 2)); }"
+    },
+    {
+      "name": "timer handle ref state",
+      "expect": "matched",
+      "source": "function main(): void { const handle = setTimeout(() => {}, 100); console.log(handle.hasRef()); handle.unref(); console.log(handle.hasRef()); handle.ref(); console.log(handle.hasRef()); clearTimeout(handle); }"
+    },
+    {
+      "name": "timer uncaught exception",
+      "expect": "matched",
+      "source": "function main(): void { process.once('uncaughtException', (error) => console.log(error.message)); setTimeout(() => { throw new Error('timer boom'); }, 0); }"
+    },
+    {
+      "name": "unhandled timer exception exits with failure",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void { setTimeout(() => { throw new Error('timer fatal'); }, 0); }"
+    },
+    {
+      "name": "process exitCode controls status",
+      "expect": "matched",
+      "exitCode": 7,
+      "source": "function main(): void { process.exitCode = 7; }"
+    },
+    {
+      "name": "process argv forwards command line arguments",
+      "expect": "matched",
+      "args": [
+        "alpha",
+        "two words",
+        "--count=3"
+      ],
+      "source": "function main(): void { console.log(process.argv.slice(2).join('|')); }"
+    },
+    {
+      "name": "process chdir affects relative filesystem access",
+      "expect": "matched",
+      "source": "import process from 'node:process'; import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path'; function main(): void { const original = process.cwd(); const directory: string = String(mkdtempSync(join(tmpdir(), 'thaw-chdir-'))); process.chdir(directory); writeFileSync('value.txt', 'ok'); console.log(process.cwd() === directory, readFileSync(join(directory, 'value.txt'), 'utf8')); process.chdir(original); rmSync(directory, { recursive: true }); }"
+    },
+    {
+      "name": "unhandled promise rejection",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { process.once('unhandledRejection', (reason) => console.log(reason.message)); Promise.reject(new Error('reject boom')); await Promise.resolve(); }"
+    },
+    {
+      "name": "handled promise rejection",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let count: number = 0; process.on('unhandledRejection', () => { count += 1; }); Promise.reject(new Error('handled')).catch(() => {}); await Promise.resolve(); await Promise.resolve(); console.log(count); }"
+    },
+    {
+      "name": "stored unhandled promise rejection",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { process.once('unhandledRejection', (reason) => console.log(reason.message)); const pending = Promise.reject(new Error('stored boom')); await Promise.resolve(); console.log(typeof pending); }"
+    },
+    {
+      "name": "stored handled promise rejection",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let count: number = 0; process.on('unhandledRejection', () => { count += 1; }); const pending = Promise.reject(new Error('stored handled')); pending.catch(() => {}); await Promise.resolve(); await Promise.resolve(); console.log(count); }"
+    },
+    {
+      "name": "multiple unhandled promise rejections",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { process.on('unhandledRejection', (reason) => console.log(reason.message)); const first = Promise.reject(new Error('first')); const second = Promise.reject(new Error('second')); await Promise.resolve(); console.log(typeof first, typeof second); }"
+    },
+    {
+      "name": "unhandled rejection before next timer turn",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let message: string = 'none'; process.once('unhandledRejection', (reason) => { message = reason.message; }); const pending = Promise.reject(new Error('turn boom')); await new Promise<void>((resolve) => setTimeout(resolve, 1)); console.log(message, typeof pending); }"
+    },
+    {
+      "name": "late promise rejection handler event",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const events: string[] = []; process.on('unhandledRejection', () => events.push('unhandled')); process.on('rejectionHandled', () => events.push('handled')); const pending = Promise.reject(new Error('late')); await new Promise<void>((resolve) => setTimeout(resolve, 1)); pending.catch(() => {}); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(events.join(',')); }"
+    },
+    {
+      "name": "nextTick precedes promise and microtask queues",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(order.join(',')); }"
+    },
+    {
+      "name": "uncaught exception monitor precedes handler",
+      "expect": "matched",
+      "source": "function main(): void { const order: string[] = []; process.on('uncaughtExceptionMonitor', () => order.push('monitor')); process.on('uncaughtException', () => { order.push('handler'); console.log(order.join(',')); }); queueMicrotask(() => { throw new Error('boom'); }); }"
+    },
+    {
+      "name": "posix path semantics",
+      "expect": "matched",
+      "source": "import posix from 'node:path/posix'; function main(): void { console.log(posix.join('/a', 'b', '..', 'c'), posix.basename('/a/file.txt', '.txt')); }"
+    },
+    {
+      "name": "cluster primary metadata",
+      "expect": "matched",
+      "source": "import { isPrimary, isMaster, isWorker, SCHED_NONE, SCHED_RR } from 'node:cluster'; function main(): void { console.log(isPrimary, isMaster, isWorker, SCHED_NONE, SCHED_RR); }"
+    },
+    {
+      "name": "console constructor output",
+      "expect": "matched",
+      "source": "import { Console } from 'node:console'; import { Writable } from 'node:stream'; function main(): void { let text: string = ''; const output = new Writable({ write(chunk, encoding, callback) { text += chunk.toString(); callback(); } }); const logger = new Console(output); logger.log('value', 42); console.log(JSON.stringify(text)); }"
+    },
+    {
+      "name": "dns callback localhost lookup",
+      "expect": "matched",
+      "source": "import { lookup } from 'node:dns'; function main(): void { lookup('localhost', (error: unknown, address: string, family: number): void => console.log(error === null, address.length > 0, family === 4 || family === 6)); }"
+    },
+    {
+      "name": "readline line events",
+      "expect": "matched",
+      "source": "import { createInterface } from 'node:readline'; import { Readable } from 'node:stream'; function main(): void { const lines: string[] = []; const input = Readable.from(['one\\n', 'two\\n']); const reader = createInterface({ input, terminal: false }); reader.on('line', (line: string): void => { lines.push(line); }); reader.on('close', (): void => console.log(lines.join(','))); input.resume(); }"
+    },
+    {
+      "name": "tls static metadata",
+      "expect": "matched",
+      "source": "import { getCiphers, DEFAULT_MIN_VERSION, DEFAULT_MAX_VERSION } from 'node:tls'; function main(): void { const ciphers = getCiphers(); console.log(ciphers.length > 0, DEFAULT_MIN_VERSION, DEFAULT_MAX_VERSION); }"
+    },
+    {
+      "name": "https global agent protocol",
+      "expect": "matched",
+      "source": "import { globalAgent } from 'node:https'; function main(): void { console.log(globalAgent.protocol); }"
+    },
+    {
+      "name": "trace events category lifecycle",
+      "expect": "matched",
+      "source": "import { createTracing, getEnabledCategories } from 'node:trace_events'; function main(): void { const tracing = createTracing({ categories: ['node'] }); console.log(tracing.enabled); tracing.enable(); console.log(tracing.enabled, String(getEnabledCategories()).includes('node')); tracing.disable(); console.log(tracing.enabled); }"
+    },
+    {
+      "name": "http2 settings round trip",
+      "expect": "matched",
+      "source": "import { getDefaultSettings, getPackedSettings, getUnpackedSettings } from 'node:http2'; function main(): void { const defaults = getDefaultSettings(); const restored = getUnpackedSettings(getPackedSettings(defaults)); console.log(typeof defaults.headerTableSize, restored.headerTableSize === defaults.headerTableSize); }"
+    },
+    {
+      "name": "inspector runtime evaluation",
+      "expect": "matched",
+      "source": "import { Session } from 'node:inspector'; function main(): void { const session = new Session(); session.connect(); session.post('Runtime.evaluate', { expression: '6 * 7', returnByValue: true }, (error, result): void => { console.log(error === null, result.result.value); session.disconnect(); }); }"
+    },
+    {
+      "name": "inspector promise runtime evaluation",
+      "expect": "matched",
+      "source": "import { Session } from 'node:inspector/promises'; async function main(): Promise<void> { const session = new Session(); session.connect(); const result = await session.post('Runtime.evaluate', { expression: '6 * 7', returnByValue: true }); console.log(result.result.value); session.disconnect(); }"
+    },
+    {
+      "name": "domain captures thrown errors",
+      "expect": "matched",
+      "source": "import { create } from 'node:domain'; function main(): void { const scope = create(); scope.on('error', (error) => console.log(error.message)); scope.run(() => { throw new Error('captured'); }); }"
+    },
+    {
+      "name": "repl default writer",
+      "expect": "matched",
+      "source": "import { writer } from 'node:repl'; function main(): void { console.log(writer({ answer: 42 }).includes('42')); }"
+    },
+    {
+      "name": "readline promises closes interface",
+      "expect": "matched",
+      "source": "import { createInterface } from 'node:readline/promises'; import { Readable } from 'node:stream'; function main(): void { const reader = createInterface({ input: Readable.from([]) }); reader.close(); console.log(reader.closed); }"
+    },
+    {
+      "name": "dgram binds and closes udp socket",
+      "expect": "matched",
+      "source": "import { createSocket } from 'node:dgram'; function main(): void { const socket = createSocket('udp4'); socket.bind(0, '127.0.0.1', (): void => { const address = socket.address(); console.log(address.family, address.port > 0); socket.close(); }); }"
+    },
+    {
+      "name": "node test mock function records calls",
+      "expect": "matched",
+      "source": "import { mock } from 'node:test'; function main(): void { const twice = mock.fn((value: number): number => value * 2); console.log(twice(21), twice.mock.callCount()); }"
+    },
+    {
+      "name": "wasi exposes preview1 import object",
+      "expect": "matched",
+      "source": "import { WASI } from 'node:wasi'; function main(): void { const wasi = new WASI({ version: 'preview1' }); const imports = wasi.getImportObject(); console.log(imports.wasi_snapshot_preview1 !== undefined); }"
+    },
+    {
+      "name": "node test dot reporter terminates output",
+      "expect": "matched",
+      "source": "import { dot } from 'node:test/reporters'; async function main(): Promise<void> { const reporter = dot([]); const result = await reporter.next(); console.log(result.done, JSON.stringify(result.value)); }"
+    },
+    {
+      "name": "filesystem symbolic link and chmod",
+      "expect": "matched",
+      "source": "import { chmodSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'; function main(): void { const root = '/tmp/thaw-node-fs-link'; const target = root + '/target.txt'; const link = root + '/link.txt'; rmSync(root, { recursive: true, force: true }); mkdirSync(root); writeFileSync(target, 'linked'); chmodSync(target, 0o640); symlinkSync('target.txt', link); console.log(lstatSync(link).isSymbolicLink(), readlinkSync(link), readFileSync(link, 'utf8'), (lstatSync(target).mode & 0o777).toString(8)); rmSync(root, { recursive: true }); }"
+    },
+    {
+      "name": "filesystem watch change event",
+      "expect": "matched",
+      "source": "import { rmSync, watch, writeFileSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-watch.txt'; rmSync(path, { force: true }); writeFileSync(path, 'before'); await new Promise<void>((resolve, reject) => { const watcher = watch(path, (eventType: string, filename: string): void => { console.log(eventType === 'change', filename === 'thaw-node-fs-watch.txt'); watcher.close(); rmSync(path, { force: true }); resolve(); }); watcher.on('error', reject); setTimeout((): void => writeFileSync(path, 'after'), 10); }); }"
+    },
+    {
+      "name": "filesystem promise file handle",
+      "expect": "matched",
+      "source": "import { open, rm } from 'node:fs/promises'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-handle.txt'; await rm(path, { force: true }); const output = await open(path, 'w'); await output.writeFile('hello'); const stat = await output.stat(); await output.close(); const input = await open(path, 'r'); const value = await input.readFile({ encoding: 'utf8' }); console.log(stat.size, value); await input.close(); await rm(path); }"
+    },
+    {
+      "name": "filesystem read and write streams",
+      "expect": "matched",
+      "source": "import { createReadStream, createWriteStream, rmSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-stream.txt'; rmSync(path, { force: true }); await new Promise<void>((resolve, reject) => { const output = createWriteStream(path, { highWaterMark: 2 }); output.on('error', reject); output.end('streamed', resolve); }); const chunks: string[] = []; await new Promise<void>((resolve, reject) => { const input = createReadStream(path, { highWaterMark: 3, encoding: 'utf8' }); input.on('data', (chunk: string): void => chunks.push(chunk)); input.on('end', resolve); input.on('error', reject); }); console.log(chunks.join(''), chunks.length); rmSync(path); }"
+    },
+    {
+      "name": "filesystem missing file error code",
+      "expect": "matched",
+      "source": "import { readFileSync } from 'node:fs'; function main(): void { try { readFileSync('/tmp/thaw-definitely-missing-file', 'utf8'); } catch (error) { console.log(error.name, error.code); } }"
+    },
+    {
+      "name": "filesystem exclusive create error code",
+      "expect": "matched",
+      "source": "import { rmSync, writeFileSync } from 'node:fs'; function main(): void { const path = '/tmp/thaw-exclusive-error'; rmSync(path, { force: true }); writeFileSync(path, 'first'); try { writeFileSync(path, 'second', { flag: 'wx' }); } catch (error) { console.log(error.name, error.code); } rmSync(path); }"
+    },
+    {
+      "name": "child process missing executable error code",
+      "expect": "matched",
+      "source": "import { execFile } from 'node:child_process'; async function main(): Promise<void> { await new Promise<void>((resolve) => { execFile('/tmp/thaw-command-does-not-exist', (error) => { console.log(error.name, error.code); resolve(); }); }); }"
+    },
+    {
+      "name": "crypto invalid digest error code",
+      "expect": "matched",
+      "source": "import { createHash } from 'node:crypto'; function main(): void { try { createHash('thaw-invalid-digest'); } catch (error) { console.log(error.name, error.code); } }"
+    },
+    {
+      "name": "zlib invalid data error code",
+      "expect": "matched",
+      "source": "import { gunzipSync } from 'node:zlib'; function main(): void { try { gunzipSync('not gzip'); } catch (error) { console.log(error.name, error.code); } }"
+    },
+    {
+      "name": "vm context process isolation",
+      "expect": "matched",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext('typeof process')); }"
+    },
+    {
+      "name": "vm context standard globals",
+      "expect": "matched",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext(`JSON.stringify([Math.max(1, 3), typeof Promise, typeof console, typeof WebAssembly, typeof setTimeout])`)); }"
+    },
+    {
+      "name": "vm context intrinsic isolation",
+      "expect": "matched",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { runInNewContext(`Object.prototype.thawVmLeak = 1`); console.log(runInNewContext(`typeof Object.prototype.thawVmLeak`)); }"
+    },
+    {
+      "name": "vm context declarations persist across runs",
+      "expect": "matched",
+      "source": "import { createContext, runInContext } from 'node:vm'; function main(): void { const context: any = createContext({ a: 1 }); runInContext('var x = 10; let y = 20; const z = 30; function g() { return x + y + z; }', context); console.log(runInContext('g() + a + typeof y', context), context.x, typeof context.y, typeof context.g); }"
+    },
+    {
+      "name": "vm context timeout interrupts a runaway script",
+      "expect": "matched",
+      "source": "import { runInNewContext, runInContext, createContext } from 'node:vm'; function main(): void { const context = createContext({}); try { runInContext('while (true) {}', context, { timeout: 30 }); } catch (error: any) { console.log(error.code, error.message); } console.log(runInContext('1 + 1', context)); try { runInNewContext('for (;;) {}', {}, { timeout: 20 }); } catch (error: any) { console.log(error.code, error instanceof Error); } }"
+    },
+    {
+      "name": "vm many contexts are created and released",
+      "expect": "matched",
+      "source": "import { createContext, runInContext } from 'node:vm'; function main(): void { let total = 0; for (let index = 0; index < 300; index++) { const context: any = createContext({ index }); total += runInContext('var square = index * index; square', context); } console.log(total); }"
+    },
+    {
+      "name": "performance event loop delay histogram",
+      "expect": "matched",
+      "source": "import { monitorEventLoopDelay } from 'node:perf_hooks'; async function main(): Promise<void> { const histogram = monitorEventLoopDelay({ resolution: 1 }); histogram.enable(); await new Promise<void>((resolve) => setTimeout(resolve, 20)); histogram.disable(); console.log(histogram.count > 0, histogram.min > 0, histogram.max >= histogram.min, histogram.mean >= histogram.min, histogram.percentile(50) > 0); }"
+    },
+    {
+      "name": "worker evaluated thread",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads'; async function main(): Promise<void> { const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage(42);`, { eval: true }); await new Promise<void>((resolve, reject) => { worker.once('message', (value) => { console.log(value); resolve(); }); worker.once('error', reject); }); await worker.terminate(); }"
+    },
+    {
+      "name": "inspector network domain lifecycle",
+      "expect": "matched",
+      "source": "import { Session } from 'node:inspector'; async function main(): Promise<void> { const session = new Session(); session.connect(); await new Promise<void>((resolve) => session.post('Network.enable', {}, (enableError): void => { session.post('Network.disable', {}, (disableError): void => { console.log(enableError === null, disableError === null); resolve(); }); })); session.disconnect(); }"
+    },
+    {
+      "name": "inspector promise network domain lifecycle",
+      "expect": "matched",
+      "source": "import { Session } from 'node:inspector/promises'; async function main(): Promise<void> { const session = new Session(); session.connect(); await session.post('Network.enable'); await session.post('Network.disable'); console.log('ok'); session.disconnect(); }"
+    },
+    {
+      "name": "cluster executes worker process",
+      "expect": "matched",
+      "source": "import cluster, { isPrimary } from 'node:cluster'; import process from 'node:process'; function main(): void { if (isPrimary) cluster.fork(); else { console.log('worker'); process.disconnect(); } }"
+    },
+    {
+      "name": "zlib callbacks round trip off the event loop",
+      "expect": "matched",
+      "source": "import zlib from 'node:zlib';\nconst input = Buffer.from('hello hello hello hello');\nfunction roundTrip(next: () => void): void { zlib.gzip(input, (error: any, packed: Buffer) => { const first = error === null; zlib.gunzip(packed, (error2: any, plain: Buffer) => { console.log(first, error2 === null, plain.toString()); next(); }); }); }\nfunction invalid(next: () => void): void { zlib.gunzip(Buffer.from('not gzip data'), (error3: any, none: any) => { console.log(error3.code, none === undefined); next(); }); }\nfunction withOptions(next: () => void): void { zlib.deflate(input, { level: 9 }, (error4: any, deflated: Buffer) => { const ok = error4 === null; zlib.inflate(deflated, (error5: any, inflated: Buffer) => { console.log(ok, error5 === null, inflated.toString() === 'hello hello hello hello'); next(); }); }); }\nfunction main(): void { roundTrip(() => { invalid(() => { withOptions(() => { console.log('done'); }); }); }); }"
+    },
+    {
+      "name": "event loop utilization reports idle time",
+      "expect": "matched",
+      "source": "import { performance } from 'node:perf_hooks'; function main(): void { const before = performance.eventLoopUtilization(); console.log(before.idle === 0, before.active === 0, before.utilization === 0); setTimeout(() => { const first = performance.eventLoopUtilization(); setTimeout(() => { const delta = performance.eventLoopUtilization(first); console.log(delta.idle > 0, delta.active >= 0, delta.utilization >= 0 && delta.utilization < 1); const whole = performance.eventLoopUtilization(); console.log(whole.idle > 0, whole.active > 0, whole.idle + whole.active > 40); }, 60); }, 10); }"
+    },
+    {
+      "name": "unref keeps a spawned child from holding the process open",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; function main(): void { const child = spawn('sleep', ['1.5'], { stdio: 'ignore' }); child.unref(); child.on('exit', () => { console.log('child exited'); }); console.log('started'); }"
+    },
+    {
+      "name": "child stdio inherit writes straight to the parent output",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; function main(): void { console.log('before'); const child = spawn('echo', ['inherited'], { stdio: 'inherit' }); child.on('close', (code: any) => { console.log('closed', code, child.stdout === null, child.stderr === null, child.stdin === null); }); }"
+    },
+    {
+      "name": "async_hooks createHook reports resources timers and promises",
+      "expect": "matched",
+      "source": "import { createHook, AsyncResource, executionAsyncId, triggerAsyncId } from 'node:async_hooks'; function main(): void { const types = new Map<number, string>(); const log: string[] = []; const hook = createHook({ init(id: number, type: string, trigger: number) { if (type === 'MyRes' || type === 'Timeout' || type === 'PROMISE') { types.set(id, type); if (type !== 'PROMISE') log.push('init:' + type); } }, before(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('before:' + t); }, after(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('after:' + t); }, destroy(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('destroy:' + t); }, promiseResolve(id: number) { if (types.get(id) === 'PROMISE') log.push('resolve:PROMISE'); } }).enable(); const resource = new AsyncResource('MyRes'); resource.runInAsyncScope(() => { log.push('scope ' + (executionAsyncId() === resource.asyncId()) + ' ' + (triggerAsyncId() === resource.triggerAsyncId())); }); setTimeout(() => { log.push('timeout'); resource.emitDestroy(); }, 10); setTimeout(() => { hook.disable(); console.log(log.filter((entry) => !entry.endsWith('PROMISE')).join(',')); }, 40); }"
+    },
+    {
+      "name": "async_hooks createHook validates callbacks and can be disabled",
+      "expect": "matched",
+      "source": "import { createHook, AsyncResource } from 'node:async_hooks'; function main(): void { try { createHook({ init: 1 } as any); } catch (error: any) { console.log(error.code, error.message); } let count = 0; const hook = createHook({ init(id: number, type: string) { if (type !== 'PROMISE') count++; } }); new AsyncResource('Before'); hook.enable(); new AsyncResource('During'); hook.disable(); new AsyncResource('After'); console.log(count, hook.enable() === hook, hook.disable() === hook); }"
+    },
+    {
+      "name": "cluster workers are real processes with an IPC channel",
+      "expect": "matched",
+      "source": "import cluster from 'node:cluster'; import process from 'node:process'; function main(): void { if (cluster.isPrimary) { const worker = cluster.fork(); const log: string[] = []; worker.on('online', () => { log.push('online'); worker.send({ hello: 1 }); }); worker.on('message', (message: any) => { log.push('message ' + JSON.stringify(message)); log.push('connected ' + worker.isConnected()); worker.kill(); }); worker.on('disconnect', () => { log.push('disconnect'); }); worker.on('exit', (code: any, signal: any) => { log.push('exit ' + signal + ' dead ' + worker.isDead() + ' after ' + worker.exitedAfterDisconnect); console.log(log.join('|')); }); } else { process.on('message', (message: any) => { process.send!({ echo: message, worker: cluster.worker!.id }); }); } }"
+    },
+    {
+      "name": "vm timeout while a tls handshake is pending",
+      "expect": "matched",
+      "source": "import net from 'node:net'; import tls from 'node:tls'; import { runInNewContext } from 'node:vm'; function main(): void { const server = net.createServer((_socket: any) => {}); server.listen(0, '127.0.0.1', () => { const port = (server.address() as any).port; const client = tls.connect({ host: '127.0.0.1', port, rejectUnauthorized: false }); client.on('error', () => {}); let ticks = 0; const timer = setInterval(() => { ticks++; }, 5); try { runInNewContext('while (true) {}', {}, { timeout: 30 }); } catch (error: any) { console.log(error.code); } setTimeout(() => { console.log('timer ran during pending handshake', ticks > 0); console.log('handshake still pending', client.authorized === false); clearInterval(timer); client.destroy(); server.close(); }, 60); }); }"
+    },
+    {
+      "name": "zlib completes off the loop while a net connect and writes are pending",
+      "expect": "matched",
+      "source": "import net from 'node:net'; import zlib from 'node:zlib';\nfunction main(): void {\n  const server = net.createServer((_socket: any) => {});\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const client = net.connect({ host: '127.0.0.1', port });\n    client.on('error', () => {});\n    let ticks = 0;\n    const timer = setInterval(() => { ticks++; }, 2);\n    const input = Buffer.alloc(4 * 1024 * 1024); input.fill(97);\n    zlib.gzip(input, (e: any, packed: Buffer) => {\n      const gzipOk = e === null;\n      zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n        const gunzipOk = e2 === null;\n        client.write('x', () => {\n          console.log('zlib', gzipOk, gunzipOk, plain.length === input.length);\n          console.log('timer ran during zlib', ticks > 0);\n          console.log('connected', client.remotePort === port);\n          clearInterval(timer); client.destroy(); server.close();\n        });\n      });\n    });\n  });\n}"
+    },
+    {
+      "name": "buffer alloc fills with a repeated pattern",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = Buffer.alloc(5, 'ab');\n  const b = Buffer.alloc(4, 7);\n  const c = Buffer.alloc(6, Buffer.from('xyz'));\n  const d = Buffer.alloc(4, 'aGk=', 'base64');\n  const e = Buffer.alloc(3, 'ff', 'hex');\n  const f = Buffer.alloc(3);\n  console.log(a.toString(), b.join(','), c.toString(), d.toString('hex'), e.toString('hex'), f.join(','));\n}\n"
+    },
+    {
+      "name": "captured any compares equal to null inside nested closures",
+      "expect": "matched",
+      "source": "import zlib from 'node:zlib';\nfunction main(): void {\n  const input = Buffer.from('hello world hello world');\n  zlib.gzip(input, (e: any, packed: Buffer) => {\n    zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n      setTimeout(() => {\n        console.log('deep', e === null, e2 === null, plain.length === input.length);\n      }, 1);\n    });\n    const direct = e === null;\n    setTimeout(() => { console.log('mid', e === null, direct); }, 1);\n  });\n}\n"
+    },
+    {
+      "name": "connection handler can call methods on its any socket",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    socket.on('data', (d: any) => { console.log('data', String(d)); socket.end('bye'); });\n    socket.on('error', (e: any) => console.log('err', e && e.code));\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => c.write('hello'));\n    c.on('data', (d: any) => { console.log('client got', String(d)); });\n    c.on('close', () => { console.log('closed'); server.close(); });\n  });\n}\n"
+    },
+    {
+      "name": "parentPort unref lets the worker exit",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.on('message', () => {}); parentPort.unref(); parentPort.postMessage('ready');`, { eval: true });\n  const log: string[] = [];\n  worker.on('message', (v: any) => { log.push('message ' + v); });\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  log.push('exit ' + code);\n  console.log(log.join('|'));\n}"
+    },
+    {
+      "name": "worker inherits environment data",
+      "expect": "matched",
+      "source": "import { Worker, setEnvironmentData } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  setEnvironmentData('w2.key', { a: 1 });\n  const worker = new Worker(`const { parentPort, getEnvironmentData } = require('node:worker_threads'); parentPort.postMessage(JSON.stringify(getEnvironmentData('w2.key')) + ' ' + typeof getEnvironmentData('missing'));`, { eval: true });\n  const text: string = await new Promise<string>((resolve) => { worker.once('message', (v: any) => { resolve(String(v)); }); });\n  console.log(text);\n  await worker.terminate();\n}"
+    },
+    {
+      "name": "worker stdin end lets the worker exit",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => { text += c; }); process.stdin.on('end', () => { parentPort.postMessage('got ' + text); });`, { eval: true, stdin: true });\n  const log: string[] = [];\n  worker.on('message', (v: any) => { log.push(String(v)); });\n  worker.stdin!.write('abc');\n  worker.stdin!.end('def');\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  log.push('exit ' + code);\n  console.log(log.join('|'));\n}"
+    },
+    {
+      "name": "worker natural exit keeps process.exitCode",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`process.exitCode = 3;`, { eval: true });\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  console.log('exit ' + code);\n}"
+    },
+    {
+      "name": "receiveMessageOnPort reads parentPort",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort, receiveMessageOnPort } = require('node:worker_threads'); parentPort.postMessage('ready'); const wait = () => { const r = receiveMessageOnPort(parentPort); if (r) { parentPort.postMessage(JSON.stringify(r.message)); parentPort.close(); } else setTimeout(wait, 5); }; wait();`, { eval: true });\n  worker.on('message', (v: any) => { if (v === 'ready') worker.postMessage({ n: 7 }); else { console.log(v); } });\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+    },
+    {
+      "name": "parentPort close keeps pending work alive",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.on('message', () => {}); parentPort.close(); setTimeout(() => { console.log('timer ran'); }, 30);`, { eval: true, stdout: false });\n  const log: string[] = [];\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  console.log('exit ' + code);\n}"
+    },
+    {
+      "name": "parentPort onmessage handler runs",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.onmessage = (event) => { parentPort.postMessage('got ' + JSON.stringify(event.data)); parentPort.close(); };`, { eval: true });\n  worker.on('message', (v: any) => { console.log(v); });\n  worker.postMessage({ k: 1 });\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+    },
+    {
+      "name": "worker stdin pause holds back data",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); const log = []; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => { log.push('data ' + c); if (c === 'a') { process.stdin.pause(); setTimeout(() => { log.push('resume'); process.stdin.resume(); }, 40); } }); process.stdin.on('end', () => { parentPort.postMessage(log.join(',')); });`, { eval: true, stdin: true });\n  worker.on('message', (v: any) => { console.log(v); });\n  worker.stdin!.write('a');\n  setTimeout(() => { worker.stdin!.write('b'); worker.stdin!.end(); }, 10);\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+    },
+    {
+      "name": "terminate interrupts a busy worker",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`while (true) {}`, { eval: true });\n  await new Promise<void>((resolve) => { setTimeout(() => { resolve(); }, 100); });\n  const code: number = await worker.terminate();\n  console.log('terminated ' + code);\n}"
+    },
+    {
+      "name": "resourceLimits stop a runaway allocation",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n  const result: string = await new Promise<string>((resolve) => { worker.on('error', (e: any) => { resolve('error ' + e.code); }); worker.on('exit', () => { resolve('exit'); }); });\n  console.log(result);\n}"
+    },
+    {
+      "name": "worker data shares a SharedArrayBuffer",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const shared = new SharedArrayBuffer(8);\n  const view = new Int32Array(shared);\n  const worker = new Worker(`const { parentPort, workerData } = require('node:worker_threads'); const view = new Int32Array(workerData); Atomics.store(view, 0, 42); parentPort.postMessage(workerData instanceof SharedArrayBuffer);`, { eval: true, workerData: shared });\n  const kind: boolean = await new Promise<boolean>((resolve) => { worker.once('message', (value: boolean) => { resolve(value); }); });\n  await worker.terminate();\n  console.log(kind, view[0]);\n}"
+    },
+    {
+      "name": "handler can close the server constant it is initializing",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    console.log('direct'); server.close();\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); });\n  });\n}\n"
+    },
+    {
+      "name": "handler reads the server constant it is initializing after main returned",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => { console.log('cb2', typeof server); });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); setTimeout(() => server.close(), 30); });\n  });\n}\n"
+    },
+    {
+      "name": "variable assigned a call whose callback captures the variable",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  let server: any;\n  server = net.createServer((socket: any) => {\n    console.log('t', typeof server);\n    server.close();\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); });\n  });\n}\n"
+    },
+    {
+      "name": "for await over a Node Readable",
+      "expect": "matched",
+      "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = Readable.from(['a', 'b', 'c']);\n  for await (const chunk of r) { console.log('chunk', chunk); }\n  console.log('done');\n}\n"
+    },
+    {
+      "name": "for await over readline lines",
+      "expect": "matched",
+      "source": "import readline from 'node:readline';\nimport { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const rl = readline.createInterface({ input: Readable.from(['x\\ny\\n']) });\n  for await (const line of rl) { console.log('line', line); }\n  console.log('done');\n}\n"
+    },
+    {
+      "name": "for await over dynamic async and sync iterables",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const src: any = new Function('return [Promise.resolve(1), 2, Promise.resolve(3)]')();\n  for await (const v of src) { console.log('v', v); }\n  const gen: any = new Function('return (async function* () { yield 10; yield 20; })()')();\n  for await (const g of gen) { console.log('g', g); }\n  const plain: any = [7, 8];\n  for await (const p of plain) { console.log('p', p); }\n}\n"
+    },
+    {
+      "name": "for await closes the iterator on break and propagates errors",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const gen: any = new Function('return (async function* () { try { yield 1; yield 2; yield 3; } finally { console.log(\"cleanup\"); } })()')();\n  for await (const x of gen) { console.log('x', x); if (x === 2) break; }\n  console.log('after break');\n  const bad: any = new Function('return { [Symbol.asyncIterator]() { return { next() { return Promise.reject(new Error(\"boom\")); } }; } }')();\n  try { for await (const q of bad) { console.log('q'); } } catch (e: any) { console.log('caught', e.message); }\n  const notIt: any = 5;\n  try { for await (const z of notIt) { console.log('z'); } } catch (e: any) { console.log('caught2', e instanceof TypeError); }\n}\n"
+    },
+    {
+      "name": "Promise.allSettled entries have the per-status shape with the real reason",
+      "expect": "matched",
+      "source": "async function f(n: number): Promise<string> { await Promise.resolve(); if (n % 2 === 0) { throw new TypeError('even ' + n); } return 'odd ' + n; }\nasync function main(): Promise<void> {\n  const rs = await Promise.allSettled([f(1), f(2), f(3), f(4)]);\n  console.log(rs.length, rs.filter((x: any) => x.status === 'fulfilled').length);\n  for (const x of rs) {\n    if (x.status === 'rejected') { console.log('rejected', String(x.reason.message)); } else { console.log('fulfilled', x.value); }\n  }\n  console.log(Object.keys(rs[0]).join(','), Object.keys(rs[1]).join(','));\n}"
+    },
+    {
+      "name": "Promise.any rejection exposes the errors of every input",
+      "expect": "matched",
+      "source": "async function f(n: number): Promise<number> { await Promise.resolve(); throw new Error('f' + n); }\nasync function main(): Promise<void> {\n  try {\n    await Promise.any([f(1), Promise.reject('b'), Promise.reject(7), Promise.reject(null)]);\n  } catch (e: any) {\n    console.log(e.name, e.message, e instanceof AggregateError);\n    console.log(e.errors.length, e.errors[0].message, e.errors[1], e.errors[2], e.errors[3]);\n  }\n  const v = await Promise.any([Promise.reject(new Error('z')), Promise.resolve(5)]);\n  console.log(v);\n  try { await Promise.any([]); } catch (e: any) { console.log(e.name, e.errors.length); }\n}"
+    },
+    {
+      "name": "early return from loops of async functions without suspension points",
+      "expect": "matched",
+      "source": "async function f(n: number): Promise<number> {\n  for (let i = 0; i < n; i++) {\n    if (i === 2) return i * 10;\n  }\n  return -1;\n}\nasync function w(n: number): Promise<number> {\n  let i = 0;\n  while (i < n) {\n    i++;\n    if (i === 3) return i;\n    await Promise.resolve();\n  }\n  return -1;\n}\nasync function d(n: number): Promise<string> {\n  let i = 0;\n  do {\n    i++;\n    if (i > 1) return 'do' + i;\n  } while (i < n);\n  return 'none';\n}\nasync function main(): Promise<void> {\n  console.log(await f(5), await f(1));\n  console.log(await w(5), await w(2));\n  console.log(await d(5), await d(1));\n}\n"
+    },
+    {
+      "name": "early return from loops of async functions after awaits",
+      "expect": "matched",
+      "source": "function tick(): Promise<void> { return Promise.resolve(); }\nasync function whileAwaitBefore(n: number): Promise<number> {\n  let i = 0;\n  while (i < n) { await tick(); i++; if (i === 2) return i * 100; }\n  return -1;\n}\nasync function whileAwaitAfter(n: number): Promise<number> {\n  let i = 0;\n  while (i < n) { i++; if (i === 2) return i * 100; await tick(); }\n  return -1;\n}\nasync function doWhile(n: number): Promise<string> {\n  let i = 0;\n  do { i++; await tick(); if (i === 3) return 'd' + i; } while (i < n);\n  return 'end';\n}\nasync function forAwaitTick(n: number): Promise<number> {\n  for (let i = 0; i < n; i++) { await tick(); if (i === 1) return i + 0.5; }\n  return -1;\n}\nasync function forOfAwait(xs: string[]): Promise<string> {\n  for (const x of xs) { await tick(); if (x === 'b') return x + '!'; }\n  return 'nope';\n}\nasync function nested(): Promise<number> {\n  for (let i = 0; i < 3; i++) {\n    for (let j = 0; j < 3; j++) {\n      await tick();\n      if (i === 1 && j === 2) return i * 10 + j;\n    }\n  }\n  return -1;\n}\nasync function labelled(): Promise<number> {\n  outer: for (let i = 0; i < 3; i++) {\n    for (let j = 0; j < 3; j++) {\n      if (j === 1) continue outer;\n      if (i === 2) return i + j;\n      await tick();\n    }\n  }\n  return -1;\n}\nasync function viaBreak(): Promise<string> {\n  let r = 'x';\n  while (true) { await tick(); r = 'y'; break; }\n  return r;\n}\nasync function main(): Promise<void> {\n  console.log(await whileAwaitBefore(5), await whileAwaitBefore(1));\n  console.log(await whileAwaitAfter(5), await whileAwaitAfter(1));\n  console.log(await doWhile(9), await doWhile(2));\n  console.log(await forAwaitTick(5), await forAwaitTick(1));\n  console.log(await forOfAwait(['a', 'b']), await forOfAwait(['c']));\n  console.log(await nested());\n  console.log(await labelled());\n  console.log(await viaBreak());\n}\n"
+    },
+    {
+      "name": "early return through try finally catch and typed async results",
+      "expect": "matched",
+      "source": "function tick(): Promise<void> { return Promise.resolve(); }\nasync function tryRet(n: number): Promise<number> {\n  for (let i = 0; i < n; i++) {\n    try {\n      await tick();\n      if (i === 1) return i;\n    } finally {\n      console.log('fin', i);\n    }\n  }\n  return -1;\n}\nasync function catchRet(): Promise<string> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      await tick();\n      if (i === 1) throw new Error('boom');\n    } catch (e: any) {\n      return 'caught ' + e.message;\n    }\n  }\n  return 'none';\n}\nasync function voidRet(n: number): Promise<void> {\n  for (let i = 0; i < n; i++) {\n    await tick();\n    if (i === 1) { console.log('early'); return; }\n  }\n  console.log('late');\n}\nasync function objRet(n: number): Promise<{ a: number; b: string }> {\n  for (let i = 0; i < n; i++) {\n    await tick();\n    if (i === 1) return { a: i, b: 'o' };\n  }\n  return { a: -1, b: 'none' };\n}\nasync function anyRet(n: number): Promise<any> {\n  for (let i = 0; i < n; i++) {\n    if (i === 1) return { k: i };\n  }\n  return null;\n}\nasync function main(): Promise<void> {\n  console.log(await tryRet(4), await tryRet(1));\n  console.log(await catchRet());\n  await voidRet(5); await voidRet(1);\n  const o = await objRet(3); console.log(o.a, o.b);\n  const q = await objRet(1); console.log(q.a, q.b);\n  console.log(JSON.stringify(await anyRet(3)), JSON.stringify(await anyRet(1)));\n}\n"
+    },
+    {
+      "name": "early return from for-of elements and class and arrow async methods",
+      "expect": "matched",
+      "source": "function tick(): Promise<void> { return Promise.resolve(); }\nclass K {\n  base: number = 10;\n  async find(xs: number[]): Promise<number> {\n    for (const x of xs) { if (x > this.base) return x; }\n    return -1;\n  }\n  async findAwait(xs: number[]): Promise<number> {\n    for (const x of xs) { await tick(); if (x > this.base) return x; }\n    return -1;\n  }\n}\nconst arrow = async (xs: number[]): Promise<string> => {\n  for (const x of xs) { if (x > 2) return 'arrow' + x; }\n  return 'none';\n};\nasync function innerLambda(xs: number[]): Promise<number> {\n  let total = 0;\n  for (const x of xs) {\n    const f = (v: number): number => { if (v > 1) return v * 2; return 0; };\n    total += f(x);\n    await tick();\n  }\n  return total;\n}\nasync function forIn(): Promise<string> {\n  const o = { a: 1, b: 2, c: 3 };\n  for (const k in o) { await tick(); if (k === 'b') return 'key ' + k; }\n  return 'none';\n}\nasync function* gen(): AsyncGenerator<number> { yield 1; yield 2; yield 3; }\nasync function consume(): Promise<number> {\n  for await (const v of gen()) { if (v === 2) return v * 7; }\n  return -1;\n}\nasync function main(): Promise<void> {\n  const k = new K();\n  console.log(await k.find([1, 11]), await k.find([1]), await k.findAwait([1, 12]), await k.findAwait([2]));\n  console.log(await arrow([1, 2, 3]), await arrow([1]));\n  console.log(await innerLambda([1, 2, 3]));\n  console.log(await forIn());\n  console.log(await consume());\n}\n"
+    },
+    {
+      "name": "async function returning a promise settles with its value",
+      "expect": "matched",
+      "source": "async function f(n: number): Promise<number> { return Promise.resolve(n + 1); }\nasync function g(n: number): Promise<number> { const p = Promise.resolve(n * 2); return p; }\nasync function h(n: number): Promise<number> { await Promise.resolve(0); return Promise.resolve(n + 3); }\nasync function main(): Promise<void> {\n  console.log(await f(1), await g(2), await h(3));\n}"
+    },
+    {
+      "name": "async return of a promise of a loop element",
+      "expect": "matched",
+      "source": "async function l(xs: number[]): Promise<number> { for (const x of xs) { if (x > 1) return Promise.resolve(x); } return -1; }\nasync function s(xs: string[]): Promise<string> { for (const x of xs) { return Promise.resolve(x); } return 'none'; }\nasync function main(): Promise<void> { console.log(await l([1, 2, 3])); console.log(await l([0, 1])); console.log(await s(['a', 'b'])); console.log(await s([])); }"
+    },
+    {
+      "name": "a chain of method calls that returns its own receiver stays a live object",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const k: any = e.on('b', f).on('c', f);\n  console.log(typeof k, k === e, k.listenerCount('c'));\n  const j: any = e.on('b', f).on('c', f).on('d', f);\n  console.log(j === e, j.listenerCount('d'));\n  k.marker = 5;\n  console.log(e.marker);\n}\n"
+    },
+    {
+      "name": "method chains on an any parameter and a returned chain are dynamic",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction setup(app: any): void { const f = () => {}; app.on('b', f).on('c', f); }\nfunction chained(app: any): number { const f = () => {}; const k = app.on('x', f).on('y', f); return k.listenerCount('y'); }\nfunction make(e: any): any { const f = () => {}; return e.on('p', f).on('q', f); }\nfunction use(x: any): number { return x.listenerCount('q'); }\nfunction main(): void {\n  const e: any = new EventEmitter();\n  setup(e);\n  console.log(e.listenerCount('c'), chained(e), use(make(e)), make(e) === e);\n}\n"
+    },
+    {
+      "name": "chained receivers keep identity in closures and containers",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nimport { Readable, PassThrough } from 'node:stream';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const g = () => { const k: any = e.on('x', f).on('y', f); return k.listenerCount('x'); };\n  console.log(g());\n  const r: any = new Readable({ read() {} });\n  const r2: any = r.setEncoding('utf8').pause().resume();\n  console.log(r2 === r, r2.readableFlowing);\n  const p: any = new PassThrough();\n  const p2: any = p.setEncoding('utf8').setMaxListeners(20);\n  console.log(p2 === p, p2.getMaxListeners());\n  const arr: any[] = [e.on('p', f).on('q', f)];\n  const o: any = { held: e.on('m', f).on('n', f) };\n  console.log(arr[0] === e, arr[0].listenerCount('q'), o.held === e, o.held.listenerCount('n'));\n}\n"
+    },
+    {
+      "name": "default-parameter closures see the callee's parameter cell",
+      "expect": "matched",
+      "source": "function f(a: number = 1, g: () => number = () => a): number { a = 2; return g(); }\nfunction mk(x: number = 0, inc: () => number = () => ++x): () => number { return inc; }\nasync function main(): Promise<void> {\n  console.log(f());\n  console.log(f(5));\n  const i1 = mk();\n  const i2 = mk();\n  console.log(i1(), i1(), i2());\n  console.log(mk(10)());\n}\n"
+    },
+    {
+      "name": "a static written through a subclass shadows the base",
+      "expect": "matched",
+      "source": "class A { static s: number = 1; static t: string = 'a'; }\nclass B extends A {}\nclass C extends B {}\nasync function main(): Promise<void> {\n  B.s = 10;\n  console.log(A.s, B.s, C.s);\n  C.s = 20;\n  console.log(A.s, B.s, C.s);\n  A.s = 5;\n  console.log(A.s, B.s, C.s);\n  B.t += 'x';\n  console.log(A.t, B.t, C.t);\n}\n"
+    },
+    {
+      "name": "tagged template objects are per-site, frozen and carry raw",
+      "expect": "matched",
+      "source": "function tag(s: TemplateStringsArray, ...v: number[]): TemplateStringsArray { return s; }\nconst f = (): TemplateStringsArray => tag`a${1}b\\n`;\nasync function main(): Promise<void> {\n  console.log(f() === f(), tag`a${1}b` === tag`a${1}b`);\n  console.log(Object.isFrozen(f()), f().raw[1], f()[1].length, f().raw[1].length, f().length);\n  console.log(Array.isArray(f().raw), Object.isFrozen(f().raw));\n}\n"
+    },
+    {
+      "name": "frozen and sealed arrays reject mutation",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const a: number[] = Object.freeze([1, 2]) as number[];\n  try { a[0] = 9; } catch (e) { console.log('write throws'); }\n  console.log(a[0], a.length);\n  for (const op of ['push', 'pop', 'shift', 'unshift', 'reverse', 'sort', 'fill', 'splice']) {\n    try {\n      if (op === 'push') a.push(3);\n      else if (op === 'pop') a.pop();\n      else if (op === 'shift') a.shift();\n      else if (op === 'unshift') a.unshift(0);\n      else if (op === 'reverse') a.reverse();\n      else if (op === 'sort') a.sort();\n      else if (op === 'fill') a.fill(0);\n      else a.splice(0, 1);\n      console.log(op, 'ok');\n    } catch (e) {\n      console.log(op, 'throws', e instanceof TypeError);\n    }\n  }\n  console.log(a.join(), Object.isFrozen(a));\n  const s: number[] = Object.seal([1, 2]) as number[];\n  s[0] = 7;\n  try { s.push(3); } catch (e) { console.log('sealed push throws'); }\n  console.log(s.join());\n  const live: number[] = [1, 2];\n  live[0] = 9;\n  live.push(3);\n  console.log(live.join());\n}\n"
+    },
+    {
+      "name": "plain object methods returning this keep identity and mutations",
+      "expect": "matched",
+      "source": "const o = {\n  n: 0,\n  inc() { this.n++; return this; },\n  dec() { this.n--; },\n  show() { return this.n; },\n};\nfunction main(): void {\n  console.log(o.inc() === o, o.n);\n  const r = o.inc();\n  r.inc();\n  console.log(o.n, r.n, o.inc().inc().n, o.n);\n  o.dec(); o.dec();\n  console.log(o.n, o.show());\n}\n"
+    },
+    {
+      "name": "awaiting a user thenable held in any",
+      "expect": "matched",
+      "source": "const thenable: any = { then(res: (v: number) => void) { res(42); } };\nconst failing: any = { then(res: any, rej: any) { rej(new Error('boom')); } };\nasync function viaAsync(): Promise<any> { return thenable; }\nasync function main(): Promise<void> {\n  console.log(await thenable);\n  console.log(await viaAsync());\n  console.log(await Promise.resolve(thenable));\n  try { await failing; } catch (e: any) { console.log('caught', e.message); }\n  const plain: any = { a: 1 };\n  const same = await plain;\n  same.a = 2;\n  console.log(plain.a);\n}\n"
+    },
+    {
+      "name": "client sockets honour allowHalfOpen and resetAndDestroy",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((s: any) => { s.on('error', () => {}); s.end('hi'); });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c: any = net.connect({ port: port, host: '127.0.0.1', allowHalfOpen: true });\n    let got = '';\n    c.on('data', (d: any) => { got += d; });\n    c.on('end', () => { console.log('end', c.writable, got); c.end(); });\n    c.on('close', () => {\n      console.log('client closed');\n      const c2: any = net.connect(port, '127.0.0.1');\n      c2.on('error', () => {});\n      c2.on('connect', () => { console.log(c2.resetAndDestroy() === c2); });\n      c2.on('close', () => { console.log('c2 closed'); server.close(); });\n    });\n  });\n}\n"
+    },
+    {
+      "name": "extracted object method is callable as a value",
+      "expect": "matched",
+      "source": "const o = { k: 7, double(x: number): number { return x * 2; } };\nfunction main(): void {\n  const f = o.double;\n  console.log(f(4), typeof f, o.double(6));\n}\n"
+    },
+    {
+      "name": "array methods and write-back on an any array",
+      "expect": "matched",
+      "source": "function main(): void {\n  const j: any = JSON.parse('[3,1,2]');\n  const alias = j;\n  console.log(j.push(9), alias.length, alias[3]);\n  console.log(j.pop(), j.shift(), j.unshift(0), alias.join(','));\n  j.sort();\n  console.log(alias.join(','), j.map((x: number) => x * 2).join(','), j.filter((x: number) => x > 1).length);\n  console.log(j.reduce((s: number, x: number) => s + x, 0), j.some((x: number) => x > 2), j.slice(1).join(','));\n  const k: any = JSON.parse('{\"list\":[1,2]}');\n  k.list.push(3);\n  console.log(k.list.length, JSON.stringify(k));\n}\n"
+    },
+    {
+      "name": "class instance in any keeps methods and identity",
+      "expect": "matched",
+      "source": "class C {\n  n = 1;\n  tag = \"x\";\n  bump(): number { this.n += 1; return this.n; }\n  plus(a: number, b: number): number { return a + b + this.n; }\n}\nasync function main(): Promise<void> {\n  const c = new C();\n  const a: any = c;\n  console.log(a.n);\n  console.log(a.bump(), a.bump());\n  console.log(c.n, a.n, a.plus(1, 2));\n  a.n = 10;\n  console.log(c.n, c.bump());\n  console.log(JSON.stringify(a));\n  console.log(a);\n  console.log(Object.keys(a));\n  console.log(a instanceof C, a === a);\n}\n"
+    },
+    {
+      "name": "inherited async rest and thenable methods through any",
+      "expect": "matched",
+      "source": "class Base { id = 7; who(): string { return \"base\" + this.id; } }\nclass D extends Base {\n  n = 1;\n  then(res: (v: number) => void): void { res(this.n * 10); }\n  async later(x: number): Promise<number> { return x + this.n; }\n  greet(name: string, ...rest: number[]): string { return name + this.n + rest.length; }\n}\nfunction viaParam(x: any): string { return x.greet(\"p\"); }\nasync function main(): Promise<void> {\n  const d = new D();\n  const a: any = d;\n  console.log(a.who(), a.greet(\"x\", 1, 2));\n  console.log(await a.later(5));\n  console.log(await a);\n  console.log(a.constructor.name, a instanceof Base);\n  const b: any = d;\n  console.log(a === b);\n  console.log(viaParam(d));\n  const list: any[] = [d, new D()];\n  console.log(list.map((e: any) => e.greet(\"m\")).join(\",\"));\n}\n"
+    },
+    {
+      "name": "tagged template invalid escapes cook to undefined",
+      "expect": "matched",
+      "source": "function tag(s: TemplateStringsArray, ...v: number[]): string {\n  const parts: string[] = [];\n  for (let i = 0; i < s.length; i++) parts.push(s[i] === undefined ? 'U' : s[i]);\n  return parts.join('|') + '#' + s.raw.join('|') + '#' + (s[1] ?? 'dflt');\n}\nasync function main(): Promise<void> {\n  console.log(tag`a\\unicode${1}b`);\n  console.log(tag`ok${2}\\xz`);\n}\n"
+    },
+    {
+      "name": "native array aliases both ways through any",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const arr: number[] = [1, 2];\n  const a: any = arr;\n  a.push(3);\n  console.log(arr.length, arr.join(\",\"));\n  arr.push(4);\n  console.log(a.length, a[3]);\n  a[0] = 9;\n  console.log(arr[0]);\n  console.log(a.map((x: number) => x * 2).join(\",\"));\n  console.log(Array.isArray(a), JSON.stringify(a));\n}\n"
+    },
+    {
+      "name": "array methods and holes through an any view",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const arr: number[] = [3, 1, 2];\n  const a: any = arr;\n  console.log(a);\n  console.log(a.length, a[1], a[5]);\n  a.sort();\n  console.log(arr.join(\",\"));\n  console.log(a.pop(), arr.length);\n  console.log(a.shift(), arr.join(\",\"));\n  a.unshift(7, 8);\n  console.log(arr.join(\",\"));\n  a.splice(1, 1, 5, 6);\n  console.log(arr.join(\",\"));\n  a.length = 2;\n  console.log(arr.join(\",\"), arr.length);\n  a[4] = 9;\n  console.log(arr.length);\n  for (const x of a) console.log(x);\n  console.log(Object.keys(a).join(\",\"));\n  console.log(a.indexOf(9), a.includes(7), a.reverse().join(\",\"));\n  console.log(JSON.stringify(a), String(a));\n  const names: string[] = [\"x\", \"y\"];\n  const n: any = names;\n  n.push(\"z\");\n  console.log(names.join(\"\"), n.join(\"-\"), n.map((s: string) => s + \"!\").join(\"\"));\n  const same: any = arr;\n  console.log(a === same);\n  const cs: C[] = [new C(), new C()];\n  const l: any = cs;\n  const e0 = l[0]; console.log(e0.bump(), cs[0].n, l.length);\n  const grid: number[][] = [[1], [2]];\n  const g: any = grid;\n  const g0 = g[0]; g0.push(5);\n  console.log(grid[0].length, JSON.stringify(g));\n  let t: any = 0;\n  t = arr;\n  t.push(100);\n  console.log(arr[arr.length - 1]);\n}\n"
+    },
+    {
+      "name": "array view survives indirection through params returns fields and literals",
+      "expect": "matched",
+      "source": "class Box { items: any = null; }\nfunction addOne(x: any): void { x.push(1); }\nfunction lenOf(x: any): number { return x.length; }\nfunction make(a: number[]): any { return a; }\nasync function main(): Promise<void> {\n  const arr: number[] = [5];\n  addOne(arr);\n  console.log(arr.length, lenOf(arr));\n  const m = make(arr);\n  m.push(2);\n  console.log(arr.length);\n  const b = new Box();\n  b.items = arr;\n  b.items.push(3);\n  console.log(arr.length);\n  const o: any = { list: arr };\n  o.list.push(4);\n  console.log(arr.length);\n  const holder: any[] = [arr];\n  holder[0].push(5);\n  console.log(arr.length);\n}\n"
+    },
+    {
+      "name": "class instances nested in literals and arrays stay live",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const c = new C();\n  const o: any = { inner: c };\n  console.log(typeof o.inner.bump);\n  console.log(o.inner.n);\n  c.n = 5;\n  console.log(o.inner.n);\n  console.log(o.inner.bump(), c.n);\n  const l: any = [c];\n  console.log(l[0].n, typeof l[0].bump);\n}\n"
+    },
+    {
+      "name": "class field holding a class instance stays live through any",
+      "expect": "matched",
+      "source": "class Inner { v = 1; inc(): number { this.v++; return this.v; } }\nclass Outer { inner: Inner = new Inner(); name = \"o\"; }\nasync function main(): Promise<void> {\n  const o = new Outer();\n  const a: any = o;\n  console.log(a.inner.v, typeof a.inner.inc);\n  console.log(a.inner.inc(), o.inner.v);\n}\n"
+    },
+    {
+      "name": "method call on an indexed any element",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } m() { return 1; } }\nasync function main(): Promise<void> {\n  const arr: number[][] = [[1], [2]];\n  const l: any = arr;\n  l[0].push(5);\n  console.log(JSON.stringify(arr));\n  const cs: C[] = [new C()];\n  const lc: any = cs;\n  console.log(lc[0].bump(), cs[0].n, lc[0].m());\n  const o: any = { list: [1, 2] };\n  o.list.push(3);\n  console.log(o.list.length, JSON.stringify(o));\n}\n"
+    },
+    {
+      "name": "spread of an any array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const a: any = [1, 2, 3];\n  const sp = [...a];\n  console.log(sp.length, sp[2]);\n  const nums: number[] = [4, 5];\n  const an: any = nums;\n  const sp2 = [0, ...an];\n  console.log(sp2.length, sp2.join(\",\"));\n}\n"
+    },
+    {
+      "name": "async class assigned to a Promise-returning interface",
+      "expect": "matched",
+      "source": "class R { async run(): Promise<number> { return 7; } async x(a: number): Promise<string> { return \"x\" + a; } }\ninterface Runner { run(): Promise<number>; x(a: number): Promise<string>; }\nasync function main(): Promise<void> {\n  const r: Runner = new R();\n  console.log(await r.run(), await r.x(2));\n}\n"
+    },
+    {
+      "name": "hasOwnProperty of a class method through any is false",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } m() { return 1; } }\nasync function main(): Promise<void> {\n  const c: any = new C();\n  console.log(c.hasOwnProperty(\"n\"), c.hasOwnProperty(\"bump\"), c.hasOwnProperty(\"m\"));\n}\n"
+    },
+    {
+      "name": "non-primitive element writes through an any array view",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const grid: number[][] = [[1], [2]];\n  const g: any = grid;\n  g[0] = [9, 9];\n  g.push([3]);\n  console.log(JSON.stringify(grid), grid.length);\n  const objs: { a: number }[] = [{ a: 1 }];\n  const go: any = objs;\n  go[0] = { a: 5 };\n  go[1] = { a: 6 };\n  console.log(objs[0].a, objs[1].a, objs.length);\n  const pairs: [string, number][] = [[\"x\", 1]];\n  const gp: any = pairs;\n  gp[0] = [\"y\", 2];\n  console.log(pairs[0][0], pairs[0][1]);\n}\n"
+    },
+    {
+      "name": "cooked undefined through an any tag parameter",
+      "expect": "matched",
+      "source": "function tag(s: any, ...v: any[]): string {\n  return typeof s[0] + \"|\" + String(s[0] === undefined) + \"|\" + String(s[1]) + \"|\" + s.length + \"|\" + Array.isArray(s) + \"|\" + JSON.stringify(s);\n}\nasync function main(): Promise<void> {\n  console.log(tag`\\unicode ${1} ok`);\n}\n"
+    },
+    {
+      "name": "raw through an any tag parameter",
+      "expect": "matched",
+      "source": "const seen: any[] = [];\nfunction tag(s: any, ...v: any[]): string { seen.push(s); return s.raw.length + \":\" + s.raw[1] + \":\" + s.length; }\nfunction site(): string { return tag`a${1}\\n${2}b`; }\nasync function main(): Promise<void> {\n  console.log(site());\n  console.log(site());\n  console.log(seen[0] === seen[1], seen[0].raw === seen[1].raw);\n}\n"
+    },
+    {
+      "name": "extracted object method throws TypeError when called",
+      "expect": "matched",
+      "source": "const o = { n: 1, inc() { this.n++; return this.n; }, pure() { return 7; } };\nasync function main(): Promise<void> {\n  const g = o.pure;\n  console.log(g());\n  const f = o.inc;\n  console.log(\"extracted\", typeof f);\n  try { f(); console.log(\"called\"); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(o.n, o.inc());\n}\n"
+    },
+    {
+      "name": "top-level class method values",
+      "expect": "matched",
+      "source": "class C { n = 1; bump() { this.n++; return this.n; } id() { return 5; } }\nconst c = new C();\nconst i = c.id;\nconst h = c.bump;\nasync function main(): Promise<void> {\n  console.log(i());\n  try { console.log(h()); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(c.n, c.bump());\n}\n"
+    },
+    {
+      "name": "class and array elements write through an any view to the native owner",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const nat: C[] = [new C()];\n  const v: any = nat;\n  const e = new C();\n  v[1] = e;\n  e.bump();\n  console.log(v.length, nat.length, nat[1] === e, nat[1].n, v[1] === e, v[1].n);\n  v.push(new C());\n  console.log(nat.length, nat[2].n);\n  const d = new C();\n  const x: any = d;\n  const y: any = [d];\n  console.log(x === d, d === x, y[0] === d, y[0] === x, x !== d);\n  const grid: number[][] = [[1]];\n  const gv: any = grid;\n  const inner = [5, 6];\n  gv[0] = inner;\n  inner.push(7);\n  console.log(grid[0].length, inner.length, grid[0] === inner, gv[0] === inner);\n  gv.push([9]);\n  console.log(grid.length, grid[1][0]);\n  const ref: any = nat;\n  console.log(ref === nat, nat === ref);\n}\n"
+    },
+    {
+      "name": "top-level any slots alias native arrays",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nconst nums: number[] = [1];\nconst alias: any = nums;\nnums.push(2);\nconst nat: C[] = [new C()];\nconst view: any = nat;\nview[1] = new C();\nconsole.log(alias.length, view.length, nat.length, nat[1].n);\nasync function main(): Promise<void> {}\n"
+    },
+    {
+      "name": "extracted method with call, apply and bind",
+      "expect": "matched",
+      "source": "const o = { base: 10, inc(n: number): number { return this.base + n; } };\nasync function main(): Promise<void> {\n  const f = o.inc;\n  try { f(1); console.log(\"no throw\"); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(f.call({ base: 5 }, 1));\n  console.log(f.apply({ base: 6 }, [1]));\n  const g = f.bind({ base: 7 });\n  console.log(g(1));\n  console.log(o.inc.call({ base: 100 }, 1));\n  const o2 = { base: 100, inc: o.inc };\n  console.log(o2.inc(1), o.inc(1));\n}\n"
+    },
+    {
+      "name": "object method as an array callback",
+      "expect": "matched",
+      "source": "const o = {\n  k: 3,\n  scale(n: number): number { return n * this.k; },\n  pure(n: number): number { return n + 1; },\n};\nasync function main(): Promise<void> {\n  console.log([1, 2].map(o.pure).join(\",\"));\n  try { console.log([1, 2].map(o.scale).join(\",\")); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log([1, 2].map(o.scale, { k: 4 }).join(\",\"));\n  console.log([1, 2].map(o.scale.bind(o)).join(\",\"));\n  console.log([1, 2, 3].filter(o.pure).length);\n}\n"
+    },
+    {
+      "name": "JS value adopted into a native class array through an any view",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const nat: C[] = [new C()];\n  const v: any = nat;\n  const j: any = JSON.parse('{\"n\": 41}');\n  v.push(j);\n  console.log(nat.length, nat[1].n);\n  v[0] = { n: 7 };\n  console.log(nat[0].n);\n}\n"
+    },
+    {
+      "name": "any[] view writes (index, push, unshift, splice, fill, length, nested, field) keep stored Json alive across turns",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const arr: any[] = [1, 2, 3];\n  const v: any = arr;\n  v[0] = { a: 1 };\n  v[5] = [9, 8];\n  console.log(JSON.stringify(arr), arr.length);\n  v.push({ p: 1 }, \"s\");\n  v.unshift({ u: 1 });\n  console.log(JSON.stringify(arr), arr.length);\n  v.splice(1, 2, { s: 1 }, [3]);\n  console.log(JSON.stringify(arr), arr.length);\n  v.fill({ f: 1 }, 0, 2);\n  v.length = 3;\n  v.reverse();\n  console.log(JSON.stringify(arr), arr.length);\n  const nested: any[][] = [[1], [2]];\n  const nv: any = nested;\n  nv[0][0] = { n: 1 };\n  nv[1].push({ m: 2 });\n  console.log(JSON.stringify(nested));\n  const items: any[] = [1, 2];\n  const holder = { items };\n  const hv: any = holder;\n  hv.items[0] = { h: 1 };\n  hv.items.push({ h: 2 });\n  console.log(JSON.stringify(holder.items));\n  const late: any[] = [];\n  const lv: any = late;\n  for (let i = 0; i < 3; i++) {\n    await new Promise<void>((resolve) => setTimeout(() => resolve(), 5));\n    lv.push({ turn: i, pad: \"x\".repeat(100) });\n  }\n  console.log(JSON.stringify(late.map((e: any) => e.turn)), arr.length);\n}\n"
+    },
+    {
+      "name": "a native callback storing its Json parameter in a native array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const store: any[] = [];\n  const f = (j: any, k: any): void => { store[0] = j; store.push(k); };\n  const g: any = f;\n  g({ a: 1 }, [2]);\n  await new Promise<void>((resolve) => setTimeout(() => resolve(), 5));\n  g({ b: 3 }, { c: 4 });\n  await new Promise<void>((resolve) => setTimeout(() => resolve(), 5));\n  console.log(JSON.stringify(store), store.length);\n  const seeded: any[] = [1];\n  const h = (j: any): void => { seeded[0] = j; };\n  const hg: any = h;\n  hg({ z: 9 });\n  console.log(JSON.stringify(seeded));\n}\n"
+    },
+    {
+      "name": "a Record aliased to any stays valid and shares writes",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const d: Record<string, number> = { a: 1 };\n  const dv: any = d;\n  console.log(d.a, dv.a);\n  dv.a = 7;\n  dv.c = 5;\n  console.log(d.a, JSON.stringify(d), JSON.stringify(dv));\n  const e: Record<string, any> = { a: 1 };\n  const ev: any = e;\n  ev.a = { x: 1 };\n  ev.b = [2];\n  console.log(JSON.stringify(e), e.a === ev.a);\n}\n"
+    },
+    {
+      "name": "an any assertion on an array literal gives it dynamic elements",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const h: any = { items: [1, 2] as any[] };\n  h.items.push(\"x\");\n  h.items.push({ a: 1 });\n  h.items[0] = \"z\";\n  console.log(h.items.length, JSON.stringify(h.items));\n  const a = [1, 2] as any;\n  a.push(\"s\");\n  const b = [1, 2] as any[];\n  b.unshift(null);\n  console.log(JSON.stringify(a), JSON.stringify(b));\n  const o = { list: [1] } as any;\n  (o as any).list.push(\"w\");\n  console.log(JSON.stringify(o));\n  const m = [[1, 2], [3]] as any[];\n  m[0].push(\"q\");\n  m.push(\"w\");\n  console.log(JSON.stringify(m));\n}\n"
+    },
+    {
+      "name": "any receivers: call result, await, JSON.parse chain",
+      "expect": "matched",
+      "source": "function mk(): any { return { a: [1, 2] }; }\nasync function main(): Promise<void> {\n  const o = mk();\n  mk().a.push(3);\n  o.a.push(\"x\");\n  console.log(o.a.length, JSON.stringify(o.a));\n  const r = mk();\n  r.a.push({ k: 1 });\n  console.log(JSON.stringify(r));\n}\n"
+    },
+    {
+      "name": "any receivers: optional chain short-circuits whole chain",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { list: [1] };\n  o?.list.push(2);\n  o.list?.push(\"z\");\n  const n: any = null;\n  console.log(JSON.stringify(o.list), n?.list.push(1));\n}\n"
+    },
+    {
+      "name": "any receivers: methods and elements through call results",
+      "expect": "matched",
+      "source": "function mk(): any { return { n: 0, inc() { this.n++; return this.n; }, name: \"abc\" }; }\nasync function main(): Promise<void> {\n  console.log(mk().inc(), mk().name.toUpperCase(), mk().name.length);\n  const o = mk();\n  o.inc(); o.inc();\n  console.log(o.n, o.name.slice(1));\n}\n"
+    },
+    {
+      "name": "string methods and length on an any value",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { s: \"Ab\", n: 3.14159 };\n  console.log(o.s.toLowerCase(), o.s.toUpperCase(), o.s.length, o.s.indexOf(\"b\"), o.s.split(\"b\").length);\n  console.log(o.s.slice(1), o.s.trim(), o.s.at(0), o.n.toFixed(2), o.s.charAt(1), o.s.padStart(4, \"-\"));\n  const p: any = \"xyz\";\n  console.log(p.toUpperCase(), p.includes(\"y\"), p.replace(\"y\", \"Y\"), p.startsWith(\"x\"));\n}\n"
+    },
+    {
+      "name": "push spreads arrays; concat spreads array arguments",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const nums: number[] = [1, 2];\n  const all: number[] = [];\n  all.push(...nums);\n  const anys: any[] = [];\n  anys.push(...nums);\n  const j: any = [7, 8];\n  anys.push(...j);\n  console.log(JSON.stringify(all), JSON.stringify(anys));\n}\n"
+    },
+    {
+      "name": "global any literal arrays take any elements",
+      "expect": "matched",
+      "source": "let g: any = { a: [1] };\nconst h: any = { a: [1] };\nconst arr: any = [[1]];\nasync function main(): Promise<void> {\n  g.a.push(\"s\");\n  h.a.push(\"t\");\n  arr[0].push(\"u\");\n  console.log(JSON.stringify(g), JSON.stringify(h), JSON.stringify(arr));\n}\n"
+    },
+    {
+      "name": "callback mutating its any element parameter",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const arr: any[] = [{ n: 1 }, { n: 2 }];\n  arr.forEach((x: any) => { x.n = 5; });\n  console.log(JSON.stringify(arr));\n  arr.map((x: any) => { x.n++; return x; });\n  console.log(JSON.stringify(arr));\n  for (const x of arr) x.n = 9;\n  console.log(JSON.stringify(arr));\n}\n"
+    },
+    {
+      "name": "json arrays of primitives written through an any view stay linked both ways",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const nat: number[][] = [[1]];\n  const v: any = nat;\n  const inner: any = [5, 6];\n  v[0] = inner;\n  inner.splice(0, 1);\n  console.log(nat[0].length, nat[0][0]);\n  inner.unshift(1, 2);\n  console.log(nat[0].join(\",\"));\n  nat[0][1] = 99;\n  console.log(inner[1], inner.length);\n  nat[0].push(4);\n  console.log(inner.join(\",\"), v[0].length);\n  inner.splice(2);\n  console.log(nat[0].length);\n  inner.fill(7);\n  console.log(nat[0].join(\",\"));\n\n  const words: string[][] = [[\"a\"]];\n  const wv: any = words;\n  const w: any = [\"x\", \"y\"];\n  wv[0] = w;\n  w.push(\"z\");\n  console.log(words[0].join(\"-\"), words[0].length);\n  words[0][0] = \"q\";\n  console.log(w.join(\"-\"));\n  w[1] = \"yy\";\n  console.log(words[0][1]);\n\n  const flags: boolean[][] = [[true]];\n  const fv: any = flags;\n  const f: any = [false, true];\n  fv[0] = f;\n  f.push(false);\n  console.log(flags[0].length, flags[0][0], flags[0][2]);\n  flags[0][0] = true;\n  console.log(f[0]);\n\n  const parsed: number[][] = [];\n  const pv: any = parsed;\n  const j = JSON.parse(\"[1,2]\");\n  pv.push(j);\n  j.push(3);\n  console.log(parsed.length, parsed[0].length);\n\n  const two: number[][] = [[0], [0]];\n  const tv: any = two;\n  const shared: any = [1];\n  tv[0] = shared;\n  tv[1] = shared;\n  shared.push(2);\n  console.log(two[0].length, two[1].length);\n\n  await new Promise<void>((resolve) => setTimeout(resolve, 5));\n  inner.push(8);\n  console.log(nat[0].length, nat[0][nat[0].length - 1]);\n  console.log(v[0] === inner, v[0] === v[0]);\n}\n"
+    },
+    {
+      "name": "json object written through an any view stays shared with the typed record",
+      "expect": "matched",
+      "source": "interface P { n: number; s: string; ok: boolean }\nasync function main(): Promise<void> {\n  const objs: P[] = [{ n: 1, s: \"a\", ok: false }];\n  const v: any = objs;\n  const j: any = { n: 2, s: \"b\", ok: true };\n  v[0] = j;\n  j.n = 9;\n  j.s = \"bb\";\n  j.ok = false;\n  console.log(objs[0].n, objs[0].s, objs[0].ok);\n  objs[0].n = 10;\n  objs[0].s = \"typed\";\n  console.log(j.n, j.s, JSON.stringify(j));\n  v.push(j);\n  j.n = 11;\n  console.log(objs[1].n, objs[0].n, v[0] === j, v[1] === j);\n  const parsed = JSON.parse('{\"n\":5,\"s\":\"p\",\"ok\":true}');\n  v[0] = parsed;\n  parsed.n = 6;\n  console.log(objs[0].n);\n  await new Promise<void>((resolve) => setTimeout(resolve, 5));\n  j.n = 12;\n  console.log(objs[1].n);\n}\n"
+    },
+    {
+      "name": "linked json values survive arena resets",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const words: string[][] = [[\"a\"]];\n  const wv: any = words;\n  const w: any = [\"x\"];\n  wv[0] = w;\n  const objs: { n: number; s: string }[] = [{ n: 0, s: \"z\" }];\n  const ov: any = objs;\n  const o: any = { n: 1, s: \"q\" };\n  ov[0] = o;\n  let sum = 0;\n  for (let i = 0; i < 200; i++) {\n    w.push(\"item\" + i);\n    o.n = i;\n    o.s = \"s\" + i;\n    await new Promise<void>((resolve) => setTimeout(resolve, 0));\n    const junk: string[] = [];\n    for (let k = 0; k < 200; k++) junk.push(\"junk\" + k + i);\n    sum += junk.length + words[0].length + objs[0].n;\n    if (words[0][words[0].length - 1] !== \"item\" + i || objs[0].s !== \"s\" + i) {\n      console.log(\"MISMATCH\", i, words[0][words[0].length - 1], objs[0].s);\n      return;\n    }\n  }\n  console.log(words[0].length, objs[0].n, sum, w.length, o.s);\n}\n"
+    },
+    {
+      "name": "methods in objects inside any array literals keep their receiver",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const m: any = [{ v: 1, inc() { this.v++; return this.v; } }];\n  console.log(m[0].inc(), m[0].v);\n  const n: any = [{ k: 2, dbl: function () { this.k *= 2; return this.k; } }, { k: 3, tri() { return this.k * 3; } }];\n  console.log(n[0].dbl(), n[0].k, n[1].tri());\n  const p: any = { rows: [{ c: 0, bump() { this.c += 5; return this.c; } }] };\n  console.log(p.rows[0].bump(), p.rows[0].c);\n  const q: any = [[{ z: 1, up() { this.z++; return this.z; } }]];\n  console.log(q[0][0].up(), q[0][0].z);\n}\n"
+    },
+    {
+      "name": "named callbacks mutate any parameters",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const rows: any = [{ n: 0, list: [1] }, { n: 0, list: [2] }];\n  const f = (x: any) => { x.n = 1; };\n  rows.forEach(f);\n  const g = (x: any) => x.list.push(7);\n  rows.map(g);\n  function h(x: any) { x.n += 10; return x.n; }\n  const ns = rows.map(h);\n  const ok = rows.filter((x: any) => x.n > 5).length;\n  console.log(JSON.stringify(rows), JSON.stringify(ns), ok);\n}\n"
+    },
+    {
+      "name": "tagged template whose tag is a member of an any value",
+      "expect": "matched",
+      "source": "function tag(s: any, ...v: any[]): string { return s.raw.join(\"|\") + v.length; }\nfunction mk(): any { return { t: tag }; }\nasync function main(): Promise<void> {\n  console.log(tag`a${1}b${2}c`);\n  console.log(mk().t`x${1}y`);\n  const o: any = { t: tag, deep: { t: tag } };\n  console.log(o.t`p${1}q`, o.deep.t`r${2}s${3}t`);\n}\n"
+    },
+    {
+      "name": "callback returning its own any parameter over a JS array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const g: any = (globalThis as any);\n  g.__lit = { list: [1, 2, 3], names: [\"a\", \"b\"] };\n  const o: any = g.__lit;\n  const a = o.list.map((x: any) => x);\n  console.log(JSON.stringify(a), a.length);\n  const b = o.names.map((s: any) => s);\n  console.log(JSON.stringify(b));\n  const c = JSON.parse('{\"xs\":[4,5,6]}').xs.map((x: any) => x);\n  console.log(JSON.stringify(c));\n  const d: any = [{ xs: [1, 2] }];\n  console.log(JSON.stringify(d[0].xs.map((x: any) => x)));\n}\n"
+    },
+    {
+      "name": "Map and Set fields of an any literal keep working",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { m: new Map<string, number>(), s: new Set<string>(), n: 1 };\n  o.m.set(\"a\", 1).set(\"b\", 2);\n  console.log(o.m.size, o.m.has(\"a\"), o.m.has(\"z\"), o.m.get(\"b\"));\n  console.log(o.m.delete(\"a\"), o.m.delete(\"a\"), o.m.size);\n  o.s.add(\"x\").add(\"y\");\n  console.log(o.s.size, o.s.has(\"x\"), o.s.delete(\"x\"), o.s.has(\"x\"));\n  for (const [k, v] of o.m) console.log(k, v);\n  console.log([...o.s]);\n  console.log(o);\n  const list: any = [new Map<string, number>(), new Set<number>()];\n  list[0].set(\"k\", 5);\n  list[1].add(7);\n  console.log(list[0].get(\"k\"), list[1].has(7), list);\n  const plain: any = { get(k: string) { return \"got \" + k; }, has: (k: string) => k === \"q\" };\n  console.log(plain.get(\"z\"), plain.has(\"q\"), plain.has(\"r\"));\n}\n"
+    },
+    {
+      "name": "Map and Set in nested and array any literals",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { n: { m: new Map<string, number>() }, list: [new Set<number>()] };\n  o.n.m.set(\"a\", 1);\n  o.list[0].add(2);\n  console.log(o.n.m.get(\"a\"), o.list[0].has(2), o.list[0].size);\n  const seen: any[] = [];\n  const w: any = { m: new Map<string, number>() };\n  w.m.set(\"a\", 1); w.m.set(\"b\", 2);\n  w.m.forEach((v: any, k: any) => { seen.push(k + v); });\n  console.log(seen.join(\",\"), [...w.m].length);\n}\n"
+    },
+    {
+      "name": "nested arrays written through an any view stay linked at every level",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const nat: number[][][] = [[[1]]];\n  const v: any = nat;\n  const inner: any = [[5, 6], [7]];\n  v[0] = inner;\n  inner[0].push(8);\n  console.log(nat[0][0].length, JSON.stringify(inner));\n  nat[0][1].push(9);\n  console.log(inner[1].length, v[0][1].join(\",\"));\n  inner.push([10]);\n  console.log(nat[0].length, nat[0][2][0]);\n  nat[0][2].push(11);\n  console.log(inner[2].join(\",\"));\n  console.log(v[0] === inner, v[0][0] === inner[0]);\n  nat[0][0] = [42, 43];\n  console.log(inner[0].join(\",\"), JSON.stringify(nat));\n}\n"
+    },
+    {
+      "name": "records with array fields written through an any view stay linked",
+      "expect": "matched",
+      "source": "interface Row { n: number; tags: string[] }\nasync function main(): Promise<void> {\n  const rows: Row[] = [{ n: 1, tags: [\"a\"] }];\n  const v: any = rows;\n  const row: any = JSON.parse('{\"n\":2,\"tags\":[\"x\",\"y\"]}');\n  v[0] = row;\n  row.tags.push(\"z\");\n  console.log(rows[0].tags.join(\",\"), rows[0].n);\n  rows[0].tags.push(\"w\");\n  console.log(row.tags.join(\",\"));\n  row.n = 5;\n  console.log(rows[0].n);\n  rows[0].tags[0] = \"q\";\n  console.log(row.tags[0], v[0] === row);\n  const extra: any = JSON.parse('{\"n\":3,\"tags\":[]}');\n  v.push(extra);\n  extra.tags.push(\"t\");\n  console.log(rows.length, rows[1].tags.join(\",\"));\n  rows[1].tags.push(\"u\");\n  console.log(extra.tags.join(\",\"));\n}\n"
+    },
+    {
+      "name": "cyclic json array joins to an empty string at the cycle and can be written into a typed slot",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const j: any = JSON.parse(\"[1,2]\");\n  j.push(j);\n  console.log(String(j));\n  console.log(j.join(\"-\"));\n  console.log(Number(j), \"\" + j);\n  const nat: number[][] = [[1]];\n  const v: any = nat;\n  v[0] = j;\n  console.log(nat.length, nat[0].length, v[0] === j);\n}\n"
+    },
+    {
+      "name": "annotated forEach callbacks on an any Map, Set and array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { m: new Map<string, number>(), s: new Set<number>([5, 6]) };\n  o.m.set(\"a\", 1);\n  o.m.set(\"b\", 2);\n  o.m.forEach((v: number, k: string) => console.log(k, v));\n  o.s.forEach((v: number) => console.log(v));\n  const list: any = [3, 4];\n  list.forEach((x: number, i: number) => console.log(i, x));\n}\n"
+    },
+    {
+      "name": "method result array of an any class instance aliases its owner",
+      "expect": "matched",
+      "source": "class Inner { arr: number[] = [1, 2]; get(): number[] { return this.arr; } }\nclass Holder { inner: Inner = new Inner(); }\nasync function main(): Promise<void> {\n  const v: any = new Holder();\n  v.inner.get().push(3);\n  console.log(v.inner.arr.length, v.inner.get() === v.inner.arr);\n  const r = v.inner.get();\n  r.push(4);\n  console.log(v.inner.arr.length, r.length, v.inner.arr[3]);\n}\n"
+    },
+    {
+      "name": "method result of an any object literal aliases its owner and chains",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { arr: [1, 2], get() { return this.arr; } };\n  const r = o.get();\n  console.log(typeof r, Array.isArray(r), r.length);\n  r.push(4);\n  console.log(o.arr.length, r.length, r === o.arr);\n  const q = o.get().length;\n  console.log(q);\n  o.get().push(9);\n  console.log(o.arr.length);\n}\n"
+    },
+    {
+      "name": "bare call of a this-using function expression reports the first property read or set",
+      "expect": "matched",
+      "source": "const lam = function (this: { n: number }, k: number): number { return k + this.n; };\nconst setter = function (this: { n: number }): void { this.n = 3; };\nasync function main(): Promise<void> {\n  try { console.log(lam(1)); } catch (e: any) { console.log(\"E1 \" + e.message); }\n  try { setter(); } catch (e: any) { console.log(\"E2 \" + e.message); }\n  console.log(lam.call({ n: 5 }, 1));\n  try { console.log(lam.call(null as any, 1)); } catch (e: any) { console.log(\"E3 \" + e.message); }\n}\n"
+    },
+    {
+      "name": "function receiver error names the assignment RHS property",
+      "expect": "matched",
+      "source": "function main(): void { const assign = function(this: {a:number,b:number}):void { this.a = this.b; }; try { assign(); } catch(e:any) { console.log(e.message); } try { assign.call(null as any); } catch(e:any) { console.log(e.message); } }"
+    },
+    {
+      "name": "native Map and Set alias through an any slot",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const m = new Map<string, number>();\n  m.set(\"a\", 1);\n  const a: any = m;\n  console.log(a === m, m === a, a.size, a.get(\"a\"), a.has(\"a\"), a.has(\"z\"));\n  a.set(\"b\", 2);\n  console.log(m.size, m.get(\"b\"));\n  m.set(\"c\", 3);\n  console.log(a.size, a.get(\"c\"));\n  console.log(a.delete(\"a\"), m.has(\"a\"), a.delete(\"zz\"));\n  console.log([...a].length, [...a.keys()].join(\",\"), [...a.values()].join(\",\"));\n  const seen: string[] = [];\n  a.forEach((v: any, k: any) => { seen.push(k + \"=\" + v); });\n  console.log(seen.join(\",\"));\n  for (const e of a) { console.log(e[0], e[1]); }\n  console.log(a instanceof Map, String(a), JSON.stringify(a));\n  console.log(a);\n  a.clear();\n  console.log(m.size, a.size);\n  const s = new Set<number>();\n  s.add(1);\n  const b: any = s;\n  b.add(2);\n  s.add(3);\n  console.log(b === s, b.size, s.size, b.has(3), s.has(2), [...b].join(\",\"));\n  console.log(b.delete(1), s.has(1));\n  console.log(b);\n}\n"
+    },
+    {
+      "name": "native Map and Set views cross literals, functions and value types",
+      "expect": "matched",
+      "source": "class P { n = 1; bump(): number { this.n += 1; return this.n; } }\nfunction touch(x: any): void {\n  x.set(\"viaFn\", 9);\n}\nfunction give(m: Map<string, number>): any {\n  return m;\n}\nasync function main(): Promise<void> {\n  const m = new Map<string, number>();\n  m.set(\"a\", 1);\n  const o: any = { m, tag: \"t\" };\n  o.m.set(\"b\", 2);\n  console.log(m.size, o.m.size, o.m === m, o.m.get(\"b\"));\n  m.set(\"c\", 3);\n  console.log(o.m.has(\"c\"), o.tag);\n  touch(m);\n  console.log(m.get(\"viaFn\"));\n  const g = give(m);\n  g.set(\"fromReturn\", 4);\n  console.log(m.get(\"fromReturn\"), g === m);\n  const s = new Set<string>([\"x\"]);\n  const list: any = [s, m];\n  list[0].add(\"y\");\n  list[1].delete(\"a\");\n  console.log(s.size, s.has(\"y\"), m.has(\"a\"), list.length, list[0] === s);\n  const nums = new Map<number, string>();\n  nums.set(1, \"one\");\n  const n: any = nums;\n  n.set(2, \"two\");\n  console.log(nums.get(2), n.get(1), n.get(3), n.has(2), n.size);\n  const arrs = new Map<string, number[]>();\n  arrs.set(\"k\", [1, 2]);\n  const ar: any = arrs;\n  ar.get(\"k\").push(3);\n  console.log(arrs.get(\"k\")!.length, ar.get(\"k\")[2], ar.size);\n  const bools = new Map<string, boolean>();\n  const bo: any = bools;\n  bo.set(\"t\", true);\n  bo.set(\"f\", false);\n  console.log(bools.get(\"t\"), bools.get(\"f\"), bo.get(\"f\"), bo.has(\"f\"));\n  const objs = new Map<string, P>();\n  objs.set(\"p\", new P());\n  const ob: any = objs;\n  console.log(ob.get(\"p\").bump(), objs.get(\"p\")!.n);\n  console.log(o);\n  console.log(JSON.stringify(o.m), [...n.entries()].map((e: any) => e.join(\":\")).join(\",\"));\n}\n"
+    },
+    {
+      "name": "native collection replacer keeps requested custom properties",
+      "expect": "matched",
+      "source": "function main(): void { const native = new Map<string, number>(); native.set(\"a\", 1); const m: any = native; m.extra = 7; m.missing = undefined; m.inf = Infinity; console.log(JSON.stringify(m, [\"size\", \"extra\", \"missing\", \"inf\"])); const set = new Set<number>([1, 2]); const s: any = set; s.extra = \"kept\"; console.log(JSON.stringify(s, [\"extra\", \"size\"])); }"
+    },
+    {
+      "name": "native collection views iterate live insertion order across mutations",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n const m = new Map<string, number>(); m.set(\"a\", 1); m.set(\"b\", 2); m.set(\"c\", 3);\n const a:any = m; const keys:any = a.keys(); const values:any = a.values(); const entries:any = a.entries();\n console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));\n m.delete(\"b\"); m.set(\"c\", 30); m.set(\"d\", 4);\n console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));\n m.clear(); m.set(\"a\", 10);\n console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));\n console.log(keys.next().done); m.set(\"e\", 5); console.log(keys.next().done);\n console.log(values.next().value, JSON.stringify(entries.next().value));\n const seen:string[] = [];\n a.forEach((v:any,k:any) => { seen.push(k + \"=\" + v); if(k === \"a\") { m.delete(\"e\"); m.set(\"f\", 6); } });\n console.log(seen.join(\",\"));\n const s = new Set<number>([1, 2, 3]); const b:any = s; const si:any = b.values(); const se:any = b.entries();\n console.log(si.next().value, JSON.stringify(se.next().value));\n s.delete(2); s.delete(1); s.add(1); s.add(4);\n console.log(si.next().value, JSON.stringify(se.next().value));\n console.log(si.next().value, JSON.stringify(se.next().value));\n s.clear(); s.add(5);\n await new Promise<void>((resolve) => setTimeout(resolve, 1));\n console.log(si.next().value, JSON.stringify(se.next().value));\n const seenSet:number[] = [];\n b.forEach((v:any) => { seenSet.push(v); if(v === 5) { s.add(6); } }); console.log(seenSet.join(\",\"));\n}"
+    },
+    {
+      "name": "native collection iterator next validates and uses its receiver",
+      "expect": "matched",
+      "source": "function main():void { const m=new Map<string,number>(); m.set(\"a\",1); const a:any=m; const it:any=a.keys(); const next:any=it.next; try { next(); console.log(\"accepted\"); } catch(e:any) { console.log(e instanceof TypeError); } console.log(it.next().value); const other:any=a.keys(); console.log(next.call(other).value); const real:any=new Map([[\"x\",1]]); const ri:any=real.keys(); console.log(next.call(ri).value); }"
+    },
+    {
+      "name": "collection iterator outlives receiver across arena resets",
+      "expect": "matched",
+      "source": "function make():any { const m=new Map<string,number>(); m.set(\"kept\",42); const a:any=m; return a.entries(); }\nasync function main():Promise<void> { const it:any=make(); for(let i=0;i<40;i++){ await new Promise<void>((resolve)=>setTimeout(resolve,1)); } console.log(JSON.stringify(it.next().value),it.next().done); }"
+    },
+    {
+      "name": "native collection iterator spread",
+      "expect": "matched",
+      "source": "function main():void { const m = new Map<string,number>(); m.set(\"a\",1); m.set(\"b\",2); const a:any=m; console.log([...a.keys()].join(\",\"), [...a.values()].join(\",\"), [...a].length); }"
+    },
+    {
+      "name": "native collection iterator spread propagates next errors",
+      "expect": "matched",
+      "source": "function main():void { const m=new Map<string,number>();m.set(\"a\",1);const a:any=m;const it:any=a.keys();it.next=()=>{throw new Error(\"next failed\");};try {const xs:any=[...it];console.log(xs.length);} catch(e:any){console.log(e.message);} }"
+    },
+    {
+      "name": "native class methods preserve returned collection aliases",
+      "expect": "matched",
+      "source": "const sharedMap = new Map<string,number>();\nconst sharedSet = new Set<number>();\nclass Store {\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return sharedMap; }\n  getSet(): Set<number> { return sharedSet; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(sharedMap.get(\"a\"),sharedSet.has(2),m===a.getMap(),t===a.getSet(),s.calls);\n sharedMap.set(\"b\",3);sharedSet.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(sharedMap.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(x.get(\"x\"));\n}"
+    },
+    {
+      "name": "native any collection keys preserve identity through host aliases",
+      "expect": "matched",
+      "source": "async function main():Promise<void> {\n const key:any={n:1}; const distinct:any={n:1}; const arr:any=[1];\n const m=new Map<any,number>();m.set(key,1);m.set(distinct,2);m.set(arr,3);\n const a:any=m;const it:any=a.keys();const got:any=it.next().value;\n console.log(got===key,a.get(key),a.get(got),a.get(distinct),a.get(arr));\n a.set(got,4);console.log(m.get(key),m.get(distinct),m.size);\n for(let i=0;i<40;i++){m.set(\"k\"+i,i);}\n console.log(a.get(got),m.get(key),a.has(key),a.has(arr));\n console.log(a.delete(got),m.has(key),m.has(distinct));a.set(key,5);console.log(m.get(key));\n const si=new Set<any>();si.add(key);si.add(arr);const s:any=si;console.log(s.has(got),s.has(arr));s.delete(got);console.log(si.has(key));s.add(got);console.log(si.has(key));\n for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(a.get(got),a.get(arr));\n const box:any={key:{n:2}};a.set(box.key,8);console.log(m.get(box.key),a.get(box.key));\n const p=new Map<any,number>();p.set(NaN,1);p.set(-0,2);p.set(\"x\",3);p.set(true,4);p.set(null,5);p.set(undefined,6);p.set(1n,7);const q:any=p;\n console.log(q.get(NaN),q.get(0),q.get(\"x\"),q.get(true),q.get(null),q.get(undefined),q.get(1n));\n}"
+    },
+    {
+      "name": "live collection iterator helpers preserve chained state",
+      "expect": "matched",
+      "source": "function main():void { const m = new Map<string,number>(); m.set(\"a\",1); m.set(\"b\",2); const a:any=m; console.log([...a.keys()].join(\",\"), [...a.values()].join(\",\"), [...a].length); const i:any=a.keys().map((x:any)=>x+\"!\"); console.log(i.next().value, [...i].join(\",\")); }"
+    },
+    {
+      "name": "live iterator helpers stay lazy preserve references and propagate errors",
+      "expect": "matched",
+      "source": "function make():any {const m=new Map<string,number>();m.set(\"a\",1);m.set(\"b\",2);const a:any=m;return a.values().map((v:any)=>v*2).take(2);}\nasync function main():Promise<void> {\n const m=new Map<number,number>();m.set(1,1);m.set(2,2);m.set(3,3);const a:any=m;let calls=0;\n const it:any=a.values().map((v:any)=>{calls+=1;return v*2;}).filter((v:any)=>v>2).drop(1).take(2).flatMap((v:any)=>[v,v+1]);\n console.log(calls);m.set(3,30);m.set(4,4);console.log(it.next().value,calls);m.set(5,5);console.log([...it].join(\",\"),calls,it.next().done);\n const key:any={n:1};const other:any={n:2};const refs=new Map<any,number>();refs.set(key,1);refs.set(other,2);const b:any=refs;\n const found:any=b.keys().find((k:any)=>k.n===2);console.log(found===other);\n const reduced:any=b.keys().reduce((acc:any,k:any)=>k);console.log(reduced===other);\n const arr:any=b.keys().toArray();console.log(arr.length,arr[0]===key,arr[1]===other);\n const bad:any=a.values().map((v:any)=>{throw new Error(\"helper failed\");});try {bad.next();}catch(e:any){console.log(e.message);}console.log(bad.next().done);\n const retained:any=make();for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log([...retained].join(\",\"),retained.next().done);\n}"
+    },
+    {
+      "name": "host collection iterator roots survive handle call chains",
+      "expect": "matched",
+      "source": "function main():void {const arr:JsValue=[1,2,3];const a:any=arr.values().map((v:any)=>v*2).drop(1).take(1);console.log(a.next().value,a.next().done);const box:any={m:new Map<string,number>(),s:new Set<number>([1,2])};const m:JsValue=box.m;m.set(\"a\",1);m.set(\"b\",2);const keys:any=m.keys().map((v:any)=>v+\"!\");console.log(keys.next().value,[...keys].join(\",\"));const set:JsValue=box.s;const entries:any=set.entries().flatMap((e:any)=>e);console.log([...entries].join(\",\"));}"
+    },
+    {
+      "name": "native class getter collection aliases",
+      "expect": "matched",
+      "source": "const sharedMap = new Map<string,number>();\nconst sharedSet = new Set<number>();\nclass Store {\n  get map(): Map<string,number> { return sharedMap; }\n  get set(): Set<number> { return sharedSet; }\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return this.map; }\n  getSet(): Set<number> { return this.set; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(s.map.get(\"a\"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);\n s.map.set(\"b\",3);s.set.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(s.map.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n}"
+    },
+    {
+      "name": "native class writable collection field aliases",
+      "expect": "matched",
+      "source": "class Store {\n  map: Map<string,number> = new Map<string, number>();\n  set: Set<number> = new Set<number>();\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return this.map; }\n  getSet(): Set<number> { return this.set; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(s.map.get(\"a\"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);\n s.map.set(\"b\",3);s.set.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(s.map.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n}"
+    },
+    {
+      "name": "native collection parameters and field writes preserve aliases",
+      "expect": "matched",
+      "source": "class Store {\n map:Map<string,number>=new Map<string,number>(); set:Set<number>=new Set<number>();\n replace(m:Map<string,number>,s:Set<number>):Map<string,number> { this.map=m;this.set=s;m.set(\"inside\",7);s.add(3);return m; }\n}\nasync function main():Promise<void>{\n const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;\n const result:any=a.replace(b,c); console.log(store.map===m,store.set===s,result===b,a.map===b,a.set===c,m.get(\"inside\"),s.has(3));\n const other=new Map<string,number>();const d:any=other;a.map=d;a.set=c;console.log(store.map===other,store.set===s);\n Object.defineProperty(a,\"map\",{value:b});console.log(store.map===m,a.map===b);\n for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}a.map.set(\"kept\",9);console.log(m.get(\"kept\"));\n}"
+    },
+    {
+      "name": "native inherited accessors preserve receiver and descriptors",
+      "expect": "matched",
+      "source": "class Base { n=1;get value():number{return this.n;}set value(v:number){this.n=v;} }\nclass Derived extends Base { get twice():number{return this.n*2;} }\nfunction main():void {const x=new Derived();const y=new Derived();y.n=5;const a:any=x;const b:any=y;console.log(a.value,a.twice);a.value=3;console.log(x.n,a.twice);const proto:any=Object.getPrototypeOf(a);const getter:any=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(proto),\"value\").get;console.log(getter.call(b));console.log(Object.keys(a).join(\",\"),Object.prototype.hasOwnProperty.call(a,\"value\"));}"
+    },
+    {
+      "name": "native inherited views retain real ancestor accessors",
+      "expect": "matched",
+      "source": "class Base {n=2;get value():number{return this.n;}set value(v:number){this.n=v;}}\nclass Derived extends Base {ping():number{return 1;}}\nfunction main():void { let seen=0;const ctor:any=Base;Object.defineProperty(ctor.prototype,\"value\",{get:()=>100,set:(v:number)=>{seen=v;},configurable:true});const x=new Derived();const a:any=x;console.log(a.value);a.value=4;console.log(x.n,a.value,a.ping(),seen); }"
+    },
+    {
+      "name": "native error subclass keeps its JavaScript prototype",
+      "expect": "matched",
+      "source": "class Failure extends Error { constructor(){super(\"failure\");} } function main():void {const cls:any=Failure;const e=new Failure();console.log(e instanceof Error,e.message,cls.prototype instanceof Error); }"
+    },
+    {
+      "name": "collection and number array callback parameters retain escaped owners",
+      "expect": "matched",
+      "source": "class Box {stored:Map<string,number>=new Map<string,number>();run(m:Map<string,number>,values:number[]):number {this.stored=m;m.set(\"sum\",values[0]+values[1]);return m.size;}}\nfunction make():any {const box=new Box();const a:any=box;const m=new Map<string,number>();const b:any=m;console.log(a.run(b,[2,3]),m.get(\"sum\"));return a;}\nasync function main():Promise<void>{const a:any=make();for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(a.stored.get(\"sum\"));}"
+    },
+    {
+      "name": "real class accessors preserve collection assignments",
+      "expect": "matched",
+      "source": "class Holder {map:Map<string,number>=new Map<string,number>();calls=0;get current():Map<string,number>{this.calls+=1;return this.map;}set current(v:Map<string,number>){this.calls+=1;this.map=v;}}\nfunction main():void {const token:any=Holder;const h=new Holder();const a:any=h;const m=new Map<string,number>();const b:any=m;console.log(h.calls);a.current=b;console.log(a.current===b,h.map===m,h.calls);a.current.set(\"x\",3);console.log(m.get(\"x\"),h.calls);}"
+    },
+    {
+      "name": "host getPrototypeOf preserves proxy exceptions",
+      "expect": "matched",
+      "source": "function main():void {const proxy:any=new Function(\"return new Proxy({}, {getPrototypeOf(){throw new Error('prototype failed');}})\")();try{Object.getPrototypeOf(proxy);console.log(\"accepted\");}catch(e:any){console.log(e.message);} }"
+    },
+    {
+      "name": "native private fields and accessors retain callback layout",
+      "expect": "matched",
+      "source": "class Counter {#n=1;get value():number{return this.#n;}set value(v:number){this.#n=v;}read():number{return this.#n;}}function main():void {const c=new Counter();const a:any=c;console.log(a.value,a.read(),Object.keys(a).length);a.value=4;console.log(c.read(),a.value);}"
+    },
+    {
+      "name": "dynamic storage keeps JavaScript-owned array elements",
+      "expect": "matched",
+      "source": "function main(): void { const xs: {x: number}[] = []; const a: any = xs; const original: any = new Function(\"return {x: 1}\")(); a[0] = original; console.log(a[0] === original, xs[0] === original); original.x = 7; console.log(xs[0].x); xs[0].x = 9; console.log(original.x); }"
+    },
+    {
+      "name": "dynamic storage follows aliases fields captures and calls",
+      "expect": "matched",
+      "source": "function identity(xs: {x: number}[]): {x: number}[] { return xs; } function main(): void { const xs: {x: number}[] = []; const holder = {xs: identity(xs)}; const read = () => holder.xs; const a: any = read(); const original: any = new Function(\"return {x: 1}\")(); a[0] = original; original.x = 5; console.log(xs[0] === original, holder.xs[0] === original, read()[0].x); }"
+    },
+    {
+      "name": "dynamic storage retains self references in typed arrays",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[][] = []; const a: any = xs; a[0] = a; console.log(a[0] === a, xs[0] === xs, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage does not adopt plain objects as classes",
+      "expect": "matched",
+      "source": "class C { x = 1; method(): number { return this.x; } } function main(): void { const xs: C[] = []; const a: any = xs; const plain: any = new Function(\"return {x: 7}\")(); a[0] = plain; console.log(xs[0] === plain, xs[0] instanceof C, typeof xs[0].method); const real = new C(); a[1] = real; console.log(xs[1] === real, xs[1] instanceof C, xs[1].method()); }"
+    },
+    {
+      "name": "dynamic class fields retain actual values",
+      "expect": "matched",
+      "source": "class Box { value: number = 1; read(): number { return this.value; } } function main(): void { const box = new Box(); const exposed: any = box; const original: any = new Function(\"return {x: 7}\")(); exposed.value = original; console.log(box.read() === original, box.value === original, typeof box.value); }"
+    },
+    {
+      "name": "dynamic method results retain fresh optional tuple and async aliases",
+      "expect": "matched",
+      "source": "class Factory { last: number[] = []; fresh(): number[] { const result: number[] = [1]; this.last = result; return result; } optional(present: boolean): number[] | undefined { return present ? this.last : undefined; } pair(): [number[], number[]] { return [this.last, this.last]; } async delayed(): Promise<number[]> { await Promise.resolve(); return this.last; } } async function main(): Promise<void> { const factory = new Factory(); const exposed: any = factory; const result: any = exposed.fresh(); console.log(result === factory.last, exposed.optional(true) === result, exposed.optional(false) === undefined); const pair: any = exposed.pair(); console.log(pair[0] === result, pair[1] === result); const delayed: any = await exposed.delayed(); delayed[0] = 9; console.log(delayed === result, factory.last[0]); }"
+    },
+    {
+      "name": "dynamic class instances preserve inheritance and private brands",
+      "expect": "matched",
+      "source": "class Base { #secret: number = 3; read(): number { return this.#secret; } } class Derived extends Base { get doubled(): number { return this.read() * 2; } } function main(): void { const values: Base[] = []; const exposed: any = values; const real = new Derived(); const plain: any = new Function(\"return {}\")(); exposed[0] = real; exposed[1] = plain; console.log(values[0] === real, values[0] instanceof Base, values[0] instanceof Derived, exposed[0].doubled, values[0].read()); try { exposed[0].read.call(plain); } catch (error) { console.log(error instanceof TypeError); } console.log(values[1] === plain, values[1] instanceof Base, typeof values[1].read); }"
+    },
+    {
+      "name": "dynamic collection slots retain arbitrary keys and values",
+      "expect": "matched",
+      "source": "function main(): void { const map = new Map<number, number>(); const set = new Set<number>(); const m: any = map; const s: any = set; const original: any = new Function(\"return {x: 7}\")(); m.set(\"key\", original); s.add(original); console.log(map.size, m.get(\"key\") === original, s.has(original), set.size); original.x = 9; console.log(m.get(\"key\").x); }"
+    },
+    {
+      "name": "dynamic storage retains deep and cyclic graph identity",
+      "expect": "matched",
+      "source": "function main(): void { const root: number[][] = []; const first: any = root; let cursor: any = first; for (let i = 0; i < 70; i++) { const next: any = []; cursor[0] = next; cursor = next; } cursor[0] = first; let read: any = root; for (let i = 0; i < 70; i++) read = read[0]; console.log(read === cursor, read[0] === root); const other: number[][] = []; const second: any = other; second[0] = first; first[1] = second; const identity: any = new Function(\"value\", \"return value\"); console.log(first[1][0] === first, identity(first) === root); }"
+    },
+    {
+      "name": "dynamic storage retains deep record aliases",
+      "expect": "matched",
+      "source": "function main(): void { const root: {next: any} = {next: null}; let cursor: any = root; for (let i = 0; i < 70; i++) { const next: any = {next: null}; cursor.next = next; cursor = next; } cursor.next = root; cursor.value = 7; let read: any = root; for (let i = 0; i < 70; i++) read = read.next; console.log(read === cursor, read.next === root, read.value); }"
+    },
+    {
+      "name": "dynamic storage survives repeated awaits and exceptions",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const values: {x: number}[] = []; const exposed: any = values; const original: any = new Function(\"return {x: 1}\")(); exposed[0] = original; const fail: any = new Function(\"value\", \"throw value\"); for (let i = 0; i < 40; i++) { await Promise.resolve(); try { fail(original); } catch (error) { } original.x += 1; } console.log(values[0] === original, exposed[0] === original, values[0].x); }"
+    },
+    {
+      "name": "dynamic storage preserves holes spreads evaluation and await values",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const original: any = new Function(\"return {x: 1}\")(); const sparse: any[] = [, original]; const exposed: any = sparse; console.log(0 in exposed, 1 in exposed, exposed[1] === original); const copied: any = [...exposed, await Promise.resolve(original)]; console.log(0 in copied, copied[1] === original, copied[2] === original); }"
+    },
+    {
+      "name": "dynamic storage tracks returned callable aliases",
+      "expect": "matched",
+      "source": "function make(xs: {x: number}[]): () => {x: number}[] { return () => xs; } function main(): void { const xs: {x: number}[] = []; const read = make(xs); const exposed: any = read(); const original: any = new Function(\"return {x: 7}\")(); exposed[0] = original; console.log(xs[0] === original, read()[0] === original); }"
+    },
+    {
+      "name": "dynamic storage retains plain class identity",
+      "expect": "matched",
+      "source": "class Plain { value: number = 1; } function main(): void { const source = new Plain(); const values: Plain[] = []; const exposed: any = values; exposed[0] = source; console.log(values[0] === source, values[0] instanceof Plain); const object: any = new Function(\"return {value: 2}\")(); exposed[1] = object; console.log(values[1] === object, values[1] instanceof Plain); }"
+    },
+    {
+      "name": "dynamic storage constructor arguments retain actual values",
+      "expect": "matched",
+      "source": "class Holder { constructor(value: number[], original: any) { const exposed: any = value; exposed[0] = original; } } function main(): void { const values: number[] = []; const original: any = {x: 7}; const holder = new Holder(values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"
+    },
+    {
+      "name": "dynamic storage unknown callable arguments retain actual values",
+      "expect": "matched",
+      "source": "function invoke(callback: any, value: number[], original: any): void { callback(value, original); } function main(): void { const values: number[] = []; const original: any = {x: 7}; const writer: any = new Function(\"value\", \"original\", \"value[0] = original\"); invoke(writer, values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"
+    },
+    {
+      "name": "dynamic storage class annotation retains plain runtime value",
+      "expect": "matched",
+      "source": "class C { value = 1; method(): number { return this.value; } } function main(): void { const plain: any = {value: 7}; const value: C = plain; console.log(value === plain, value instanceof C, typeof value.method); }"
+    },
+    {
+      "name": "dynamic storage logical alias keeps dynamic storage",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const exposed: any = xs || []; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage optional alias keeps dynamic storage",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const holder = {xs}; const exposed: any = holder?.xs; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage iteration alias keeps dynamic storage",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const original: any = {x: 7}; for (const row of [xs]) { const exposed: any = row; exposed[0] = original; } console.log(xs[0] === original, typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage rest aliases keep all dynamic arguments",
+      "expect": "matched",
+      "source": "function mutate(...xs: number[][]): void { const exposed: any = xs; exposed[1][0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(first, second); console.log(typeof second[0], second[0].x); }"
+    },
+    {
+      "name": "dynamic storage spread aliases keep all dynamic arguments",
+      "expect": "matched",
+      "source": "function mutate(first: number[], second: number[]): void { const exposed: any = second; exposed[0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(...[first, second]); console.log(typeof second[0], second[0].x); }"
+    },
+    {
+      "name": "dynamic storage derived exposure promotes inherited fields",
+      "expect": "matched",
+      "source": "class Base { value: number = 1; read(): number { return this.value; } } class Derived extends Base {} function main(): void { const value = new Derived(); const exposed: any = value; const original: any = {x: 7}; exposed.value = original; console.log(value.value === original, typeof value.value, typeof value.read()); }"
+    },
+    {
+      "name": "dynamic storage any type aliases expose actual owners",
+      "expect": "matched",
+      "source": "type DynamicValue = any; function main(): void { const xs: number[] = [1]; const exposed: DynamicValue = xs; exposed[0] = {x: 7}; console.log(typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage nested any annotations expose actual slots",
+      "expect": "matched",
+      "source": "function main(): void { const xs: number[] = [1]; const holder: {slot: any} = {slot: xs}; holder.slot[0] = {x: 7}; console.log(typeof xs[0]); }"
+    },
+    {
+      "name": "dynamic storage dynamic callable aliases retain callback argument owners",
+      "expect": "matched",
+      "source": "function mutate(values: number[]): void { const exposed: any = values; exposed[0] = {x: 7}; } function main(): void { const values: number[] = []; const callable: any = mutate; callable(values); console.log(typeof values[0]); }"
+    },
+    {
+      "name": "dynamic storage dynamic rest packed owner retains self cycles",
+      "expect": "matched",
+      "source": "function cycle(...values: number[][]): any { const exposed: any = values; exposed[0] = exposed; return exposed; } function main(): void { const result: any = cycle([]); console.log(result[0] === result, Array.isArray(result)); }"
+    },
+    {
+      "name": "dynamic storage nested dynamic parameter slots",
+      "expect": "matched",
+      "source": "function write(holder: {slot:any}):void{holder.slot[0]={x:7};} function main():void{const xs:number[]=[1];const holder={slot:xs};write(holder);console.log(typeof xs[0],xs[0].x);}"
+    },
+    {
+      "name": "dynamic storage dynamic map value slots",
+      "expect": "matched",
+      "source": "function main():void{const xs:number[]=[1];const map=new Map<string,any>();map.set(\"x\",xs);map.get(\"x\")[0]={x:7};console.log(typeof xs[0],xs[0].x);}"
+    },
+    {
+      "name": "dynamic storage dynamic tuple spread owners",
+      "expect": "matched",
+      "source": "function mutate(a:number[],b:number[]):void{const exposed:any=b;exposed[0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const args:[number[],number[]]=[a,b];mutate(...args);console.log(typeof b[0],b[0].x);}"
+    },
+    {
+      "name": "dynamic storage dynamic rest callable owners",
+      "expect": "matched",
+      "source": "function mutate(...xs:number[][]):void{const exposed:any=xs;exposed[1][0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const fn:any=mutate;fn(a,b);console.log(typeof b[0],b[0].x);}"
+    },
+    {
+      "name": "dynamic storage inferred dynamic field writes",
+      "expect": "matched",
+      "source": "function main():void{const xs:number[]=[1];const holder={slot:undefined as any};holder.slot=xs;holder.slot[0]={x:7};console.log(typeof xs[0],xs[0].x);}"
+    },
+    {
+      "name": "dynamic collection parameters retain actual values",
+      "expect": "matched",
+      "source": "class Store {calls=0;use(m:Map<string,number>,s:Set<number>):number {this.calls+=1;m.set(\"ok\",1);s.add(2);return this.calls;}}\nfunction main():void {const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;\nconst wrong=new Map<string,string>();const wrongSet=new Set<string>();const d:any=wrong;const e:any=wrongSet;\ntry {a.use(d,c);console.log(\"accepted wrong map\");}catch(error:any){console.log(error instanceof TypeError);}\ntry {a.use(b,e);console.log(\"accepted wrong set\");}catch(error:any){console.log(error instanceof TypeError);}\nconst host:any=new Function(\"return new Map()\")();try{a.use(host,c);console.log(\"accepted host\");}catch(error:any){console.log(error instanceof TypeError);}\nconst fake:any={\"__thaw_js_handle_id__\":1};try{a.use(fake,c);console.log(\"accepted fake\");}catch(error:any){console.log(error instanceof TypeError);}\nconsole.log(store.calls,m.size,s.size);console.log(a.use(b,c),m.get(\"ok\"),s.has(2));}"
+    },
+    {
+      "name": "structuredClone rebuilds a host Map and Set as independent collections",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const m: any = new Map([[1, 2]]);\n  const mc: any = structuredClone(m);\n  console.log(mc === m, mc instanceof Map, mc.get(1), mc.size);\n  m.set(3, 4);\n  mc.set(9, 9);\n  console.log(mc.size, m.size, mc.has(9), m.has(9));\n  const s: any = new Set([1, 2]);\n  const sc: any = structuredClone(s);\n  sc.add(7);\n  console.log(sc instanceof Set, sc.size, s.size, sc.has(7), s.has(7));\n  const nested: any = new Map([[{ k: 1 }, [1, 2]]]);\n  const nc: any = structuredClone(nested);\n  let kk: any = null;\n  let vv: any = null;\n  nc.forEach((v: any, k: any) => { kk = k; vv = v; });\n  console.log(kk.k, vv.length, vv !== nested.get([...nested.keys()][0]));\n}\n"
+    },
+    {
+      "name": "structuredClone rejects a function with a DataCloneError",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const f: any = (x: number) => x;\n  let name = \"none\";\n  let ok = false;\n  try { structuredClone(f); } catch (e: any) { name = e.name; ok = e.message.endsWith(\"could not be cloned.\"); }\n  console.log(name, ok);\n  let inner = \"none\";\n  try { structuredClone({ f }); } catch (e: any) { inner = e.name; }\n  console.log(inner);\n}\n"
+    },
+    {
+      "name": "structuredClone clones a sparse host array without probing every index",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const a: any = new Array(50000);\n  a[5] = \"x\";\n  a[49999] = { k: 1 };\n  const c: any = structuredClone({ a });\n  console.log(c.a.length, 0 in c.a, 5 in c.a, c.a[5], c.a[49999].k, c.a[49999] !== a[49999]);\n  const b: any = [1, , 3, undefined];\n  const bc: any = structuredClone(b);\n  console.log(bc.length, 1 in bc, 3 in bc, bc[3], bc[2]);\n}\n"
+    },
+    {
+      "name": "static builtin results assigned to any keep their typed inputs",
+      "expect": "matched",
+      "source": "function main(): void {\n    const a: any = Object.fromEntries([[\"a\", 1], [\"b\", 2]]);\n    console.log(JSON.stringify(a));\n    const g: any = Object.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(JSON.stringify(g));\n    const m: any = Map.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(m.size, JSON.stringify(m.get(\"even\")));\n}\n"
+},
+    {
+      "name": "nested method call on a class instance built through an any constructor",
+      "expect": "matched",
+      "source": "class Counter {\n    count: number = 0;\n    increment(): void { this.count = this.count + 1; }\n    touch(): void { this.increment(); }\n}\nfunction main(): void {\n    const value: any = new (Counter as any)();\n    value.touch();\n    value.touch();\n    console.log(value.count);\n}\n"
+},
+    {
+      "name": "Object.hasOwn sees a shadowed inherited static field",
+      "expect": "matched",
+      "source": "class Parent { static value: number = 1; }\nclass Child extends Parent {}\nfunction main(): void {\n    Child.value = 2;\n    console.log(Parent.value, Child.value, Object.hasOwn(Child, \"value\"));\n}\n"
+},
+    {
+      "name": "timers: each due timer gets a microtask checkpoint",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n    const events: string[] = [];\n    setTimeout(() => {\n        events.push(\"timer-1\");\n        Promise.resolve().then(() => {\n            events.push(\"promise\");\n        });\n    }, 0);\n    setTimeout(() => {\n        events.push(\"timer-2\");\n    }, 0);\n    await new Promise<void>((resolve) => setTimeout(resolve, 20));\n    console.log(events.join(\",\"));\n}\n"
+    },
+    {
+      "name": "marker object thrown through an any callback keeps identity",
+      "expect": "matched",
+      "source": "function main(): void {\n  const marker: any = { value: 1 };\n  const invoke: any = (callback: any): any => callback();\n  try {\n    invoke(() => { throw marker; });\n  } catch (error: any) {\n    const e: any = error;\n    console.log(e === marker, e.value);\n  }\n}\n"
+    },
+    {
+      "name": "generator throw keeps thrown object identity",
+      "expect": "matched",
+      "source": "function* generator(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const marker: any = { value: 42 };\n  const iterator = generator();\n  iterator.next();\n  const result = iterator.throw(marker);\n  console.log(result.value === marker, result.value.value, result.done);\n}\n"
+},
+    {
+      "name": "generator throw passes primitives and undefined",
+      "expect": "matched",
+      "source": "function* g(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const it = g();\n  it.next();\n  console.log(it.throw(7).value);\n  const it2 = g();\n  it2.next();\n  console.log(it2.throw(\"s\").value);\n  const it3 = g();\n  it3.next();\n  console.log(it3.throw(undefined).value);\n}\n"
+},
+    {
+      "name": "yield delegate forwards a thrown string to the inner generator",
+      "expect": "matched",
+      "source": "function* inner(): Generator<number> {\n  try { yield 1; }\n  catch (error) { console.log(error); yield 2; }\n}\nfunction* outer(): Generator<number> {\n  yield* inner();\n  yield 3;\n}\nfunction main(): void {\n  const iterator = outer();\n  console.log(iterator.next().value);\n  console.log(iterator.throw(\"boom\").value);\n  console.log(iterator.next().value);\n  console.log(iterator.next().done);\n}\n"
+},
+    {
+          "name": "unset process.env variable is undefined",
+          "expect": "matched",
+          "source": "function main(): void {\n  console.log(process.env.E1_UNSET_VAR_X ?? \"3000\");\n  console.log(process.env.E1_UNSET_VAR_X || \"fallback\");\n  console.log(process.env.E1_UNSET_VAR_X === undefined);\n  console.log(typeof process.env.E1_UNSET_VAR_X);\n  process.env.E1_SET_VAR_Y = \"hello\";\n  console.log(process.env.E1_SET_VAR_Y, typeof process.env.E1_SET_VAR_Y);\n  delete process.env.E1_SET_VAR_Y;\n  console.log(process.env.E1_SET_VAR_Y === undefined, process.env.E1_SET_VAR_Y ?? \"gone\");\n  console.log(Number(process.env.E1_UNSET_VAR_X) || 3000);\n  console.log(Object.keys(process.env).includes(\"E1_UNSET_VAR_X\"));\n}\n"
+    },
+    {
+        "name": "class toString, valueOf and toPrimitive drive string conversion in ToPrimitive order",
+        "expect": "matched",
+        "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
+    },
+    {
+        "name": "untyped default parameter takes the default type",
+        "expect": "matched",
+        "source": "function f(a: number, b = a * 2) { return a + b }\nfunction s(a: string, sep = \", \") { return a + sep + \"x\" }\nfunction t(flag = true, n = 3 + 4) { return flag ? n : -n }\nclass C { k: number; constructor(x: number, y = x - 1) { this.k = x + y } }\nconst h = (a: number, b = a * 3, c = b + 1) => a + b + c;\nasync function main(): Promise<void> {\n  console.log(f(1), f(1, 5), s(\"a\"), s(\"a\", \"-\"), t(), t(false, 2), new C(4).k, h(2), h(2, 1));\n}\n"
+    },
+    {
+        "name": "subclass instance passes where its base class is expected",
+        "expect": "matched",
+        "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"
+    }
+  ]
+}
