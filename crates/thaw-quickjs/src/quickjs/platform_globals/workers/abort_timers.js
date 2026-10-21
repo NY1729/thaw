@@ -293,17 +293,17 @@
     if (![...timers.values()].some(timer => timer.refed && !timer.clock)) return -1;
     let due = Infinity;
     for (const timer of timers.values()) if (!timer.clock) due = Math.min(due, timer.due);
-    return due === Infinity ? -1 : Math.max(0, due - nativeDateNow());
+    return due === Infinity ? -1 : Math.ceil(Math.max(0, due - timerNow()));
   };
   // Delay to the next timer of any kind, ref'd or not (-1 when none): a blocking wait on a pending promise
   // may still be resolved by an unref'd timer (e.g. fs.watch/watchFile with `persistent: false`).
   globalThis.__thaw_next_any_timer_delay = () => {
     let due = Infinity;
     for (const timer of timers.values()) if (!timer.clock) due = Math.min(due, timer.due);
-    return due === Infinity ? -1 : Math.max(0, due - nativeDateNow());
+    return due === Infinity ? -1 : Math.ceil(Math.max(0, due - timerNow()));
   };
   globalThis.__thaw_run_due_timers = () => {
-    const now = nativeDateNow();
+    const now = timerNow();
     const due = [...timers.entries()]
       .filter(([, timer]) => !timer.clock && timer.due <= now)
       .sort((a, b) => a[1].due - b[1].due || a[0] - b[0]);
@@ -311,8 +311,8 @@
     // after each callback (Node's microtask checkpoint), so the callbacks observe Node's order.
     let ran = 0;
     for (const [id, timer] of due) {
-      if (!timers.has(id) || timer.due > nativeDateNow()) continue;
-      if (timer.repeat) timer.due = nativeDateNow() + timer.milliseconds;
+      if (!timers.has(id) || timer.due > timerNow()) continue;
+      if (timer.repeat) timer.due = timerNow() + timer.milliseconds;
       else timers.delete(id);
       invokeTimer(timer);
       ran += 1;
