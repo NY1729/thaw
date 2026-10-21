@@ -1749,7 +1749,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Undefined,
             HirType::Undefined,
         );
-        let params = [HirType::I64, HirType::Str, HirType::Undefined]
+        let params = [HirType::I64, HirType::Json, HirType::Undefined]
             .into_iter()
             .chain(std::iter::repeat_n(
                 HirType::Array(Box::new(HirType::Undefined)),

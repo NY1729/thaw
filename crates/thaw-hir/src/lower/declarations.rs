@@ -960,6 +960,12 @@ fn lower_function_statements(
             "__thaw_generator_initialized".into(),
             Box::new(HirExpr::Lit(HirLit::Bool(true))),
         ));
+        // A thrown value keeps its identity: publish its provenance and throw
+        // its display text, exactly as a source `throw` does.
+        let error_throw = lowerer.lower_throw_value_statements(
+            HirExpr::Var(error.clone()),
+            HirType::Json,
+        )?;
         if let Some((entry, locals, state_machine)) =
             lower_generator_state_machine(
                 &lowered_generator_body,
@@ -967,7 +973,7 @@ fn lower_function_statements(
                 &values,
                 &state,
                 &control,
-                &error,
+                &error_throw,
                 "__thaw_generator_initialized",
                 &returns,
                 &return_request,
@@ -1377,7 +1383,7 @@ fn generator_function_type(
     HirType::Function(
         vec![
             HirType::I64,
-            HirType::Str,
+            HirType::Json,
             input,
             HirType::Array(Box::new(returned.clone())),
             HirType::Array(Box::new(returned.clone())),

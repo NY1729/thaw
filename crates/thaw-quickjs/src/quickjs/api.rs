@@ -5291,12 +5291,55 @@ fn native_exception_packet<'js>(
     thaw_arena::exception::packet(token)
 }
 
+/// A thrown JavaScript primitive has no object to carry a packet token, so its type would be lost
+/// on the way back into native code (`throw 7` caught as an Error). Build a packet that keeps the
+/// value tag (1 number, 3 bool, 4 string, 5 undefined, 6 null) and its display text.
+fn primitive_exception_packet<'js>(
+    exception: &Value<'js>,
+) -> Option<std::rc::Rc<thaw_arena::exception::ExceptionPacket>> {
+    let (tag, number, boolean) = if let Some(value) = exception.as_bool() {
+        (3, 0, u64::from(value))
+    } else if let Some(value) = exception.as_number() {
+        (1, value.to_bits(), 0)
+    } else if exception.is_string() {
+        (4, 0, 0)
+    } else if exception.is_undefined() {
+        (5, 0, 0)
+    } else if exception.is_null() {
+        (6, 0, 0)
+    } else {
+        return None;
+    };
+    let text = exception.get::<rquickjs::convert::Coerced<String>>().ok()?.0;
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let owned = bytes.into_boxed_slice();
+    let address = owned.as_ptr() as usize;
+    thaw_arena::register_exception_bytes(address as *const c_char, text.len());
+    thaw_arena::exception::register_packet(thaw_arena::exception::ExceptionPacket {
+        id: 0,
+        pending: address,
+        native_text: address,
+        native_error_identity: 0,
+        object: 0,
+        native: 0,
+        aggregate: 0,
+        tag,
+        number,
+        bigint: 0,
+        boolean,
+        _roots: Vec::new(),
+        _owned_bytes: vec![owned],
+        _leases: Vec::new(),
+    }).map(|(_, packet)| packet)
+}
+
 fn describe_tagged_exception(ctx: &Ctx<'_>) -> BoundaryError {
     let exc = ctx.catch();
     let _ = install_native_exception_bridge(ctx);
     // Authenticate the exact Error object before asking it for any user-controlled
     // message/name/property values. The WeakMap entry is private Rust userdata.
-    let packet = native_exception_packet(ctx, &exc);
+    let packet = native_exception_packet(ctx, &exc).or_else(|| primitive_exception_packet(&exc));
     let properties = error_property_json(ctx, &exc);
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
