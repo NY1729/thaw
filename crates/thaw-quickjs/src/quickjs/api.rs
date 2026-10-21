@@ -2039,10 +2039,10 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, BoundaryE
     let refs: Array = globals
         .get("__thaw_value_handle_refs")
         .map_err(|_| "JavaScript value handle reference registry is empty".to_string())?;
-    // ponytail: linear identity lookup keeps the registry simple; replace it
-    // with a WeakMap only if live handle counts become measurably large.
-    let mut free = None;
-    for index in 0..handles.len() {
+    // Every value is indexed (SameValueZero keys, with -0 kept distinct), so
+    // retaining costs O(1) however many handles are live.
+    let found = handle_index_op(ctx, 0, &value, Value::new_undefined(ctx.clone()))?;
+    if let Some(index) = found.as_int().and_then(|index| usize::try_from(index).ok()) {
         if live.get::<bool>(index).unwrap_or(false) {
             let existing: Value = handles.get(index).map_err(|error| error.to_string())?;
             if identical
@@ -2054,17 +2054,74 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, BoundaryE
                     .map_err(|error| error.to_string())?;
                 return Ok(index as u64 + 1);
             }
-        } else if free.is_none() {
-            free = Some(index);
         }
     }
-    let index = free.unwrap_or_else(|| handles.len());
+    let index = pop_free_handle_slot(ctx, &live)?.unwrap_or_else(|| handles.len());
     handles
-        .set(index, value)
+        .set(index, value.clone())
         .map_err(|error| error.to_string())?;
     live.set(index, true).map_err(|error| error.to_string())?;
     refs.set(index, 1u64).map_err(|error| error.to_string())?;
+    handle_index_op(ctx, 1, &value, Value::new_int(ctx.clone(), index as i32))?;
     Ok(index as u64 + 1)
+}
+
+/// JS helper for the handle index and freed-slot stack. Objects are keyed by
+/// identity in a WeakMap; primitives in a Map, with -0 mapped to its own key.
+/// Ops: 0 find, 1 bind, 2 unbind, 3 push free slot, 4 pop free slot.
+const HANDLE_INDEX_SOURCE: &str = "(() => {
+  const WeakMapCtor = WeakMap, MapCtor = Map, is = Object.is;
+  const wmGet = WeakMap.prototype.get, wmSet = WeakMap.prototype.set, wmDelete = WeakMap.prototype.delete;
+  const mGet = Map.prototype.get, mSet = Map.prototype.set, mDelete = Map.prototype.delete;
+  const push = Array.prototype.push, pop = Array.prototype.pop;
+  const objects = new WeakMapCtor();
+  const primitives = new MapCtor();
+  const free = [];
+  const negativeZero = {};
+  const isObject = (key) => key !== null && (typeof key === 'object' || typeof key === 'function');
+  return (op, value, index) => {
+    const object = isObject(value);
+    const key = object ? value : (is(value, -0) ? negativeZero : value);
+    switch (op) {
+      case 0: return object ? wmGet.call(objects, key) : mGet.call(primitives, key);
+      case 1: if (object) wmSet.call(objects, key, index); else mSet.call(primitives, key, index); return undefined;
+      case 2: if (object) wmDelete.call(objects, key); else mDelete.call(primitives, key); return undefined;
+      case 3: push.call(free, index); return undefined;
+      default: return pop.call(free);
+    }
+  };
+})()";
+
+fn handle_index_op<'js>(
+    ctx: &Ctx<'js>,
+    op: u8,
+    value: &Value<'js>,
+    argument: Value<'js>,
+) -> Result<Value<'js>, BoundaryError> {
+    let helper = ctx
+        .userdata::<NativeBundleOwner<'_>>()
+        .ok_or("value handle index helper is unavailable")?
+        .handle_index
+        .clone();
+    helper
+        .call((op, value.clone(), argument))
+        .map_err(|error| error.to_string().into())
+}
+
+/// Pops a freed handle slot that is still not live, skipping stale entries.
+fn pop_free_handle_slot<'js>(
+    ctx: &Ctx<'js>,
+    live: &Array<'js>,
+) -> Result<Option<usize>, BoundaryError> {
+    loop {
+        let candidate = handle_index_op(ctx, 4, &Value::new_undefined(ctx.clone()), Value::new_undefined(ctx.clone()))?;
+        let Some(index) = candidate.as_int().and_then(|index| usize::try_from(index).ok()) else {
+            return Ok(None);
+        };
+        if !live.get::<bool>(index).unwrap_or(false) {
+            return Ok(Some(index));
+        }
+    }
 }
 
 /// Consumes a candidate JS-object handle and returns one retained canonical
@@ -3637,6 +3694,10 @@ fn release_handle_in_context(ctx: &Ctx<'_>, handle: u64) -> u8 {
         return 0;
     }
     let _ = refs.set(index, 0u64);
+    if let Ok(released) = handles.get::<Value>(index) {
+        handle_index_op(ctx, 2, &released, Value::new_undefined(ctx.clone())).ok();
+    }
+    handle_index_op(ctx, 3, &Value::new_undefined(ctx.clone()), Value::new_int(ctx.clone(), index as i32)).ok();
     let cleared = handles.set(index, Value::new_undefined(ctx.clone())).is_ok();
     if cleared {
         NATIVE_CALLBACK_HANDLES.with(|cache| cache.borrow_mut().retain(|_, cached| *cached != handle));
@@ -7156,6 +7217,32 @@ mod forced_root_graph_wire_controls {
                 release_input(handle);
             }
         }).join().unwrap();
+    }
+
+    #[test]
+    fn retaining_many_live_handles_stays_linear() {
+        // Quadratic identity scans made 20k retained cycles take minutes; the
+        // indexed registry finishes in well under a second in debug builds.
+        std::thread::spawn(|| {
+            let _inputs = TestInputScope::new();
+            install_real_host_callbacks();
+            let started = std::time::Instant::now();
+            with_context(|ctx| {
+                for index in 0..20_000 {
+                    let value: Value = ctx
+                        .eval(format!("(() => {{ const o = {{ v: {index} }}; o.self = o; return o; }})()"))
+                        .expect("cycle fixture");
+                    retain_value(&ctx, value).expect("retain fixture");
+                }
+            });
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "20k retains took {:?}",
+                started.elapsed()
+            );
+        })
+        .join()
+        .expect("linear retain guard");
     }
 
     #[test]
