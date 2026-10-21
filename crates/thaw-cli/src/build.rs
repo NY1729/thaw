@@ -1541,8 +1541,8 @@ fn prepared_staticlib_cache_path(
     no_default_features: bool,
     features: &[&str],
 ) -> Result<PathBuf, String> {
-    Ok(std::env::temp_dir()
-        .join("thaw-runtime-cache")
+    Ok(prepared_staticlib_root()?
+        .join("cache")
         .join(runtime_fingerprint())
         .join(staticlib_variant(no_default_features, features))
         .join(format!("lib{}.a", package.replace('-', "_"))))
@@ -1583,4 +1583,39 @@ fn feature_target_dir(pkg: &str, features: &[&str]) -> PathBuf {
                 features.join("-")
             }
         ))
+}
+
+#[cfg(test)]
+mod prepared_cache_trust_tests {
+    use super::*;
+
+    #[test]
+    fn shared_tmp_cache_is_ignored_and_valid_cache_is_reused() {
+        let package = "thaw-p2probe";
+        let root = prepared_staticlib_root().unwrap();
+        std::fs::create_dir_all(root.join("minimal")).unwrap();
+        std::fs::write(root.join("compiler.fingerprint"), runtime_fingerprint()).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, b"GOOD").unwrap();
+        std::fs::write(
+            prepared_staticlib_path(package, true, &[]).unwrap(),
+            encoder.finish().unwrap(),
+        )
+        .unwrap();
+        let shared = std::env::temp_dir()
+            .join("thaw-runtime-cache")
+            .join(runtime_fingerprint())
+            .join("minimal")
+            .join("libthaw_p2probe.a");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"EVIL").unwrap();
+
+        let linked = prepared_staticlib(package, true, &[]).expect("prepared archive");
+        assert!(!linked.starts_with(std::env::temp_dir()), "{}", linked.display());
+        assert_eq!(std::fs::read(&linked).unwrap(), b"GOOD");
+        assert_eq!(prepared_staticlib(package, true, &[]).unwrap(), linked);
+        std::fs::remove_file(&shared).ok();
+        std::fs::remove_dir_all(root.join("cache")).ok();
+        std::fs::remove_file(prepared_staticlib_path(package, true, &[]).unwrap()).ok();
+    }
 }
