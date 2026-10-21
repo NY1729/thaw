@@ -961,6 +961,11 @@ impl<'a> FnLowerer<'a> {
             );
             return self.wrap_call_argument_bindings(result, &[(name, HirType::Json, lhs)]);
         }
+        // A left operand that is always nullish (`undefined`, `null`) always
+        // falls back to `y`; the static type is the only evidence needed.
+        if matches!(lhs_type, HirType::Undefined | HirType::Null) {
+            return Ok(rhs);
+        }
         let (payload, is_none, value) = match lhs_type.clone() {
             HirType::Optional(payload) => {
                 let is_none = HirExpr::OptionalIsNone(
