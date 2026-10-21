@@ -1716,6 +1716,11 @@
       "name": "yield delegate forwards a thrown string to the inner generator",
       "expect": "matched",
       "source": "function* inner(): Generator<number> {\n  try { yield 1; }\n  catch (error) { console.log(error); yield 2; }\n}\nfunction* outer(): Generator<number> {\n  yield* inner();\n  yield 3;\n}\nfunction main(): void {\n  const iterator = outer();\n  console.log(iterator.next().value);\n  console.log(iterator.throw(\"boom\").value);\n  console.log(iterator.next().value);\n  console.log(iterator.next().done);\n}\n"
-}
+},
+    {
+        "name": "class toString, valueOf and toPrimitive drive string conversion in ToPrimitive order",
+        "expect": "matched",
+        "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
+    }
   ]
 }
