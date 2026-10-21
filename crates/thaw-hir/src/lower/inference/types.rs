@@ -3067,7 +3067,8 @@ impl<'a> FnLowerer<'a> {
             }
             HirExpr::ArrayLen(_) => Ok(HirType::F64),
             HirExpr::EnumReverseLookup(_, _) => Ok(HirType::Optional(Box::new(HirType::Str))),
-            HirExpr::EnvVar(_) => Ok(HirType::Str),
+            // `process.env.NAME` is `string | undefined` (unset variables are undefined).
+            HirExpr::EnvVar(_) => Ok(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::ObjectLit(fields) => {
                 let fields = fields
                     .iter()
