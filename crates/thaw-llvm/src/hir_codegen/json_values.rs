@@ -554,6 +554,9 @@ impl<'ctx> HirCompiler<'ctx> {
         inner: &HirExpr,
         fn_name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A local frame lets this consumer see the fresh producer inside `inner` even when no
+        // statement-level discard frame is active (e.g. in a lambda body).
+        self.begin_owned_json_discard_frame();
         let val = self.compile_expr(inner)?;
         let function = self.module.get_function(fn_name).unwrap();
         let call = self
@@ -563,6 +566,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = call.try_as_basic_value()
             .basic()
             .ok_or_else(|| format!("`{fn_name}` did not return a value"))?;
+        if fn_name == "thaw_json_as_number" {
+            // The scalar does not alias the box; release a fresh producer result.
+            self.release_fresh_owned_json_operand(val)?;
+        }
+        self.owned_json_discard_frames.pop();
         self.compile_check_json_host_error(value, (fn_name == "thaw_json_as_string")
             .then_some("thaw_cstring_destroy"))
     }
@@ -571,6 +579,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// returns `i8` (0/1), not `i1`, so the result needs converting to
     /// match how `HirType::Bool` is represented everywhere else.
     fn compile_json_as_bool(&mut self, inner: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        self.begin_owned_json_discard_frame();
         let val = self.compile_expr(inner)?;
         let function = self.module.get_function("thaw_json_as_bool").unwrap();
         let call = self
@@ -582,6 +591,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_as_bool did not return a value")?
             .into_int_value();
+        self.release_fresh_owned_json_operand(val)?;
+        self.owned_json_discard_frames.pop();
         self.compile_check_json_host_error(u8_val.into(), None)?;
         let zero = self.context.i8_type().const_int(0, false);
         self.builder

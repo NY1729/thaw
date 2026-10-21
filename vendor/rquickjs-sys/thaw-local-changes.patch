@@ -1,0 +1,291 @@
+--- a/build.rs
++++ b/build.rs
+@@ -203,9 +203,11 @@
+     }
+ 
+     for file in source_files.iter().chain(header_files.iter()) {
++        println!("cargo:rerun-if-changed={}", src_dir.join(file).display());
+         fs::copy(src_dir.join(file), out_dir.join(file))
+             .expect("Unable to copy source; try 'git submodule update --init'");
+     }
++    println!("cargo:rerun-if-changed=quickjs.bind.h");
+     fs::copy("quickjs.bind.h", out_dir.join("quickjs.bind.h")).expect("Unable to copy source");
+ 
+     if target_os == "wasi" && !matches!(env::var("RQUICKJS_SYS_NO_WASI_SDK").as_deref(), Ok("1")) {
+--- a/quickjs/quickjs.h
++++ b/quickjs/quickjs.h
+@@ -1197,6 +1197,8 @@
+ /* JS Job support */
+ 
+ typedef JSValue JSJobFunc(JSContext *ctx, int argc, JSValueConst *argv);
++JS_EXTERN JSValue JS_GetAsyncContext(JSContext *ctx);
++JS_EXTERN JSValue JS_SwapAsyncContext(JSContext *ctx, JSValueConst next);
+ JS_EXTERN int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
+                             int argc, JSValueConst *argv);
+ 
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -518,6 +518,7 @@
+     JSValue array_proto_values;
+     JSValue throw_type_error;
+     JSValue eval_obj;
++    JSValue async_context; /* owned current async frame */
+ 
+     JSValue global_obj; /* global object */
+     JSValue global_var_obj; /* contains the global let/const definitions */
+@@ -993,6 +994,7 @@
+     JSContext *ctx;
+     JSJobFunc *job_func;
+     int argc;
++    JSValue async_context; /* owned frame for this job */
+     JSValue argv[];
+ } JSJobEntry;
+ 
+@@ -2134,9 +2136,11 @@
+     rt->sab_funcs = *sf;
+ }
+ 
+-/* return 0 if OK, < 0 if exception */
+-int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
+-                  int argc, JSValueConst *argv)
++/* Job frames are captured at enqueue unless a Promise reaction supplies
++   the frame retained when its handler was registered. */
++static int js_enqueue_job_with_async_context(JSContext *ctx, JSJobFunc *job_func,
++                                             int argc, JSValueConst *argv,
++                                             JSValueConst async_context)
+ {
+     JSRuntime *rt = ctx->rt;
+     JSJobEntry *e;
+@@ -2150,6 +2154,7 @@
+     e->ctx = ctx;
+     e->job_func = job_func;
+     e->argc = argc;
++    e->async_context = js_dup(async_context);
+     for(i = 0; i < argc; i++) {
+         e->argv[i] = js_dup(argv[i]);
+     }
+@@ -2157,6 +2162,26 @@
+     return 0;
+ }
+ 
++/* return 0 if OK, < 0 if exception */
++int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
++                  int argc, JSValueConst *argv)
++{
++    return js_enqueue_job_with_async_context(ctx, job_func, argc, argv,
++                                             ctx->async_context);
++}
++
++JSValue JS_GetAsyncContext(JSContext *ctx)
++{
++    return js_dup(ctx->async_context);
++}
++
++JSValue JS_SwapAsyncContext(JSContext *ctx, JSValueConst next)
++{
++    JSValue previous = ctx->async_context;
++    ctx->async_context = js_dup(next);
++    return previous;
++}
++
+ bool JS_IsJobPending(JSRuntime *rt)
+ {
+     return !list_empty(&rt->job_list);
+@@ -2176,7 +2201,7 @@
+ {
+     JSContext *ctx;
+     JSJobEntry *e;
+-    JSValue res;
++    JSValue res, previous_async_context;
+     int i, ret;
+ 
+     if (list_empty(&rt->job_list)) {
+@@ -2188,7 +2213,12 @@
+     e = list_entry(rt->job_list.next, JSJobEntry, link);
+     list_del(&e->link);
+     ctx = e->ctx;
+-    res = e->job_func(e->ctx, e->argc, vc(e->argv));
++    previous_async_context = ctx->async_context;
++    ctx->async_context = js_dup(e->async_context);
++    res = e->job_func(ctx, e->argc, vc(e->argv));
++    JS_FreeValue(ctx, ctx->async_context);
++    ctx->async_context = previous_async_context;
++    JS_FreeValue(ctx, e->async_context);
+     for(i = 0; i < e->argc; i++)
+         JS_FreeValue(ctx, e->argv[i]);
+     if (JS_IsException(res))
+@@ -2298,6 +2328,7 @@
+         JSJobEntry *e = list_entry(el, JSJobEntry, link);
+         for(i = 0; i < e->argc; i++)
+             JS_FreeValueRT(rt, e->argv[i]);
++        JS_FreeValueRT(rt, e->async_context);
+         js_free_rt(rt, e);
+     }
+     init_list_head(&rt->job_list);
+@@ -2517,6 +2548,7 @@
+     ctx->iterator_ctor_getset = JS_NULL;
+     ctx->regexp_ctor = JS_NULL;
+     ctx->promise_ctor = JS_NULL;
++    ctx->async_context = JS_UNDEFINED;
+     ctx->error_ctor = JS_NULL;
+     ctx->error_back_trace = JS_UNDEFINED;
+     ctx->error_prepare_stack = JS_UNDEFINED;
+@@ -2636,6 +2668,7 @@
+ 
+     JS_MarkValue(rt, ctx->throw_type_error, mark_func);
+     JS_MarkValue(rt, ctx->eval_obj, mark_func);
++    JS_MarkValue(rt, ctx->async_context, mark_func);
+ 
+     JS_MarkValue(rt, ctx->array_proto_values, mark_func);
+     for(i = 0; i < JS_NATIVE_ERROR_COUNT; i++) {
+@@ -2718,6 +2751,7 @@
+ 
+     JS_FreeValue(ctx, ctx->throw_type_error);
+     JS_FreeValue(ctx, ctx->eval_obj);
++    JS_FreeValue(ctx, ctx->async_context);
+ 
+     JS_FreeValue(ctx, ctx->array_proto_values);
+     for(i = 0; i < JS_NATIVE_ERROR_COUNT; i++) {
+@@ -44641,6 +44675,7 @@
+                     }
+                     break;
+                 }
++                JS_FreeValue(ctx, item);
+                 index_val = JS_UNDEFINED;
+                 ret = JS_UNDEFINED;
+                 item = JS_UNDEFINED;
+@@ -44954,6 +44989,20 @@
+ 
+     it->executing = 1;
+ 
++    /* return() closes sources without advancing them or invoking mapper callbacks. */
++    if (magic == GEN_MAGIC_RETURN) {
++        if (it->kind == JS_ITERATOR_HELPER_KIND_FLAT_MAP && !JS_IsUndefined(it->inner)) {
++            int close_failed = JS_IteratorClose(ctx, it->inner, false);
++            JS_FreeValue(ctx, it->inner);
++            it->inner = JS_UNDEFINED;
++            if (close_failed)
++                goto fail;
++        }
++        *pdone = true;
++        ret = JS_IteratorClose(ctx, it->obj, false) ? JS_EXCEPTION : JS_UNDEFINED;
++        goto done;
++    }
++
+     switch (it->kind) {
+     case JS_ITERATOR_HELPER_KIND_DROP:
+         {
+@@ -45018,6 +45067,7 @@
+             selected = JS_Call(ctx, it->func, JS_UNDEFINED, countof(args), args);
+             JS_FreeValue(ctx, index_val);
+             if (JS_IsException(selected)) {
++                JS_FreeValue(ctx, item);
+                 JS_FreeValue(ctx, method);
+                 goto fail;
+             }
+@@ -45026,6 +45076,7 @@
+                 ret = item;
+                 goto done;
+             }
++            JS_FreeValue(ctx, item);
+             goto filter_again;
+         }
+         break;
+@@ -45180,6 +45231,7 @@
+     it->executing = 0;
+     return ret;
+ fail:
++    *pdone = true;
+     /* close the iterator object, preserving pending exception */
+     JS_IteratorClose(ctx, it->obj, true);
+     ret = JS_EXCEPTION;
+@@ -51274,6 +51326,11 @@
+         JS_FreeValue(ctx, trap_result_obj);
+         if (res < 0)
+             return -1;
++        /* js_obj_to_desc() reports accessor fields as JS_PROP_HAS_GET/SET;
++           the property-descriptor consumers (Object.getOwnPropertyDescriptor,
++           the invariant checks below) test the JS_PROP_GETSET type bit. */
++        if (result_desc.flags & (JS_PROP_HAS_GET | JS_PROP_HAS_SET))
++            result_desc.flags |= JS_PROP_GETSET;
+ 
+         if (target_desc_ret) {
+             /* convert result_desc.flags to defineProperty flags */
+@@ -51391,15 +51448,21 @@
+             }
+         } else if (flags & JS_PROP_HAS_VALUE) {
+             if ((desc.flags & (JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE)) ==
+-                JS_PROP_WRITABLE && !(flags & JS_PROP_WRITABLE)) {
+-                /* missing-proxy-check feature */
++                JS_PROP_WRITABLE &&
++                (flags & (JS_PROP_HAS_WRITABLE | JS_PROP_WRITABLE)) ==
++                JS_PROP_HAS_WRITABLE) {
++                /* missing-proxy-check feature; a value-only request that
++                   does not mention writable is valid (ES2024 10.5.6 17.c) */
+                 goto fail1;
+             } else if ((desc.flags & (JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE)) == 0 &&
+                 !js_same_value(ctx, val, desc.value)) {
+                 goto fail1;
+             }
+         }
+-        if (flags & JS_PROP_HAS_WRITABLE) {
++        if ((flags & (JS_PROP_HAS_WRITABLE | JS_PROP_WRITABLE)) ==
++            JS_PROP_HAS_WRITABLE) {
++            /* ES2024 10.5.6 step 17.c: only a request for writable:false
++               conflicts with a nonconfigurable writable target property. */
+             if ((desc.flags & (JS_PROP_GETSET | JS_PROP_CONFIGURABLE |
+                                JS_PROP_WRITABLE)) == JS_PROP_WRITABLE) {
+                 /* proxy-missing-checks */
+@@ -54235,6 +54298,7 @@
+     struct list_head link; /* not used in promise_reaction_job */
+     JSValue resolving_funcs[2];
+     JSValue handler;
++    JSValue async_context; /* registration-time frame */
+ } JSPromiseReactionData;
+ 
+ JSPromiseStateEnum JS_PromiseState(JSContext *ctx, JSValueConst promise)
+@@ -54274,6 +54338,7 @@
+     JS_FreeValueRT(rt, rd->resolving_funcs[0]);
+     JS_FreeValueRT(rt, rd->resolving_funcs[1]);
+     JS_FreeValueRT(rt, rd->handler);
++    JS_FreeValueRT(rt, rd->async_context);
+     js_free_rt(rt, rd);
+ }
+ 
+@@ -54382,7 +54447,8 @@
+         args[2] = rd->handler;
+         args[3] = js_bool(is_reject);
+         args[4] = value;
+-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
++        js_enqueue_job_with_async_context(ctx, promise_reaction_job, 5, args,
++                                          rd->async_context);
+         list_del(&rd->link);
+         promise_reaction_data_free(ctx->rt, rd);
+     }
+@@ -54590,6 +54656,7 @@
+             JS_MarkValue(rt, rd->resolving_funcs[0], mark_func);
+             JS_MarkValue(rt, rd->resolving_funcs[1], mark_func);
+             JS_MarkValue(rt, rd->handler, mark_func);
++            JS_MarkValue(rt, rd->async_context, mark_func);
+         }
+     }
+     JS_MarkValue(rt, s->promise_result, mark_func);
+@@ -55148,6 +55215,8 @@
+                 promise_reaction_data_free(ctx->rt, rd_array[0]);
+             return -1;
+         }
++        rd->async_context = JS_UNDEFINED;
++        rd->async_context = js_dup(ctx->async_context);
+         for(j = 0; j < 2; j++)
+             rd->resolving_funcs[j] = js_dup(cap_resolving_funcs[j]);
+         handler = resolve_reject[i];
+@@ -55175,7 +55244,8 @@
+         args[2] = rd->handler;
+         args[3] = js_bool(i);
+         args[4] = s->promise_result;
+-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
++        js_enqueue_job_with_async_context(ctx, promise_reaction_job, 5, args,
++                                          rd->async_context);
+         for(i = 0; i < 2; i++)
+             promise_reaction_data_free(ctx->rt, rd_array[i]);
+     }
