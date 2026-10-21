@@ -56,6 +56,103 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    /// The "already transferred" flag of an exact fresh producer value, loaded at the current
+    /// insertion point (`None` when `value` is not a tracked fresh producer). Used to carry
+    /// freshness through a conditional whose arms are both fresh producers.
+    fn fresh_owned_json_transfer_flag(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<Option<inkwell::values::IntValue<'ctx>>, String> {
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        let slots: Vec<_> = self.owned_json_discard_frames.iter()
+            .filter(|frame| frame.function_name == function_name)
+            .flat_map(|frame| frame.candidates.iter())
+            .filter(|candidate| candidate.value.as_value_ref() == value.as_value_ref())
+            .map(|candidate| candidate.transferred)
+            .collect();
+        if slots.is_empty() {
+            return Ok(None);
+        }
+        let bool_type = self.context.bool_type();
+        let mut flag = bool_type.const_zero();
+        for slot in slots {
+            let loaded = self.builder.build_load(bool_type, slot, "arm_json_was_transferred")
+                .map_err(|error| error.to_string())?.into_int_value();
+            flag = self.builder.build_or(flag, loaded, "arm_json_transferred_any")
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(Some(flag))
+    }
+
+    /// Register the merged value of a conditional as a fresh producer when both arms were
+    /// fresh producers; `flags` are the arms' transfer flags read at the end of each arm.
+    fn mark_fresh_conditional_json_result(
+        &mut self,
+        merged: BasicValueEnum<'ctx>,
+        flags: [(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>); 2],
+    ) -> Result<(), String> {
+        let phi = self.builder.build_phi(self.context.bool_type(), "merged_json_transferred")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[(&flags[0].0, flags[0].1), (&flags[1].0, flags[1].1)]);
+        let before = self.owned_json_discard_frames.last().map_or(0, |frame| frame.candidates.len());
+        self.mark_fresh_owned_json_result(merged)?;
+        if let Some(frame) = self.owned_json_discard_frames.last() {
+            if frame.candidates.len() > before {
+                let slot = frame.candidates.last().unwrap().transferred;
+                self.builder.build_store(slot, phi.as_basic_value())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release a fresh `Json` box that an operand consumer has finished with and that cannot
+    /// alias its scalar/native result (`Boolean(json)`, `Number(json)`, a native collection
+    /// argument). Only an exact fresh-producer SSA value that no store has taken over is
+    /// destroyed; a variable read or an already transferred box is left alone. Destruction
+    /// preserves a pending host error, so this is also safe right before an error check.
+    fn release_fresh_owned_json_operand(&mut self, value: BasicValueEnum<'ctx>) -> Result<(), String> {
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        let slots: Vec<_> = self.owned_json_discard_frames.iter()
+            .filter(|frame| frame.function_name == function_name)
+            .flat_map(|frame| frame.candidates.iter())
+            .filter(|candidate| candidate.value.as_value_ref() == value.as_value_ref())
+            .map(|candidate| candidate.transferred)
+            .collect();
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let bool_type = self.context.bool_type();
+        let mut still_owned = bool_type.const_int(1, false);
+        for slot in &slots {
+            let transferred = self.builder.build_load(bool_type, *slot, "operand_json_was_transferred")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let owned = self.builder.build_not(transferred, "operand_json_still_owned")
+                .map_err(|error| error.to_string())?;
+            still_owned = self.builder.build_and(still_owned, owned, "operand_json_all_owned")
+                .map_err(|error| error.to_string())?;
+        }
+        let function = self.current_function();
+        let destroy = self.context.append_basic_block(function, "destroy_consumed_json_operand");
+        let done = self.context.append_basic_block(function, "consumed_json_operand_done");
+        self.builder.build_conditional_branch(still_owned, destroy, done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(destroy);
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[value.into()],
+            "destroy_consumed_fresh_json_operand",
+        ).map_err(|error| error.to_string())?;
+        // The statement-level discard must not destroy it a second time.
+        for slot in slots {
+            self.builder.build_store(slot, bool_type.const_int(1, false))
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
     fn discard_owned_json_statement_result(
         &mut self,
         expression: &HirExpr,
