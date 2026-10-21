@@ -373,6 +373,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_str_pointer_same",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_exception_native_same",
             i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),

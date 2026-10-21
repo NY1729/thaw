@@ -1653,6 +1653,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::NativeException);
                     }
+                    "__thaw_str_pointer_same" => {
+                        if args.len() != 2 || self.infer_expr_type(&args[0])? != HirType::Str
+                            || self.infer_expr_type(&args[1])? != HirType::Str
+                        {
+                            return Err("string pointer identity requires two strings".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_native_exception_owner_present" => {
                         if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
                             return Err("native exception owner check requires its projected pointer".into());
