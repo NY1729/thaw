@@ -1305,6 +1305,11 @@ impl<'a> FnLowerer<'a> {
                     // Object]"` (`__thaw_object_to_string`) every other
                     // class/object literal already gets.
                     _ => {
+                        if let Some(result) = self.invoke_class_ordinary_to_primitive(
+                            value.clone(), &HirType::Object(fields.clone()), "string",
+                        )? {
+                            return Ok(HirExpr::JsonAsString(Box::new(result)));
+                        }
                         let tag_property = well_known_symbol_key("toStringTag");
                         if let Some(owner) = self.class_instance_accessor_owner(
                             &HirType::Object(fields.clone()), &tag_property,
@@ -2849,6 +2854,9 @@ impl<'a> FnLowerer<'a> {
             return Ok((result, HirType::Json));
         }
         if let Some(result) = self.invoke_class_to_primitive(value.clone(), &ty, "default")? {
+            return Ok((result, HirType::Json));
+        }
+        if let Some(result) = self.invoke_class_ordinary_to_primitive(value.clone(), &ty, "default")? {
             return Ok((result, HirType::Json));
         }
         Err(format!(
