@@ -525,6 +525,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonAsString(inner) => self.compile_json_as(inner, "thaw_json_as_string"),
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
             HirExpr::JsonAsNative(inner, ty) => {
+                // Local frame: see the fresh producer in `inner` even without a statement frame.
+                self.begin_owned_json_discard_frame();
                 let json = self.compile_expr(inner)?;
                 // This is a second root for recursive Object/Array decoding.
                 // A Function field can register its original JS handle before
@@ -545,12 +547,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
                     &[self.context.i8_type().const_int(2, false).into()], "merge_json_as_native_scope",
                 ).map_err(|error| error.to_string())?;
+                // A native Map/Set result is either an authenticated native pointer or a fresh
+                // copy; neither aliases the source box, so a fresh producer result is dead here.
+                let collection = matches!(ty, HirType::Map(..) | HirType::Set(..));
+                if collection {
+                    self.release_fresh_owned_json_operand(json)?;
+                }
                 self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
                 self.builder.position_at_end(failed);
                 self.compile_discard_typed_decode_scope()?;
+                if collection {
+                    self.release_fresh_owned_json_operand(json)?;
+                }
                 self.branch_on_pending_exception()?;
                 self.builder.build_unreachable().map_err(|error| error.to_string())?;
                 self.builder.position_at_end(done);
+                self.owned_json_discard_frames.pop();
                 Ok(value)
             }
 

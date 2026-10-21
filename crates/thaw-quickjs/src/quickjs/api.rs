@@ -6357,7 +6357,7 @@ mod forced_root_graph_wire_controls {
         // (u64 plus error pointer) and ThawResult (text plus error pointer),
         // matching thaw-std's HostHandleResult and HostTextResult exactly.
         unsafe {
-        thaw_json_register_host_operations(
+            thaw_json_register_host_operations(
                 thaw_js_retain_handle,
                 thaw_js_release_handle,
                 thaw_js_get_property_json_key_result,
@@ -6365,15 +6365,15 @@ mod forced_root_graph_wire_controls {
                 thaw_js_host_date_set_result,
                 thaw_js_set_property_graph_result,
                 thaw_js_property_predicate_json_key_result,
-            thaw_js_host_enumerate_result,
-        );
-        thaw_json_register_error_factory(
-            thaw_js_error_from_tagged_handle,
-            thaw_js_lookup_native_object,
-            thaw_js_intern_native_object,
-        );
+                thaw_js_host_enumerate_result,
+            );
+            thaw_json_register_error_factory(
+                thaw_js_error_from_tagged_handle,
+                thaw_js_lookup_native_object,
+                thaw_js_intern_native_object,
+            );
+        }
     }
-}
 
     fn retain_source(source: &str) -> u64 {
         let handle = with_context(|ctx| {

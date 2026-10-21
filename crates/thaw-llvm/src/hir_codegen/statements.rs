@@ -237,8 +237,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(condition, consequent_block, alternate_block)
             .map_err(|error| error.to_string())?;
 
+        let json_result = matches!(ty, HirType::Json | HirType::Dictionary(_));
         self.builder.position_at_end(consequent_block);
         let consequent = self.compile_expr(consequent)?;
+        let consequent_flag = if json_result { self.fresh_owned_json_transfer_flag(consequent)? } else { None };
         let consequent_end = self.builder.get_insert_block().unwrap();
         self.builder
             .build_unconditional_branch(merge_block)
@@ -246,6 +248,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(alternate_block);
         let alternate = self.compile_expr(alternate)?;
+        let alternate_flag = if json_result { self.fresh_owned_json_transfer_flag(alternate)? } else { None };
         let alternate_end = self.builder.get_insert_block().unwrap();
         self.builder
             .build_unconditional_branch(merge_block)
@@ -260,7 +263,15 @@ impl<'ctx> HirCompiler<'ctx> {
             (&consequent, consequent_end),
             (&alternate, alternate_end),
         ]);
-        Ok(phi.as_basic_value())
+        let merged = phi.as_basic_value();
+        // Both arms produced a fresh box nobody else owns, so the merged box is fresh too.
+        if let (Some(consequent_flag), Some(alternate_flag)) = (consequent_flag, alternate_flag) {
+            self.mark_fresh_conditional_json_result(
+                merged,
+                [(consequent_flag, consequent_end), (alternate_flag, alternate_end)],
+            )?;
+        }
+        Ok(merged)
     }
 
     /// Compiles a statement list, stopping early if one of them

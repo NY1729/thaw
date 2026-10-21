@@ -136,6 +136,50 @@ mod tests {
         CALL_ERROR.with(|error| error.set(ptr::null()));
     }
 
+    /// Every untagged JIT array handle the application may receive back must be a full
+    /// `{buffer, presence}` pair: `compile_jit_array_result` reuses an untagged non-null
+    /// pointer as an application handle and reads the presence word. The producers are
+    /// `mutable_array_handle` and `dynamic_array_result` (both 16 bytes); a one-word cell would
+    /// make the application read past the allocation.
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn mutable_array_handle_allocates_a_full_application_handle() {
+        thread_local! { static REQUESTED: Cell<usize> = const { Cell::new(0) }; }
+        unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
+            REQUESTED.with(|requested| requested.set(size));
+            let output = unsafe { libc::malloc(size).cast::<u8>() };
+            if !output.is_null() {
+                unsafe { output.write_bytes(0xa5, size) };
+            }
+            output
+        }
+
+        let buffer = unsafe { libc::malloc(16).cast::<u8>() };
+        assert!(!buffer.is_null());
+        unsafe {
+            buffer.cast::<u64>().write(1);
+            buffer.add(8).cast::<f64>().write(7.0);
+        }
+        ARENA_ALLOC.with(|allocator| allocator.set(Some(allocate)));
+        CALL_ERROR.with(|error| error.set(ptr::null()));
+
+        let handle = mutable_array_handle(array_result(buffer));
+        assert_eq!(REQUESTED.with(Cell::get), 2 * std::mem::size_of::<*mut u8>());
+        assert_eq!(handle.to_bits() & ARRAY_RESULT_TAG, 0, "a boxed handle is untagged");
+        let slots = handle.to_bits() as usize as *const *const u8;
+        assert_eq!(unsafe { slots.read() }, buffer.cast_const());
+        assert!(unsafe { slots.add(1).read() }.is_null(), "the presence word must be initialized");
+        // An untagged value is already an application handle and passes through unchanged.
+        assert_eq!(mutable_array_handle(handle).to_bits(), handle.to_bits());
+
+        unsafe {
+            libc::free(slots.cast_mut().cast());
+            libc::free(buffer.cast());
+        }
+        ARENA_ALLOC.with(|allocator| allocator.set(None));
+        CALL_ERROR.with(|error| error.set(ptr::null()));
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
