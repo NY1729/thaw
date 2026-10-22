@@ -3,6 +3,8 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
+    // sqlite3 ships its addon only as a GitHub prebuild, which needs the opt-in.
+    std::env::set_var("THAW_ALLOW_UNVERIFIED_PREBUILD", "1");
     let dir = std::env::temp_dir().join(format!("thaw-cli-auto-sqlite3-{}", std::process::id()));
     let registry = dir.join("modules");
     let added = thaw_registry::add(&registry, "sqlite3@6.0.1").unwrap();
