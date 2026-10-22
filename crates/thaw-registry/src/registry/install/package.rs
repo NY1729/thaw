@@ -15,8 +15,10 @@
 /// `@<scope>/<name>` package) and uses *its* declarations -- the JS
 /// still always comes from `package` itself, since `@types/*` packages
 /// carry no runtime code. Native addons never produce a `native.a`: bundled
-/// `.node` files, platform optional dependencies, and GitHub-hosted
-/// `prebuild-install` assets are selected independently of the JS fallback.
+/// `.node` files and platform optional dependencies are selected independently
+/// of the JS fallback; platform packages are verified against npm's
+/// `dist.integrity` first, and GitHub-hosted `prebuild-install` assets (no
+/// trusted digest) are refused.
 ///
 /// `package` may carry a version/tag/range specifier the same way `npm
 /// install` accepts one (`left-pad@1.3.0`, `left-pad@^1.2.0`,
@@ -380,6 +382,15 @@ fn publish_staged_package(staged: &Path, destination: &Path, backup: &Path) -> R
     Ok(())
 }
 
+/// Whether the user opted in to loading a GitHub-only prebuild without a
+/// trusted digest.
+fn unverified_prebuild_allowed() -> bool {
+    matches!(
+        std::env::var("THAW_ALLOW_UNVERIFIED_PREBUILD").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 fn fetch_and_copy(
     scratch: &Path,
     registry_dir: &Path,
@@ -391,6 +402,7 @@ fn fetch_and_copy(
     let node_modules_dir = scratch.join("node_modules");
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
+    install_verified_platform_packages(&node_modules_dir, &manifest, scratch)?;
     let main_field = package_export_target(&manifest, None, &["require", "node", "default"])
         .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
@@ -413,6 +425,20 @@ fn fetch_and_copy(
         js_source,
         &mut candidate_diagnostics,
     )?.is_none() {
+        if let Some((url, _, _, _)) = prebuild_install_asset(&manifest) {
+            if !unverified_prebuild_allowed() {
+                let refusal = format!(
+                    "`{name}` ships its native addon only as a GitHub prebuild at `{url}`, which has no trusted digest; set THAW_ALLOW_UNVERIFIED_PREBUILD=1 to load it unverified"
+                );
+                return Err(match early_bundle {
+                    Err(source_error) => format!("{source_error}; {refusal}"),
+                    Ok(_) => refusal,
+                });
+            }
+            eprintln!(
+                "warning: `{name}` native addon is loaded from `{url}` without a trusted digest (THAW_ALLOW_UNVERIFIED_PREBUILD is set)"
+            );
+        }
         if let Err(download_error) = download_prebuild_install_addon(&package_dir, &manifest) {
             return Err(match early_bundle {
                 Err(source_error) => format!("{source_error}; prebuild download also failed: {download_error}"),
