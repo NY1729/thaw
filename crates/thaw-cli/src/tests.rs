@@ -1232,14 +1232,30 @@ fn project_entry_that_is_missing_is_an_error_not_a_guess() {
         std::env::temp_dir().join(format!("thaw-cli-missing-entry-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("server.ts"), "function main(): void {}\n").unwrap();
-    let configured = project_build_defaults(r#"{"thaw":{"entry":"missing.ts"}}"#)
-        .unwrap()
-        .0;
-    let error = project_input_path(&directory, configured).unwrap_err();
+    let manifest = r#"{"thaw":{"entry":"missing.ts"}}"#;
+    let configured = project_build_defaults(manifest).unwrap().0;
+    let error =
+        project_input_path(&directory, configured, manifest_sets_thaw_entry(manifest)).unwrap_err();
     assert!(error.contains("missing.ts"), "{error}");
     assert!(error.contains("thaw.entry"), "{error}");
     assert_eq!(
-        project_input_path(&directory, Some(PathBuf::from("server.ts"))).unwrap(),
+        project_input_path(&directory, Some(PathBuf::from("server.ts")), true).unwrap(),
+        Some(directory.join("server.ts"))
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn project_npm_entry_that_is_missing_falls_back_to_default_server() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-missing-npm-entry-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("server.ts"), "function main(): void {}\n").unwrap();
+    let manifest = r#"{"main":"dist/index.js"}"#;
+    let configured = project_build_defaults(manifest).unwrap().0;
+    assert!(!manifest_sets_thaw_entry(manifest));
+    assert_eq!(
+        project_input_path(&directory, configured, false).unwrap(),
         Some(directory.join("server.ts"))
     );
     let _ = std::fs::remove_dir_all(directory);
