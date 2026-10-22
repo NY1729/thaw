@@ -143,6 +143,10 @@ struct ReadyContinuation {
     subscription: PromiseSubscription,
     result: *const u8,
     _result_root: thaw_arena::ArenaRoot,
+    /// QuickJS job barrier (0 = none): QuickJS jobs queued before this
+    /// continuation became ready must run before it resumes, as one FIFO
+    /// microtask queue does in JavaScript.
+    js_barrier: u64,
 }
 
 thread_local! {
@@ -458,13 +462,48 @@ pub extern "C" fn thaw_runtime_run_one_event() -> bool {
 }
 
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
+    let js_barrier = js_queue_job_barrier();
     READY_CONTINUATIONS.with(|ready| {
         ready.borrow_mut().push_back(ReadyContinuation {
             subscription,
             result,
             _result_root: thaw_arena::ArenaRoot::new(result as usize),
+            js_barrier,
         });
     });
+}
+
+thread_local! {
+    /// QuickJS job barrier hooks, registered by `thaw-quickjs` on context
+    /// creation (see `thaw_runtime_set_js_job_hooks`).
+    static JS_JOB_HOOKS: Cell<Option<(extern "C" fn() -> u64, extern "C" fn(u64))>> =
+        const { Cell::new(None) };
+}
+
+/// Registers the QuickJS job barrier hooks for this thread: `queue` returns a
+/// barrier id for the jobs pending now (0 if none), `drain` runs jobs until
+/// that barrier ran. Called once by `thaw-quickjs` when its context is created.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_set_js_job_hooks(
+    queue: extern "C" fn() -> u64,
+    drain: extern "C" fn(u64),
+) {
+    JS_JOB_HOOKS.with(|hooks| hooks.set(Some((queue, drain))));
+}
+
+/// Queues a QuickJS job marker behind the jobs pending now (0 if none pending
+/// or no JavaScript engine registered).
+fn js_queue_job_barrier() -> u64 {
+    JS_JOB_HOOKS
+        .with(|hooks| hooks.get())
+        .map_or(0, |(queue, _)| queue())
+}
+
+/// Runs QuickJS jobs until the marker queued as `barrier` has run.
+fn js_drain_to_job_barrier(barrier: u64) {
+    if let Some((_, drain)) = JS_JOB_HOOKS.with(|hooks| hooks.get()) {
+        drain(barrier);
+    }
 }
 
 fn promote_due_timers() {
@@ -527,6 +566,9 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
                 || reporting_work,
         );
     };
+    if continuation.js_barrier != 0 {
+        js_drain_to_job_barrier(continuation.js_barrier);
+    }
     (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
     drop(continuation);
     1

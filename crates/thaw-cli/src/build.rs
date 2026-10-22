@@ -1021,9 +1021,10 @@ fn napi_export_args() -> [&'static str; 2] {
     ]
 }
 
-fn quickjs_callback_export_args() -> [&'static str; 3] {
+fn quickjs_callback_export_args() -> [&'static str; 4] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
+        "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks",
         "-Wl,--export-dynamic-symbol=thaw_promise_state",
         "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
     ]
@@ -1081,6 +1082,7 @@ fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
         quickjs_callback_export_args(),
         [
             "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
+            "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks",
             "-Wl,--export-dynamic-symbol=thaw_promise_state",
             "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
         ]
