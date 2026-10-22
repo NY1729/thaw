@@ -1254,17 +1254,15 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_process_cwd", cwd)
                     .expect("failed to install process cwd bridge");
-                let chdir =
-                    Function::new(ctx.clone(), |path: crate::Wtf8String| -> rquickjs::Result<()> {
-                        std::env::set_current_dir(String::from_utf8_lossy(&path.0).as_ref())
-                            .map_err(|error| {
-                                rquickjs::Error::new_from_js_message(
-                                    "process",
-                                    "chdir",
-                                    error.to_string(),
-                                )
-                            })
-                    })
+                // Returns a JSON record; the JS `process.chdir` wrapper throws the Node-shaped error.
+                let chdir = Function::new(ctx.clone(), |path: crate::Wtf8String| -> String {
+                    let dest = String::from_utf8_lossy(&path.0).into_owned();
+                    let cwd = std::env::current_dir().map(|cwd| cwd.display().to_string()).unwrap_or_default();
+                    match std::env::set_current_dir(&dest) {
+                        Ok(()) => r#"{"ok":true}"#.to_string(),
+                        Err(error) => process_chdir_error(&cwd, &dest, &error),
+                    }
+                })
                 .expect("failed to create process chdir bridge");
                 ctx.globals()
                     .set("__thaw_process_chdir", chdir)

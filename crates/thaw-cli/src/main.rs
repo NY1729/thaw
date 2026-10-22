@@ -152,8 +152,17 @@ fn run_file_in(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let output = std::env::temp_dir().join(format!("thaw-run-{}-{nonce}", std::process::id()));
+    let output = run_output_path(nonce)?;
     run_file_at(input, args, &output, directory, registry)
+}
+
+/// The private, per-user location `thaw run` builds its program into (not the
+/// shared temp directory, and never printed).
+fn run_output_path(nonce: u128) -> Result<PathBuf, String> {
+    let dir = thaw_cache_root().join("run");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create `{}`: {error}", dir.display()))?;
+    Ok(dir.join(format!("thaw-run-{}-{nonce}", std::process::id())))
 }
 
 fn run_file_at(
@@ -164,7 +173,7 @@ fn run_file_at(
     registry: Option<&Path>,
 ) -> Result<i32, String> {
     let build_args = run_build_args(input, output, registry);
-    let result = run_build(&build_args).and_then(|_| {
+    let result = build_to_output(&build_args).and_then(|_| {
         let mut command = Command::new(output);
         command.args(args);
         if let Some(directory) = directory {
@@ -279,6 +288,7 @@ fn run_script(args: &[String]) -> Result<i32, String> {
             directory.display()
         ));
     }
+    check_tsconfig(directory)?;
     // A script whose command is just a supported source file is compiled
     // and run by thaw -- the point of `thaw run` -- from the project
     // directory, with the script's own declared arguments plus any the
@@ -742,6 +752,14 @@ fn build_option_value(args: &[String], index: usize) -> Result<Option<&str>, Str
 }
 
 fn run_build(args: &[String]) -> Result<(), String> {
+    let output = build_to_output(args)?;
+    println!("built `{}`", output.display());
+    Ok(())
+}
+
+/// Compiles the `thaw build` arguments and returns the output path. Quiet, so
+/// `thaw run` can build into its own temporary location without announcing it.
+fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut extra_links: Vec<PathBuf> = Vec::new();
@@ -824,6 +842,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
         let manifest_path = directory.join("package.json");
         let manifest = std::fs::read_to_string(&manifest_path)
             .map_err(|_| format!("`{}` does not contain package.json", directory.display()))?;
+        check_tsconfig(directory)?;
         let (configured_input, configured_vite, configured_output) =
             project_build_defaults(&manifest)?;
         input = project_input_path(directory, configured_input);
@@ -875,7 +894,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     if let Some(path) = generated_input {
         let _ = std::fs::remove_file(path);
     }
-    result
+    result.map(|()| output)
 }
 
 #[allow(clippy::type_complexity)]
@@ -885,12 +904,16 @@ fn project_build_defaults(
     let manifest: serde_json::Value =
         serde_json::from_str(manifest).map_err(|error| format!("invalid package.json: {error}"))?;
     let thaw = manifest.get("thaw").and_then(serde_json::Value::as_object);
-    let path = |name| {
-        thaw.and_then(|config| config.get(name))
-            .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from)
+    // A `thaw.*` path must be a string (`null` counts as unset); anything else
+    // is reported as such instead of falling through to a misleading default.
+    let path = |name| -> Result<Option<PathBuf>, String> {
+        match thaw.and_then(|config| config.get(name)) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(path)) => Ok(Some(PathBuf::from(path))),
+            Some(_) => Err(format!("`thaw.{name}` in package.json must be a string")),
+        }
     };
-    let entry = path("entry")
+    let entry = path("entry")?
         .or_else(|| {
             ["source", "module", "main"]
                 .into_iter()
@@ -912,13 +935,103 @@ fn project_build_defaults(
                     .map(PathBuf::from)
             })
         });
-    let vite = path("vite").or_else(|| {
+    let vite = path("vite")?.or_else(|| {
         manifest["scripts"]["build"]
             .as_str()
             .is_some_and(|script| script.split_whitespace().any(|word| word == "vite"))
             .then(|| PathBuf::from("."))
     });
-    Ok((entry, vite, path("output")))
+    Ok((entry, vite, path("output")?))
+}
+
+/// Fails when `directory/tsconfig.json` exists but is not a JSON object.
+/// tsconfig is JSONC (comments and trailing commas are allowed), so those are
+/// stripped before parsing.
+fn check_tsconfig(directory: &Path) -> Result<(), String> {
+    let path = directory.join("tsconfig.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to read `{}`: {error}", path.display())),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&strip_jsonc(&text))
+        .map_err(|error| format!("invalid tsconfig.json at `{}`: {error}", path.display()))?;
+    if !parsed.is_object() {
+        return Err(format!(
+            "invalid tsconfig.json at `{}`: expected a JSON object",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Removes `//` and `/* */` comments and trailing commas before `}`/`]`,
+/// leaving string literals untouched.
+fn strip_jsonc(text: &str) -> String {
+    let mut without_comments = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            without_comments.push(c);
+            match c {
+                '\\' => without_comments.extend(chars.next()),
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+            without_comments.push(c);
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            while chars.next_if(|next| *next != '\n').is_some() {}
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = ' ';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            without_comments.push(' ');
+        } else {
+            without_comments.push(c);
+        }
+    }
+    let chars: Vec<char> = without_comments.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut in_string = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        index += 1;
+        if in_string {
+            out.push(c);
+            match c {
+                '\\' => {
+                    if let Some(&escaped) = chars.get(index) {
+                        out.push(escaped);
+                        index += 1;
+                    }
+                }
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else {
+            let trailing_comma = c == ','
+                && chars[index..]
+                    .iter()
+                    .find(|next| !next.is_whitespace())
+                    .is_some_and(|next| matches!(next, '}' | ']'));
+            if !trailing_comma {
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 fn project_input_path(directory: &Path, configured: Option<PathBuf>) -> Option<PathBuf> {
