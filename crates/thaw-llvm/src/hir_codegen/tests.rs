@@ -286,6 +286,7 @@ fn compile_and_run_raw(
         // own tracked completion) never finds `thaw_runtime_poll_one`
         // and its native continuation queue is never drained.
         .arg("-Wl,--export-dynamic-symbol=thaw_runtime_poll_one")
+        .arg("-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks")
         .arg("-Wl,--export-dynamic-symbol=thaw_promise_state")
         .arg("-Wl,--export-dynamic-symbol=thaw_promise_mark_handled")
         .arg("-o")
@@ -544,6 +545,7 @@ include!("tests/ja_contracts.rs");
 include!("tests/h1_contracts.rs");
 include!("tests/k3_contracts.rs");
 include!("tests/r1o1_contracts.rs");
+include!("tests/r1gap_contracts.rs");
 include!("tests/r8f_contracts.rs");
 include!("tests/na_contracts.rs");
 include!("tests/nb3_contracts.rs");
