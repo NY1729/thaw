@@ -3510,7 +3510,17 @@
     stdout: globalThis.process.stdout || processStream(1, processRawWrite),
     stderr: globalThis.process.stderr || processStream(2, processRawWrite),
     cwd: () => globalThis.__thaw_process_cwd(),
-    chdir: directory => globalThis.__thaw_process_chdir(String(directory)),
+    chdir: directory => {
+      const result = JSON.parse(globalThis.__thaw_process_chdir(String(directory)));
+      if (result.ok) return;
+      const error = new Error(result.message);
+      error.errno = result.errno;
+      error.code = result.code;
+      error.syscall = result.syscall;
+      error.path = result.path;
+      error.dest = result.dest;
+      throw error;
+    },
     exit: code => {
       const status = code === undefined ? Number(globalThis.process.exitCode || 0) : Number(code);
       globalThis.process.exitCode = status;

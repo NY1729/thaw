@@ -2965,6 +2965,18 @@ fn process_exposes_time_cwd_and_event_helpers() {
 }
 
 #[test]
+fn process_chdir_failure_is_a_node_shaped_error() {
+    assert_eq!(
+        load("function chdirError() { try { process.chdir('/thaw/missing/dir'); } catch (e) { return [e.name, e.code, e.errno, e.syscall, e.path === process.cwd(), e.dest, e.message.startsWith('ENOENT: no such file or directory, chdir '), e.message.endsWith(\"-> '/thaw/missing/dir'\")]; } return 'no error'; }"),
+        1
+    );
+    assert_eq!(
+        call("chdirError", "[]"),
+        r#"["Error","ENOENT",-2,"chdir",true,"/thaw/missing/dir",true,true]"#
+    );
+}
+
+#[test]
 fn process_clock_uses_captured_monotonic_nanoseconds() {
     std::thread::spawn(|| {
         assert_eq!(

@@ -364,11 +364,17 @@ fn exact_requested_version<'a>(spec: &'a str, package: &str) -> Option<&'a str> 
 /// `$XDG_CACHE_HOME/thaw/x` (or `$HOME/.cache/thaw/x`, or the temp
 /// directory as a last resort).
 fn x_cache_root() -> Result<PathBuf, String> {
+    Ok(thaw_cache_root().join("x"))
+}
+
+/// `$XDG_CACHE_HOME/thaw` (or `$HOME/.cache/thaw`, or the temp directory as a
+/// last resort).
+fn thaw_cache_root() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
-    Ok(base.join("thaw").join("x"))
+    base.join("thaw")
 }
 
 /// Every command a package's `bin` entry declares, as `(name, path)`. A

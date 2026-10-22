@@ -78,16 +78,50 @@ fn fs_kind_error_code(kind: io::ErrorKind) -> Option<&'static str> {
     })
 }
 
-fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
-    let code = if let Some(raw) = error.raw_os_error() {
+fn fs_error_code(error: &io::Error) -> String {
+    if let Some(raw) = error.raw_os_error() {
         fs_raw_error_code(raw)
             .or_else(|| if cfg!(unix) { None } else { fs_kind_error_code(error.kind()) })
             .map(str::to_owned)
             .unwrap_or_else(|| format!("ERRNO_{raw}"))
     } else {
         fs_kind_error_code(error.kind()).unwrap_or("EIO").to_string()
-    };
+    }
+}
+
+fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
+    let code = fs_error_code(&error);
     serde_json::json!({ "ok": false, "code": code, "operation": operation, "path": path, "message": error.to_string() }).to_string()
+}
+
+/// The JSON record `process.chdir` turns into Node's `ENOENT: ..., chdir '<cwd>' -> '<dest>'`
+/// error (`code`, `errno` (negative), `syscall`, `path` = cwd, `dest`).
+fn process_chdir_error(cwd: &str, dest: &str, error: &io::Error) -> String {
+    let code = fs_error_code(error);
+    let errno = error.raw_os_error().map_or(0, |raw| -raw);
+    // Rust's `Display` appends " (os error N)" and capitalises strerror; Node uses it verbatim.
+    let text = error.to_string();
+    let text = text.split(" (os error").next().unwrap_or_default();
+    let mut chars = text.chars();
+    let strerror: String = chars.next().map(|first| first.to_lowercase().chain(chars).collect()).unwrap_or_default();
+    serde_json::json!({
+        "ok": false, "code": code, "errno": errno, "syscall": "chdir", "path": cwd, "dest": dest,
+        "message": format!("{code}: {strerror}, chdir '{cwd}' -> '{dest}'"),
+    }).to_string()
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn process_chdir_error_matches_node_error_shape() {
+    let record: serde_json::Value = serde_json::from_str(&process_chdir_error(
+        "/work", "/nope/x", &io::Error::from_raw_os_error(libc::ENOENT),
+    )).unwrap();
+    assert_eq!(record["code"], "ENOENT");
+    assert_eq!(record["errno"], -libc::ENOENT);
+    assert_eq!(record["syscall"], "chdir");
+    assert_eq!(record["path"], "/work");
+    assert_eq!(record["dest"], "/nope/x");
+    assert_eq!(record["message"], "ENOENT: no such file or directory, chdir '/work' -> '/nope/x'");
 }
 
 #[cfg(unix)]
