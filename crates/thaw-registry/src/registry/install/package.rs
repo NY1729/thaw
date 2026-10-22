@@ -382,6 +382,15 @@ fn publish_staged_package(staged: &Path, destination: &Path, backup: &Path) -> R
     Ok(())
 }
 
+/// Whether the user opted in to loading a GitHub-only prebuild without a
+/// trusted digest.
+fn unverified_prebuild_allowed() -> bool {
+    matches!(
+        std::env::var("THAW_ALLOW_UNVERIFIED_PREBUILD").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 fn fetch_and_copy(
     scratch: &Path,
     registry_dir: &Path,
@@ -416,16 +425,24 @@ fn fetch_and_copy(
         js_source,
         &mut candidate_diagnostics,
     )?.is_none() {
-        // A GitHub-hosted prebuild has no digest from a trusted source, so
-        // it is refused rather than downloaded and loaded unverified. No
-        // opt-in flag exists for this yet.
         if let Some((url, _, _, _)) = prebuild_install_asset(&manifest) {
-            let refusal = format!(
-                "`{name}` ships its native addon only as a GitHub prebuild at `{url}`, which has no trusted digest; refusing to download and load it unverified"
+            if !unverified_prebuild_allowed() {
+                let refusal = format!(
+                    "`{name}` ships its native addon only as a GitHub prebuild at `{url}`, which has no trusted digest; set THAW_ALLOW_UNVERIFIED_PREBUILD=1 to load it unverified"
+                );
+                return Err(match early_bundle {
+                    Err(source_error) => format!("{source_error}; {refusal}"),
+                    Ok(_) => refusal,
+                });
+            }
+            eprintln!(
+                "warning: `{name}` native addon is loaded from `{url}` without a trusted digest (THAW_ALLOW_UNVERIFIED_PREBUILD is set)"
             );
+        }
+        if let Err(download_error) = download_prebuild_install_addon(&package_dir, &manifest) {
             return Err(match early_bundle {
-                Err(source_error) => format!("{source_error}; {refusal}"),
-                Ok(_) => refusal,
+                Err(source_error) => format!("{source_error}; prebuild download also failed: {download_error}"),
+                Ok(_) => download_error,
             });
         }
     }

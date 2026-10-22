@@ -880,3 +880,70 @@ mod integrity_tests {
         assert!(npm_dist_record(&http, "x", "1.0.0").is_err());
     }
 }
+
+/// Downloads the GitHub prebuild for a package. Callers must have checked the
+/// opt-in; the download has no trusted digest.
+fn download_prebuild_install_addon(
+    package_dir: &Path,
+    manifest: &serde_json::Value,
+) -> Result<(), String> {
+    let Some((url, asset, _, _)) = prebuild_install_asset(manifest) else {
+        return Ok(());
+    };
+    let mut response = ureq::get(&url)
+        .call()
+        .map_err(|error| format!("failed to download native prebuild `{url}`: {error}"))?;
+    let archive_bytes = response
+        .body_mut()
+        .with_config()
+        .limit(128 * 1024 * 1024)
+        .read_to_vec()
+        .map_err(|error| format!("failed to read native prebuild `{url}`: {error}"))?;
+    let unpack_dir = package_dir.join(".thaw-prebuild");
+    if unpack_dir.is_dir() {
+        fs::remove_dir_all(&unpack_dir)
+            .map_err(|error| format!("failed to clear `{}`: {error}", unpack_dir.display()))?;
+    }
+    fs::create_dir_all(&unpack_dir)
+        .map_err(|error| format!("failed to create `{}`: {error}", unpack_dir.display()))?;
+    let decoder = flate2::read::GzDecoder::new(archive_bytes.as_slice());
+    tar::Archive::new(decoder)
+        .unpack(&unpack_dir)
+        .map_err(|error| format!("failed to unpack native prebuild `{asset}`: {error}"))?;
+    let addon = find_node_file(&unpack_dir)?
+        .ok_or_else(|| format!("native prebuild `{asset}` contains no `.node` file"))?;
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package_dir
+        .join("prebuilds")
+        .join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target)
+        .map_err(|error| format!("failed to create `{}`: {error}", target.display()))?;
+    let destination =
+        target.join(addon.file_name().ok_or_else(|| {
+            format!("native prebuild path `{}` has no filename", addon.display())
+        })?);
+    fs::copy(&addon, &destination).map_err(|error| {
+        format!(
+            "failed to copy downloaded native addon to `{}`: {error}",
+            destination.display()
+        )
+    })?;
+    fs::write(package_dir.join(".thaw-prebuild-source"), url)
+        .map_err(|error| format!("failed to record downloaded native prebuild source: {error}"))?;
+    Ok(())
+}
+
+fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut matches = find_node_files(root)?;
+    if matches.len() > 1 {
+        return Err(format!(
+            "downloaded prebuild contains multiple `.node` files: {}",
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(matches.pop())
+}
