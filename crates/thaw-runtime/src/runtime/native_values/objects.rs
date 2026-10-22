@@ -502,6 +502,21 @@ fn object_internal_accessor_slot(key: &str) -> bool {
     key.starts_with("__thaw_getter_") || key.starts_with("__thaw_setter_")
 }
 
+/// Whether a stored key is a Symbol's wire text (`\u{1f}@@name`, `\u{3}<id>[:desc]`,
+/// `\u{3}R<id>:key`), never a string property name. Mirrors thaw-std's `is_symbol_key_wire`;
+/// the crates stay independent, so the predicate is repeated rather than shared.
+fn symbol_key_wire(key: &str) -> bool {
+    if key.starts_with("\u{1f}@@") {
+        return true;
+    }
+    let Some(rest) = key.strip_prefix('\u{3}') else {
+        return false;
+    };
+    let rest = rest.strip_prefix('R').unwrap_or(rest);
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(b':'))
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_object_has_full_layout(owner: *const u8) -> bool {
     OBJECT_FIELD_OFFSETS.with(|all| all.borrow().contains_key(&(owner as usize)))
@@ -546,7 +561,7 @@ pub extern "C" fn thaw_object_full_own_keys(
     let hidden = OBJECT_CLASS_IDENTITIES.with(|states| states.borrow()
         .get(&(owner as usize)).map(|state| state.hidden_markers.clone()).unwrap_or_default());
     let mut keys = fields.into_iter().enumerate().filter_map(|(index, key)| {
-        if hidden.contains(&key) || object_internal_accessor_slot(&key)
+        if hidden.contains(&key) || object_internal_accessor_slot(&key) || symbol_key_wire(&key)
             || (!include_non_enumerable && object_property_flags(owner, &key) & PROPERTY_ENUMERABLE == 0) {
             return None;
         }

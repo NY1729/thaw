@@ -2810,18 +2810,38 @@ impl<'a> FnLowerer<'a> {
                             }
                 let json_arguments =
                     self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_arguments))?;
-                            let json = HirExpr::Call(
-                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
-                                vec![HirExpr::Lit(HirLit::Str("JSON".to_string()))],
-                            );
-                            let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("callDynamicMethod".to_string())),
-                                vec![
-                                    json,
-                                    HirExpr::Lit(HirLit::Str("stringify".to_string())),
-                                    json_arguments,
-                                ],
-                            )));
+                            // A lone value goes through the QuickJS `__thaw_json_stringify_direct`
+                            // helper, which drops symbol-keyed wire properties. Passing it as the
+                            // same Json argument keeps the conversion identical to the old
+                            // `JSON.stringify` method call; any replacer/space keeps that call.
+                            let result = if arguments.len() == 1 {
+                                HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("callDynamicValueMixedExact".to_string())),
+                                    vec![
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                            vec![HirExpr::Lit(HirLit::Str(
+                                                "__thaw_json_stringify_direct".to_string(),
+                                            ))],
+                                        ),
+                                        json_arguments,
+                                        HirExpr::ArrayLit(Vec::new()),
+                                    ],
+                                )))
+                            } else {
+                                let json = HirExpr::Call(
+                                    Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                    vec![HirExpr::Lit(HirLit::Str("JSON".to_string()))],
+                                );
+                                HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+                                    vec![
+                                        json,
+                                        HirExpr::Lit(HirLit::Str("stringify".to_string())),
+                                        json_arguments,
+                                    ],
+                                )))
+                            };
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let mut replacer_array = None;
