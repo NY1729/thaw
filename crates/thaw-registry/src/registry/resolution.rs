@@ -38,6 +38,7 @@ pub struct ResolvedPackage {
 /// have nothing for thaw-bridge's shim to call.
 pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, String> {
     let (package, subpath) = split_bare_spec(name);
+    validate_installed_package_name(package)?;
     let package_root = registry_dir.join(package);
     let mut dir = package_root.clone();
     if let Some(subpath) = subpath {
