@@ -535,6 +535,7 @@ include!("tests/gc_contracts.rs");
 include!("tests/gb_contracts.rs");
 include!("tests/hb_contracts.rs");
 include!("tests/ha_contracts.rs");
+include!("tests/y1_contracts.rs");
 include!("tests/h2_contracts.rs");
 include!("tests/ia_contracts.rs");
 include!("tests/jb_contracts.rs");
