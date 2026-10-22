@@ -339,3 +339,78 @@ fn i_contract_k19c() {
 "##;
     assert_eq!(compile_and_run(source, "i_contract_k19c"), "true true true false true undefined\n");
 }
+
+#[test]
+fn object_literal_proto_setter_installs_object_prototype() {
+    let source = r##"function main() {
+  const p: any = { x: 1 };
+  const withP: any = { __proto__: p };
+  const withQ: any = { __proto__: p, own: 3 };
+  console.log(withP.x, withQ.x, withQ.own, Object.keys(withP).length, Object.keys(withQ).join(","));
+  console.log(Object.getPrototypeOf(withP) === p);
+}
+"##;
+    assert_eq!(compile_and_run(source, "proto_literal_object"), "1 1 3 0 own\ntrue\n");
+}
+
+#[test]
+fn object_literal_proto_setter_null_and_primitive() {
+    let source = r##"function main() {
+  const nullProto: any = { __proto__: null };
+  console.log(nullProto.toString === undefined, Object.getPrototypeOf(nullProto) === null);
+  const primitive: any = { __proto__: 5 };
+  console.log(primitive.toString === Object.prototype.toString, Object.getPrototypeOf(primitive) === Object.prototype);
+}
+"##;
+    assert_eq!(compile_and_run(source, "proto_literal_null_primitive"), "true true\ntrue true\n");
+}
+
+#[test]
+fn object_literal_proto_shorthand_and_computed_keys_stay_own() {
+    let source = r##"function main() {
+  const __proto__ = 7;
+  const shorthand: any = { __proto__ };
+  const computed: any = { ["__proto__"]: 3 };
+  console.log(Object.keys(shorthand).join(","), shorthand.__proto__, Object.keys(computed).join(","), computed.__proto__);
+}
+"##;
+    assert_eq!(compile_and_run(source, "proto_literal_own_keys"), "__proto__ 7 __proto__ 3\n");
+}
+
+#[test]
+fn object_literal_proto_setter_matches_node_semantics() {
+    let source = r##"function tag(order: string[], label: string, value: any): any {
+  order.push(label);
+  return value;
+}
+function main(): void {
+  const p: any = { x: 1 };
+  console.log(({ __proto__: p }).x);
+  console.log(({ __proto__: null } as any).toString);
+  console.log(({ __proto__: 5 } as any).toString === Object.prototype.toString);
+  console.log(Object.keys({ __proto__: p }).length);
+  const order: string[] = [];
+  const o: any = { a: tag(order, "a", 1), __proto__: tag(order, "p", p), b: 2 };
+  console.log(order.join(","), o.x, o.a, o.b);
+  const f: any = { __proto__: null, k: 1 };
+  console.log(Object.keys(f).join(","), f.k);
+  const spready: any = { ...{ s: 1 }, __proto__: p };
+  console.log(spready.s, spready.x);
+  const n: any = { __proto__: p };
+  console.log(Object.getPrototypeOf(n) === p, Object.keys(n).length);
+  console.log(JSON.stringify({ __proto__: p, own: 2 }));
+}
+"##;
+    assert_eq!(compile_and_run(source, "object_literal_proto_setter_matches_node_semantics"), "1\nundefined\ntrue\n0\na,p 1 1 2\nk 1\n1 1\ntrue 0\n{\"own\":2}\n");
+}
+
+#[test]
+fn object_literal_proto_setter_with_methods_and_accessors() {
+    let source = r##"function main(): void {
+  const p: any = { x: 1 };
+  const o: any = { __proto__: p, m(): number { return this.x + 1; }, get g(): number { return 7; } };
+  console.log(o.m(), o.g, o.x, Object.keys(o).join(","));
+}
+"##;
+    assert_eq!(compile_and_run(source, "object_literal_proto_setter_with_methods_and_accessors"), "2 7 1 m,g\n");
+}
