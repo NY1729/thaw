@@ -696,3 +696,5 @@ include!("tests/ka_contracts.rs");
 include!("tests/lb_contracts.rs");
 include!("tests/looseeq_contracts.rs");
 include!("tests/symkeys_contracts.rs");
+
+include!("tests/privfield_contracts.rs");
