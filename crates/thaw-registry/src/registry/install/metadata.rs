@@ -328,14 +328,17 @@ fn types_package_name(package: &str) -> String {
 /// (relative to `package_dir`) and the resolved absolute path to read.
 fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(String, PathBuf)> {
     if let Some(path) = package_export_target(manifest, None, &["types"]) {
-        let absolute = package_dir.join(path);
-        if absolute.is_file() {
-            return Some((path.to_string(), absolute));
+        if let Ok(absolute) = join_contained_path(package_dir, path) {
+            if absolute.is_file() {
+                return Some((path.to_string(), absolute));
+            }
         }
     }
     for field in ["types", "typings"] {
         if let Some(path) = manifest.get(field).and_then(|v| v.as_str()) {
-            return Some((path.to_string(), package_dir.join(path)));
+            if let Ok(absolute) = join_contained_path(package_dir, path) {
+                return Some((path.to_string(), absolute));
+            }
         }
     }
     let index = package_dir.join("index.d.ts");
@@ -422,6 +425,8 @@ fn resolve_module_path_inner(
                         package_export_target(&manifest, None, &["require", "node", "default"])
                             .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
                     entry.and_then(|entry| {
+                        // A manifest entry that escapes its package directory is not a module.
+                        join_contained_path(&directory, entry).ok()?;
                         resolve_module_path_inner(
                             &directory,
                             entry,
