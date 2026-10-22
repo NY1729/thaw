@@ -845,7 +845,11 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
         check_tsconfig(directory)?;
         let (configured_input, configured_vite, configured_output) =
             project_build_defaults(&manifest)?;
-        input = project_input_path(directory, configured_input)?;
+        input = project_input_path(
+            directory,
+            configured_input,
+            manifest_sets_thaw_entry(&manifest),
+        )?;
         if output.is_none() {
             output = configured_output
                 .map(|path| directory.join(path))
@@ -1051,20 +1055,29 @@ fn strip_jsonc(text: &str) -> String {
     out
 }
 
+/// Whether `thaw.entry` itself is set. The other entry fields are fallbacks.
+fn manifest_sets_thaw_entry(manifest: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(manifest)
+        .is_ok_and(|manifest| manifest["thaw"]["entry"].is_string())
+}
+
 fn project_input_path(
     directory: &Path,
     configured: Option<PathBuf>,
+    explicit: bool,
 ) -> Result<Option<PathBuf>, String> {
     if let Some(path) = configured {
-        // A declared entry that is missing is an error, not a cue to guess one.
         let entry = directory.join(&path);
-        if !entry.is_file() {
+        if entry.is_file() {
+            return Ok(Some(entry));
+        }
+        // An explicit `thaw.entry` that is missing is an error, not a cue to guess one.
+        if explicit {
             return Err(format!(
-                "package.json entry `{}` does not exist; set `thaw.entry` to an existing file",
+                "`thaw.entry` in package.json points to `{}`, which does not exist",
                 entry.display()
             ));
         }
-        return Ok(Some(entry));
     }
     Ok(["server.ts", "src/server.ts", "index.ts", "src/index.ts"]
         .into_iter()

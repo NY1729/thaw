@@ -156,7 +156,7 @@ fn dev_project_paths(args: &[String], directory: &Path) -> Result<(PathBuf, Opti
     })?;
     check_tsconfig(directory)?;
     let configured = project_build_defaults(&manifest)?;
-    let input = project_input_path(directory, configured.0)?
+    let input = project_input_path(directory, configured.0, manifest_sets_thaw_entry(&manifest))?
         .and_then(|path| path.strip_prefix(directory).ok().map(PathBuf::from))
         .or_else(|| configured.1.as_ref().map(|_| PathBuf::from("package.json")))
         .ok_or("missing input file; set `thaw.entry` in package.json or add server.ts")?;
