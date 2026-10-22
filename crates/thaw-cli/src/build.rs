@@ -1511,7 +1511,11 @@ fn prepared_staticlib(
     }
     let path = prepared_staticlib_cache_path(package, no_default_features, features).ok()?;
     if path.is_file() {
-        return Some(path);
+        if cache_file_is_private(&path) {
+            return Some(path);
+        }
+        // Someone else could have written this copy; drop it and decompress again.
+        std::fs::remove_file(&path).ok()?;
     }
     std::fs::create_dir_all(path.parent()?).ok()?;
     let input = std::fs::File::open(archive).ok()?;
@@ -1525,6 +1529,24 @@ fn prepared_staticlib(
         return None;
     }
     Some(path)
+}
+
+/// A cached archive is reused only when the current user owns it and nobody
+/// else can write it. The effective uid is read from `/proc/self`, which is
+/// owned by the process's euid; without it, the copy is rebuilt.
+#[cfg(unix)]
+fn cache_file_is_private(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(file), Ok(process)) = (std::fs::metadata(path), std::fs::metadata("/proc/self"))
+    else {
+        return false;
+    };
+    file.uid() == process.uid() && file.mode() & 0o022 == 0
+}
+
+#[cfg(not(unix))]
+fn cache_file_is_private(_path: &Path) -> bool {
+    true
 }
 
 fn prepared_staticlib_path(
@@ -1617,6 +1639,32 @@ mod prepared_cache_trust_tests {
         assert_eq!(prepared_staticlib(package, true, &[]).unwrap(), linked);
         std::fs::remove_file(&shared).ok();
         std::fs::remove_dir_all(root.join("cache")).ok();
+        std::fs::remove_file(prepared_staticlib_path(package, true, &[]).unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_or_world_writable_cached_archive_is_rebuilt() {
+        use std::os::unix::fs::PermissionsExt;
+        let package = "thaw-p3probe";
+        let root = prepared_staticlib_root().unwrap();
+        std::fs::create_dir_all(root.join("minimal")).unwrap();
+        std::fs::write(root.join("compiler.fingerprint"), runtime_fingerprint()).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, b"GOOD").unwrap();
+        std::fs::write(
+            prepared_staticlib_path(package, true, &[]).unwrap(),
+            encoder.finish().unwrap(),
+        )
+        .unwrap();
+        let cached = prepared_staticlib_cache_path(package, true, &[]).unwrap();
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"EVIL").unwrap();
+        std::fs::set_permissions(&cached, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let linked = prepared_staticlib(package, true, &[]).expect("prepared archive");
+        assert_eq!(std::fs::read(&linked).unwrap(), b"GOOD");
+        std::fs::remove_file(&cached).ok();
         std::fs::remove_file(prepared_staticlib_path(package, true, &[]).unwrap()).ok();
     }
 }

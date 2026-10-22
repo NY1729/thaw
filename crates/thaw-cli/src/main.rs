@@ -845,7 +845,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
         check_tsconfig(directory)?;
         let (configured_input, configured_vite, configured_output) =
             project_build_defaults(&manifest)?;
-        input = project_input_path(directory, configured_input);
+        input = project_input_path(directory, configured_input)?;
         if output.is_none() {
             output = configured_output
                 .map(|path| directory.join(path))
@@ -941,7 +941,24 @@ fn project_build_defaults(
             .is_some_and(|script| script.split_whitespace().any(|word| word == "vite"))
             .then(|| PathBuf::from("."))
     });
-    Ok((entry, vite, path("output")?))
+    // The output is installed by renaming over it, so it must stay in the project.
+    let output = path("output")?;
+    if let Some(output) = &output {
+        if output.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            return Err(format!(
+                "`thaw.output` in package.json must be a relative path inside the project, not `{}`",
+                output.display()
+            ));
+        }
+    }
+    Ok((entry, vite, output))
 }
 
 /// Fails when `directory/tsconfig.json` exists but is not a JSON object.
@@ -1034,16 +1051,25 @@ fn strip_jsonc(text: &str) -> String {
     out
 }
 
-fn project_input_path(directory: &Path, configured: Option<PathBuf>) -> Option<PathBuf> {
-    configured
-        .filter(|path| directory.join(path).is_file())
+fn project_input_path(
+    directory: &Path,
+    configured: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = configured {
+        // A declared entry that is missing is an error, not a cue to guess one.
+        let entry = directory.join(&path);
+        if !entry.is_file() {
+            return Err(format!(
+                "package.json entry `{}` does not exist; set `thaw.entry` to an existing file",
+                entry.display()
+            ));
+        }
+        return Ok(Some(entry));
+    }
+    Ok(["server.ts", "src/server.ts", "index.ts", "src/index.ts"]
+        .into_iter()
         .map(|path| directory.join(path))
-        .or_else(|| {
-            ["server.ts", "src/server.ts", "index.ts", "src/index.ts"]
-                .into_iter()
-                .map(|path| directory.join(path))
-                .find(|path| path.is_file())
-        })
+        .find(|path| path.is_file()))
 }
 
 fn write_static_asset_server_entry() -> Result<PathBuf, String> {

@@ -162,10 +162,60 @@ fn relative_candidates(from: &Path, specifier: &str) -> Vec<PathBuf> {
             .unwrap_or_else(|| Path::new("."))
             .join(specifier),
     );
+    // TypeScript ESM style: `./x.js` also names `x.ts` (or `.tsx`/`.mts`/`.cts`).
+    // The raw path stays first so specifiers that already resolve do not change.
+    let counterparts: &[&str] = match raw.extension().and_then(|extension| extension.to_str()) {
+        Some("js") => &["ts", "tsx"],
+        Some("mjs") => &["mts"],
+        Some("cjs") => &["cts"],
+        _ => &[],
+    };
     if raw.extension().is_some() {
-        vec![raw]
+        std::iter::once(raw.clone())
+            .chain(
+                counterparts
+                    .iter()
+                    .map(|extension| raw.with_extension(extension)),
+            )
+            .collect()
     } else {
         vec![raw.with_extension("ts"), raw.join("index.ts")]
+    }
+}
+
+#[cfg(test)]
+mod relative_candidates_tests {
+    use super::*;
+
+    #[test]
+    fn typescript_esm_extensions_try_their_source_counterparts() {
+        let from = Path::new("/project/src/main.ts");
+        assert_eq!(
+            relative_candidates(from, "./x.js"),
+            [
+                PathBuf::from("/project/src/x.js"),
+                PathBuf::from("/project/src/x.ts"),
+                PathBuf::from("/project/src/x.tsx"),
+            ]
+        );
+        assert_eq!(
+            relative_candidates(from, "./y.mjs"),
+            [
+                PathBuf::from("/project/src/y.mjs"),
+                PathBuf::from("/project/src/y.mts")
+            ]
+        );
+        assert_eq!(
+            relative_candidates(from, "./z.cjs"),
+            [
+                PathBuf::from("/project/src/z.cjs"),
+                PathBuf::from("/project/src/z.cts")
+            ]
+        );
+        assert_eq!(
+            relative_candidates(from, "./w.json"),
+            [PathBuf::from("/project/src/w.json")]
+        );
     }
 }
 
