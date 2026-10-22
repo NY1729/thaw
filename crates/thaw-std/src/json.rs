@@ -5955,14 +5955,14 @@ pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -
             .and_then(|fields| fields.get(to_key(key).as_slice()).cloned())
             .unwrap_or_else(napi_undefined_value);
         unsafe { thaw_json_destroy(value) };
-        return leak(result);
+        return thaw_json_track_arena_owned_root(leak(result));
     }
     let value = unsafe { consume_owned_json_value(value) };
     let result = value
         .as_object_mut()
         .and_then(|mut fields| fields.shift_remove(to_key(key).as_slice()))
         .unwrap_or_else(napi_undefined_value);
-    leak(result)
+    thaw_json_track_arena_owned_root(leak(result))
 }
 
 #[no_mangle]
@@ -7129,7 +7129,7 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
 
 #[no_mangle]
 pub extern "C" fn thaw_json_array_new() -> *mut Value {
-    leak(Value::shared_array(Vec::new()))
+    thaw_json_track_arena_owned_root(leak(Value::shared_array(Vec::new())))
 }
 
 #[no_mangle]
@@ -12610,6 +12610,30 @@ mod tests {
             HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
             assert!(!ARENA_OWNED_JSON_ROOTS
                 .with(|roots| roots.borrow().contains_key(&(value as usize))));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn fresh_array_and_take_roots_are_reclaimed_by_arena_reset() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            for _ in 0..100 {
+                let array = thaw_json_array_new();
+                assert!(!array.is_null());
+            }
+            assert_eq!(
+                ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().len()),
+                100,
+                "every fresh array is an arena-owned root"
+            );
+            thaw_arena::thaw_arena_reset();
+            assert_eq!(
+                ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().len()),
+                0,
+                "unreachable fresh roots are reclaimed at reset"
+            );
         })
         .join()
         .unwrap();
