@@ -3516,13 +3516,18 @@ fn directory_main_self_cycle_uses_index_fallback() {
 #[test]
 fn mutually_recursive_directory_entries_return_a_cycle_diagnostic() {
     let dir = temp_registry("module_main_mutual_cycle");
-    for (name, main) in [("a", "../b"), ("b", "../a")] {
-        let directory = dir.join(name);
+    // The cycle stays inside each package root: a -> a/nested -> a/nested. A main that
+    // climbs out of its package (`../b`) is rejected by containment before any cycle check.
+    for (directory, main) in [("a", "./nested"), ("a/nested", "./"), ("c", "../b")] {
+        let directory = dir.join(directory);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("package.json"), format!(r#"{{"main":"{main}"}}"#)).unwrap();
     }
+    fs::create_dir_all(dir.join("b")).unwrap();
+    fs::write(dir.join("b").join("index.js"), "module.exports = 1;").unwrap();
     let error = resolve_module_path(&dir, "./a").unwrap_err();
     assert!(error.contains("circular directory module entry"), "{error}");
+    assert!(resolve_module_path(&dir, "./c").is_err(), "escaping main `../b` must be rejected");
     let _ = fs::remove_dir_all(&dir);
 }
 
