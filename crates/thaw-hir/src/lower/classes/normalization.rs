@@ -481,6 +481,32 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             }));
         }
 
+        fn visit_mut_key_value_prop(&mut self, property: &mut swc_ecma_ast::KeyValueProp) {
+            // A static `__proto__` key stays computed (with a literal expression) instead of
+            // folding to a `Str` key, so object-literal lowering can tell `{__proto__: v}`
+            // (rejected) from `{["__proto__"]: v}` (an ordinary own property).
+            if let PropName::Computed(computed) = &property.key {
+                if !self.expression_is_shadowed(&computed.expr)
+                    && static_class_member_name(&computed.expr, &|name| self.constants.get(name).cloned())
+                        .as_deref()
+                        == Some("__proto__")
+                {
+                    let span = computed.span;
+                    property.key = PropName::Computed(swc_ecma_ast::ComputedPropName {
+                        span,
+                        expr: Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                            span,
+                            value: "__proto__".into(),
+                            raw: None,
+                        }))),
+                    });
+                    property.value.visit_mut_with(self);
+                    return;
+                }
+            }
+            property.visit_mut_children_with(self);
+        }
+
         fn visit_mut_prop_name(&mut self, property: &mut PropName) {
             let PropName::Computed(computed) = property else {
                 property.visit_mut_children_with(self);
