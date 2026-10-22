@@ -68,6 +68,22 @@ pub fn package_name(spec: &str) -> &str {
     split_package_spec(spec).0
 }
 
+// Joins a manifest-supplied relative path under `base`. Rejects absolute paths and
+// `..` components, and any existing target that canonicalizes outside `base`.
+fn join_contained_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
+    let path = Path::new(relative);
+    if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err(format!("path `{relative}` escapes its package directory"));
+    }
+    let joined = base.join(path);
+    if let (Ok(real_base), Ok(real)) = (fs::canonicalize(base), fs::canonicalize(&joined)) {
+        if !real.starts_with(&real_base) {
+            return Err(format!("path `{relative}` escapes its package directory"));
+        }
+    }
+    Ok(joined)
+}
+
 fn validate_installed_package_name(name: &str) -> Result<(), String> {
     let parts: Vec<&str> = name.split('/').collect();
     let valid = if name.starts_with('@') {
