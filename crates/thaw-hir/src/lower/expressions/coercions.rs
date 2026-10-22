@@ -2592,6 +2592,36 @@ impl<'a> FnLowerer<'a> {
                 &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
             );
         }
+        // `Object == primitive`: the object converts with ToPrimitive hint
+        // "default" (not the numeric hint `ToNumber` would use), then the two
+        // values compare as dynamic `Json`.
+        let is_primitive = |ty: &HirType| matches!(ty, HirType::F64 | HirType::Str | HirType::StrLiteral(_) | HirType::Bool);
+        let object_left = matches!(lhs_type, HirType::Object(_)) && is_primitive(&rhs_type);
+        let object_right = matches!(rhs_type, HirType::Object(_)) && is_primitive(&lhs_type);
+        if object_left || object_right {
+            let object_ty = if object_left { lhs_type.clone() } else { rhs_type.clone() };
+            let HirType::Object(fields) = &object_ty else { unreachable!("object operand") };
+            let lhs_name = format!("__thaw_loose_object_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let rhs_name = format!("__thaw_loose_object_right_{}", self.next_binding);
+            self.next_binding += 1;
+            let prim_name = format!("__thaw_loose_object_prim_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(lhs_name.clone(), lhs_type.clone());
+            self.scope.insert(rhs_name.clone(), rhs_type.clone());
+            self.scope.insert(prim_name.clone(), HirType::Json);
+            let (object_name, other_name) = if object_left { (lhs_name.clone(), rhs_name.clone()) } else { (rhs_name.clone(), lhs_name.clone()) };
+            let object = HirExpr::Var(object_name.clone());
+            let primitive = match self.object_default_to_primitive(object.clone(), fields, &object_ty)? {
+                Some(result) => result,
+                None => self.coerce_primitive_to_string(object)?,
+            };
+            let primitive = self.coerce_to_declared(&HirType::Json, primitive)?;
+            let other = self.coerce_to_declared(&HirType::Json, HirExpr::Var(other_name))?;
+            let compared = self.lower_loose_equality_base(HirExpr::Var(prim_name.clone()), other)?;
+            let compared = self.wrap_call_argument_bindings(compared, &[(prim_name, HirType::Json, primitive)])?;
+            return self.wrap_call_argument_bindings(compared, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)]);
+        }
         lhs = self.coerce_primitive_to_number(lhs)?;
         rhs = self.coerce_primitive_to_number(rhs)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
@@ -2898,13 +2928,7 @@ impl<'a> FnLowerer<'a> {
         let HirType::Object(fields) = &ty else {
             return Ok((value, ty));
         };
-        if let Some(result) = self.invoke_object_to_primitive(value.clone(), fields, "default")? {
-            return Ok((result, HirType::Json));
-        }
-        if let Some(result) = self.invoke_class_to_primitive(value.clone(), &ty, "default")? {
-            return Ok((result, HirType::Json));
-        }
-        if let Some(result) = self.invoke_class_ordinary_to_primitive(value.clone(), &ty, "default")? {
+        if let Some(result) = self.object_default_to_primitive(value.clone(), fields, &ty)? {
             return Ok((result, HirType::Json));
         }
         Err(format!(
