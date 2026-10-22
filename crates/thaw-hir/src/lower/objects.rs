@@ -1483,6 +1483,15 @@ impl<'a> FnLowerer<'a> {
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
         let any_literal = std::mem::take(&mut self.any_object_literal);
+        // Checked before the dispatch below: dictionary/spread/accessor/ordered paths
+        // would otherwise lower `__proto__: v` as an ordinary field without reaching the
+        // KeyValue arm. `{__proto__}` and `{["__proto__"]: v}` stay own properties.
+        if obj_lit.props.iter().any(|property| {
+            matches!(property, PropOrSpread::Prop(prop)
+                if matches!(prop.as_ref(), Prop::KeyValue(KeyValueProp { key, .. }) if is_proto_setter_key(key)))
+        }) {
+            return Err(PROTO_SETTER_UNSUPPORTED.into());
+        }
         let has_callable = obj_lit.props.iter().any(|property| {
             matches!(property, PropOrSpread::Prop(property)
                 if matches!(property.as_ref(), Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_)))
@@ -6459,5 +6468,20 @@ impl<'a> FnLowerer<'a> {
             args,
         );
         Ok(Some(call))
+    }
+}
+
+/// Diagnostic for `{__proto__: v}`: the prototype-setter form is unsupported.
+const PROTO_SETTER_UNSUPPORTED: &str =
+    "object literal `__proto__` prototype setter is not supported; use Object.create(proto) instead";
+
+/// Non-computed `__proto__` key (identifier or string literal). Computed keys are excluded
+/// because `{["__proto__"]: v}` defines an ordinary own property; the class normalizer keeps
+/// static `__proto__` computed keys computed, so they never reach here as `Str`.
+fn is_proto_setter_key(key: &PropName) -> bool {
+    match key {
+        PropName::Ident(name) => &*name.sym == "__proto__",
+        PropName::Str(name) => name.value.to_string_lossy() == "__proto__",
+        _ => false,
     }
 }

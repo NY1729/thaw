@@ -3714,3 +3714,42 @@ fn class_array_satisfies_top_level_structural_array_contract() {
     ).expect("parse");
     assert!(lower_module(&module).is_ok(), "class instances should satisfy structural array elements");
 }
+
+/// `{__proto__: v}` is the prototype-setter form, which is unsupported. Every
+/// non-computed key spelling (identifier or string literal) must be rejected with the
+/// dedicated diagnostic, including when other dynamic keys route the literal elsewhere.
+#[test]
+fn rejects_object_literal_proto_setter_key() {
+    for source in [
+        "function main(): void { const p = { x: 1 }; const o = { __proto__: p }; console.log(o); }",
+        "function main(): void { const o = { __proto__: null }; console.log(o); }",
+        "function main(): void { const o = { '__proto__': null }; console.log(o); }",
+        "function main(): void { const k = 'a'; const o = { __proto__: null, [k]: 1 }; console.log(o); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains(
+                "object literal `__proto__` prototype setter is not supported; use Object.create(proto) instead"
+            ),
+            "{source}: {error}"
+        );
+    }
+}
+
+/// Shorthand `{__proto__}` and computed `{["__proto__"]: v}` define an ordinary own
+/// property and must keep lowering.
+#[test]
+fn object_literal_proto_shorthand_and_computed_key_still_lower() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const __proto__ = 1;
+                const shorthand = { __proto__ };
+                const computed = { ["__proto__"]: 1 };
+                console.log(shorthand, computed);
+            }
+        "#,
+    );
+    assert_eq!(program.functions.len(), 1);
+}
