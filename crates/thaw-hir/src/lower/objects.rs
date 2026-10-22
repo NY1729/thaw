@@ -6357,6 +6357,24 @@ impl<'a> FnLowerer<'a> {
         Ok(Some(result))
     }
 
+    /// `ToPrimitive(value)` with hint `"default"` for an `Object`-typed value:
+    /// its `[Symbol.toPrimitive]` (object literal or class), else a user-defined
+    /// `valueOf`/`toString` in ordinary order. `None` when it has none of these.
+    fn object_default_to_primitive(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        object_type: &HirType,
+    ) -> Result<Option<HirExpr>, String> {
+        if let Some(result) = self.invoke_object_to_primitive(value.clone(), fields, "default")? {
+            return Ok(Some(result));
+        }
+        if let Some(result) = self.invoke_class_to_primitive(value.clone(), object_type, "default")? {
+            return Ok(Some(result));
+        }
+        self.invoke_class_ordinary_to_primitive(value, object_type, "default")
+    }
+
     /// The class-instance sibling of `invoke_object_to_primitive` above.
     /// A class instance's own `[Symbol.toPrimitive](hint)` method (mangled
     /// via `well_known_symbol_key`, same as an object literal's, by

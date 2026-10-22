@@ -1756,6 +1756,11 @@
       "name": "promise resolve of a thenable calls then after the synchronous code",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const events: string[] = [];\n  const thenable: any = {\n    get then() {\n      events.push(\"get\");\n      return function (resolve: any): void {\n        events.push(\"call\");\n        resolve(9);\n      };\n    },\n  };\n  events.push(\"before\");\n  const promise = Promise.resolve(thenable);\n  events.push(\"after\");\n  console.log(await promise, events.join(\",\"));\n}\n"
+    },
+    {
+      "name": "loose equality against a class with ToPrimitive uses the default hint",
+      "expect": "matched",
+      "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass O {}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nfunction main(): void {\n    const p = new P();\n    const v = new V();\n    const q = new Q();\n    console.log(q == \"Q:default\", q == \"Q:string\", \"Q:default\" == q, q != \"Q:default\");\n    console.log(p == \"P!\", v == 5, v == \"v\", v == \"5\");\n    console.log(q + \"\", q + 1, v + \"\", v == 5);\n    const o = new O();\n    console.log(o == \"[object Object]\", o == 0, q == 7, q == \"7\");\n}\n"
     }
   ]
 }
