@@ -1791,6 +1791,26 @@
       "name": "in operator sees Object.prototype keys on fixed-shape objects",
       "expect": "matched",
       "source": "function main(): void { console.log(\"toString\" in {a: 1}); console.log(\"hasOwnProperty\" in {a: 1}); console.log(\"__proto__\" in {a: 1}); console.log(\"a\" in {a: 1}); console.log(\"zz\" in {a: 1}); }\n"
+    },
+    {
+      "name": "object literal __proto__ value sets the prototype",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = { x: 1 }; const o: any = { __proto__: p, own: 3 }; console.log(o.x, o.own, Object.keys(o).join(','), Object.getPrototypeOf(o) === p); }"
+    },
+    {
+      "name": "object literal __proto__ null has no inherited members",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = { __proto__: null }; console.log(o.toString, Object.getPrototypeOf(o) === null); }"
+    },
+    {
+      "name": "object literal __proto__ primitive is ignored",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = { __proto__: 5 }; console.log(o.toString === Object.prototype.toString, Object.getPrototypeOf(o) === Object.prototype); }"
+    },
+    {
+      "name": "object literal __proto__ shorthand and computed key stay own",
+      "expect": "matched",
+      "source": "function main(): void { const __proto__ = 7; const s: any = { __proto__ }; const c: any = { ['__proto__']: 3 }; console.log(Object.keys(s).join(','), s.__proto__, Object.keys(c).join(','), c.__proto__); }"
     }
   ]
 }
