@@ -1781,6 +1781,16 @@
       "name": "private field read through a base-typed parameter returns the subclass instance's private value",
       "expect": "matched",
       "source": "class PrivBase { #x = 1; read(p: PrivBase): number { return p.#x; } }\nclass PrivSub extends PrivBase { }\nfunction main(): void {\n  console.log(new PrivBase().read(new PrivSub()));\n  console.log(new PrivBase().read(new PrivBase()));\n}\n"
+    },
+    {
+      "name": "or and with any left operand keeps the left value",
+      "expect": "matched",
+      "source": "function f(v: any): void { console.log(v || 5); console.log(v && 5); console.log(v || \"x\"); console.log(v && \"y\"); console.log(v || {a: 1}); console.log(v || null); console.log(v || true); console.log(v && false); }\nfunction main(): void { f(\"abc\"); f(0); f(null); f(undefined); f(false); f(7); }\n"
+    },
+    {
+      "name": "in operator sees Object.prototype keys on fixed-shape objects",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"toString\" in {a: 1}); console.log(\"hasOwnProperty\" in {a: 1}); console.log(\"__proto__\" in {a: 1}); console.log(\"a\" in {a: 1}); console.log(\"zz\" in {a: 1}); }\n"
     }
   ]
 }
