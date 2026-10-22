@@ -1795,7 +1795,7 @@
     {
       "name": "any-typed Symbol.toPrimitive uses default hint for == and +",
       "expect": "matched",
-      "source": "function main(): void { class Q { [Symbol.toPrimitive](hint: string): any { return \"Q:\" + hint; } } class N { [Symbol.toPrimitive](hint: string): any { return hint === \"number\" ? 7 : \"N:\" + hint; } } const a: any = new Q(); console.log(a == \"Q:default\", a + \"\", a + 1); const b: any = new N(); console.log(b == \"N:default\", b * 2, b - 1, b + \"\", b == 7, `${b}`, b > 6, String(b)); const s: any = \"x\"; const k: any = 5; console.log(s == \"x\", s + \"\", s + 1, k == 5, k + \"\", k + 1, k * 2); }\n"
+      "source": "class Q { [Symbol.toPrimitive](hint: string): any { return \"Q:\" + hint; } }\nclass N { [Symbol.toPrimitive](hint: string): any { return hint === \"number\" ? 7 : \"N:\" + hint; } }\nfunction main(): void { const a: any = new Q(); console.log(a == \"Q:default\", a + \"\", a + 1); const b: any = new N(); console.log(b == \"N:default\", b * 2, b - 1, b + \"\", b == 7, `${b}`, b > 6, String(b)); const s: any = \"x\"; const k: any = 5; console.log(s == \"x\", s + \"\", s + 1, k == 5, k + \"\", k + 1, k * 2); }\n"
     }
   ]
 }
