@@ -1208,6 +1208,60 @@ fn project_build_uses_standard_npm_entry_and_vite_fields() {
 }
 
 #[test]
+fn project_output_must_stay_inside_the_project() {
+    for output in [r#""/tmp/app""#, r#""../app""#, r#""dist/../../app""#] {
+        let manifest = format!(r#"{{"thaw":{{"output":{output}}}}}"#);
+        assert!(
+            project_build_defaults(&manifest)
+                .unwrap_err()
+                .contains("`thaw.output` in package.json must be a relative path"),
+            "{manifest}"
+        );
+    }
+    assert_eq!(
+        project_build_defaults(r#"{"thaw":{"output":"./dist/app"}}"#)
+            .unwrap()
+            .2,
+        Some(PathBuf::from("./dist/app"))
+    );
+}
+
+#[test]
+fn project_entry_that_is_missing_is_an_error_not_a_guess() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-missing-entry-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("server.ts"), "function main(): void {}\n").unwrap();
+    let manifest = r#"{"thaw":{"entry":"missing.ts"}}"#;
+    let configured = project_build_defaults(manifest).unwrap().0;
+    let error =
+        project_input_path(&directory, configured, manifest_sets_thaw_entry(manifest)).unwrap_err();
+    assert!(error.contains("missing.ts"), "{error}");
+    assert!(error.contains("thaw.entry"), "{error}");
+    assert_eq!(
+        project_input_path(&directory, Some(PathBuf::from("server.ts")), true).unwrap(),
+        Some(directory.join("server.ts"))
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn project_npm_entry_that_is_missing_falls_back_to_default_server() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-missing-npm-entry-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("server.ts"), "function main(): void {}\n").unwrap();
+    let manifest = r#"{"main":"dist/index.js"}"#;
+    let configured = project_build_defaults(manifest).unwrap().0;
+    assert!(!manifest_sets_thaw_entry(manifest));
+    assert_eq!(
+        project_input_path(&directory, configured, false).unwrap(),
+        Some(directory.join("server.ts"))
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn build_accepts_an_npm_project_directory() {
     let directory = std::env::temp_dir().join(format!("thaw-npm-project-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("src")).unwrap();
