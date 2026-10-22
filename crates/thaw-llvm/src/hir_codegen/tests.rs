@@ -527,6 +527,7 @@ include!("tests/ci_contracts.rs");
 include!("tests/uc_contracts.rs");
 include!("tests/lv_contracts.rs");
 include!("tests/rm_contracts.rs");
+include!("tests/hs_contracts.rs");
 include!("tests/fa_contracts.rs");
 include!("tests/fc_contracts.rs");
 include!("tests/fe_contracts.rs");
