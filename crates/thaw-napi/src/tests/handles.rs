@@ -681,6 +681,38 @@ fn callback_boundaries_validate_values_and_fill_missing_arguments() {
 }
 
 #[test]
+fn new_instance_rejects_null_argv_with_nonzero_argc() {
+    unsafe extern "C" fn noop(_env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        ptr::null_mut()
+    }
+
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut constructor = ptr::null_mut();
+        assert_eq!(
+            napi_create_function(
+                env_ptr,
+                c"Ctor".as_ptr(),
+                NAPI_AUTO_LENGTH,
+                Some(noop),
+                ptr::null_mut(),
+                &mut constructor,
+            ),
+            NAPI_OK
+        );
+        let mut result = ptr::null_mut();
+        assert_eq!(
+            napi_new_instance(env_ptr, constructor, 2, ptr::null(), &mut result),
+            NAPI_INVALID_ARG
+        );
+        let mut info = ptr::null();
+        assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+        assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+    }
+}
+
+#[test]
 fn sealed_and_frozen_objects_enforce_integrity_levels() {
     unsafe {
         let mut env = Env::new();

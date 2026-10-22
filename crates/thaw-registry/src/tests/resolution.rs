@@ -3039,6 +3039,53 @@ fn optional_dependency_target_matches_complete_architecture_and_libc_suffixes() 
     assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64-glibc"));
 }
 
+#[test]
+fn resolve_rejects_names_that_escape_the_registry() {
+    let outer = temp_registry("resolve-escape");
+    let registry = outer.join("registry");
+    fs::create_dir_all(&registry).unwrap();
+    // Valid packages outside the registry, reached by `..` and by an absolute name.
+    let sibling = outer.join("x");
+    fs::create_dir_all(&sibling).unwrap();
+    fs::write(sibling.join("package.d.ts"), "export {};").unwrap();
+    let absolute = outer.join("abs").join("dir");
+    fs::create_dir_all(&absolute).unwrap();
+    fs::write(absolute.join("package.d.ts"), "export {};").unwrap();
+    for name in ["../x".to_string(), absolute.to_string_lossy().into_owned()] {
+        assert!(resolve(&registry, &name).is_err(), "`{name}` must not resolve");
+    }
+    let _ = fs::remove_dir_all(outer);
+}
+
+#[test]
+fn native_addon_manifest_paths_must_stay_inside_their_package() {
+    let (platform, arch, _) = target_prebuild_components();
+    let root = temp_registry("contained-paths");
+    let node_modules = root.join("node_modules");
+    fs::create_dir_all(&node_modules).unwrap();
+    // An optionalDependencies key that climbs out of node_modules to a real package.
+    let outside = root.join(format!("x-{platform}-{arch}"));
+    fs::create_dir_all(outside.join("bin")).unwrap();
+    fs::write(outside.join("bin").join("x.node"), b"").unwrap();
+    fs::write(outside.join("package.json"), r#"{"name":"x"}"#).unwrap();
+    let parent = serde_json::json!({
+        "name": "app",
+        "optionalDependencies": { format!("../x-{platform}-{arch}"): "1.0.0" }
+    });
+    assert!(select_optional_dependency_executable(&node_modules, &parent).is_err());
+    // A bin path that climbs out of the platform package to a real file.
+    let package = format!("app-{platform}-{arch}");
+    let package_root = node_modules.join(&package);
+    fs::create_dir_all(&package_root).unwrap();
+    fs::create_dir_all(root.join("other")).unwrap();
+    fs::write(root.join("other").join("x.node"), b"").unwrap();
+    let manifest = serde_json::json!({ "name": package, "bin": "../../other/x.node" });
+    fs::write(package_root.join("package.json"), manifest.to_string()).unwrap();
+    let parent = serde_json::json!({ "name": "app", "optionalDependencies": { package: "1.0.0" } });
+    assert!(select_optional_dependency_executable(&node_modules, &parent).is_err());
+    let _ = fs::remove_dir_all(root);
+}
+
 // The "platform package ships the executable" rule is shape-driven: any package that lists
 // platform-specific optional dependencies qualifies, whatever its name.
 #[test]

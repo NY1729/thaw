@@ -84,7 +84,7 @@ fn select_optional_dependency_executable(
         .keys()
         .filter(|name| markers.iter().any(|marker| optional_dependency_matches_target(name, marker)))
     {
-        let root = node_modules_dir.join(name);
+        let root = join_contained_path(node_modules_dir, name)?;
         if !root.is_dir() {
             continue;
         }
@@ -98,9 +98,10 @@ fn select_optional_dependency_executable(
         };
         // Without a declared `bin`, the conventional location is `bin/<the package's own name>`.
         let own_name = manifest_name.rsplit('/').next().unwrap_or(manifest_name);
-        let path = binary
-            .map(|path| root.join(path))
-            .unwrap_or_else(|| root.join("bin").join(own_name));
+        let path = match binary {
+            Some(path) => join_contained_path(&root, path)?,
+            None => root.join("bin").join(own_name),
+        };
         if path.is_file() {
             return Ok(Some(path));
         }
@@ -377,7 +378,7 @@ fn select_optional_dependency_addon_with(
         .collect::<Vec<_>>();
     names.sort();
     for name in names {
-        let dependency_dir = node_modules_dir.join(name);
+        let dependency_dir = join_contained_path(node_modules_dir, name)?;
         if !dependency_dir.is_dir() {
             continue;
         }
@@ -386,7 +387,7 @@ fn select_optional_dependency_addon_with(
             .get("main")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("index.js");
-        let main_path = dependency_dir.join(main);
+        let main_path = join_contained_path(&dependency_dir, main)?;
         let main_is_node = main_path
             .extension()
             .is_some_and(|extension| extension == "node")
@@ -621,7 +622,7 @@ fn platform_shared_libraries(
     };
     let mut libraries = Vec::new();
     for name in optional.keys().filter(|name| markers.iter().any(|marker| optional_dependency_matches_target(name, marker))) {
-        let root = node_modules_dir.join(name);
+        let root = join_contained_path(node_modules_dir, name)?;
         if !root.is_dir() {
             continue;
         }
