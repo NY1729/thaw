@@ -1771,6 +1771,11 @@
       "name": "await settled promise drains queued thenable and microtasks in order",
       "expect": "matched",
       "source": "async function main(): Promise<void> { const events: string[] = []; const thenable: any = { then(resolve: any): void { events.push('then'); resolve(1); } }; Promise.resolve(thenable); Promise.resolve().then(() => { events.push('micro'); }); events.push('sync'); await Promise.resolve(); events.push('after'); console.log(events.join(',')); }"
+    },
+    {
+      "name": "symbol-keyed properties stay out of string-key enumeration and JSON.stringify",
+      "expect": "matched",
+      "source": "function main(): void { const key = Symbol('secret'); const o = { visible: 1, [key]: 2 }; console.log(Object.keys(o).join(',')); console.log(Object.values(o).join(',')); console.log(Object.entries(o).map((e) => e.join(':')).join(',')); const seen: string[] = []; for (const k in o) seen.push(k); console.log(seen.join(',')); console.log(JSON.stringify(o)); const dyn: any = o; console.log(Object.keys(dyn).join(','), dyn[key]); const anon = Symbol(); const p = { a: 1, [anon]: 'x' }; console.log(Object.keys(p).join(',')); console.log(Object.keys({ ...p }).join(',')); console.log(Object.keys(Object.assign({}, p)).join(',')); }"
     }
   ]
 }

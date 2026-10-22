@@ -695,3 +695,4 @@ include!("tests/fb_contracts.rs");
 include!("tests/ka_contracts.rs");
 include!("tests/lb_contracts.rs");
 include!("tests/looseeq_contracts.rs");
+include!("tests/symkeys_contracts.rs");

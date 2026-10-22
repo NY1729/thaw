@@ -573,7 +573,7 @@
       case 5: return value === undefined ? '1' : '0';
       case 6: return value == null ? '1' : '0';
       case 7: return value === null ? '1' : '0';
-      case 8: return thawGraphStringify(value) ?? 'null';
+      case 8: return thawStringifyWithoutSymbolKeys(value) ?? 'null';
       case 9: return value !== null && (typeof value === 'object' || typeof value === 'function') ? '1' : '0';
       case 10: return thawGraphObjectIs(value, -0) ? '-0' : thawGraphString(value);
       case 11: return thawGraphBufferIsBuffer(value) ? '1' : '0';
@@ -614,9 +614,28 @@
       default: throw new thawGraphTypeError('Invalid native host query');
     }
   };
+  // Symbol keys are stored as wire-text strings (see thaw-std `is_symbol_key_wire`); string-key
+  // enumeration must skip them, while reads by the same wire text still find the property.
+  // Only unique/registered Symbol wire text (`\u0003<id>` / `\u0003R<id>:`): a `\u001f@@` string key is user data here.
+  const thawSymbolKeyWire = (key) => /^\u0003R?\d+(:|$)/.test(key);
+  // JSON.stringify skips symbol-keyed wire properties. An array replacer already selects keys,
+  // so it passes through; a function replacer is composed after the wire check.
+  const thawStringifyWithoutSymbolKeys = (value, replacer, space) => {
+    if (Array.isArray(replacer)) return thawGraphStringify(value, replacer, space);
+    return thawGraphStringify(value, function (key, item) {
+      if (typeof key === 'string' && thawSymbolKeyWire(key)) return undefined;
+      return typeof replacer === 'function' ? thawGraphApply(replacer, this, [key, item]) : item;
+    }, space);
+  };
   globalThis.__thaw_json_host_enumerate = (value, operation) => {
     if (operation === 9)
       return globalThis.__thaw_json_host_property_names(value, 0, 18, 1);
+    if (operation === 2)
+      return thawGraphEncode(thawGraphObjectKeys(value).filter((key) => !thawSymbolKeyWire(key)), 0, true);
+    if (operation === 3) {
+      const keys = thawGraphObjectKeys(value);
+      return thawGraphEncode(thawGraphObjectValues(value).filter((_, index) => !thawSymbolKeyWire(keys[index])), 0, true);
+    }
     const nativeCollection = operation >= 4 && operation <= 6 ? thawNativeCollectionState(value) : undefined;
     if (nativeCollection) {
       const keys = nativeCollection.keys();
@@ -666,6 +685,7 @@
       for (const key of thawGraphReflectOwnKeys(current)) {
         const symbol = typeof key === 'symbol';
         if (symbol ? (keyFilter & 16) !== 0 : (keyFilter & 8) !== 0) continue;
+        if (!symbol && thawSymbolKeyWire(key)) continue;
         const descriptor = thawGraphObjectGetOwnPropertyDescriptor(current, key);
         if (descriptor === undefined) continue;
         if (thawGraphApply(thawGraphSetHas, seen, [key])) continue;
@@ -2631,18 +2651,18 @@
     configurable: !!(flags & 4),
   });
   thawGraphDefineProperty(globalThis, '__thaw_json_stringify_native_accessors', {
-    value: (replacer, space, value) => thawGraphStringify(value, replacer, space),
+    value: (replacer, space, value) => thawStringifyWithoutSymbolKeys(value, replacer, space),
     writable: false, configurable: false, enumerable: true,
   });
   thawGraphDefineProperty(globalThis, '__thaw_json_stringify_direct', {
-    value: value => thawGraphStringify(value),
+    value: value => thawStringifyWithoutSymbolKeys(value),
     writable: false, configurable: false,
   });
   // A native function replacer receives the live native owner as its `this`
   // source. The captured apply/stringify intrinsics remain stable if user
   // code changes JSON.stringify or Function.prototype.apply later.
   thawGraphDefineProperty(globalThis, '__thaw_json_stringify_live_replacer', {
-    value: (space, value, replacer) => thawGraphStringify(value, function (key, item) {
+    value: (space, value, replacer) => thawStringifyWithoutSymbolKeys(value, function (key, item) {
       return thawGraphApply(replacer, this, [key, item]);
     }, space),
     writable: false, configurable: false,
@@ -2651,7 +2671,7 @@
   // the captured intrinsic perform its ordinary callable/array distinction
   // on the live value, including its exact getter and proxy throws.
   thawGraphDefineProperty(globalThis, '__thaw_json_stringify_live_dynamic_replacer', {
-    value: (space, value, replacer) => thawGraphStringify(value, replacer, space),
+    value: (space, value, replacer) => thawStringifyWithoutSymbolKeys(value, replacer, space),
     writable: false, configurable: false,
   });
   globalThis.__thaw_iterator_from = source => {
