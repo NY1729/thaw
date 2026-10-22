@@ -782,6 +782,15 @@ impl<'a> FnLowerer<'a> {
         live_json: bool,
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
+        let proto_setters = obj_lit
+            .props
+            .iter()
+            .filter(|property| matches!(property, PropOrSpread::Prop(prop)
+                if matches!(prop.as_ref(), Prop::KeyValue(KeyValueProp { key, .. }) if is_proto_setter_key(key))))
+            .count();
+        if proto_setters > 1 {
+            return Err(PROTO_SETTER_DUPLICATE.into());
+        }
         let mut bindings = Vec::new();
         let mut kinds = Vec::new();
         let mut keys = Vec::new();
@@ -813,6 +822,13 @@ impl<'a> FnLowerer<'a> {
                 _ => false,
             };
             let (kind, key, value, callback) = match property.as_ref() {
+                Prop::KeyValue(KeyValueProp { key, value }) if is_proto_setter_key(key) => {
+                    // Applied by the runtime at this position: `null` or an object installs
+                    // the prototype, any other value is ignored (Node semantics).
+                    let value = self.lower_object_lit_field_value(value, None)?;
+                    let value = self.coerce_to_declared(&HirType::Json, value)?;
+                    ("proto", HirExpr::Lit(HirLit::Str(String::new())), Some(value), None)
+                }
                 Prop::KeyValue(KeyValueProp { key, value }) => {
                     let expected_value = self
                         .static_object_property_name(key)
@@ -1483,14 +1499,10 @@ impl<'a> FnLowerer<'a> {
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
         let any_literal = std::mem::take(&mut self.any_object_literal);
-        // Checked before the dispatch below: dictionary/spread/accessor/ordered paths
-        // would otherwise lower `__proto__: v` as an ordinary field without reaching the
-        // KeyValue arm. `{__proto__}` and `{["__proto__"]: v}` stay own properties.
-        if obj_lit.props.iter().any(|property| {
-            matches!(property, PropOrSpread::Prop(prop)
-                if matches!(prop.as_ref(), Prop::KeyValue(KeyValueProp { key, .. }) if is_proto_setter_key(key)))
-        }) {
-            return Err(PROTO_SETTER_UNSUPPORTED.into());
+        // `{__proto__: v}` sets the prototype (Node semantics). Only the live object builder
+        // can apply it in source order, and its result reads inherited properties.
+        if object_literal_has_proto_setter(obj_lit) {
+            return self.lower_dynamic_accessor_object_lit_with_expected_fields(obj_lit, true, None);
         }
         let has_callable = obj_lit.props.iter().any(|property| {
             matches!(property, PropOrSpread::Prop(property)
@@ -6471,9 +6483,16 @@ impl<'a> FnLowerer<'a> {
     }
 }
 
-/// Diagnostic for `{__proto__: v}`: the prototype-setter form is unsupported.
-const PROTO_SETTER_UNSUPPORTED: &str =
-    "object literal `__proto__` prototype setter is not supported; use Object.create(proto) instead";
+/// Early error for `{__proto__: a, __proto__: b}`, which is a SyntaxError in JavaScript.
+const PROTO_SETTER_DUPLICATE: &str =
+    "duplicate `__proto__` fields are not allowed in object literals";
+
+/// Whether an object literal has a `__proto__: v` prototype-setter property; its static
+/// shape is unknown, so it is lowered (and typed) as a dynamic object.
+fn object_literal_has_proto_setter(object: &SwcObjectLit) -> bool {
+    object.props.iter().any(|property| matches!(property, PropOrSpread::Prop(prop)
+        if matches!(prop.as_ref(), Prop::KeyValue(KeyValueProp { key, .. }) if is_proto_setter_key(key))))
+}
 
 /// Non-computed `__proto__` key (identifier or string literal). Computed keys are excluded
 /// because `{["__proto__"]: v}` defines an ordinary own property; the class normalizer keeps

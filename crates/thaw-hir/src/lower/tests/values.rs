@@ -3715,26 +3715,31 @@ fn class_array_satisfies_top_level_structural_array_contract() {
     assert!(lower_module(&module).is_ok(), "class instances should satisfy structural array elements");
 }
 
-/// `{__proto__: v}` is the prototype-setter form, which is unsupported. Every
-/// non-computed key spelling (identifier or string literal) must be rejected with the
-/// dedicated diagnostic, including when other dynamic keys route the literal elsewhere.
+/// `{__proto__: v}` sets the prototype (Node semantics): every non-computed key spelling
+/// (identifier or string literal) lowers to a `proto` operation in the live object builder,
+/// which installs the prototype only for an object or null value.
 #[test]
-fn rejects_object_literal_proto_setter_key() {
+fn object_literal_proto_setter_key_lowers_to_prototype_install() {
     for source in [
         "function main(): void { const p = { x: 1 }; const o = { __proto__: p }; console.log(o); }",
         "function main(): void { const o = { __proto__: null }; console.log(o); }",
         "function main(): void { const o = { '__proto__': null }; console.log(o); }",
         "function main(): void { const k = 'a'; const o = { __proto__: null, [k]: 1 }; console.log(o); }",
     ] {
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains(
-                "object literal `__proto__` prototype setter is not supported; use Object.create(proto) instead"
-            ),
-            "{source}: {error}"
-        );
+        let hir = format!("{:?}", lower(source));
+        assert!(hir.contains("Str(\"proto\")"), "{source}: {hir}");
     }
+}
+
+/// `{__proto__: a, __proto__: b}` is a SyntaxError in JavaScript and stays a compile error.
+#[test]
+fn object_literal_duplicate_proto_setter_is_compile_error() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const o = { __proto__: null, __proto__: null }; console.log(o); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("duplicate `__proto__` fields are not allowed"), "{error}");
 }
 
 /// Shorthand `{__proto__}` and computed `{["__proto__"]: v}` define an ordinary own
