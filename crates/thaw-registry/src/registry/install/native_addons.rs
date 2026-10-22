@@ -509,21 +509,6 @@ fn find_node_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(matches)
 }
 
-fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
-    let mut matches = find_node_files(root)?;
-    if matches.len() > 1 {
-        return Err(format!(
-            "downloaded prebuild contains multiple `.node` files: {}",
-            matches
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    Ok(matches.pop())
-}
-
 fn select_generated_addon_with(
     node_modules_dir: &Path,
     package_source: &str,
@@ -647,52 +632,251 @@ fn platform_shared_libraries(
     Ok(libraries)
 }
 
-fn download_prebuild_install_addon(
-    package_dir: &Path,
-    manifest: &serde_json::Value,
-) -> Result<(), String> {
-    let Some((url, asset, _, _)) = prebuild_install_asset(manifest) else {
-        return Ok(());
-    };
-    let mut response = ureq::get(&url)
+/// The npm registry used for version documents, honoring npm's own
+/// `npm_config_registry` override. HTTPS only: the digest the tarball is
+/// checked against comes from this document.
+fn npm_registry_base() -> Result<String, String> {
+    let base = std::env::var("npm_config_registry")
+        .or_else(|_| std::env::var("NPM_CONFIG_REGISTRY"))
+        .unwrap_or_else(|_| "https://registry.npmjs.org".into());
+    let base = base.trim_end_matches('/').to_string();
+    if !base.starts_with("https://") {
+        return Err(format!(
+            "npm registry `{base}` is not HTTPS; refusing to trust its integrity digests"
+        ));
+    }
+    Ok(base)
+}
+
+fn https_get_bounded(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let mut response = ureq::get(url)
         .call()
-        .map_err(|error| format!("failed to download native prebuild `{url}`: {error}"))?;
-    let archive_bytes = response
+        .map_err(|error| format!("failed to fetch `{url}`: {error}"))?;
+    response
         .body_mut()
         .with_config()
-        .limit(128 * 1024 * 1024)
+        .limit(limit)
         .read_to_vec()
-        .map_err(|error| format!("failed to read native prebuild `{url}`: {error}"))?;
-    let unpack_dir = package_dir.join(".thaw-prebuild");
-    if unpack_dir.is_dir() {
-        fs::remove_dir_all(&unpack_dir)
-            .map_err(|error| format!("failed to clear `{}`: {error}", unpack_dir.display()))?;
+        .map_err(|error| format!("failed to read `{url}`: {error}"))
+}
+
+/// The `dist` record npm stores for one exact `name@version`: the SRI
+/// `integrity` string and the tarball URL. A version with no `sha512`
+/// digest cannot be checked, so it is refused rather than loaded.
+fn npm_dist_record(
+    document: &serde_json::Value,
+    name: &str,
+    version: &str,
+) -> Result<(String, String), String> {
+    let dist = document.get("dist");
+    let integrity = dist
+        .and_then(|dist| dist.get("integrity"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|integrity| !integrity.is_empty())
+        .ok_or_else(|| {
+            format!("npm registry has no `dist.integrity` for {name}@{version}; refusing to load its native code")
+        })?;
+    let tarball = dist
+        .and_then(|dist| dist.get("tarball"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("npm registry has no `dist.tarball` for {name}@{version}"))?;
+    if !tarball.starts_with("https://") {
+        return Err(format!("npm tarball `{tarball}` for {name}@{version} is not HTTPS"));
     }
-    fs::create_dir_all(&unpack_dir)
-        .map_err(|error| format!("failed to create `{}`: {error}", unpack_dir.display()))?;
-    let decoder = flate2::read::GzDecoder::new(archive_bytes.as_slice());
-    tar::Archive::new(decoder)
-        .unpack(&unpack_dir)
-        .map_err(|error| format!("failed to unpack native prebuild `{asset}`: {error}"))?;
-    let addon = find_node_file(&unpack_dir)?
-        .ok_or_else(|| format!("native prebuild `{asset}` contains no `.node` file"))?;
-    let (platform, arch, _) = target_prebuild_components();
-    let target = package_dir
-        .join("prebuilds")
-        .join(format!("{platform}-{arch}"));
-    fs::create_dir_all(&target)
-        .map_err(|error| format!("failed to create `{}`: {error}", target.display()))?;
-    let destination =
-        target.join(addon.file_name().ok_or_else(|| {
-            format!("native prebuild path `{}` has no filename", addon.display())
-        })?);
-    fs::copy(&addon, &destination).map_err(|error| {
-        format!(
-            "failed to copy downloaded native addon to `{}`: {error}",
-            destination.display()
-        )
-    })?;
-    fs::write(package_dir.join(".thaw-prebuild-source"), url)
-        .map_err(|error| format!("failed to record downloaded native prebuild source: {error}"))?;
+    Ok((integrity.to_string(), tarball.to_string()))
+}
+
+/// Standard base64 with padding, the encoding SRI digests use.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for index in 0..4 {
+            if index <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * index)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Checks `bytes` against an npm `dist.integrity` value. Only `sha512-`
+/// entries count (npm's own rule: any one matching entry is enough).
+fn verify_sha512_integrity(bytes: &[u8], integrity: &str) -> Result<(), String> {
+    let mut expected = integrity
+        .split_whitespace()
+        .filter_map(|entry| entry.strip_prefix("sha512-"))
+        .peekable();
+    if expected.peek().is_none() {
+        return Err(format!("integrity `{integrity}` has no sha512 entry; refusing to load it"));
+    }
+    let digest = base64_standard(&sha2::Sha512::digest(bytes));
+    if expected.any(|entry| entry == digest) {
+        Ok(())
+    } else {
+        Err(format!(
+            "tarball sha512 mismatch: registry says `{integrity}`, downloaded bytes are `sha512-{digest}`"
+        ))
+    }
+}
+
+/// Verifies `tarball` first and only then unpacks it, so a mismatched
+/// download never reaches the filesystem.
+fn unpack_verified_tarball(tarball: &[u8], integrity: &str, destination: &Path) -> Result<(), String> {
+    verify_sha512_integrity(tarball, integrity)?;
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed to create `{}`: {error}", destination.display()))?;
+    tar::Archive::new(flate2::read::GzDecoder::new(tarball))
+        .unpack(destination)
+        .map_err(|error| format!("failed to unpack verified tarball: {error}"))
+}
+
+/// Optional dependencies that are platform packages for this target --
+/// the only packages whose native code (`.node`, shared libraries, the
+/// platform executable) gets loaded from npm's install tree. Matched
+/// generously: an over-match only means one extra verification, and a
+/// package npm did not install is skipped by the caller.
+fn target_platform_dependencies(manifest: &serde_json::Value) -> Vec<String> {
+    let Some(optional) = manifest
+        .get("optionalDependencies")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let (platform, arch, libc) = target_prebuild_components();
+    let mut needles = vec![format!("{platform}-{arch}")];
+    if platform == "linux" && libc == "musl" {
+        needles.push(format!("linuxmusl-{arch}"));
+    }
+    optional
+        .keys()
+        .filter(|name| {
+            let leaf = name.rsplit('/').next().unwrap_or(name);
+            needles.iter().any(|needle| leaf.contains(needle.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Replaces each installed target platform package with the copy inside
+/// its own registry tarball, after checking that tarball against the
+/// registry's `dist.integrity` for the exact installed version. The native
+/// files loaded afterwards are therefore exactly the verified bytes.
+fn install_verified_platform_packages(
+    node_modules_dir: &Path,
+    manifest: &serde_json::Value,
+    staging: &Path,
+) -> Result<(), String> {
+    let base = npm_registry_base()?;
+    for (index, name) in target_platform_dependencies(manifest).iter().enumerate() {
+        let installed = join_contained_path(node_modules_dir, name)?;
+        if !installed.is_dir() {
+            continue;
+        }
+        let version = read_manifest(&installed)?
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("installed `{name}` has no version"))?
+            .to_string();
+        let document: serde_json::Value = serde_json::from_slice(&https_get_bounded(
+            &format!("{base}/{name}/{version}"),
+            16 * 1024 * 1024,
+        )?)
+        .map_err(|error| format!("registry document for {name}@{version} is not JSON: {error}"))?;
+        let (integrity, tarball_url) = npm_dist_record(&document, name, &version)?;
+        let tarball = https_get_bounded(&tarball_url, 128 * 1024 * 1024)?;
+        let unpack_dir = staging.join(format!("verified-platform-{index}"));
+        if unpack_dir.exists() {
+            fs::remove_dir_all(&unpack_dir)
+                .map_err(|error| format!("failed to clear `{}`: {error}", unpack_dir.display()))?;
+        }
+        unpack_verified_tarball(&tarball, &integrity, &unpack_dir)
+            .map_err(|error| format!("{name}@{version}: {error}"))?;
+        let verified = unpack_dir.join("package");
+        if !verified.is_dir() {
+            return Err(format!("tarball for {name}@{version} has no `package/` root"));
+        }
+        fs::remove_dir_all(&installed)
+            .map_err(|error| format!("failed to replace `{}`: {error}", installed.display()))?;
+        fs::rename(&verified, &installed)
+            .map_err(|error| format!("failed to install verified `{name}`: {error}"))?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn sri(bytes: &[u8]) -> String {
+        format!("sha512-{}", base64_standard(&sha2::Sha512::digest(bytes)))
+    }
+
+    fn tarball_with(path: &str, body: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, body).unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&tar_bytes).unwrap();
+        gz.finish().unwrap()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("thaw-integrity-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn base64_standard_matches_known_vectors() {
+        assert_eq!(base64_standard(b""), "");
+        assert_eq!(base64_standard(b"f"), "Zg==");
+        assert_eq!(base64_standard(b"fo"), "Zm8=");
+        assert_eq!(base64_standard(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn integrity_match_is_accepted_and_unpacked() {
+        let tarball = tarball_with("package/bin/addon.node", b"native");
+        let dest = scratch("match");
+        unpack_verified_tarball(&tarball, &sri(&tarball), &dest).unwrap();
+        assert_eq!(fs::read(dest.join("package/bin/addon.node")).unwrap(), b"native");
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn integrity_mismatch_is_rejected_without_extraction() {
+        let tarball = tarball_with("package/bin/addon.node", b"tampered");
+        let expected = sri(&tarball_with("package/bin/addon.node", b"original"));
+        let dest = scratch("mismatch");
+        let error = unpack_verified_tarball(&tarball, &expected, &dest).unwrap_err();
+        assert!(error.contains("sha512 mismatch"), "{error}");
+        assert!(!dest.exists(), "a mismatched tarball must not reach the filesystem");
+    }
+
+    #[test]
+    fn missing_integrity_is_refused_for_native_loading() {
+        let no_integrity = serde_json::json!({ "dist": { "tarball": "https://registry.npmjs.org/x/-/x-1.0.0.tgz" } });
+        let error = npm_dist_record(&no_integrity, "x", "1.0.0").unwrap_err();
+        assert!(error.contains("no `dist.integrity`"), "{error}");
+
+        let sha1_only = serde_json::json!({ "dist": { "integrity": "sha1-AAAA", "tarball": "https://registry.npmjs.org/x/-/x-1.0.0.tgz" } });
+        let (integrity, _) = npm_dist_record(&sha1_only, "x", "1.0.0").unwrap();
+        let error = verify_sha512_integrity(b"anything", &integrity).unwrap_err();
+        assert!(error.contains("no sha512 entry"), "{error}");
+
+        let http = serde_json::json!({ "dist": { "integrity": sri(b"x"), "tarball": "http://example.com/x.tgz" } });
+        assert!(npm_dist_record(&http, "x", "1.0.0").is_err());
+    }
 }
