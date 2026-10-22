@@ -154,6 +154,7 @@ fn dev_project_paths(args: &[String], directory: &Path) -> Result<(PathBuf, Opti
     let manifest = std::fs::read_to_string(directory.join("package.json")).map_err(|_| {
         "missing input file and package.json has no project configuration".to_string()
     })?;
+    check_tsconfig(directory)?;
     let configured = project_build_defaults(&manifest)?;
     let input = project_input_path(directory, configured.0)
         .and_then(|path| path.strip_prefix(directory).ok().map(PathBuf::from))

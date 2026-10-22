@@ -788,7 +788,6 @@ fn build_with_native_mode(
 
     publish_build_artifacts(&scratch, output, external_native_dirs.as_ref())?;
 
-    println!("built `{}`", output.display());
     Ok(())
 }
 

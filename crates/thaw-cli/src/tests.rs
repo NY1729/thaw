@@ -1117,6 +1117,55 @@ fn dev_accepts_an_npm_project_directory() {
 }
 
 #[test]
+fn project_build_rejects_non_string_thaw_paths() {
+    assert_eq!(
+        project_build_defaults(r#"{"thaw":{"entry":[1]}}"#).unwrap_err(),
+        "`thaw.entry` in package.json must be a string"
+    );
+    assert_eq!(
+        project_build_defaults(r#"{"thaw":{"output":{}}}"#).unwrap_err(),
+        "`thaw.output` in package.json must be a string"
+    );
+    assert_eq!(
+        project_build_defaults(r#"{"thaw":{"entry":null},"main":"index.ts"}"#)
+            .unwrap()
+            .0,
+        Some(PathBuf::from("index.ts"))
+    );
+}
+
+#[test]
+fn tsconfig_check_accepts_jsonc_and_reports_invalid_json() {
+    let directory = std::env::temp_dir().join(format!("thaw_tsconfig_{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let check = |text: &str| {
+        std::fs::write(directory.join("tsconfig.json"), text).unwrap();
+        check_tsconfig(&directory)
+    };
+    assert!(check(r#"{"compilerOptions":{"target":"es2022"}}"#).is_ok());
+    assert!(check("// comment\n{ \"a\": \"x//y,}\", /* block */ \"b\": [1, 2,], }").is_ok());
+    assert!(check(r#"{ "compilerOptions": "#)
+        .unwrap_err()
+        .starts_with("invalid tsconfig.json at `"));
+    assert!(check("[1,2]")
+        .unwrap_err()
+        .ends_with("expected a JSON object"));
+    std::fs::remove_file(directory.join("tsconfig.json")).unwrap();
+    assert!(check_tsconfig(&directory).is_ok());
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn run_output_lives_in_thaw_cache_not_temp_dir() {
+    let output = run_output_path(7).unwrap();
+    assert_eq!(
+        output.parent(),
+        Some(thaw_cache_root().join("run").as_path())
+    );
+    assert!(output.starts_with(thaw_cache_root()));
+}
+
+#[test]
 fn project_build_reads_package_defaults() {
     assert_eq!(
         project_build_defaults(r#"{"thaw":{"entry":"server.ts","vite":"web","output":"app"}}"#)
