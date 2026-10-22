@@ -1037,6 +1037,28 @@ fn install_async_context_bootstrap<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     ctx.globals().set("__thaw_async_context_bootstrap", bridge)
 }
 
+/// Hands the job barrier hooks to `thaw-runtime` (a soft dependency, looked up
+/// by symbol like `thaw_runtime_poll_one` is from this side).
+#[cfg(unix)]
+fn register_js_job_hooks() {
+    unsafe {
+        let register = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"thaw_runtime_set_js_job_hooks".as_ptr(),
+        );
+        if register.is_null() {
+            return;
+        }
+        std::mem::transmute::<
+            *mut libc::c_void,
+            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64)),
+        >(register)(js_queue_job_barrier, js_drain_to_job_barrier);
+    }
+}
+
+#[cfg(not(unix))]
+fn register_js_job_hooks() {}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -1045,7 +1067,9 @@ fn ensure_context() {
             runtime.set_loader(BundleModuleResolver, BundleModuleLoader);
             runtime.set_host_promise_rejection_tracker(Some(Box::new(track_js_promise_rejection)));
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
+            register_js_job_hooks();
             context.with(|ctx| {
+                JOB_BARRIER_CTX.with(|raw| raw.set(ctx.as_raw().as_ptr()));
                 install_shared_array_buffer_functions(&ctx);
                 install_shared_array_buffer_clone_functions(&ctx);
                 let intrinsic_then: Function = ctx.eval("Promise.prototype.then")
@@ -3450,4 +3474,97 @@ fn install_shared_array_buffer_clone_functions(ctx: &Ctx<'_>) {
         .expect("failed to install __thaw_sab_serialize");
     globals.set("__thaw_sab_deserialize", Function::new(ctx.clone(), sab_deserialize).expect("failed to create __thaw_sab_deserialize"))
         .expect("failed to install __thaw_sab_deserialize");
+}
+
+thread_local! {
+    /// The raw JSContext of this thread's engine, set once by `ensure_context`.
+    static JOB_BARRIER_CTX: Cell<*mut rquickjs::qjs::JSContext> = const { Cell::new(std::ptr::null_mut()) };
+    /// Barrier ids in enqueue order; QuickJS runs marker jobs FIFO, so the
+    /// marker that runs next is always the front of this queue.
+    static JOB_BARRIERS_QUEUED: RefCell<std::collections::VecDeque<u64>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
+    static JOB_BARRIERS_DONE: RefCell<std::collections::HashSet<u64>> =
+        RefCell::new(std::collections::HashSet::new());
+    static NEXT_JOB_BARRIER: Cell<u64> = const { Cell::new(1) };
+}
+
+/// Native QuickJS job (no JS function object, no global): records that the
+/// barrier at the front of the queue has run.
+unsafe extern "C" fn run_job_barrier(
+    _ctx: *mut rquickjs::qjs::JSContext,
+    _argc: std::ffi::c_int,
+    _argv: *mut rquickjs::qjs::JSValue,
+) -> rquickjs::qjs::JSValue {
+    if let Some(id) = JOB_BARRIERS_QUEUED.with(|queued| queued.borrow_mut().pop_front()) {
+        JOB_BARRIERS_DONE.with(|done| done.borrow_mut().insert(id));
+    }
+    rquickjs::qjs::JSValue {
+        u: rquickjs::qjs::JSValueUnion { int32: 0 },
+        tag: rquickjs::qjs::JS_TAG_UNDEFINED as i64,
+    }
+}
+
+/// Whether the raw engine may be driven now. Raw calls take no Rust-side
+/// runtime lock, so they are safe under an active (reentrant) context, or
+/// with no entry in progress; a bare entry (lock held, no active context)
+/// degrades to no barrier instead of risking a re-lock.
+fn job_barrier_ctx() -> Option<*mut rquickjs::qjs::JSContext> {
+    let raw = JOB_BARRIER_CTX.with(Cell::get);
+    if raw.is_null() {
+        return None;
+    }
+    let active = ACTIVE_NAPI_CONTEXT.with(|active| !active.get().is_null());
+    let entered = ENGINE_ENTRY_DEPTH.with(Cell::get) != 0;
+    (active || !entered).then_some(raw)
+}
+
+/// Queues a native marker job behind every QuickJS job pending now, and
+/// returns its id (0 when no job is pending, so there is nothing to order
+/// against). The runtime's continuation queue calls this when it enqueues a
+/// continuation, then `js_drain_to_job_barrier` before resuming it: one FIFO
+/// microtask order across native continuations and QuickJS jobs. Uses only
+/// the raw engine API: no JS global, no user-visible property, no `Promise`.
+extern "C" fn js_queue_job_barrier() -> u64 {
+    let Some(raw) = job_barrier_ctx() else {
+        return 0;
+    };
+    // SAFETY: `raw` is this thread's live context (set by `ensure_context`).
+    unsafe {
+        if !rquickjs::qjs::JS_IsJobPending(rquickjs::qjs::JS_GetRuntime(raw)) {
+            return 0;
+        }
+        let id = NEXT_JOB_BARRIER.with(|next| {
+            let id = next.get();
+            next.set(id + 1);
+            id
+        });
+        JOB_BARRIERS_QUEUED.with(|queued| queued.borrow_mut().push_back(id));
+        if rquickjs::qjs::JS_EnqueueJob(raw, Some(run_job_barrier), 0, std::ptr::null_mut()) < 0 {
+            JOB_BARRIERS_QUEUED.with(|queued| queued.borrow_mut().pop_back());
+            return 0;
+        }
+        id
+    }
+}
+
+/// Runs QuickJS jobs in FIFO order until the marker queued as `barrier` has
+/// run, so every job queued before it runs first.
+extern "C" fn js_drain_to_job_barrier(barrier: u64) {
+    if barrier == 0 {
+        return;
+    }
+    let Some(raw) = job_barrier_ctx() else { return };
+    // SAFETY: as in `js_queue_job_barrier`.
+    unsafe {
+        let runtime = rquickjs::qjs::JS_GetRuntime(raw);
+        loop {
+            if JOB_BARRIERS_DONE.with(|done| done.borrow_mut().remove(&barrier)) {
+                break;
+            }
+            let mut job_ctx = std::ptr::null_mut();
+            if rquickjs::qjs::JS_ExecutePendingJob(runtime, &mut job_ctx) == 0 {
+                break;
+            }
+        }
+    }
 }
