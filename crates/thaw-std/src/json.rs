@@ -2454,7 +2454,11 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
         Value::Object(fields) => Value::shared_object(
             ordered_object_fields_shared(fields)
                 .into_iter()
-                .filter(|(key, value)| !is_private_slot_key(key) && !is_napi_undefined(value))
+                .filter(|(key, value)| {
+                    !is_private_slot_key(key)
+                        && !is_symbol_key_wire(key)
+                        && !is_napi_undefined(value)
+                })
                 .map(|(key, value)| {
                     let value = if non_finite_number(value).is_some() {
                         Value::Null
@@ -7393,12 +7397,27 @@ fn enumerable_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
     }
 }
 
-/// `Object.keys`/`values`/`entries` see string keys only; symbol keys are stored
-/// as `\u{1f}@@name` sentinel keys.
+/// `Object.keys`/`values`/`entries`/`for...in` see string keys only; symbol keys
+/// are stored as sentinel-texted keys that `is_symbol_key_wire` recognises.
 fn enumerable_string_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
     let mut entries = enumerable_entries(value);
-    entries.retain(|(key, _)| !key.starts_with(b"\x1f@@"));
+    entries.retain(|(key, _)| !is_symbol_key_wire(key));
     entries
+}
+
+/// Whether a stored property key is a Symbol's wire text rather than a string:
+/// the `\u{1f}@@name` well-known sentinel, a unique `\u{3}<id>[:description]`
+/// or a registered `\u{3}R<id>:key` symbol (see `thaw_symbol_new`/`thaw_symbol_for`).
+fn is_symbol_key_wire(key: &[u8]) -> bool {
+    if key.starts_with(b"\x1f@@") {
+        return true;
+    }
+    let Some(rest) = key.strip_prefix(b"\x03") else {
+        return false;
+    };
+    let rest = rest.strip_prefix(b"R").unwrap_or(rest);
+    let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    digits > 0 && matches!(rest.get(digits), None | Some(b':'))
 }
 
 fn utf16_unit_value(unit: u16) -> Value {
@@ -10770,6 +10789,28 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn symbol_key_wire_is_excluded_from_string_enumeration() {
+        for key in [
+            &b"\x031:secret"[..],
+            b"\x032",
+            b"\x03R7:shared",
+            b"\x1f@@iterator",
+        ] {
+            assert!(is_symbol_key_wire(key), "{key:?}");
+        }
+        for key in [
+            &b"visible"[..],
+            b"\x03",
+            b"\x03x",
+            b"\x03R",
+            b"123",
+            b"\x031x",
+        ] {
+            assert!(!is_symbol_key_wire(key), "{key:?}");
+        }
     }
 
     #[test]
