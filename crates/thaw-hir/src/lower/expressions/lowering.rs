@@ -2748,9 +2748,26 @@ impl<'a> FnLowerer<'a> {
                                 return Err("`in` currently requires a fixed-shape object".into());
                             };
                             let lhs = self.coerce_primitive_to_string(lhs)?;
+                            // Keys every ordinary object inherits from
+                            // `Object.prototype`: `"toString" in {a: 1}` is true.
+                            const OBJECT_PROTOTYPE_KEYS: [&str; 12] = [
+                                "__proto__",
+                                "constructor",
+                                "hasOwnProperty",
+                                "isPrototypeOf",
+                                "propertyIsEnumerable",
+                                "toLocaleString",
+                                "toString",
+                                "valueOf",
+                                "__defineGetter__",
+                                "__defineSetter__",
+                                "__lookupGetter__",
+                                "__lookupSetter__",
+                            ];
                             let field_names = fields
                                 .iter()
                                 .map(|(field, _)| field.clone())
+                                .chain(OBJECT_PROTOTYPE_KEYS.iter().map(|key| key.to_string()))
                                 .collect::<Vec<_>>();
                             let left_name = format!("__thaw_in_key_{}", self.next_binding);
                         self.next_binding += 1;

@@ -364,6 +364,14 @@ impl<'a> FnLowerer<'a> {
             lhs = self.wrap_native_value_as_json(lhs, lhs_type.clone())?;
             lhs_type = HirType::Json;
         }
+        // The mirror case: a `Json` left operand (`v || 5` with `v: any`) can
+        // hold any JS value, so the result must stay dynamic. Promoting the
+        // right operand keeps both branches `Json`; coercing the left to the
+        // right's primitive type would turn `"abc" || 5` into `NaN`.
+        if lhs_type == HirType::Json && rhs_type != HirType::Json {
+            rhs = self.wrap_native_value_as_json(rhs, rhs_type.clone())?;
+            rhs_type = HirType::Json;
+        }
         if lhs_type != rhs_type && lhs_type != HirType::Json {
             return self.lower_mixed_logical_expr(lhs, lhs_type, rhs, rhs_type, is_and);
         }
@@ -405,15 +413,10 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), lhs_type.clone());
         let left = HirExpr::Var(name.clone());
         let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
-        let left_value = if lhs_type == HirType::Json && rhs_type != HirType::Json {
-            self.coerce_to_declared(&rhs_type, left.clone())?
-        } else {
-            left
-        };
         let (then_value, else_value) = if is_and {
-            (rhs, left_value)
+            (rhs, left)
         } else {
-            (left_value, rhs)
+            (left, rhs)
         };
         let result = HirExpr::Block(vec![HirStmt::If(
             condition,
