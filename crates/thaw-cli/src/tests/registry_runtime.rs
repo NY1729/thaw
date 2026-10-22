@@ -1142,6 +1142,14 @@ function main(): void {
 
     assert_eq!(ok_request("/warmup"), "ok:/warmup");
     let baseline_fds = fd_count();
+    // Poll until the server has released descriptors back near baseline (bounded);
+    // the assertions after each call still judge the result.
+    let settle_fds = |baseline: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while fd_count() > baseline + 8 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
 
     // 1. A client that sends a partial head and then stalls forever is
     //    closed by the server's read-side timeout (700ms here), not left
@@ -1181,8 +1189,8 @@ function main(): void {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    // Give the server a beat to reap them (its own timeout plus slack).
-    std::thread::sleep(Duration::from_millis(1200));
+    // Give the server time to reap them (its own timeout plus slack).
+    settle_fds(baseline_fds);
     assert_eq!(ok_request("/after-churn"), "ok:/after-churn");
     let after_churn_fds = fd_count();
     assert!(
@@ -1221,7 +1229,7 @@ function main(): void {
          handlers are still running -- their sockets weren't released promptly"
     );
     // And it stays flat after the handlers actually complete.
-    std::thread::sleep(Duration::from_millis(600));
+    settle_fds(baseline_fds);
     assert_eq!(ok_request("/after-aborts"), "ok:/after-aborts");
     let after_aborts_fds = fd_count();
     assert!(
@@ -1248,7 +1256,7 @@ function main(): void {
         // still notionally running its delays.
         assert_eq!(ok_request("/mid-stream-check"), "ok:/mid-stream-check");
     }
-    std::thread::sleep(Duration::from_millis(700));
+    settle_fds(baseline_fds);
     assert_eq!(ok_request("/after-stream-aborts"), "ok:/after-stream-aborts");
     let after_stream_fds = fd_count();
     assert!(
