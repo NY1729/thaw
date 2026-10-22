@@ -2625,6 +2625,45 @@ impl<'a> FnLowerer<'a> {
             let compared = self.wrap_call_argument_bindings(compared, &[(prim_name, HirType::Json, primitive)])?;
             return self.wrap_call_argument_bindings(compared, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)]);
         }
+        // A live host handle (or Json) against a primitive: `==` must apply
+        // ToPrimitive with hint "default", which only the realm's own `==`
+        // does; numeric coercion below would use the "number" hint.
+        let is_dynamic = |ty: &HirType| matches!(ty, HirType::Json | HirType::JsValue);
+        let is_primitive = |ty: &HirType| matches!(ty, HirType::F64 | HirType::Str | HirType::StrLiteral(_) | HirType::Bool);
+        if (is_dynamic(&lhs_type) && is_primitive(&rhs_type))
+            || (is_primitive(&lhs_type) && is_dynamic(&rhs_type))
+        {
+            if lhs_type == HirType::JsValue || rhs_type == HirType::JsValue {
+                return self.function_dynamic_pair(lhs, &lhs_type, rhs, &rhs_type, false);
+            }
+            // A plain Json number/string keeps the numeric tail below; only an
+            // object-like Json value (a live handle) uses the native `==`.
+            let lhs_name = format!("__thaw_loose_guard_lhs_{}", self.next_binding);
+            self.next_binding += 1;
+            let rhs_name = format!("__thaw_loose_guard_rhs_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(lhs_name.clone(), lhs_type.clone());
+            self.scope.insert(rhs_name.clone(), rhs_type.clone());
+            let left = HirExpr::Var(lhs_name.clone());
+            let right = HirExpr::Var(rhs_name.clone());
+            let (dynamic, dynamic_ty) = if is_dynamic(&lhs_type) {
+                (left.clone(), lhs_type.clone())
+            } else {
+                (right.clone(), rhs_type.clone())
+            };
+            let live = self.function_dynamic_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, false)?;
+            let native = HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(self.coerce_primitive_to_number(left)?),
+                Box::new(self.coerce_primitive_to_number(right)?),
+            );
+            let guard = self.json_operand_is_object_like(dynamic, &dynamic_ty)?;
+            let result = HirExpr::Conditional(Box::new(guard), Box::new(live), Box::new(native), HirType::Bool);
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
+            );
+        }
         lhs = self.coerce_primitive_to_number(lhs)?;
         rhs = self.coerce_primitive_to_number(rhs)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
@@ -2958,6 +2997,73 @@ impl<'a> FnLowerer<'a> {
     /// `coerce_primitive_to_string`/`coerce_primitive_to_number` (already
     /// handling a `Json` result via a plain decode, no second `ToPrimitive`
     /// call).
+    /// A dynamic (Json-backed) operand, which may be a live QuickJS handle.
+    fn add_operand_is_json(ty: &HirType) -> bool {
+        matches!(ty, HirType::Json)
+            || *ty == HirType::Optional(Box::new(HirType::Json))
+    }
+
+    /// Runtime guard for the QuickJS default-hint path: true when a dynamic
+    /// operand is an object or function, the only kinds that can be a live
+    /// handle with its own `Symbol.toPrimitive`. Plain numbers and strings
+    /// fail it and keep the native coercion.
+    pub(super) fn json_operand_is_object_like(
+        &mut self, value: HirExpr, ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        if *ty == HirType::JsValue {
+            return Ok(HirExpr::Lit(HirLit::Bool(true)));
+        }
+        if !Self::add_operand_is_json(ty) {
+            return Ok(HirExpr::Lit(HirLit::Bool(false)));
+        }
+        let json = self.coerce_to_declared(&HirType::Json, value)?;
+        let typeof_of = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![json]);
+        let is_object = HirExpr::BinOp(BinOp::EqEqEq, Box::new(typeof_of.clone()),
+            Box::new(HirExpr::Lit(HirLit::Str("object".into()))));
+        let is_function = HirExpr::BinOp(BinOp::EqEqEq, Box::new(typeof_of),
+            Box::new(HirExpr::Lit(HirLit::Str("function".into()))));
+        self.lower_logical_expr(is_object, is_function, false)
+    }
+
+    /// `+` with a dynamic operand: an object-like operand takes the QuickJS
+    /// default-hint `+`; otherwise the native ToPrimitive path (unchanged).
+    pub(super) fn lower_add_json_guarded(
+        &mut self, lhs: HirExpr, rhs: HirExpr, guaranteed_string: bool,
+    ) -> Result<HirExpr, String> {
+        let lhs_ty = self.infer_expr_type(&lhs)?;
+        let rhs_ty = self.infer_expr_type(&rhs)?;
+        // Only operands that already coerce to Json take the guard; anything
+        // else (Symbol, BigInt, unions, ...) keeps its native lowering, which
+        // owns those TypeError/BigInt rules.
+        let json_compatible = |ty: &HirType| Self::add_operand_is_json(ty)
+            || matches!(ty, HirType::JsValue | HirType::F64 | HirType::Str
+                | HirType::StrLiteral(_) | HirType::Bool);
+        if !(json_compatible(&lhs_ty) && json_compatible(&rhs_ty)) {
+            return self.lower_add_with_to_primitive(lhs, rhs);
+        }
+        let lhs_name = format!("__thaw_add_guard_lhs_{}", self.next_binding);
+        self.next_binding += 1;
+        let rhs_name = format!("__thaw_add_guard_rhs_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(lhs_name.clone(), lhs_ty.clone());
+        self.scope.insert(rhs_name.clone(), rhs_ty.clone());
+        let left = HirExpr::Var(lhs_name.clone());
+        let right = HirExpr::Var(rhs_name.clone());
+        let live = self.lower_add_with_live_json(left.clone(), right.clone())?;
+        let live = if guaranteed_string {
+            self.coerce_to_declared(&HirType::Str, live)?
+        } else {
+            live
+        };
+        let native = self.lower_add_with_to_primitive(left.clone(), right.clone())?;
+        let left_guard = self.json_operand_is_object_like(left, &lhs_ty)?;
+        let right_guard = self.json_operand_is_object_like(right, &rhs_ty)?;
+        let guard = self.lower_logical_expr(left_guard, right_guard, false)?;
+        let result_ty = if guaranteed_string { HirType::Str } else { HirType::Json };
+        let result = HirExpr::Conditional(Box::new(guard), Box::new(live), Box::new(native), result_ty);
+        self.wrap_call_argument_bindings(result, &[(lhs_name, lhs_ty, lhs), (rhs_name, rhs_ty, rhs)])
+    }
+
     fn add_operand_may_be_string(ty: &HirType) -> bool {
         match ty {
             HirType::Str | HirType::StrLiteral(_) => true,
