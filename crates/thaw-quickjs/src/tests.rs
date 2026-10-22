@@ -1,5 +1,14 @@
 use super::*;
 
+// cwd and the environment are process-wide; tests that change or read them hold this lock.
+static PROCESS_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_process_state() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn call(func_name: &str, args_json: &str) -> String {
     let func_name = CString::new(func_name).unwrap();
     let args_json = CString::new(args_json).unwrap();
@@ -2943,6 +2952,7 @@ fn process_next_tick_is_async_and_forwards_arguments() {
 
 #[test]
 fn process_exposes_time_cwd_and_event_helpers() {
+    let _process_state = lock_process_state();
     assert_eq!(
             load(
                 "function processHelpers() {\n\
@@ -2966,6 +2976,7 @@ fn process_exposes_time_cwd_and_event_helpers() {
 
 #[test]
 fn process_chdir_failure_is_a_node_shaped_error() {
+    let _process_state = lock_process_state();
     assert_eq!(
         load("function chdirError() { try { process.chdir('/thaw/missing/dir'); } catch (e) { return [e.name, e.code, e.errno, e.syscall, e.path === process.cwd(), e.dest, e.message.startsWith('ENOENT: no such file or directory, chdir '), e.message.endsWith(\"-> '/thaw/missing/dir'\")]; } return 'no error'; }"),
         1
@@ -16179,6 +16190,7 @@ fn recorded_w2_contracts_match() {
 
 #[test]
 fn process_env_reads_and_writes_the_libc_environment() {
+    let _process_state = lock_process_state();
     // Compiled code reads process.env.NAME through libc getenv, so JavaScript must use the same store.
     assert_eq!(
         load(
