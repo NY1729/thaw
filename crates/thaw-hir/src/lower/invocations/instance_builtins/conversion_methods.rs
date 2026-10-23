@@ -321,6 +321,24 @@ impl<'a> FnLowerer<'a> {
                     // array. `infer_expr_type` normalizes `Bytes` away, so
                     // ask for the un-normalized receiver type.
                     if self.infer_expr_type_inner(&receiver)? == HirType::Bytes {
+                        // `buf.toString(encoding, start, end)`: decode only the
+                        // `[start, end)` byte range (copied out first).
+                        if call.args.len() >= 2 && call.args.iter().all(|argument| argument.spread.is_none()) {
+                            let (arguments, mut bindings) =
+                                self.lower_native_spread_values(&call.args, "Buffer.toString")?;
+                            let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+                            let start = self.coerce_primitive_to_number(arguments[1].clone())?;
+                            let end = self.number_format_end_or_infinity(arguments.get(2))?;
+                            let range = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_bytes_slice".to_string())),
+                                vec![receiver, start, end],
+                            );
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_bytes_to_string".to_string())),
+                                vec![range, arguments[0].clone()],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let encoding = match call.args.first() {
                             Some(argument) => self.lower_expr(&argument.expr)?,
                             None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
