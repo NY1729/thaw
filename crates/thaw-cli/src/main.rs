@@ -148,21 +148,42 @@ fn run_file_in(
     directory: Option<&Path>,
     registry: Option<&Path>,
 ) -> Result<i32, String> {
-    let nonce = std::time::SystemTime::now()
+    let output = run_output_path()?;
+    let result = run_file_at(input, args, &output, directory, registry);
+    if let Some(dir) = output.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    result
+}
+
+/// The private location `thaw run` builds its program into: a fresh directory
+/// under the thaw cache (not the shared temp directory, and never printed).
+fn run_output_path() -> Result<PathBuf, String> {
+    Ok(private_temp_dir(&thaw_cache_root()?.join("run"), "run")?.join("thaw-run"))
+}
+
+/// Creates a new directory named `<prefix>-<pid>-<nanos>` under `parent` that
+/// only the current user can enter (mode 0700). `create_dir` is
+/// create-exclusive, so a path that already exists, including one planted by
+/// another user, is an error rather than being reused.
+fn private_temp_dir(parent: &Path, prefix: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create `{}`: {error}", parent.display()))?;
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let output = run_output_path(nonce)?;
-    run_file_at(input, args, &output, directory, registry)
-}
-
-/// The private, per-user location `thaw run` builds its program into (not the
-/// shared temp directory, and never printed).
-fn run_output_path(nonce: u128) -> Result<PathBuf, String> {
-    let dir = thaw_cache_root().join("run");
-    std::fs::create_dir_all(&dir)
+    let dir = parent.join(format!("{prefix}-{}-{nanos}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
         .map_err(|error| format!("failed to create `{}`: {error}", dir.display()))?;
-    Ok(dir.join(format!("thaw-run-{}-{nonce}", std::process::id())))
+    Ok(dir)
 }
 
 fn run_file_at(
@@ -895,8 +916,8 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
         install_missing,
         icu4c,
     );
-    if let Some(path) = generated_input {
-        let _ = std::fs::remove_file(path);
+    if let Some(dir) = generated_input.as_deref().and_then(Path::parent) {
+        let _ = std::fs::remove_dir_all(dir);
     }
     result.map(|()| output)
 }
@@ -1085,8 +1106,11 @@ fn project_input_path(
         .find(|path| path.is_file()))
 }
 
+/// Writes the generated static server entry into a fresh private directory
+/// (see `private_temp_dir`); the caller removes that directory after the build.
 fn write_static_asset_server_entry() -> Result<PathBuf, String> {
-    let path = std::env::temp_dir().join(format!("thaw-vite-entry-{}.ts", std::process::id()));
+    let dir = private_temp_dir(&std::env::temp_dir(), "thaw-vite-entry")?;
+    let path = dir.join("server.ts");
     std::fs::write(
         &path,
         r#"import { createServer } from "node:http";

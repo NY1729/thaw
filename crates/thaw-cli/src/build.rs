@@ -111,6 +111,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
 
     fn collect(
         root: &Path,
+        canonical_root: &Path,
         directory: &Path,
         files: &mut Vec<(String, String, &'static str)>,
     ) -> Result<(), String> {
@@ -125,8 +126,31 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
                 format!("failed to inspect asset `{}`: {error}", path.display())
             })?;
             if file_type.is_dir() {
-                collect(root, &path, files)?;
-            } else if file_type.is_file() {
+                collect(root, canonical_root, &path, files)?;
+                continue;
+            }
+            if file_type.is_symlink() {
+                // Followed only when it resolves to a regular file inside the
+                // asset root; anything else is an error, never a silent skip.
+                let target = std::fs::canonicalize(&path).map_err(|error| {
+                    format!("failed to inspect asset `{}`: {error}", path.display())
+                })?;
+                if !target.starts_with(canonical_root) {
+                    return Err(format!(
+                        "asset `{}` is a symlink that points outside the asset directory",
+                        path.display()
+                    ));
+                }
+                if !target.is_file() {
+                    return Err(format!(
+                        "asset `{}` is a symlink to something other than a regular file",
+                        path.display()
+                    ));
+                }
+            } else if !file_type.is_file() {
+                continue;
+            }
+            {
                 let relative = path.strip_prefix(root).unwrap();
                 let url = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
                 let bytes = std::fs::read(&path)
@@ -144,8 +168,11 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
         Ok(())
     }
 
+    let canonical_root = std::fs::canonicalize(directory).map_err(|error| {
+        format!("failed to read asset directory `{}`: {error}", directory.display())
+    })?;
     let mut files = Vec::new();
-    collect(directory, directory, &mut files)?;
+    collect(directory, &canonical_root, directory, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     if files.is_empty() {
         return Err(format!("asset directory `{}` is empty", directory.display()));
@@ -1666,5 +1693,39 @@ mod prepared_cache_trust_tests {
         assert_eq!(std::fs::read(&linked).unwrap(), b"GOOD");
         std::fs::remove_file(&cached).ok();
         std::fs::remove_file(prepared_staticlib_path(package, true, &[]).unwrap()).ok();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod asset_symlink_tests {
+    use super::*;
+
+    fn asset_root(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("thaw-asset-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("assets")).unwrap();
+        base
+    }
+
+    #[test]
+    fn asset_symlink_to_a_file_inside_the_root_is_collected() {
+        let base = asset_root("inside");
+        let root = base.join("assets");
+        std::fs::write(root.join("app.js"), "console.log(1)").unwrap();
+        std::os::unix::fs::symlink(root.join("app.js"), root.join("alias.js")).unwrap();
+        let shim = generate_asset_shim(&root).unwrap();
+        assert!(shim.contains("/alias.js"), "{shim}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn asset_symlink_outside_the_root_is_an_error() {
+        let base = asset_root("outside");
+        let root = base.join("assets");
+        std::fs::write(base.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.txt"), root.join("leak.txt")).unwrap();
+        let error = generate_asset_shim(&root).unwrap_err();
+        assert!(error.contains("points outside the asset directory"), "{error}");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
