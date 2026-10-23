@@ -1868,6 +1868,26 @@
           "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
     },
     {
+      "name": "console.log of an inline array method result",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [3, 1, 2]; console.log([10, 9, 1, 100].sort()); console.log(a.toSorted()); }"
+    },
+    {
+      "name": "console.log of an inline Date and Date array",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Date(0)); console.log([new Date(0)]); }"
+    },
+    {
+      "name": "console.log of a null-prototype object",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.create(null)); }"
+    },
+    {
+      "name": "console.log of querystring.parse and parseArgs results",
+      "expect": "matched",
+      "source": "import * as qs from \"node:querystring\"; import { parseArgs } from \"node:util\"; function main(): void { console.log(qs.parse(\"a=1&a=2&b=%20x&c\")); console.log(parseArgs({ args: [\"-f\"], options: { foo: { type: \"boolean\", short: \"f\" } } })); }"
+    },
+    {
       "name": "buffer ranged toString and utf16le",
       "expect": "matched",
       "source": "function main(): void {\n  const s = Buffer.from(\"hello world\");\n  console.log(s.toString(\"utf8\", 2, 7), s.toString(\"hex\", 0, 3), s.toString(\"utf8\", 6), s.toString(\"base64\", 1, 4), s.toString(\"utf8\", 3, 100), \"[\" + s.toString(\"utf8\", 5, 2) + \"]\");\n  console.log(s.toString(\"utf16le\").length, Buffer.from(\"hi\", \"utf16le\"), Buffer.from(\"hi\", \"ucs2\").toString(\"ucs2\"), Buffer.from(\"\\u{1F600}x\", \"utf16le\"), Buffer.from(\"hé\", \"utf16le\").toString(\"utf16le\"));\n  const a = Buffer.from([97, 98, 99]);\n  const wide: any = Buffer.from([1, 2, 3]);\n  console.log(a.toString(), JSON.stringify(wide));\n}\n"
@@ -2032,6 +2052,11 @@
       "name": "valid ts rejects: string index read",
       "expect": "matched",
       "source": "function main(): void {\n  const s = \"Hello\";\n  console.log(s[1], s[s.length - 1], s[0] + s[4]);\n  let n = 0;\n  for (let i = 0; i < s.length; i++) { if (s[i] === \"l\") n++; }\n  console.log(n);\n  const words = [\"ab\", \"cd\"];\n  console.log(words[1][0], words.map((w) => w[1]).join(\"\"));\n}"
+    },
+    {
+      "name": "process version is a v22 string",
+      "expect": "matched",
+      "source": "function main(): void { console.log(process.version.startsWith('v22.'), typeof process.versions.node); }"
     },
     {
       "name": "http server address and listen callback",

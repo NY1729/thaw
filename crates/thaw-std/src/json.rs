@@ -4992,7 +4992,9 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     if HOST_INSPECT_DEPTH.with(Cell::get) >= 4 {
         return Node::Raw(if array { "[Array]" } else { "[Object]" }.to_string());
     }
-    if !array {
+    // `Object.create(null)`: `String(value)` throws, and Node prints it with a marker prefix.
+    let null_proto = !array && host_query(lease, 26).as_deref() == Some("1");
+    if !array && !null_proto {
         let text = host_inspect_text(lease, false);
         if !matches!(&text, Node::Raw(value) if value == "[object Object]") {
             return text;
@@ -5020,6 +5022,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
                 .collect();
             let ctor = match host_query(lease, 23) {
+                _ if null_proto => Ctor::NullProto,
                 Some(name) if !name.is_empty() => Ctor::Named(name),
                 _ => Ctor::Plain,
             };

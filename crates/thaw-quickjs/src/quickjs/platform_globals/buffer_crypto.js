@@ -273,7 +273,7 @@
       if (asymmetricInfo) {
         this.asymmetricKeyType = asymmetricInfo.keyType;
         this.asymmetricKeyDetails = asymmetricInfo.namedCurve
-          ? { namedCurve: asymmetricInfo.namedCurve }
+          ? { namedCurve: { 'P-256': 'prime256v1', 'P-384': 'secp384r1', 'P-521': 'secp521r1' }[asymmetricInfo.namedCurve] || asymmetricInfo.namedCurve }
           : asymmetricInfo.modulusLength != null
           ? { modulusLength: asymmetricInfo.modulusLength, publicExponent: BigInt(asymmetricInfo.publicExponent) }
           : {};
