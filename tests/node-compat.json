@@ -1888,6 +1888,31 @@
       "source": "import * as qs from \"node:querystring\"; import { parseArgs } from \"node:util\"; function main(): void { console.log(qs.parse(\"a=1&a=2&b=%20x&c\")); console.log(parseArgs({ args: [\"-f\"], options: { foo: { type: \"boolean\", short: \"f\" } } })); }"
     },
     {
+      "name": "buffer ranged toString and utf16le",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s = Buffer.from(\"hello world\");\n  console.log(s.toString(\"utf8\", 2, 7), s.toString(\"hex\", 0, 3), s.toString(\"utf8\", 6), s.toString(\"base64\", 1, 4), s.toString(\"utf8\", 3, 100), \"[\" + s.toString(\"utf8\", 5, 2) + \"]\");\n  console.log(s.toString(\"utf16le\").length, Buffer.from(\"hi\", \"utf16le\"), Buffer.from(\"hi\", \"ucs2\").toString(\"ucs2\"), Buffer.from(\"\\u{1F600}x\", \"utf16le\"), Buffer.from(\"hé\", \"utf16le\").toString(\"utf16le\"));\n  const a = Buffer.from([97, 98, 99]);\n  const wide: any = Buffer.from([1, 2, 3]);\n  console.log(a.toString(), JSON.stringify(wide));\n}\n"
+    },
+    {
+      "name": "fs writes Buffer bytes and readSync fills the buffer",
+      "expect": "matched",
+      "source": "import * as fs from \"node:fs\";\nfunction main(): void {\n  const d = \"/tmp/thaw-bytesfix-node-compat\";\n  fs.mkdirSync(d, { recursive: true });\n  fs.writeFileSync(d + \"/a\", Buffer.from([1, 2, 3]));\n  console.log(fs.readFileSync(d + \"/a\"));\n  fs.writeFileSync(d + \"/b\", Buffer.from([65, 200, 3, 0, 255]));\n  console.log(fs.statSync(d + \"/b\").size, fs.readFileSync(d + \"/b\"));\n  fs.appendFileSync(d + \"/b\", Buffer.from([7, 8]));\n  console.log(fs.readFileSync(d + \"/b\"));\n  fs.writeFileSync(d + \"/c\", \"hello world\");\n  const fd = fs.openSync(d + \"/c\", \"r\");\n  const buf = Buffer.alloc(8);\n  const n = fs.readSync(fd, buf, 2, 5, 6);\n  console.log(n, buf);\n  const first = Buffer.alloc(4);\n  const m = fs.readSync(fd, first, 0, 4, 0);\n  console.log(m, first.toString());\n  fs.closeSync(fd);\n  fs.rmSync(d, { recursive: true });\n}\n"
+    },
+    {
+      "name": "crypto md5 sha3 hmac and hash",
+      "expect": "matched",
+      "source": "import * as crypto from \"node:crypto\";\nimport { createHash } from \"node:crypto\";\nfunction main(): void {\n  console.log(createHash(\"md5\").update(\"a\").digest(\"hex\"));\n  console.log(crypto.createHash(\"sha3-256\").update(\"x\").digest(\"hex\"));\n  console.log(crypto.createHash(\"sha3-512\").update(\"abc\").digest(\"base64\"));\n  console.log(crypto.createHmac(\"md5\", Buffer.from(\"k\")).update(\"a\").update(\"b\").digest(\"base64\"));\n  console.log(crypto.createHmac(\"sha3-256\", \"key\").update(\"hello\").digest(\"hex\"));\n  console.log(crypto.hash(\"sha1\", \"abc\"));\n  console.log(crypto.hash(\"sha3-224\", \"abc\", \"base64\"));\n  console.log(typeof crypto.webcrypto.subtle, typeof crypto.subtle);\n}\n"
+    },
+    {
+      "name": "TextDecoder utf-16le and latin1",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(new TextDecoder(\"utf-16le\").decode(new Uint8Array([104, 0, 105, 0])));\n  console.log(new TextDecoder(\"utf-16le\").decode(new Uint8Array([0x3d, 0xd8, 0x00, 0xde, 0x41, 0])));\n  console.log(new TextDecoder(\"latin1\").decode(new Uint8Array([233, 65, 0x80])));\n  console.log(new TextDecoder(\"latin1\").encoding, new TextDecoder(\"utf-16\").encoding);\n}\n"
+    },
+    {
+      "name": "process hrtime bigint ids release and kill",
+      "expect": "matched",
+      "source": "function main(): void {\n  const b = process.hrtime.bigint();\n  console.log(typeof b, b > 0n, process.hrtime.bigint() >= b);\n  console.log(typeof process.uptime(), typeof process.memoryUsage.rss(), typeof process.getuid(), typeof process.getgid(), typeof process.umask());\n  console.log(process.release.name, process.kill(process.pid, 0));\n  process.on(\"SIGUSR2\", () => { console.log(\"got sig\"); });\n  process.kill(process.pid, \"SIGUSR2\");\n  setTimeout(() => console.log(\"end\"), 20);\n}\n"
+    },
+    {
       "name": "zero ms timeout keeps insertion order with a 1 ms timeout",
       "expect": "matched",
       "source": "function main(): void { setTimeout((): void => console.log('one'), 1); setTimeout((): void => console.log('zero'), 0); setTimeout((): void => console.log('one-b'), 1); }"
