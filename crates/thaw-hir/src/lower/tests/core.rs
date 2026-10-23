@@ -1858,6 +1858,37 @@ fn promise_then_keeps_single_value_callback_validation() {
     }
 }
 
+#[test]
+fn new_target_emits_a_construct_body_only_for_functions_that_use_it() {
+    let program = lower(
+        r#"function F(): void { console.log(new.target === undefined); }
+           function Plain(): void {}
+           function main(): void { F(); new F(); new Plain(); }"#,
+    );
+    let names: Vec<_> = program.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"F") && names.contains(&"F__thaw_construct"), "{names:?}");
+    assert!(!names.contains(&"Plain__thaw_construct"), "{names:?}");
+    let main = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(main.contains("F__thaw_construct"), "{main}");
+}
+
+#[test]
+fn new_target_outside_a_supported_function_is_a_clear_error() {
+    for source in [
+        "class C { constructor() { console.log(new.target); } } function main(): void { new C(); }",
+        "function main(): void { function inner(): void { console.log(new.target); } inner(); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("`new.target` is only supported"), "{source}: {error}");
+    }
+}
+
+#[test]
+fn top_level_new_target_is_rejected_by_the_parser() {
+    assert!(thaw_parser::parse_typescript("console.log(new.target); function main(): void {}").is_err());
+}
+
 fn lower_function_length_program(source: &str) -> Result<String, String> {
     let module = thaw_parser::parse_typescript(source).expect("parse error");
     lower_module(&module).map(|program| format!("{program:?}"))
