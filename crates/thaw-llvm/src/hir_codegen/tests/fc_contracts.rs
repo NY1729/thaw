@@ -61,3 +61,23 @@ async function main(): Promise<void> {
         "2 41\n7\n"
     );
 }
+
+#[test]
+fn fc_contract_foreign_object_in_native_class_array_keeps_identity() {
+    let source = r##"class C { n = 1; bump(): number { this.n += 1; return this.n; } }
+function main(): void {
+  const nat: C[] = [];
+  const v: any = nat;
+  const o: any = { n: 7 };
+  v[0] = o;
+  console.log(nat[0] === o, nat[0] instanceof C, nat[0].n);
+}
+"##;
+    assert_eq!(
+        compile_and_run(
+            source,
+            "fc_contract_foreign_object_in_native_class_array_keeps_identity"
+        ),
+        "true false 7\n"
+    );
+}
