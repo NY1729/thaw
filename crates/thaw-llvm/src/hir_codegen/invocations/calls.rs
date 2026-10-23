@@ -1791,6 +1791,34 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint string conversion returned no value".into());
             }
+            "__thaw_object_class_name" => {
+                let [value] = args else {
+                    return Err("class name lookup expects one operand".into());
+                };
+                let value = self.compile_expr(value)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_object_class_name").unwrap(),
+                        &[value.into()],
+                        "object_class_name",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("class name lookup returned no value".into());
+            }
+            "__thaw_i64_to_number" => {
+                let [value] = args else {
+                    return Err("bigint number conversion expects one operand".into());
+                };
+                let value = self.compile_expr(value)?.into_int_value();
+                return self
+                    .builder
+                    .build_signed_int_to_float(value, self.context.f64_type(), "bigint_number")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_i64_from_number" | "__thaw_i64_from_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));

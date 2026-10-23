@@ -185,6 +185,15 @@ impl<'a> FnLowerer<'a> {
                 )),
                 Box::new(false_lit()),
             )),
+            HirType::I64 => Ok(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value),
+                    Box::new(HirExpr::Lit(HirLit::I64(0))),
+                )),
+                Box::new(false_lit()),
+            )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
             // Truthiness is asked of the live engine value: a function (or any object
             // whose JSON projection is empty) is truthy, which a JSON round trip loses.
@@ -2680,8 +2689,8 @@ impl<'a> FnLowerer<'a> {
                 &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
             );
         }
-        lhs = self.coerce_primitive_to_number(lhs)?;
-        rhs = self.coerce_primitive_to_number(rhs)?;
+        lhs = self.coerce_primitive_to_number(self.bigint_to_number(lhs)?)?;
+        rhs = self.coerce_primitive_to_number(self.bigint_to_number(rhs)?)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
     }
 
@@ -3586,11 +3595,26 @@ impl<'a> FnLowerer<'a> {
                 &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
             );
         }
+        let lhs = self.bigint_to_number(lhs)?;
+        let rhs = self.bigint_to_number(rhs)?;
         Ok(HirExpr::BinOp(
             op,
             Box::new(self.coerce_primitive_to_number(lhs)?),
             Box::new(self.coerce_primitive_to_number(rhs)?),
         ))
+    }
+
+    /// A native `bigint` compared with a `number` (`1n < 2`, `3n == 3`) is compared as a
+    /// number; exact within 2^53. Arithmetic still rejects the mix, as JS throws there.
+    pub(crate) fn bigint_to_number(&self, value: HirExpr) -> Result<HirExpr, String> {
+        Ok(if self.infer_expr_type(&value)? == HirType::I64 {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_i64_to_number".to_string())),
+                vec![value],
+            )
+        } else {
+            value
+        })
     }
 
     fn lower_optional_undefined_equality(
