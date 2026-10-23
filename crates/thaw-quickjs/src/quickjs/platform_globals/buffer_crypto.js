@@ -204,6 +204,12 @@
     }
   }
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
+  // Digests `createHash`/`createHmac`/`pbkdf2` accept; sign/verify/OAEP keep the narrower set below.
+  const normalizeDigestAlgorithm = algorithm => {
+    const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
+    if (!['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'sha3224', 'sha3256', 'sha3384', 'sha3512'].includes(name)) throw new Error(`Digest method not supported`);
+    return name;
+  };
   const normalizeHashAlgorithm = algorithm => {
     const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
     if (name !== 'sha1' && name !== 'sha256' && name !== 'sha384' && name !== 'sha512') throw new Error(`Unsupported digest: ${algorithm}`);
@@ -311,7 +317,7 @@
     return { pem: info.pem, info };
   };
   class Hash {
-    constructor(algorithm) { this.algorithm = normalizeHashAlgorithm(algorithm); this._chunks = []; this._digested = false; }
+    constructor(algorithm) { this.algorithm = normalizeDigestAlgorithm(algorithm); this._chunks = []; this._digested = false; }
     update(data, encoding) {
       if (this._digested) throw new Error('Digest already called');
       this._chunks.push(Buffer.from(data, encoding)); return this;
@@ -393,7 +399,7 @@
   };
   const pbkdf2Sync = (password, salt, iterations, keylen, digest) => Buffer.from(
     __thaw_crypto_pbkdf2_hex(
-      normalizeHashAlgorithm(digest),
+      normalizeDigestAlgorithm(digest),
       Buffer.from(password).toString('hex'),
       Buffer.from(salt).toString('hex'),
       checkedPbkdf2Number(iterations, 1, 'iterations'),
@@ -682,7 +688,11 @@
     generateKeyPairSync, generateKeyPair,
     diffieHellman, ECDH, createECDH,
     constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING },
-    timingSafeEqual, getHashes: () => ['sha256', 'sha512']
+    timingSafeEqual, getHashes: () => ['sha256', 'sha512'],
+    hash: (algorithm, data, outputEncoding = 'hex') => {
+      const value = new Hash(algorithm).update(data).digest();
+      return outputEncoding === 'buffer' ? value : value.toString(outputEncoding);
+    }
   };
   const subtle = {
     digest(algorithm, data) {

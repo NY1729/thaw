@@ -115,12 +115,16 @@
   globalThis.TextDecoder = class TextDecoder {
     constructor(label = 'utf-8', options = {}) {
       const normalized = String(label).trim().toLowerCase().replace(/[_\s]/g, '-');
-      if (!['utf-8', 'utf8', 'unicode-1-1-utf-8'].includes(normalized)) {
+      const encoding = ['utf-8', 'utf8', 'unicode-1-1-utf-8'].includes(normalized) ? 'utf-8'
+        : ['utf-16le', 'utf-16', 'ucs-2', 'unicode', 'csunicode', 'iso-10646-ucs-2', 'unicodefeff'].includes(normalized) ? 'utf-16le'
+        : ['latin1', 'iso-8859-1', 'iso8859-1', 'l1', 'ascii', 'us-ascii', 'windows-1252', 'cp1252', 'x-cp1252'].includes(normalized) ? 'windows-1252'
+        : null;
+      if (encoding === null) {
         throw new RangeError(`unsupported encoding: ${label}`);
       }
       this.fatal = Boolean(options.fatal);
       this.ignoreBOM = Boolean(options.ignoreBOM);
-      this.encoding = 'utf-8';
+      this.encoding = encoding;
       this._pending = new __thawTextUint8Array();
       this._bomSeen = false;
       this._previousStreaming = false;
@@ -144,6 +148,35 @@
         if (this.fatal) throw new TypeError('invalid UTF-8 data');
         output += replacement;
       };
+      if (this.encoding === 'windows-1252') {
+        const high = [0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f,
+          0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178];
+        for (; index < byteLength; index++) {
+          const byte = bytes[index];
+          output += String.fromCharCode(byte >= 0x80 && byte <= 0x9f ? high[byte - 0x80] : byte);
+        }
+      } else if (this.encoding === 'utf-16le') {
+        let end = byteLength - byteLength % 2;
+        if (streaming && end >= 2) {
+          const last = bytes[end - 2] | bytes[end - 1] << 8;
+          if (last >= 0xd800 && last <= 0xdbff) end -= 2;
+        }
+        if (streaming) {
+          this._pending = new __thawTextUint8Array(byteLength - end);
+          for (let pendingIndex = end; pendingIndex < byteLength; pendingIndex++) this._pending[pendingIndex - end] = bytes[pendingIndex];
+        }
+        for (; index + 1 < end; index += 2) {
+          const unit = bytes[index] | bytes[index + 1] << 8;
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = index + 3 < end ? bytes[index + 2] | bytes[index + 3] << 8 : 0;
+            if (next >= 0xdc00 && next <= 0xdfff) { output += String.fromCharCode(unit, next); index += 2; }
+            else invalid();
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) invalid();
+          else output += String.fromCharCode(unit);
+        }
+        if (!streaming && byteLength % 2) invalid();
+        index = byteLength;
+      }
       while (index < byteLength) {
         const first = bytes[index++];
         if (first <= 0x7f) { output += String.fromCodePoint(first); continue; }

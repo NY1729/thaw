@@ -34,7 +34,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -672,22 +672,123 @@ fn set_stdin_raw_mode(_enabled: bool) -> bool {
     false
 }
 
+/// Keccak-f[1600] (FIPS 202); `sha3-*` digests only, no extendable output.
+fn keccak_f1600(state: &mut [u64; 25]) {
+    const ROUND_CONSTANTS: [u64; 24] = [
+        0x0000000000000001,
+        0x0000000000008082,
+        0x800000000000808a,
+        0x8000000080008000,
+        0x000000000000808b,
+        0x0000000080000001,
+        0x8000000080008081,
+        0x8000000000008009,
+        0x000000000000008a,
+        0x0000000000000088,
+        0x0000000080008009,
+        0x000000008000000a,
+        0x000000008000808b,
+        0x800000000000008b,
+        0x8000000000008089,
+        0x8000000000008003,
+        0x8000000000008002,
+        0x8000000000000080,
+        0x000000000000800a,
+        0x800000008000000a,
+        0x8000000080008081,
+        0x8000000000008080,
+        0x0000000080000001,
+        0x8000000080008008,
+    ];
+    const ROTATIONS: [u32; 24] = [
+        1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,
+    ];
+    const LANES: [usize; 24] = [
+        10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
+    ];
+    for constant in ROUND_CONSTANTS {
+        let mut columns = [0u64; 5];
+        for (x, column) in columns.iter_mut().enumerate() {
+            *column = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+        }
+        for x in 0..5 {
+            let delta = columns[(x + 4) % 5] ^ columns[(x + 1) % 5].rotate_left(1);
+            for y in 0..5 {
+                state[x + 5 * y] ^= delta;
+            }
+        }
+        let mut carried = state[1];
+        for (lane, rotation) in LANES.into_iter().zip(ROTATIONS) {
+            let next = state[lane];
+            state[lane] = carried.rotate_left(rotation);
+            carried = next;
+        }
+        for y in 0..5 {
+            let row = [
+                state[5 * y],
+                state[5 * y + 1],
+                state[5 * y + 2],
+                state[5 * y + 3],
+                state[5 * y + 4],
+            ];
+            for x in 0..5 {
+                state[5 * y + x] = row[x] ^ (!row[(x + 1) % 5] & row[(x + 2) % 5]);
+            }
+        }
+        state[0] ^= constant;
+    }
+}
+
+fn sha3_digest(value: &[u8], output_bytes: usize) -> Vec<u8> {
+    let rate = 200 - 2 * output_bytes;
+    let mut state = [0u64; 25];
+    let mut padded = value.to_vec();
+    padded.push(0x06);
+    padded.resize(padded.len().div_ceil(rate) * rate, 0);
+    *padded.last_mut().expect("padded block") |= 0x80;
+    for block in padded.chunks(rate) {
+        for (lane, bytes) in state.iter_mut().zip(block.as_chunks::<8>().0) {
+            *lane ^= u64::from_le_bytes(*bytes);
+        }
+        keccak_f1600(&mut state);
+    }
+    state
+        .iter()
+        .flat_map(|lane| lane.to_le_bytes())
+        .take(output_bytes)
+        .collect()
+}
+
 fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {
     match algorithm {
+        "md5" => md5::Md5::digest(value).to_vec(),
         "sha1" => Sha1::digest(value).to_vec(),
+        "sha224" => sha2::Sha224::digest(value).to_vec(),
         "sha256" => Sha256::digest(value).to_vec(),
         "sha384" => Sha384::digest(value).to_vec(),
         "sha512" => Sha512::digest(value).to_vec(),
+        "sha3224" => sha3_digest(value, 28),
+        "sha3256" => sha3_digest(value, 32),
+        "sha3384" => sha3_digest(value, 48),
+        "sha3512" => sha3_digest(value, 64),
         _ => Vec::new(),
     }
 }
 
+/// HMAC block size: the digest's input block (the SHA-3 sponge rate for `sha3*`).
+fn hmac_block_size(algorithm: &str) -> usize {
+    match algorithm {
+        "sha384" | "sha512" => 128,
+        "sha3224" => 144,
+        "sha3256" => 136,
+        "sha3384" => 104,
+        "sha3512" => 72,
+        _ => 64,
+    }
+}
+
 fn hmac_bytes(algorithm: &str, key: &[u8], value: &[u8]) -> Vec<u8> {
-    let block_size = if algorithm == "sha384" || algorithm == "sha512" {
-        128
-    } else {
-        64
-    };
+    let block_size = hmac_block_size(algorithm);
     let mut normalized = if key.len() > block_size {
         digest_bytes(algorithm, key)
     } else {
@@ -1931,22 +2032,31 @@ include!("quickjs/intl_relative_time.rs");
 include!("quickjs/asymmetric_crypto.rs");
 
 #[cfg(unix)]
-static PENDING_PROCESS_SIGNAL: AtomicI32 = AtomicI32::new(0);
+static PENDING_PROCESS_SIGNALS: AtomicU64 = AtomicU64::new(0);
+
+/// Signals a script can subscribe to with `process.on(name, ..)`.
+#[cfg(unix)]
+const PROCESS_SIGNALS: [(&str, libc::c_int); 6] = [
+    ("SIGINT", libc::SIGINT),
+    ("SIGTERM", libc::SIGTERM),
+    ("SIGHUP", libc::SIGHUP),
+    ("SIGQUIT", libc::SIGQUIT),
+    ("SIGUSR1", libc::SIGUSR1),
+    ("SIGUSR2", libc::SIGUSR2),
+];
 
 #[cfg(unix)]
 extern "C" fn record_process_signal(signal: libc::c_int) {
-    PENDING_PROCESS_SIGNAL.store(signal, Ordering::Relaxed);
+    PENDING_PROCESS_SIGNALS.fetch_or(1 << signal, Ordering::Relaxed);
 }
 
 fn configure_process_signal(name: String, enabled: bool) -> bool {
     #[cfg(unix)]
     {
-        let signal = match name.as_str() {
-            "SIGINT" => libc::SIGINT,
-            "SIGTERM" => libc::SIGTERM,
-            _ => return false,
+        let Some(&(_, signal)) = PROCESS_SIGNALS.iter().find(|(known, _)| *known == name) else {
+            return false;
         };
-        // SAFETY: the installed handler only performs an atomic store, which
+        // SAFETY: the installed handler only performs an atomic or, which
         // is async-signal-safe. Disabling restores the platform default.
         unsafe {
             libc::signal(
@@ -1967,18 +2077,73 @@ fn configure_process_signal(name: String, enabled: bool) -> bool {
     }
 }
 
+/// Small libc-backed `process` queries for the JS shim (`getuid`, `umask`,
+/// `kill`, resident set size). `kill` returns the errno (0 on success).
+fn process_syscall(name: String, first: f64, second: f64) -> f64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: each call below is a plain libc query/signal with integer arguments.
+        unsafe {
+            match name.as_str() {
+                "getpid" => f64::from(libc::getpid()),
+                "getppid" => f64::from(libc::getppid()),
+                "getuid" => libc::getuid() as f64,
+                "geteuid" => libc::geteuid() as f64,
+                "getgid" => libc::getgid() as f64,
+                "getegid" => libc::getegid() as f64,
+                "umask" => {
+                    // `umask` can only be read by setting it, so put it straight back.
+                    let previous = libc::umask(0o022);
+                    libc::umask(if first.is_nan() {
+                        previous
+                    } else {
+                        first as libc::mode_t
+                    });
+                    f64::from(previous)
+                }
+                "kill" => {
+                    if libc::kill(first as libc::pid_t, second as libc::c_int) == 0 {
+                        0.0
+                    } else {
+                        f64::from(
+                            std::io::Error::last_os_error()
+                                .raw_os_error()
+                                .unwrap_or(libc::EPERM),
+                        )
+                    }
+                }
+                "rss" => std::fs::read_to_string("/proc/self/statm")
+                    .ok()
+                    .and_then(|text| text.split_whitespace().nth(1)?.parse::<f64>().ok())
+                    .map_or(0.0, |pages| {
+                        pages * libc::sysconf(libc::_SC_PAGESIZE) as f64
+                    }),
+                _ => f64::NAN,
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (name, first, second);
+        f64::NAN
+    }
+}
+
 fn dispatch_pending_process_signal(ctx: &Ctx<'_>) {
     #[cfg(unix)]
     {
-        let signal = PENDING_PROCESS_SIGNAL.swap(0, Ordering::Relaxed);
-        let name = match signal {
-            libc::SIGINT => "SIGINT",
-            libc::SIGTERM => "SIGTERM",
-            _ => return,
-        };
-        if let Ok(process) = ctx.globals().get::<_, Object>("process") {
-            if let Ok(emit) = process.get::<_, Function>("emit") {
-                let _ = emit.call::<_, bool>((name,));
+        let pending = PENDING_PROCESS_SIGNALS.swap(0, Ordering::Relaxed);
+        if pending == 0 {
+            return;
+        }
+        for (name, signal) in PROCESS_SIGNALS {
+            if pending & (1 << signal) == 0 {
+                continue;
+            }
+            if let Ok(process) = ctx.globals().get::<_, Object>("process") {
+                if let Ok(emit) = process.get::<_, Function>("emit") {
+                    let _ = emit.call::<_, bool>((name,));
+                }
             }
         }
     }
