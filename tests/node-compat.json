@@ -1796,6 +1796,26 @@
       "name": "any-typed Symbol.toPrimitive uses default hint for == and +",
       "expect": "matched",
       "source": "class Q { [Symbol.toPrimitive](hint: string): any { return \"Q:\" + hint; } }\nclass N { [Symbol.toPrimitive](hint: string): any { return hint === \"number\" ? 7 : \"N:\" + hint; } }\nfunction main(): void { const a: any = new Q(); console.log(a == \"Q:default\", a + \"\", a + 1); const b: any = new N(); console.log(b == \"N:default\", b * 2, b - 1, b + \"\", b == 7, `${b}`, b > 6, String(b)); const s: any = \"x\"; const k: any = 5; console.log(s == \"x\", s + \"\", s + 1, k == 5, k + \"\", k + 1, k * 2); }\n"
+    },
+    {
+      "name": "object literal __proto__ value sets the prototype",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = { x: 1 }; const o: any = { __proto__: p, own: 3 }; console.log(o.x, o.own, Object.keys(o).join(','), Object.getPrototypeOf(o) === p); }"
+    },
+    {
+      "name": "object literal __proto__ null has no inherited members",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = { __proto__: null }; console.log(o.toString, Object.getPrototypeOf(o) === null); }"
+    },
+    {
+      "name": "object literal __proto__ primitive is ignored",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = { __proto__: 5 }; console.log(o.toString === Object.prototype.toString, Object.getPrototypeOf(o) === Object.prototype); }"
+    },
+    {
+      "name": "object literal __proto__ shorthand and computed key stay own",
+      "expect": "matched",
+      "source": "function main(): void { const __proto__ = 7; const s: any = { __proto__ }; const c: any = { ['__proto__']: 3 }; console.log(Object.keys(s).join(','), s.__proto__, Object.keys(c).join(','), c.__proto__); }"
     }
   ]
 }

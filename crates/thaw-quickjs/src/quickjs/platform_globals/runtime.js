@@ -2612,6 +2612,13 @@
         }
         continue;
       }
+      if (kind === 'proto') {
+        const prototype = values[i];
+        if (prototype === null || typeof prototype === 'object' || typeof prototype === 'function') {
+          Object.setPrototypeOf(object, prototype);
+        }
+        continue;
+      }
       const key = keyKinds[i] ? globalThis.__thaw_property_key(keys[i]) : keys[i];
       if (kind === 'data') {
         Object.defineProperty(object, key, {

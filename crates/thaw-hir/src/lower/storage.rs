@@ -237,7 +237,7 @@ impl StorageGraph {
                 Some(Box::new(TsType::TsTypeRef(swc_ecma_ast::TsTypeRef { span: value.span,
                     type_name: swc_ecma_ast::TsEntityName::Ident(name.clone()), type_params: value.type_args.clone() })))
             }
-            Expr::Object(object) => {
+            Expr::Object(object) if !object_literal_has_proto_setter(object) => {
                 let members = object.props.iter().filter_map(|property| {
                     let PropOrSpread::Prop(property) = property else { return None };
                     let (key, value) = match property.as_ref() {
@@ -1698,7 +1698,7 @@ impl FnLowerer<'_> {
                     Some(element) => self.source_value_hint(&element.expr).unwrap_or_else(|| typed(HirType::Json)),
                 }).collect()))
             }
-            Expr::Object(object) => {
+            Expr::Object(object) if !object_literal_has_proto_setter(object) => {
                 let mut fields = Vec::new();
                 for property in &object.props {
                     let PropOrSpread::Prop(property) = property else { return None };
