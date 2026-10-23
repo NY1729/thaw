@@ -2643,6 +2643,20 @@ impl<'a> FnLowerer<'a> {
                 .ok_or("unbound `this` member access requires a statically known property")?;
             return self.lower_unbound_this_member(&property);
         }
+        // `f.length` on a declared function identifier: a compile-time
+        // constant from its source parameter list. Anything else (aliases,
+        // arrows, class constructors) has no `source_length` and falls
+        // through to the existing rejection.
+        if let (MemberProp::Ident(property), Expr::Ident(ident)) = (&member.prop, member.obj.as_ref()) {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            if property.sym.as_ref() == "length"
+                && !self.scope.contains_key(&name)
+            {
+                if let Some(length) = self.signatures.get(&name).and_then(|signature| signature.source_length) {
+                    return Ok(HirExpr::Lit(HirLit::F64(length as f64)));
+                }
+            }
+        }
         // `Symbol.<wellKnown>` as a value -- lowered to a distinctive
         // sentinel string a computed access/call can dispatch on. These are
         // not registered symbols (`Symbol.for`), so no runtime symbol is

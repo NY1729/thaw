@@ -1326,6 +1326,23 @@ fn generators_close_after_uncaught_throw_and_keep_caught_throws_resumable() {
 }
 
 #[test]
+fn uncaught_aggregate_throws_print_the_console_inspected_value() {
+    // Node prints the inspected value on stderr and exits 1; the stack framing
+    // differs, so only the value line is compared.
+    for (name, body, value) in [
+        ("uncaught_object_inspect", "throw { code: 7, msg: 'boom' };", "{ code: 7, msg: 'boom' }"),
+        ("uncaught_plain_object_inspect", "throw { a: 1 };", "{ a: 1 }"),
+        ("uncaught_array_inspect", "throw [1, 'x'];", "[ 1, 'x' ]"),
+    ] {
+        let source = format!("function main(): void {{ {body} }}");
+        let (_stdout, stderr, code) = compile_and_run_failing(&source, name);
+        assert_eq!(code, Some(1), "{stderr}");
+        assert!(stderr.contains(&format!("Uncaught: {value}\n")), "{stderr}");
+        assert!(!stderr.contains("[exception value]"), "{stderr}");
+    }
+}
+
+#[test]
 fn async_generators_close_without_erasing_caught_rejection_metadata() {
     let source = r#"
         async function* typed(): AsyncGenerator<number> {

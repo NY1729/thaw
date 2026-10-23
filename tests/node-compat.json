@@ -1836,6 +1836,11 @@
       "name": "extracted method receiver message names property",
       "expect": "matched",
       "source": "class K { x = 3; m(): number { return this.x; } } function main(): void { const o = { x: 7, get(): number { return this.x; } }; const e = o.get; try { console.log(e()); } catch (err) { console.log((err as Error).message); } const km = new K().m; try { console.log(km()); } catch (err) { console.log((err as Error).message); } }"
+    },
+{
+          "name": "function length counts leading parameters",
+          "expect": "matched",
+          "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
     }
   ]
 }
