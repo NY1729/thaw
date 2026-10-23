@@ -40,3 +40,38 @@ fn evloop_contract_unhandled_rejection_stops_the_process_before_later_timers() {
     let (stdout, _stderr, code) = compile_and_run_failing(source, "evloop_contract_unhandled_before_timers");
     assert_eq!((stdout.as_str(), code), ("", Some(1)));
 }
+
+#[test]
+fn evloop_contract_awaiting_main_stops_at_an_unhandled_rejection() {
+    let source = r##"async function f(): Promise<void> { throw new Error("x"); }
+async function main(): Promise<void> {
+  f();
+  await new Promise<void>((r) => setTimeout(r, 10));
+  console.log("after");
+}
+"##;
+    let (stdout, _stderr, code) = compile_and_run_failing(source, "evloop_contract_await_unhandled");
+    assert_eq!((stdout.as_str(), code), ("", Some(1)));
+}
+
+#[test]
+fn evloop_contract_exit_is_emitted_with_code_1_on_uncaught_and_unhandled() {
+    let uncaught = r##"function main(): void {
+  process.on("exit", (code: number) => console.log("exit", code));
+  console.log("a");
+  setTimeout(() => { throw new Error("boom"); }, 5);
+}
+"##;
+    let (stdout, _stderr, code) = compile_and_run_failing(uncaught, "evloop_contract_exit_uncaught");
+    assert_eq!((stdout.as_str(), code), ("a\nexit 1\n", Some(1)));
+    let rejected = r##"async function f(): Promise<void> { throw new Error("x"); }
+function main(): void {
+  process.on("exit", (code: number) => console.log("exit", code));
+  f();
+  setTimeout(() => console.log("timer"), 50);
+  console.log("a");
+}
+"##;
+    let (stdout, _stderr, code) = compile_and_run_failing(rejected, "evloop_contract_exit_unhandled");
+    assert_eq!((stdout.as_str(), code), ("a\nexit 1\n", Some(1)));
+}

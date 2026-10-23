@@ -2631,6 +2631,16 @@ fn unhandled_timer_exception_fails_the_event_loop() {
 }
 
 #[test]
+fn exit_event_is_emitted_with_code_1_when_the_loop_fails() {
+    assert_eq!(
+        load("globalThis.exitSeen = []; process.on('exit', code => exitSeen.push(code)); setTimeout(() => { throw new Error('boom'); }, 0);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 1);
+    assert_eq!(eval_json("exitSeen"), Ok(Some("[1]".into())));
+}
+
+#[test]
 fn unhandled_js_promise_rejection_reaches_the_process_event_surface() {
     // Node's default (`--unhandled-rejections=throw`): offered to 'unhandledRejection' first.
     assert_eq!(
@@ -16688,5 +16698,73 @@ fn live_graph_callback_mask_retains_primitive_handles() {
     assert_eq!(
         call("inspectLiveGraphPrimitiveMask", "[]"),
         "[true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn crypto_md5_and_sha3_digests_hmacs_and_hash_match_node() {
+    assert_eq!(
+        load(
+            "function digests() { const crypto = __thaw_crypto_module; const out = [];\n\
+               for (const alg of ['md5','sha224','sha3-224','sha3-256','sha3-384','sha3-512']) {\n\
+                 out.push(crypto.createHash(alg).update('abc').update('x'.repeat(300)).digest('hex'));\n\
+                 out.push(crypto.createHmac(alg, 'x'.repeat(200)).update('hello').digest('base64'));\n\
+               }\n\
+               out.push(crypto.hash('md5','abc'));\n\
+               out.push(crypto.hash('sha3-256','', 'base64'));\n\
+               out.push(crypto.pbkdf2Sync('pw','salt',3,16,'sha3-256').toString('hex'));\n\
+               return out; }"
+        ),
+        1
+    );
+    // Expected values produced by Node 22 (`node:crypto`).
+    assert_eq!(
+        call("digests", "[]"),
+        r#"["3afdc72f8d3de666c8cb285ea7d29f5f","yRzeyIE4bCnn0dMyAb4zzA==","c62a84e2f81db390c5b8490be9def00c934f1445d83f7d2382127bf6","UDUUetKrYD0HHs0VWneWPAKzHjw65aBQ8m4s0w==","0ad13354abae8e42a1bb9dfb8f037f254fe9fda090d57bd106cfbcfc","LIE1WdhTLY17mb9dTnro+9fJRVYFfarwYYhLKA==","f82d997c6dc24fba0962d44dc7038662b46df680cf719fa595bfd65ce4c8e5e4","9Ws2m3lMcNdBg23SNG/JD3h9dlvj03pbcJZC5Y+QcKw=","ec9bf490b461618aa1d66606cd963a3afc5a29080cbbe8fa8cba6893906588fe499997766982d42834275380bc5d039e","ymGwbPSaR0I7fJC9SZ8+yYC2e2Spce7TJdVWfvJuqLOROHFVU6ALgvyz5C0MBThy","7ef58f05696320116d43399bb42471ee8c4a82aa478d3d31c2551c07f088d45e224bd45d4ec59ce406460e73c3b82b0d65ec8e600fd3ecf5d34895c8d49891d1","zx6/c8vOiyJ/IbXpoea3wgs9doHJRfBhxNNvw/oKIHSFwhYNVVNXRDaVgnVCO/GwMM1f+ltSgSk+3utLv3DfjA==","900150983cd24fb0d6963f7d28e17f72","p//G+L8e12ZRwUdWoGHWYvWA/03kO0n6gtgKS4D4Q0o=","aed9faa5b67ac0547e5e2d5de5354f5b"]"#
+    );
+}
+
+#[test]
+fn text_decoder_supports_utf16le_and_latin1_labels() {
+    assert_eq!(
+        load(
+            "function decoders() { const r = []; const d = new TextDecoder('utf-16le');\n\
+               r.push(d.decode(new Uint8Array([104,0,105,0])));\n\
+               r.push(d.decode(new Uint8Array([0x3d,0xd8,0x00,0xde,0x41,0])));\n\
+               r.push(d.decode(new Uint8Array([0xff,0xfe,0x68,0])));\n\
+               r.push(d.decode(new Uint8Array([0x00,0xd8,0x41,0,0x42])));\n\
+               r.push(new TextDecoder('utf-16le',{ignoreBOM:true}).decode(new Uint8Array([0xff,0xfe,0x68,0])).length);\n\
+               const s = new TextDecoder('utf-16le');\n\
+               r.push(s.decode(new Uint8Array([0x3d,0xd8,0x00]),{stream:true}) + '|' + s.decode(new Uint8Array([0xde]),{stream:true}) + '|' + s.decode());\n\
+               r.push(new TextDecoder('latin1').decode(new Uint8Array([233,65,0x80,0x9f,0xff])));\n\
+               r.push(new TextDecoder('latin1').encoding, new TextDecoder('ascii').encoding, new TextDecoder('utf-16').encoding, new TextDecoder('UTF-16LE').encoding);\n\
+               return r; }"
+        ),
+        1
+    );
+    // Expected values produced by Node 22.
+    assert_eq!(
+        call("decoders", "[]"),
+        r#"["hi","😀A","h","�A�",2,"|😀|","éA€Ÿÿ","windows-1252","windows-1252","utf-16le","utf-16le"]"#
+    );
+}
+
+#[test]
+fn process_exposes_ids_umask_kill_release_and_rss() {
+    let _process_state = lock_process_state();
+    assert_eq!(
+        load(
+            "function processIds() { const mask = process.umask(); const restored = process.umask(mask);\n\
+               let missing = 'no error'; try { process.kill(2147483646, 0); } catch (e) { missing = [e.code, e.errno, e.syscall, e.message].join(','); }\n\
+               let unknown = 'no error'; try { process.kill(process.pid, 'SIGNOPE'); } catch (e) { unknown = [e.name, e.code, e.message].join(','); }\n\
+               return [typeof process.getuid(), typeof process.geteuid(), typeof process.getgid(), typeof process.getegid(), mask === restored, process.umask() === mask,\n\
+                 process.kill(process.pid, 0), missing, unknown, process.release.name, typeof process.pid, process.ppid > 0, process.memoryUsage.rss() > 0, typeof process.features]; }"
+        ),
+        1
+    );
+    // Shape verified against Node 22; ids/rss are host specific so only their kind is compared.
+    assert_eq!(
+        call("processIds", "[]"),
+        r#"["number","number","number","number",true,true,true,"ESRCH,-3,kill,kill ESRCH","TypeError,ERR_UNKNOWN_SIGNAL,Unknown signal: SIGNOPE","node","number",true,true,"object"]"#
     );
 }

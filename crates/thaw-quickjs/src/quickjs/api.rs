@@ -1438,9 +1438,25 @@ fn finish_idle_process(ctx: &Ctx<'_>) -> std::ops::ControlFlow<i32> {
             } else {
                 error.to_string()
             });
-            std::ops::ControlFlow::Break(1)
+            fail_process(ctx)
         }
     }
+}
+
+/// The process dies from an uncaught exception or unhandled rejection: like Node, `exit` is
+/// emitted with code 1 and nothing runs afterwards.
+fn fail_process(ctx: &Ctx<'_>) -> std::ops::ControlFlow<i32> {
+    if let Ok(fail) = ctx.globals().get::<_, Function>("__thaw_process_fail") {
+        let _active = ActiveNapiContext::enter(ctx);
+        if let Err(error) = fail.call::<_, ()>((1,)) {
+            eprintln!("{}", if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(ctx)
+            } else {
+                error.to_string()
+            });
+        }
+    }
+    std::ops::ControlFlow::Break(1)
 }
 
 thread_local! {
@@ -1502,7 +1518,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                         error.to_string()
                     };
                     eprintln!("{message}");
-                    return std::ops::ControlFlow::Break(1);
+                    return fail_process(&ctx);
                 }
             }
             let ran_job = ctx.execute_pending_job();
@@ -1519,7 +1535,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                 }
                 if result.value == 0 || listener_failed {
                     eprintln!("{message}");
-                    return std::ops::ControlFlow::Break(1);
+                    return fail_process(&ctx);
                 }
                 drained_any = true;
                 continue;
@@ -1533,13 +1549,13 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
         if drained_any {
             return std::ops::ControlFlow::Continue(());
         }
-        if let Some(code) = report_unhandled_js_rejections(&ctx) {
-            return std::ops::ControlFlow::Break(code);
+        if report_unhandled_js_rejections(&ctx).is_some() {
+            return fail_process(&ctx);
         }
         // Node ends the process right after the microtask drain that left a rejection unhandled.
         if native_unhandled_failure() {
             PROCESS_EXITED.with(|exited| exited.set(true));
-            return std::ops::ControlFlow::Break(1);
+            return fail_process(&ctx);
         }
         // Native http servers share this loop: a `listen` callback runs on the turn after the
         // bind, before timers, and requests are served while JS timers and clients are pending.
@@ -1567,7 +1583,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                 Ok(false) => {}
                 Err(error) => {
                     eprintln!("root test finalization failed: {error}");
-                    return std::ops::ControlFlow::Break(1);
+                    return fail_process(&ctx);
                 }
             }
             return finish_idle_process(&ctx);
@@ -1583,7 +1599,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                 error.to_string()
             };
             eprintln!("{message}");
-            return std::ops::ControlFlow::Break(1);
+            return fail_process(&ctx);
         }
 
         std::ops::ControlFlow::Continue(())
@@ -1707,6 +1723,10 @@ pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
             let _active = ActiveNapiContext::enter(&ctx);
             poll_native_continuations()
         };
+        // Like Node, an unhandled rejection ends the program at the poll that reported it.
+        if native_unhandled_failure() {
+            return;
+        }
         if more_ready {
             continue;
         }
@@ -5143,9 +5163,32 @@ fn dynamic_property_key<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Value<'js>, B
         .map_err(|error| error.to_string().into())
 }
 
+/// The native `http.Server` exposes Node's overloaded `listen`/`close`/`on` as separately named
+/// fields (`__listenWithCallback`, ...); a dynamically dispatched call picks the field by
+/// argument shape, as the compiler does for a statically typed receiver.
+fn native_server_overload<'js>(object: &Object<'js>, name: &str, arguments: &Array<'js>) -> Option<Function<'js>> {
+    let is_function = |index: usize| arguments.get::<Value>(index).is_ok_and(|value| value.is_function());
+    let target = match name {
+        "listen" if arguments.len() >= 3 && is_function(2) => "__listenWithHostCallback",
+        "listen" if arguments.len() == 2 && is_function(1) => "__listenWithCallback",
+        "close" if arguments.len() == 1 && is_function(0) => "__closeWithCallback",
+        "on" if arguments.len() == 2 && arguments.get::<String>(0).is_ok_and(|event| event == "error") => "__onError",
+        _ => return None,
+    };
+    match object.get::<_, Function>(target) {
+        Ok(function) => Some(function),
+        Err(rquickjs::Error::Exception) => {
+            // A throwing getter/proxy trap on an unrelated object must not leave a pending exception.
+            let _ = object.ctx().catch();
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 // A member call captures its property before arguments and invokes it later.
 fn invoke_selected_method<'js>(
-    ctx: &Ctx<'js>, receiver: u64, selected: u64, args_json: &str,
+    ctx: &Ctx<'js>, receiver: u64, selected: u64, name: &str, args_json: &str,
 ) -> Result<Value<'js>, BoundaryError> {
     let arguments = decode_argument_array(ctx, args_json, true)?;
     // The graph decoder owns transferred leases even if the receiver has
@@ -5154,6 +5197,10 @@ fn invoke_selected_method<'js>(
     // Callability is checked after arguments, but no property is re-read.
     let method = Function::from_value(value_for_handle(ctx, selected)?)
         .map_err(|_| "\u{1}TypeError\u{1}Selected property is not callable".to_string())?;
+    let method = Object::from_value(this_value.clone())
+        .ok()
+        .and_then(|object| native_server_overload(&object, name, &arguments))
+        .unwrap_or(method);
     let mut call_args = Args::new_unsized(ctx.clone());
     call_args.this(this_value).map_err(|error| error.to_string())?;
     for index in 0..arguments.len() {
@@ -5173,7 +5220,7 @@ pub extern "C" fn thaw_js_call_selected_method_graph_result(
     let name = to_str(name);
     let args_json = to_str(args_json);
     let result = with_active_or_context(|ctx| {
-        let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
+        let value = invoke_selected_method(&ctx, receiver, selected, &name, &args_json)?;
         let receiver = value_for_handle(&ctx, receiver).ok();
         resolve_method_result_graph(ctx, value, &name, receiver)
     });
@@ -5190,7 +5237,7 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
     let name = to_str(name);
     let args_json = to_str(args_json);
     let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
-        let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
+        let value = invoke_selected_method(&ctx, receiver, selected, &name, &args_json)?;
         let value = if defer_resolution { value } else {
             resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"), true)?
         };
@@ -5224,6 +5271,7 @@ fn invoke_method<'js>(
         Ok::<_, BoundaryError>((object, method))
     })?;
     let arguments = decode_argument_array(ctx, args_json, graph_args)?;
+    let method = native_server_overload(&object, name, &arguments).unwrap_or(method);
     let mut call_args = Args::new_unsized(ctx.clone());
     call_args.this(object).map_err(|error| error.to_string())?;
     for index in 0..arguments.len() {
