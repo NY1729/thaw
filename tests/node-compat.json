@@ -2067,6 +2067,26 @@
       "name": "fetch Response from a local http server",
       "expect": "matched",
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
+    },
+    {
+      "name": "EventEmitter unhandled error event throws",
+      "expect": "matched",
+      "source": "import { EventEmitter, once } from 'node:events'; function show(e: any): string { return (e && e.constructor && e.constructor.name) + '|' + (e && e.code) + '|' + (e && e.message) + '|' + (e && e.context); } async function main(): Promise<void> {   const em = new EventEmitter();   try { em.emit('error', new Error('boom')); } catch (e: any) { console.log('1', show(e)); }   try { em.emit('error', 'str'); } catch (e: any) { console.log('2', show(e)); }   try { em.emit('error', { a: 1 }); } catch (e: any) { console.log('3', show(e)); }   try { em.emit('error'); } catch (e: any) { console.log('4', show(e)); }   const p = once(em, 'x');   em.emit('x', 1, 'b');   console.log('5', JSON.stringify(await p));   const p2 = once(em, 'y');   em.emit('error', new Error('bad'));   try { await p2; } catch (e: any) { console.log('6', show(e)); } }"
+    },
+    {
+      "name": "assert failure messages and fields",
+      "expect": "matched",
+      "source": "import * as assert from 'node:assert'; function t(n: string, f: () => void): void {   try { f(); console.log(n, 'no throw'); } catch (e: any) { console.log(n, e.name, e.code, e.operator, JSON.stringify(e.actual), JSON.stringify(e.expected), e.generatedMessage, JSON.stringify(e.message)); } } function main(): void {   t('se', () => assert.strictEqual(1, 2));   t('sestr', () => assert.strictEqual('a', 'b'));     t('ne', () => assert.notStrictEqual(1, 1));   t('eq', () => assert.equal(1, 2));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }));      t('okmsg', () => assert.ok(0, 'm'));   t('fail', () => assert.fail());   t('fail2', () => assert.fail('x'));   t('throws', () => assert.throws(() => {}));   t('throws2', () => assert.throws(() => { throw new Error('a'); }, /b/));   t('dnt', () => assert.doesNotThrow(() => { throw new Error('a'); })); }"
+    },
+    {
+      "name": "assert diff messages and custom messages",
+      "expect": "matched",
+      "source": "import * as assert from 'node:assert'; function t(n: string, f: () => void): void {   try { f(); console.log(n, 'no throw'); } catch (e: any) { console.log(n, e.code, e.operator, e.generatedMessage, JSON.stringify(e.message)); } } function main(): void {   t('ne', () => assert.notStrictEqual(1, 1, 'c'));     t('eq', () => assert.equal(1, 2, 'c'));   t('seobj', () => assert.strictEqual({ a: 1 }, { a: 1 }));   t('seobj2', () => assert.strictEqual([1, 2], [1, 3]));   t('sediff', () => assert.strictEqual('a', 'a '));   t('setype', () => assert.strictEqual(1, '1' as any));   t('semulti', () => assert.strictEqual('a\\nb', 'a\\nc'));   t('dse2', () => assert.deepStrictEqual([1, 2, 3], [1, 2, 4]));   t('dse3', () => assert.deepStrictEqual(1, 2));   t('dse4', () => assert.deepStrictEqual({ a: 1, b: { c: 2 } }, { a: 1, b: { c: 3 } }));   t('nds', () => assert.notDeepStrictEqual({ a: 1 }, { a: 1 }));   t('ne2', () => assert.notEqual(1, 1));   t('thr', () => assert.throws(() => {}, TypeError));   t('thr2', () => assert.throws(() => {}, TypeError, 'msg'));   t('thr3', () => assert.throws(() => { throw new Error('x'); }, TypeError));   t('fail', () => assert.fail('x'));   t('fail0', () => assert.fail());   t('dnt', () => assert.doesNotThrow(() => { throw new Error('a'); }, 'm')); }"
+    },
+    {
+      "name": "util.inspect of an Error",
+      "expect": "matched",
+      "source": "import { inspect } from 'node:util'; function main(): void {   const e = new Error('boom');   const s = inspect(e);   console.log(s.split('\\n')[0]);   console.log(s.split('\\n').slice(1).every((l: string) => l.startsWith('    at ')));   console.log(String(e.stack).split('\\n')[0]);   console.log(inspect(new TypeError('t')).split('\\n')[0]); }"
     }
   ]
 }
