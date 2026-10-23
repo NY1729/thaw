@@ -244,6 +244,13 @@ Known gaps against Node semantics:
   JavaScript-owned `Map`/`Set` whose declared key and value types have a supported
   copy-in layout. Unsupported JavaScript-owned collection layouts throw `TypeError`
   before native code is invoked.
+- Writing the same linked array through both a JavaScript (`any`) view and a typed native
+  view within one expression: the JavaScript-side write wins. Node applies the last write in
+  statement order.
+- Writes to a frozen native array always throw `TypeError`. Node ignores them silently in
+  sloppy-mode scripts (CommonJS without `'use strict'`). Thaw code is always strict.
+- Class instances passed to npm or ambient functions are snapshots: later changes made in
+  Thaw are not visible to npm code, and the reverse. Node passes live objects.
 
 ## Examples
 
