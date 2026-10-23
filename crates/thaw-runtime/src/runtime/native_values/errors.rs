@@ -314,6 +314,22 @@ pub unsafe extern "C" fn thaw_error_property_json(
     }
 }
 
+/// The global constructor name behind a caught error's `.constructor`: the most-derived class of
+/// the static identity chain, ignoring any runtime `.name` override.
+///
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_constructor_name(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    let (chain, _) = split_error_tag(&text);
+    let name = error_ancestry(chain).next().unwrap_or(chain);
+    arena_c_string(name).map_or(std::ptr::null(), |value| value.cast())
+}
+
 /// # Safety
 /// `message` must be null or a valid, NUL-terminated C string.
 ///
@@ -413,10 +429,11 @@ pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const 
     if message.is_null() {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    if !text.starts_with(ERROR_TAG_MARKER) {
+    // Hot path (`+`/template operands): untagged strings return after one byte check.
+    if unsafe { *message } != ERROR_TAG_MARKER as c_char {
         return message;
     }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let (_, body) = split_error_tag(&text);
     let name = resolved_error_name(&text);
     let rendered = if name.is_empty() {
@@ -820,4 +837,26 @@ mod error_native_tests {
         let cause = unsafe { thaw_error_cause(tagged.as_ptr()) };
         assert_eq!(unsafe { CStr::from_ptr(cause) }.to_string_lossy(), "\u{1}TypeError\u{1}root");
     }
+}
+
+/// Lowest stack address compiled code may use before it throws `RangeError`: the main thread's
+/// stack end (from `RLIMIT_STACK`, 8 MiB when unlimited) plus a 1 MiB margin for native callees.
+/// Returns 0 (guard off) when the limit is too small to leave a margin.
+#[no_mangle]
+pub extern "C" fn thaw_stack_guard_limit() -> u64 {
+    const MARGIN: u64 = 1 << 20;
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let size = if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } == 0
+        && limit.rlim_cur != libc::RLIM_INFINITY
+    {
+        limit.rlim_cur
+    } else {
+        8 << 20
+    };
+    let marker = 0u8;
+    let here = std::ptr::addr_of!(marker) as u64;
+    if size <= 2 * MARGIN {
+        return 0;
+    }
+    here.saturating_sub(size - MARGIN)
 }
