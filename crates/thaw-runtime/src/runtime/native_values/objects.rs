@@ -196,6 +196,27 @@ pub unsafe extern "C" fn thaw_object_has_class_identity(
     })
 }
 
+/// `object.constructor.name` for a class instance: its most-derived class, without the
+/// module-flattening `__thawmod<N>_` prefix. An object with no class identity is an `Object`.
+#[no_mangle]
+pub extern "C" fn thaw_object_class_name(object: *const u8) -> *const c_char {
+    let name = OBJECT_CLASS_IDENTITIES.with(|stored| {
+        let stored = stored.borrow();
+        let leaf = stored
+            .get(&(object as usize))
+            .and_then(|metadata| metadata.ancestry.as_deref())
+            .and_then(|identities| identities.split('\u{1f}').next())
+            .unwrap_or("Object");
+        match leaf.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
+            Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => {
+                original.to_owned()
+            }
+            _ => leaf.to_owned(),
+        }
+    });
+    arena_c_string(&name).map_or(std::ptr::null(), |value| value.cast())
+}
+
 /// Marks a compiler-created physical marker as hidden without granting nominal
 /// class identity to an ordinary object allocation.
 #[no_mangle]

@@ -1462,6 +1462,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, radix, "bigint toString radix")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_object_class_name" => return Ok(HirType::Str),
+                    "__thaw_i64_to_number" => {
+                        let [value] = args.as_slice() else {
+                            return Err("bigint number conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::I64, value, "bigint number conversion")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_i64_from_number" => {
                         let [value] = args.as_slice() else {
                             return Err("bigint number conversion expects one operand".into());
@@ -2997,6 +3005,8 @@ impl<'a> FnLowerer<'a> {
             HirExpr::PromiseAll(_, element) => Ok(HirType::Promise(Box::new(HirType::Array(
                 Box::new(element.clone()),
             )))),
+            // `Promise.all` over void promises only joins them: it resolves to void.
+            HirExpr::PromiseAllArray(_, HirType::Void) => Ok(HirType::Promise(Box::new(HirType::Void))),
             HirExpr::PromiseAllArray(_, element) => Ok(HirType::Promise(Box::new(HirType::Array(
                 Box::new(element.clone()),
             )))),
