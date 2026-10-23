@@ -609,6 +609,8 @@
         if (native) return native.isMap ? 'map' : 'set';
         return thawGraphKind(thawGraphMapSize, value) ? 'map' : thawGraphKind(thawGraphSetSize, value) ? 'set' : '';
       }
+      // 26: a null-prototype object (`Object.create(null)`), whose String() coercion throws.
+      case 26: return thawGraphGetPrototypeOf(value) === null ? '1' : '0';
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
@@ -3577,11 +3579,13 @@
                        globalThis.process.env || {})),
     platform: globalThis.process.platform || hostInfo.platform || 'linux',
     arch: globalThis.process.arch || hostInfo.arch || '',
-    version: globalThis.process.version || '',
+    version: globalThis.process.version || 'v22.0.0',
     execPath: globalThis.process.execPath || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     argv0: globalThis.process.argv0 || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     execArgv: globalThis.process.execArgv || JSON.parse(globalThis.__thaw_host_exec_argv_json || '[]'),
     config: globalThis.process.config || { variables: {} },
+    // versions.node stays '' on purpose: esbuild (and similar) read it to pick the worker_threads sync path,
+    // which needs file-path Workers Thaw does not have. process.version covers the semver feature gates.
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
     stdin: globalThis.process.stdin || stdin,

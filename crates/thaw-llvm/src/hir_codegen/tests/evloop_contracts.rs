@@ -42,6 +42,17 @@ fn evloop_contract_unhandled_rejection_stops_the_process_before_later_timers() {
 }
 
 #[test]
+fn evloop_contract_process_version_is_v22_while_versions_node_stays_empty() {
+    // versions.node is deliberately empty (see runtime.js); node 22 prints a non-empty one, so only
+    // the process.version half is a node comparison.
+    let source = r##"function main(): void {
+  console.log(process.version.startsWith("v22."), typeof process.versions.node);
+}
+"##;
+    assert_eq!(compile_and_run(source, "evloop_contract_process_version"), "true string\n");
+}
+
+#[test]
 fn evloop_contract_awaiting_main_stops_at_an_unhandled_rejection() {
     let source = r##"async function f(): Promise<void> { throw new Error("x"); }
 async function main(): Promise<void> {

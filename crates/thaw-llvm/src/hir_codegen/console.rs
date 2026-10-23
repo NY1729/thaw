@@ -12,6 +12,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirExpr::Call(callee, inner) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_console_bytes") => {
                     Ok((Some(HirType::Bytes), self.compile_expr(&inner[0])?))
                 }
+                HirExpr::Call(callee, inner) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_console_typed") => {
+                    let [HirExpr::TypedClosure(ty, value)] = inner.as_slice() else {
+                        return Err("console type tag needs its type".into());
+                    };
+                    Ok((Some(ty.clone()), self.compile_expr(value)?))
+                }
                 _ => Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)),
             })
             .collect::<Result<Vec<_>, String>>()?;
