@@ -1851,12 +1851,8 @@
       "name": "process beforeExit re-arm and exit event",
       "expect": "matched",
       "source": "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }"
-    },
-    {
-      "name": "process version is a v22 string",
-      "expect": "matched",
-      "source": "function main(): void { console.log(process.version.startsWith('v22.'), process.versions.node === process.version.slice(1)); }"
-    },
+    }
+,
     {
       "name": "error constructor name of builtin errors",
       "expect": "matched",

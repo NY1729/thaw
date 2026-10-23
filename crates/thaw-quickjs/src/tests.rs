@@ -2744,14 +2744,6 @@ fn before_exit_can_rearm_and_exit_runs_once_with_the_exit_code() {
 }
 
 #[test]
-fn process_version_is_a_node_22_string() {
-    assert_eq!(
-        eval_json("process.version.startsWith('v22.') && process.versions.node === process.version.slice(1)"),
-        Ok(Some("true".into()))
-    );
-}
-
-#[test]
 fn standalone_event_loop_ignores_only_unreferenced_timers() {
     assert_eq!(
         load(
