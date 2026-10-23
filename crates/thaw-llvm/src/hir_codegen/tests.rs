@@ -521,6 +521,7 @@ include!("tests/p_contracts.rs");
 include!("tests/r_contracts.rs");
 include!("tests/t_contracts.rs");
 include!("tests/z_contracts.rs");
+include!("tests/evloop_contracts.rs");
 include!("tests/an_contracts.rs");
 include!("tests/aa_contracts.rs");
 include!("tests/ci_contracts.rs");

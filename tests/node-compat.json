@@ -1866,6 +1866,31 @@
       "name": "stack overflow is a catchable RangeError",
       "expect": "matched",
       "source": "function r(n: number): number { return r(n + 1) + 1; } function depth(n: number): number { return n === 0 ? 0 : depth(n - 1) + 1; } function main(): void { try { r(0); console.log('no'); } catch (e: any) { console.log('caught', e instanceof RangeError, e.message); } console.log(depth(5000)); try { r(0); } catch (e: any) { console.log(String(e)); } }"
+    },
+    {
+      "name": "zero ms timeout keeps insertion order with a 1 ms timeout",
+      "expect": "matched",
+      "source": "function main(): void { setTimeout((): void => console.log('one'), 1); setTimeout((): void => console.log('zero'), 0); setTimeout((): void => console.log('one-b'), 1); }"
+    },
+    {
+      "name": "process beforeExit re-arm and exit event",
+      "expect": "matched",
+      "source": "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }"
+    },
+    {
+      "name": "process version is a v22 string",
+      "expect": "matched",
+      "source": "function main(): void { console.log(process.version.startsWith('v22.'), process.versions.node === process.version.slice(1)); }"
+    },
+    {
+      "name": "http server address and listen callback",
+      "expect": "matched",
+      "source": "import * as http from 'node:http'; function main(): void { const srv = http.createServer(() => {}); console.log(srv.address()); srv.listen(0, '127.0.0.1', () => { const a = (srv as any).address(); console.log(typeof a.port, a.family, a.address); srv.close(() => console.log(srv.address())); }); }"
+    },
+    {
+      "name": "fetch Response from a local http server",
+      "expect": "matched",
+      "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
     }
   ]
 }

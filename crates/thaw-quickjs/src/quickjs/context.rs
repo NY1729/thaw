@@ -1037,6 +1037,15 @@ fn install_async_context_bootstrap<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     ctx.globals().set("__thaw_async_context_bootstrap", bridge)
 }
 
+/// Callbacks `thaw-runtime` fills in (same layout as its `RuntimeHooks`): a native http.Server poll
+/// (bit 0 live, bit 1 a callback ran) and a peek at the latched unhandled-rejection failure.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RuntimeHooks {
+    server_poll: Option<extern "C" fn() -> u8>,
+    unhandled_failure: Option<extern "C" fn() -> u8>,
+}
+
 /// Hands the job barrier hooks to `thaw-runtime` (a soft dependency, looked up
 /// by symbol like `thaw_runtime_poll_one` is from this side).
 #[cfg(unix)]
@@ -1051,8 +1060,12 @@ fn register_js_job_hooks() {
         }
         std::mem::transmute::<
             *mut libc::c_void,
-            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64)),
-        >(register)(js_queue_job_barrier, js_drain_to_job_barrier);
+            extern "C" fn(
+                extern "C" fn() -> u64,
+                extern "C" fn(u64),
+                *mut RuntimeHooks,
+            ),
+        >(register)(js_queue_job_barrier, js_drain_to_job_barrier, RUNTIME_HOOKS.with(Cell::as_ptr));
     }
 }
 
@@ -3472,6 +3485,11 @@ fn install_shared_array_buffer_clone_functions(ctx: &Ctx<'_>) {
         .expect("failed to install __thaw_sab_serialize");
     globals.set("__thaw_sab_deserialize", Function::new(ctx.clone(), sab_deserialize).expect("failed to create __thaw_sab_deserialize"))
         .expect("failed to install __thaw_sab_deserialize");
+}
+
+thread_local! {
+    /// Native-runtime callbacks handed back by `thaw-runtime` when the job hooks are registered.
+    static RUNTIME_HOOKS: Cell<RuntimeHooks> = const { Cell::new(RuntimeHooks { server_poll: None, unhandled_failure: None }) };
 }
 
 thread_local! {

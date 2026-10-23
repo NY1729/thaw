@@ -615,6 +615,8 @@ pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
             .unwrap_or(source),
         None => source,
     };
+    // New code means new work: the loop may run again after an earlier natural exit.
+    PROCESS_EXITED.with(|exited| exited.set(false));
     with_context(|ctx| match load_impl(ctx, &source) {
         Ok(()) => 1,
         Err(reason) => {
@@ -1393,8 +1395,80 @@ fn finish_root_test_hooks_at_idle(ctx: &Ctx<'_>) -> rquickjs::Result<bool> {
     Ok(true)
 }
 
+/// One non-blocking pass over native `http.Server`s (bit 0: servers or connections
+/// still live, bit 1: a listening/error/close callback ran). 0 when thaw-std is not linked.
+fn poll_http_servers() -> u8 {
+    RUNTIME_HOOKS.with(|hooks| hooks.get().server_poll).map_or(0, |poll| poll())
+}
+
+/// Whether the native runtime already reported an unhandled Promise rejection (it stays latched for exit).
+fn native_unhandled_failure() -> bool {
+    RUNTIME_HOOKS.with(|hooks| hooks.get().unhandled_failure).is_some_and(|peek| peek() != 0)
+}
+
+/// The loop has nothing left: emit `beforeExit` (its listeners may schedule more work and
+/// keep the loop alive), and once it stays idle emit `exit` and return the exit code.
+fn finish_idle_process(ctx: &Ctx<'_>) -> std::ops::ControlFlow<i32> {
+    let call = |name: &str| -> rquickjs::Result<()> {
+        match ctx.globals().get::<_, Function>(name) {
+            Ok(function) => function.call::<_, ()>(()),
+            Err(_) => Ok(()),
+        }
+    };
+    let result = call("__thaw_process_before_exit").and_then(|()| {
+        run_pending_jobs(ctx);
+        let rearmed = ctx.has_exception() || unsafe {
+            rquickjs::qjs::JS_IsJobPending(rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()))
+        } || ctx.globals().get::<_, Function>("__thaw_next_tick_queue_pending")
+            .ok().and_then(|pending| pending.call::<_, bool>(()).ok()).unwrap_or(false)
+            || ctx.globals().get::<_, Function>("__thaw_next_timer_delay")
+                .ok().and_then(|delay| delay.call::<_, i64>(()).ok()).is_some_and(|delay| delay >= 0)
+            || platform_activity_pending(ctx);
+        if rearmed {
+            return Ok(true);
+        }
+        call("__thaw_process_finish").map(|()| false)
+    });
+    match result {
+        Ok(true) => std::ops::ControlFlow::Continue(()),
+        Ok(false) => std::ops::ControlFlow::Break(process_exit_code(ctx)),
+        Err(error) => {
+            eprintln!("{}", if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(ctx)
+            } else {
+                error.to_string()
+            });
+            fail_process(ctx)
+        }
+    }
+}
+
+/// The process dies from an uncaught exception or unhandled rejection: like Node, `exit` is
+/// emitted with code 1 and nothing runs afterwards.
+fn fail_process(ctx: &Ctx<'_>) -> std::ops::ControlFlow<i32> {
+    if let Ok(fail) = ctx.globals().get::<_, Function>("__thaw_process_fail") {
+        let _active = ActiveNapiContext::enter(ctx);
+        if let Err(error) = fail.call::<_, ()>((1,)) {
+            eprintln!("{}", if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(ctx)
+            } else {
+                error.to_string()
+            });
+        }
+    }
+    std::ops::ControlFlow::Break(1)
+}
+
+thread_local! {
+    /// Set once `exit` was emitted: nothing runs after it, whoever drives the loop again.
+    static PROCESS_EXITED: Cell<bool> = const { Cell::new(false) };
+}
+
 fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
     with_context(|ctx| {
+        if PROCESS_EXITED.with(Cell::get) {
+            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
+        }
         dispatch_pending_process_signal(&ctx);
         if let Ok(poll) = ctx
             .globals()
@@ -1444,7 +1518,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                         error.to_string()
                     };
                     eprintln!("{message}");
-                    return std::ops::ControlFlow::Break(1);
+                    return fail_process(&ctx);
                 }
             }
             let ran_job = ctx.execute_pending_job();
@@ -1461,7 +1535,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                 }
                 if result.value == 0 || listener_failed {
                     eprintln!("{message}");
-                    return std::ops::ControlFlow::Break(1);
+                    return fail_process(&ctx);
                 }
                 drained_any = true;
                 continue;
@@ -1475,8 +1549,22 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
         if drained_any {
             return std::ops::ControlFlow::Continue(());
         }
-        if let Some(code) = report_unhandled_js_rejections(&ctx) {
-            return std::ops::ControlFlow::Break(code);
+        if report_unhandled_js_rejections(&ctx).is_some() {
+            return fail_process(&ctx);
+        }
+        // Node ends the process right after the microtask drain that left a rejection unhandled.
+        if native_unhandled_failure() {
+            PROCESS_EXITED.with(|exited| exited.set(true));
+            return fail_process(&ctx);
+        }
+        // Native http servers share this loop: a `listen` callback runs on the turn after the
+        // bind, before timers, and requests are served while JS timers and clients are pending.
+        let http = {
+            let _active = ActiveNapiContext::enter(&ctx);
+            poll_http_servers()
+        };
+        if http & 2 != 0 {
+            return std::ops::ControlFlow::Continue(());
         }
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
             return std::ops::ControlFlow::Break(process_exit_code(&ctx));
@@ -1485,7 +1573,8 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
             return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
         if delay < 0 {
-            if platform_activity_pending(&ctx) {
+            // ponytail: a live server polls every 1 ms; block in the runtime's fd poll if idle CPU matters.
+            if platform_activity_pending(&ctx) || http & 1 != 0 {
                 std::thread::sleep(Duration::from_millis(1));
                 return std::ops::ControlFlow::Continue(());
             }
@@ -1494,10 +1583,10 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                 Ok(false) => {}
                 Err(error) => {
                     eprintln!("root test finalization failed: {error}");
-                    return std::ops::ControlFlow::Break(1);
+                    return fail_process(&ctx);
                 }
             }
-            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
+            return finish_idle_process(&ctx);
         }
         sleep_until_next_poll(delay);
         let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
@@ -1510,7 +1599,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                 error.to_string()
             };
             eprintln!("{message}");
-            return std::ops::ControlFlow::Break(1);
+            return fail_process(&ctx);
         }
 
         std::ops::ControlFlow::Continue(())
@@ -1547,7 +1636,7 @@ pub extern "C" fn thaw_js_collect_garbage() {
 /// remain nonzero after all work is complete.
 #[no_mangle]
 pub extern "C" fn thaw_js_terminal_work_pending() -> u8 {
-    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) {
+    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) || PROCESS_EXITED.with(Cell::get) {
         return 0;
     }
     with_context(|ctx| {
@@ -1612,6 +1701,10 @@ pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
             let _active = ActiveNapiContext::enter(&ctx);
             poll_native_continuations()
         };
+        // Like Node, an unhandled rejection ends the program at the poll that reported it.
+        if native_unhandled_failure() {
+            return;
+        }
         if more_ready {
             continue;
         }
@@ -5050,7 +5143,7 @@ fn dynamic_property_key<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Value<'js>, B
 
 // A member call captures its property before arguments and invokes it later.
 fn invoke_selected_method<'js>(
-    ctx: &Ctx<'js>, receiver: u64, selected: u64, args_json: &str,
+    ctx: &Ctx<'js>, receiver: u64, selected: u64, name: &str, args_json: &str,
 ) -> Result<Value<'js>, BoundaryError> {
     let arguments = decode_argument_array(ctx, args_json, true)?;
     // The graph decoder owns transferred leases even if the receiver has
@@ -5059,6 +5152,10 @@ fn invoke_selected_method<'js>(
     // Callability is checked after arguments, but no property is re-read.
     let method = Function::from_value(value_for_handle(ctx, selected)?)
         .map_err(|_| "\u{1}TypeError\u{1}Selected property is not callable".to_string())?;
+    let method = Object::from_value(this_value.clone())
+        .ok()
+        .and_then(|object| native_server_overload(&object, name, &arguments))
+        .unwrap_or(method);
     let mut call_args = Args::new_unsized(ctx.clone());
     call_args.this(this_value).map_err(|error| error.to_string())?;
     for index in 0..arguments.len() {
@@ -5078,7 +5175,7 @@ pub extern "C" fn thaw_js_call_selected_method_graph_result(
     let name = to_str(name);
     let args_json = to_str(args_json);
     let result = with_active_or_context(|ctx| {
-        let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
+        let value = invoke_selected_method(&ctx, receiver, selected, &name, &args_json)?;
         let receiver = value_for_handle(&ctx, receiver).ok();
         resolve_method_result_graph(ctx, value, &name, receiver)
     });
@@ -5095,7 +5192,7 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
     let name = to_str(name);
     let args_json = to_str(args_json);
     let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
-        let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
+        let value = invoke_selected_method(&ctx, receiver, selected, &name, &args_json)?;
         let value = if defer_resolution { value } else {
             resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"), true)?
         };
@@ -5106,6 +5203,21 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
         Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
+}
+
+/// The native `http.Server` exposes Node's overloaded `listen`/`close`/`on` as separately named
+/// fields (`__listenWithCallback`, ...); a dynamically dispatched call picks the field by
+/// argument shape, as the compiler does for a statically typed receiver.
+fn native_server_overload<'js>(object: &Object<'js>, name: &str, arguments: &Array<'js>) -> Option<Function<'js>> {
+    let is_function = |index: usize| arguments.get::<Value>(index).is_ok_and(|value| value.is_function());
+    let target = match name {
+        "listen" if arguments.len() >= 3 && is_function(2) => "__listenWithHostCallback",
+        "listen" if arguments.len() == 2 && is_function(1) => "__listenWithCallback",
+        "close" if arguments.len() == 1 && is_function(0) => "__closeWithCallback",
+        "on" if arguments.len() == 2 && arguments.get::<String>(0).is_ok_and(|event| event == "error") => "__onError",
+        _ => return None,
+    };
+    object.get::<_, Function>(target).ok()
 }
 
 fn invoke_method<'js>(
@@ -5129,6 +5241,7 @@ fn invoke_method<'js>(
         Ok::<_, BoundaryError>((object, method))
     })?;
     let arguments = decode_argument_array(ctx, args_json, graph_args)?;
+    let method = native_server_overload(&object, name, &arguments).unwrap_or(method);
     let mut call_args = Args::new_unsized(ctx.clone());
     call_args.this(object).map_err(|error| error.to_string())?;
     for index in 0..arguments.len() {
