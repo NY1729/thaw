@@ -20,7 +20,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20if (typeof input === 'function') return '[Function' + (input.name ? ': ' + input.name : '') + ']';\n\
              \x20\x20if (typeof input === 'symbol' || typeof input === 'bigint') return String(input);\n\
              \x20\x20if (typeof input !== 'object') return String(input);\n\
-             \x20\x20\x20\x20if (input instanceof Error) return input.stack || input.name + ': ' + input.message;\n\
+             \x20\x20\x20\x20if (input instanceof Error) { var header = input.message ? input.name + ': ' + input.message : String(input.name), frames = String(input.stack || '').split('\\n').filter(function(line) { return /^\\s+at /.test(line) && !/thaw[A-Z]|eval_script/.test(line); }); return String(input.stack || '').indexOf(header) === 0 && frames.length === String(input.stack).split('\\n').length - 1 ? input.stack : [header].concat(frames).join('\\n'); }\n\
              \x20\x20\x20\x20if (input instanceof Date) return isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();\n\
              \x20\x20\x20\x20if (input instanceof RegExp) return String(input);\n\
              \x20\x20\x20\x20if (remaining < 0) return Array.isArray(input) ? '[Array]' : input instanceof Map ? '[Map]' : input instanceof Set ? '[Set]' : '[Object]';\n\
