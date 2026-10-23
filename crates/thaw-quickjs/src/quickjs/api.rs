@@ -1653,6 +1653,18 @@ pub extern "C" fn thaw_js_drain_next_ticks() {
     });
 }
 
+/// An unhandled fatal error ended the process: emit `exit` with code 1 now and run nothing after.
+#[no_mangle]
+pub extern "C" fn thaw_js_fatal_exit() {
+    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) || PROCESS_EXITED.with(Cell::get) {
+        return;
+    }
+    with_context(|ctx| {
+        PROCESS_EXITED.with(|exited| exited.set(true));
+        let _ = fail_process(&ctx);
+    });
+}
+
 /// Reports queued work independently of `thaw_js_run_event_loop`'s exit
 /// status. A failed job can leave later jobs queued, while `exitCode` can
 /// remain nonzero after all work is complete.

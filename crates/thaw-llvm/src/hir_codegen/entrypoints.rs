@@ -85,6 +85,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
         });
+        if user_main.is_some() && !main_returns_promise {
+            // A synchronous throw out of main is fatal unless a process listener
+            // handles it: go straight to the terminal checkpoint, which reports it
+            // and only then runs whatever work is still allowed.
+            let thrown = self.builder.build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                self.pending_exception().as_pointer_value(), "sync_main_pending_exception",
+            ).unwrap().into_pointer_value();
+            let thrown = self.builder.build_is_not_null(thrown, "sync_main_threw").unwrap();
+            let continue_main = self.context.append_basic_block(main_fn, "sync_main_returned");
+            self.builder.build_conditional_branch(thrown, cleanup, continue_main).unwrap();
+            self.builder.position_at_end(continue_main);
+        }
         if self.uses_quickjs && self.commonjs_entry {
             self.builder
                 .build_call(
@@ -1071,6 +1084,25 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> IntValue<'ctx> {
         let reported_failure = self.report_c_main();
         self.latch_terminal_failure(failure, reported_failure);
+        // An unhandled fatal error kills the process immediately: drop queued
+        // timers and emit `exit` with code 1 before any other work can run.
+        let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let fatal = self.context.append_basic_block(function, "terminal_fatal_exit");
+        let after_fatal = self.context.append_basic_block(function, "terminal_after_fatal_exit");
+        self.builder.build_conditional_branch(reported_failure, fatal, after_fatal).unwrap();
+        self.builder.position_at_end(fatal);
+        self.builder.build_call(
+            self.module.get_function("thaw_runtime_abort_pending_work").unwrap(), &[],
+            "abort_pending_work_after_fatal",
+        ).unwrap();
+        if self.uses_quickjs || self.uses_quickjs_handles {
+            self.builder.build_call(
+                self.module.get_function("thaw_js_fatal_exit").unwrap(), &[],
+                "emit_exit_after_fatal",
+            ).unwrap();
+        }
+        self.builder.build_unconditional_branch(after_fatal).unwrap();
+        self.builder.position_at_end(after_fatal);
         let native_before = self.builder.build_call(
             self.module.get_function("thaw_runtime_run_until_idle").unwrap(), &[],
             "terminal_native_before_js",
