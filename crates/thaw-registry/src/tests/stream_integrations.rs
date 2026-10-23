@@ -275,9 +275,11 @@ fn tty_builtin_reports_capabilities_and_emits_ansi_sequences() {
     let args = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    // tty.isatty(1) reflects the test process's own stdout, so derive it rather than assuming a pipe.
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     assert_eq!(
             result,
-            "[false,true,false,true,[80,24],24,8,true,false,\"text\\u001b[4;3H\\u001b[1D\\u001b[2B\\u001b[2K\\u001b[0J\",\"cursor,move\"]"
+            format!("[{stdout_is_tty},true,false,true,[80,24],24,8,true,false,\"text\\u001b[4;3H\\u001b[1D\\u001b[2B\\u001b[2K\\u001b[0J\",\"cursor,move\"]")
         );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
