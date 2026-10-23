@@ -731,7 +731,7 @@ fn unpack_verified_tarball(tarball: &[u8], integrity: &str, destination: &Path) 
     verify_sha512_integrity(tarball, integrity)?;
     fs::create_dir_all(destination)
         .map_err(|error| format!("failed to create `{}`: {error}", destination.display()))?;
-    tar::Archive::new(flate2::read::GzDecoder::new(tarball))
+    tar::Archive::new(gzip_size_capped(tarball))
         .unpack(destination)
         .map_err(|error| format!("failed to unpack verified tarball: {error}"))
 }
@@ -906,8 +906,7 @@ fn download_prebuild_install_addon(
     }
     fs::create_dir_all(&unpack_dir)
         .map_err(|error| format!("failed to create `{}`: {error}", unpack_dir.display()))?;
-    let decoder = flate2::read::GzDecoder::new(archive_bytes.as_slice());
-    tar::Archive::new(decoder)
+    tar::Archive::new(gzip_size_capped(archive_bytes.as_slice()))
         .unpack(&unpack_dir)
         .map_err(|error| format!("failed to unpack native prebuild `{asset}`: {error}"))?;
     let addon = find_node_file(&unpack_dir)?

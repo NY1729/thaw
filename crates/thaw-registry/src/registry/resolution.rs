@@ -1,3 +1,31 @@
+/// Largest decompressed size accepted for a gzip payload (`bundle.js.gz`, native tarballs);
+/// a gzip bomb fails here instead of exhausting memory or disk.
+const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Gzip-decodes `source`, erroring once more than `MAX_DECOMPRESSED_BYTES` come out.
+fn gzip_size_capped<R: Read>(source: R) -> impl Read {
+    struct Capped<R> {
+        inner: R,
+        remaining: u64,
+    }
+    impl<R: Read> Read for Capped<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.remaining = self.remaining.checked_sub(read as u64).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("decompressed size exceeds {MAX_DECOMPRESSED_BYTES} bytes"),
+                )
+            })?;
+            Ok(read)
+        }
+    }
+    Capped {
+        inner: flate2::read::GzDecoder::new(source),
+        remaining: MAX_DECOMPRESSED_BYTES,
+    }
+}
+
 /// A package resolved from a local registry directory. `native_lib`,
 /// `native_addon`, and `bundle_js` are independent runtime backends.
 #[derive(Debug)]
@@ -88,7 +116,7 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
             )
         })?;
         let mut source = String::new();
-        flate2::read::GzDecoder::new(file)
+        gzip_size_capped(file)
             .read_to_string(&mut source)
             .map_err(|error| {
                 format!(
@@ -101,10 +129,12 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         None
     };
 
-    let runtime_env: BTreeMap<String, String> = fs::read_to_string(package_root.join("runtime-env.json"))
-        .ok()
-        .and_then(|source| serde_json::from_str(&source).ok())
-        .unwrap_or_default();
+    let runtime_env: BTreeMap<String, String> = match fs::read_to_string(package_root.join("runtime-env.json")) {
+        Ok(source) => serde_json::from_str(&source)
+            .map_err(|error| format!("registry package `{name}`: malformed `runtime-env.json`: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(format!("registry package `{name}`: failed to read `runtime-env.json`: {error}")),
+    };
     // ponytail: the defaults ride on the package's bundle, so a native-only package without a bundle
     // runs no JS to apply them; give such packages a prelude-only bundle if one ever needs this.
     let bundle_js = match bundle_js {
@@ -112,13 +142,21 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         other => other,
     };
 
-    let version = fs::read_to_string(dir.join("version.txt"))
-        .ok()
-        .map(|s| s.trim().to_string());
+    let version = match fs::read_to_string(dir.join("version.txt")) {
+        Ok(source) => Some(source.trim().to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("registry package `{name}`: failed to read `version.txt`: {error}")),
+    };
 
-    let legacy_lock = || fs::read_to_string(dir.join("lock.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<BTreeMap<String, String>>(&s).ok());
+    let legacy_lock = || -> Result<Option<BTreeMap<String, String>>, String> {
+        match fs::read_to_string(dir.join("lock.json")) {
+            Ok(source) => serde_json::from_str(&source)
+                .map(Some)
+                .map_err(|error| format!("registry package `{name}`: malformed `lock.json`: {error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("registry package `{name}`: failed to read `lock.json`: {error}")),
+        }
+    };
     let dependency_versions = if let Some(subpath) = subpath {
         match fs::symlink_metadata(package_root.join("instances.json")) {
             Ok(_) => {
@@ -129,11 +167,11 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
                 let versions = project_package_versions(instance_versions(records, &package_root.join("instances.json"))?)?;
                 (versions.len() > 1).then_some(versions)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => legacy_lock(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => legacy_lock()?,
             Err(error) => return Err(format!("cannot inspect registry package `{name}` instance index: {error}")),
         }
     } else {
-        legacy_lock()
+        legacy_lock()?
     };
 
     Ok(ResolvedPackage {
@@ -410,4 +448,27 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         version: None,
         dependency_versions: None,
     })
+}
+
+#[cfg(test)]
+mod gzip_size_cap_tests {
+    use super::*;
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn gzip_size_capped_rejects_output_past_the_limit() {
+        let small = gzip(b"module.exports = 1;");
+        let mut out = Vec::new();
+        gzip_size_capped(small.as_slice()).read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"module.exports = 1;");
+
+        let bomb = gzip(&vec![0u8; MAX_DECOMPRESSED_BYTES as usize + 1]);
+        let error = gzip_size_capped(bomb.as_slice()).read_to_end(&mut Vec::new()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
