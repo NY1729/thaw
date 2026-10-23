@@ -47,6 +47,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_object_class_name",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_i64_to_string",
             i8_ptr.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),
@@ -943,6 +948,11 @@ impl<'ctx> HirCompiler<'ctx> {
             );
             self.module.add_function(name, ty, Some(Linkage::External));
         }
+        self.module.add_function(
+            "thaw_bigint_pow",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
         let array_fill_type = i8_ptr.fn_type(
             &[
                 i8_ptr.into(),

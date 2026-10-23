@@ -1040,7 +1040,13 @@ impl<'a> FnLowerer<'a> {
                 // `__thaw_error_name`/`__thaw_error_message` routing a
                 // `Str` value gets (real trigger: `catch (e) { const err:
                 // any = e; err.name }` vs. the working `String(e)`).
+                // A reassignable `let x: any = "s"` must stay `any`: only an immutable
+                // alias or a direct copy of a caught error keeps the `Str` storage.
+                let keeps_str = var_decl.kind == VarDeclKind::Const
+                    || matches!(&value, HirExpr::Var(n)
+                        if self.catch_bindings.contains(n) || self.promise_catch_bindings.contains(n));
                 let ty = if actual_type == HirType::Str
+                    && keeps_str
                     && matches!(ty, HirType::Dynamic | HirType::Json)
                 {
                     HirType::Str
@@ -1088,7 +1094,7 @@ impl<'a> FnLowerer<'a> {
                     && matches!(&ty, HirType::Object(fields) if fields.iter().any(|(_, field)| *field == HirType::Dynamic))
                 {
                     actual_type.clone()
-                } else if ty == HirType::Dynamic && actual_type == HirType::Str {
+                } else if ty == HirType::Dynamic && actual_type == HirType::Str && keeps_str {
                     // `const err: any = <caught error>` -- an `any`-annotated
                     // copy of a caught-exception string. Storing it as
                     // `Dynamic` would drop the `.name`/`.message`/`.code`

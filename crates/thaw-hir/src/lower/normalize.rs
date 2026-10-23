@@ -1869,17 +1869,24 @@ pub fn annotate_untyped_default_parameters(module: &Module) -> Module {
     fn expr_type(
         expr: &Expr,
         earlier: &HashMap<String, TsKeywordTypeKind>,
+        fields: &HashMap<String, TsKeywordTypeKind>,
     ) -> Option<TsKeywordTypeKind> {
         use TsKeywordTypeKind::*;
         match expr {
-            Expr::Paren(paren) => expr_type(&paren.expr, earlier),
+            Expr::Paren(paren) => expr_type(&paren.expr, earlier, fields),
+            Expr::Member(member) if matches!(member.obj.as_ref(), Expr::This(_)) => {
+                match &member.prop {
+                    MemberProp::Ident(name) => fields.get(&name.sym.to_string()).cloned(),
+                    _ => None,
+                }
+            }
             Expr::Lit(Lit::Num(_)) => Some(TsNumberKeyword),
             Expr::Lit(Lit::Str(_)) => Some(TsStringKeyword),
             Expr::Lit(Lit::Bool(_)) => Some(TsBooleanKeyword),
             Expr::Ident(ident) => earlier.get(&ident.sym.to_string()).cloned(),
             Expr::Bin(bin) => {
-                let left = expr_type(&bin.left, earlier);
-                let right = expr_type(&bin.right, earlier);
+                let left = expr_type(&bin.left, earlier, fields);
+                let right = expr_type(&bin.right, earlier, fields);
                 let both_numbers = left == Some(TsNumberKeyword) && right == Some(TsNumberKeyword);
                 match bin.op {
                     BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Exp
@@ -1907,7 +1914,7 @@ pub fn annotate_untyped_default_parameters(module: &Module) -> Module {
                 Pat::Assign(assign) => match assign.left.as_mut() {
                     Pat::Ident(binding) => {
                         if binding.type_ann.is_none() {
-                            if let Some(kind) = expr_type(&assign.right, &earlier) {
+                            if let Some(kind) = expr_type(&assign.right, &earlier, &HashMap::new()) {
                                 binding.type_ann = Some(keyword_annotation(kind));
                             }
                         }
@@ -1932,8 +1939,103 @@ pub fn annotate_untyped_default_parameters(module: &Module) -> Module {
             arrow.visit_mut_children_with(self);
             annotate_params(arrow.params.iter_mut());
         }
+        fn visit_mut_class(&mut self, class: &mut Class) {
+            class.visit_mut_children_with(self);
+            // `handler = () => this.n`: a field without an annotation takes its arrow's
+            // signature, with a return type from the arrow, its body, or `void`.
+            let mut fields: HashMap<String, TsKeywordTypeKind> = HashMap::new();
+            for member in &class.body {
+                let ClassMember::ClassProp(prop) = member else { continue };
+                let (PropName::Ident(name), false) = (&prop.key, prop.is_static) else { continue };
+                let kind = match (&prop.type_ann, &prop.value) {
+                    (Some(annotation), _) => keyword_of(annotation),
+                    (None, Some(value)) => expr_type(value, &HashMap::new(), &fields),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    fields.insert(name.sym.to_string(), kind);
+                }
+            }
+            for member in &mut class.body {
+                let ClassMember::ClassProp(prop) = member else { continue };
+                if prop.is_static || prop.type_ann.is_some() {
+                    continue;
+                }
+                let Some(Expr::Arrow(arrow)) = prop.value.as_deref() else { continue };
+                if arrow.is_async || arrow.is_generator || arrow.type_params.is_some() {
+                    continue;
+                }
+                let mut params = Vec::new();
+                let mut known: HashMap<String, TsKeywordTypeKind> = HashMap::new();
+                for param in &arrow.params {
+                    let Pat::Ident(binding) = param else { break };
+                    let Some(annotation) = binding.type_ann.as_ref() else { break };
+                    if let Some(kind) = keyword_of(annotation) {
+                        known.insert(binding.id.sym.to_string(), kind);
+                    }
+                    params.push(TsFnParam::Ident(binding.clone()));
+                }
+                if params.len() != arrow.params.len() {
+                    continue;
+                }
+                // The value of the last `return <expr>` in a block (not inside a closure).
+                fn returned_value(statements: &[Stmt]) -> Option<&Expr> {
+                    let mut found = None;
+                    for statement in statements {
+                        match statement {
+                            Stmt::Return(ret) => found = ret.arg.as_deref().or(found),
+                            Stmt::Block(block) => found = returned_value(&block.stmts).or(found),
+                            Stmt::If(branch) => {
+                                found = returned_value(std::slice::from_ref(&branch.cons)).or(found);
+                                if let Some(alt) = branch.alt.as_deref() {
+                                    found = returned_value(std::slice::from_ref(alt)).or(found);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    found
+                }
+                let return_type = if let Some(annotation) = arrow.return_type.clone() {
+                    annotation
+                } else {
+                    let kind = match arrow.body.as_ref() {
+                        ArrowFunctionBody::Expr(body) => expr_type(body, &known, &fields),
+                        ArrowFunctionBody::FunctionBody(body) => match returned_value(&body.stmts) {
+                            None => Some(TsKeywordTypeKind::TsVoidKeyword),
+                            Some(value) => expr_type(value, &known, &fields),
+                        },
+                    };
+                    let Some(kind) = kind else { continue };
+                    keyword_annotation(kind)
+                };
+                prop.type_ann = Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(TsType::TsFnOrConstructorType(
+                        TsFnOrConstructorType::TsFnType(TsFnType {
+                            span: swc_common::DUMMY_SP,
+                            params,
+                            type_params: None,
+                            type_ann: return_type,
+                        }),
+                    )),
+                }));
+            }
+        }
         fn visit_mut_constructor(&mut self, constructor: &mut Constructor) {
             constructor.visit_mut_children_with(self);
+            // `constructor(private z = 3)`: a parameter property takes its default's type.
+            for param in &mut constructor.params {
+                let ParamOrTsParamProp::TsParamProp(property) = param else { continue };
+                let TsParamPropParam::Assign(assign) = &mut property.param else { continue };
+                if let Pat::Ident(binding) = assign.left.as_mut() {
+                    if binding.type_ann.is_none() {
+                        if let Some(kind) = expr_type(&assign.right, &HashMap::new(), &HashMap::new()) {
+                            binding.type_ann = Some(keyword_annotation(kind));
+                        }
+                    }
+                }
+            }
             annotate_params(constructor.params.iter_mut().filter_map(|param| match param {
                 ParamOrTsParamProp::Param(param) => Some(&mut param.pat),
                 ParamOrTsParamProp::TsParamProp(_) => None,
@@ -1943,4 +2045,337 @@ pub fn annotate_untyped_default_parameters(module: &Module) -> Module {
     let mut module = module.clone();
     module.visit_mut_with(&mut Annotator);
     module
+}
+
+/// Flattens `namespace NS { export const a = 1; export function f() {} }` into top-level
+/// declarations named `NS__a`/`NS__f`, and rewrites `NS.a` (value and type position) and the
+/// namespace body's own unqualified references to match. Types stay under their bare names, as
+/// `collect_type_declarations` already hoists them. A namespace is left untouched (and so
+/// rejected as before) when it is exported, ambient, merged-in-body unsupported, or a local
+/// binding shadows one of its members.
+pub fn flatten_namespaces(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+
+    #[derive(Clone)]
+    enum Binding {
+        Flat(String),
+        Namespace(String),
+    }
+    type Members = HashMap<String, Binding>;
+
+    fn block_of(declaration: &TsModuleDecl) -> Option<&TsModuleBlock> {
+        match (&declaration.id, &declaration.body) {
+            (TsModuleName::Ident(_), Some(TsNamespaceBody::TsModuleBlock(block)))
+                if !declaration.declare && !declaration.global =>
+            {
+                Some(block)
+            }
+            _ => None,
+        }
+    }
+    fn declared(item: &ModuleItem) -> Option<(&Decl, bool)> {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(decl)) => Some((decl, false)),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some((&export.decl, true)),
+            _ => None,
+        }
+    }
+    fn has_value(block: &TsModuleBlock) -> bool {
+        block.body.iter().any(|item| match declared(item) {
+            Some((Decl::TsInterface(_) | Decl::TsTypeAlias(_), _)) => false,
+            Some((Decl::TsModule(inner), _)) => block_of(inner).is_some_and(has_value),
+            _ => true,
+        })
+    }
+    /// How often each name is bound (variable, parameter, function, class) anywhere in a body.
+    #[derive(Default)]
+    struct Bindings(HashMap<String, usize>);
+    impl Visit for Bindings {
+        fn visit_binding_ident(&mut self, binding: &BindingIdent) {
+            *self.0.entry(binding.id.sym.to_string()).or_default() += 1;
+        }
+        // `x = 1` / `x += 1` assigns to an existing binding, it does not declare one.
+        fn visit_simple_assign_target(&mut self, target: &SimpleAssignTarget) {
+            if !matches!(target, SimpleAssignTarget::Ident(_)) {
+                target.visit_children_with(self);
+            }
+        }
+        fn visit_fn_decl(&mut self, function: &FnDecl) {
+            *self.0.entry(function.ident.sym.to_string()).or_default() += 1;
+            function.function.visit_with(self);
+        }
+        fn visit_class_decl(&mut self, class: &ClassDecl) {
+            *self.0.entry(class.ident.sym.to_string()).or_default() += 1;
+            class.class.visit_with(self);
+        }
+        fn visit_ts_enum_decl(&mut self, declaration: &TsEnumDecl) {
+            *self.0.entry(declaration.id.sym.to_string()).or_default() += 1;
+        }
+    }
+
+    struct Hoist {
+        exported: HashMap<String, Members>,
+        env: HashMap<String, Members>,
+        items: Vec<(String, ModuleItem)>,
+        failed: bool,
+    }
+    impl Hoist {
+        fn block(&mut self, path: &str, parent: &Members, block: &TsModuleBlock) {
+            let mut counts = Bindings::default();
+            block.visit_with(&mut counts);
+            let mut members = parent.clone();
+            let mut exported = Members::new();
+            let mut hoisted = Vec::new();
+            for item in &block.body {
+                let Some((decl, is_export)) = declared(item) else {
+                    if matches!(item, ModuleItem::Stmt(_)) {
+                        hoisted.push(item.clone());
+                    } else {
+                        self.failed = true;
+                    }
+                    continue;
+                };
+                let mut decl = decl.clone();
+                let mut names: Vec<(String, Binding)> = Vec::new();
+                let rename = |ident: &mut Ident, names: &mut Vec<(String, Binding)>| {
+                    let flat = format!("{path}__{}", ident.sym);
+                    names.push((ident.sym.to_string(), Binding::Flat(flat.clone())));
+                    ident.sym = flat.into();
+                };
+                match &mut decl {
+                    Decl::Var(var) => {
+                        for declarator in &mut var.decls {
+                            match &mut declarator.name {
+                                Pat::Ident(binding) => rename(&mut binding.id, &mut names),
+                                _ => self.failed = true,
+                            }
+                        }
+                    }
+                    Decl::Fn(function) => rename(&mut function.ident, &mut names),
+                    Decl::Class(class) => rename(&mut class.ident, &mut names),
+                    Decl::TsEnum(declaration) => rename(&mut declaration.id, &mut names),
+                    // Types keep their bare names; recording them lets `NS.Shape` resolve to `Shape`.
+                    Decl::TsInterface(declaration) => {
+                        names.push((declaration.id.sym.to_string(), Binding::Flat(declaration.id.sym.to_string())));
+                    }
+                    Decl::TsTypeAlias(declaration) => {
+                        names.push((declaration.id.sym.to_string(), Binding::Flat(declaration.id.sym.to_string())));
+                    }
+                    Decl::TsModule(inner) => match (block_of(inner), &inner.id) {
+                        (Some(inner_block), TsModuleName::Ident(name)) if has_value(inner_block) => {
+                            let inner_path = format!("{path}__{}", name.sym);
+                            names.push((name.sym.to_string(), Binding::Namespace(inner_path.clone())));
+                            let mut inner_members = members.clone();
+                            inner_members.insert(name.sym.to_string(), Binding::Namespace(inner_path.clone()));
+                            self.block(&inner_path, &inner_members, inner_block);
+                            for (name, binding) in &names {
+                                members.insert(name.clone(), binding.clone());
+                                if is_export {
+                                    exported.insert(name.clone(), binding.clone());
+                                }
+                            }
+                            continue;
+                        }
+                        _ => self.failed = true,
+                    },
+                    _ => self.failed = true,
+                }
+                for (name, binding) in names {
+                    if counts.0.get(&name).copied().unwrap_or(0) > 1 {
+                        self.failed = true;
+                    }
+                    members.insert(name.clone(), binding.clone());
+                    if is_export {
+                        exported.insert(name, binding);
+                    }
+                }
+                hoisted.push(ModuleItem::Stmt(Stmt::Decl(decl)));
+            }
+            // Reopened namespaces merge their exports.
+            self.exported.entry(path.to_string()).or_default().extend(exported);
+            self.env.entry(path.to_string()).or_default().extend(members);
+            for item in hoisted {
+                self.items.push((path.to_string(), item));
+            }
+        }
+    }
+
+    struct Rewrite<'a> {
+        env: &'a Members,
+        exported: &'a HashMap<String, Members>,
+    }
+    impl Rewrite<'_> {
+        fn namespace_of_expr(&self, expr: &Expr) -> Option<&str> {
+            match expr {
+                Expr::Ident(ident) => match self.env.get(ident.sym.as_ref()) {
+                    Some(Binding::Namespace(path)) => Some(path),
+                    _ => None,
+                },
+                Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) => {
+                    let outer = self.namespace_of_expr(obj)?;
+                    match self.exported.get(outer)?.get(name.sym.as_ref()) {
+                        Some(Binding::Namespace(path)) => Some(path),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        fn namespace_of_entity(&self, name: &TsEntityName) -> Option<&str> {
+            match name {
+                // The module-flattening rename leaves `NS` in type positions untouched.
+                TsEntityName::Ident(ident) => match self.env.get(ident.sym.as_ref()).or_else(|| {
+                    self.env.iter().find_map(|(key, binding)| {
+                        let (digits, original) = key.strip_prefix("__thawmod")?.split_once('_')?;
+                        (digits.bytes().all(|b| b.is_ascii_digit()) && original == ident.sym.as_ref())
+                            .then_some(binding)
+                    })
+                }) {
+                    Some(Binding::Namespace(path)) => Some(path),
+                    _ => None,
+                },
+                TsEntityName::TsQualifiedName(qualified) => {
+                    let outer = self.namespace_of_entity(&qualified.left)?;
+                    match self.exported.get(outer)?.get(qualified.right.sym.as_ref()) {
+                        Some(Binding::Namespace(path)) => Some(path),
+                        _ => None,
+                    }
+                }
+            }
+        }
+        fn flat(&self, ident: &Ident) -> Option<String> {
+            match self.env.get(ident.sym.as_ref()) {
+                Some(Binding::Flat(flat)) => Some(flat.clone()),
+                _ => None,
+            }
+        }
+    }
+    impl VisitMut for Rewrite<'_> {
+        fn visit_mut_expr(&mut self, expr: &mut Expr) {
+            if let Expr::Member(member) = expr {
+                if let MemberProp::Ident(name) = &member.prop {
+                    if let Some(path) = self.namespace_of_expr(&member.obj) {
+                        if let Some(Binding::Flat(flat)) =
+                            self.exported.get(path).and_then(|m| m.get(name.sym.as_ref()))
+                        {
+                            *expr = Expr::Ident(Ident::new_no_ctxt(flat.as_str().into(), member.span));
+                            return;
+                        }
+                    }
+                }
+            }
+            if let Expr::Ident(ident) = expr {
+                if let Some(flat) = self.flat(ident) {
+                    ident.sym = flat.into();
+                }
+                return;
+            }
+            expr.visit_mut_children_with(self);
+        }
+        fn visit_mut_prop(&mut self, prop: &mut Prop) {
+            if let Prop::Shorthand(ident) = prop {
+                if let Some(flat) = self.flat(ident) {
+                    *prop = Prop::KeyValue(KeyValueProp {
+                        key: PropName::Ident(IdentName::new(ident.sym.clone(), ident.span)),
+                        value: Box::new(Expr::Ident(Ident::new_no_ctxt(flat.into(), ident.span))),
+                    });
+                }
+                return;
+            }
+            prop.visit_mut_children_with(self);
+        }
+        fn visit_mut_simple_assign_target(&mut self, target: &mut SimpleAssignTarget) {
+            if let SimpleAssignTarget::Ident(binding) = target {
+                if let Some(flat) = self.flat(&binding.id) {
+                    binding.id.sym = flat.into();
+                }
+                return;
+            }
+            target.visit_mut_children_with(self);
+        }
+        fn visit_mut_ts_entity_name(&mut self, name: &mut TsEntityName) {
+            match name {
+                TsEntityName::TsQualifiedName(qualified) => {
+                    if let Some(path) = self.namespace_of_entity(&qualified.left) {
+                        if let Some(Binding::Flat(flat)) =
+                            self.exported.get(path).and_then(|m| m.get(qualified.right.sym.as_ref()))
+                        {
+                            *name = TsEntityName::Ident(Ident::new_no_ctxt(
+                                flat.as_str().into(),
+                                qualified.span,
+                            ));
+                        }
+                    }
+                }
+                TsEntityName::Ident(ident) => {
+                    if let Some(flat) = self.flat(ident) {
+                        ident.sym = flat.into();
+                    }
+                }
+            }
+        }
+    }
+
+    // Top-level namespaces (plain statements) that declare at least one value.
+    let mut top = Members::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(declaration))) = item {
+            if let (Some(block), TsModuleName::Ident(name)) = (block_of(declaration), &declaration.id) {
+                if has_value(block) {
+                    top.insert(name.sym.to_string(), Binding::Namespace(name.sym.to_string()));
+                }
+            }
+        }
+    }
+    if top.is_empty() {
+        return module.clone();
+    }
+    let mut hoist = Hoist {
+        exported: HashMap::new(),
+        env: HashMap::new(),
+        items: Vec::new(),
+        failed: false,
+    };
+    let mut layout: Vec<Result<ModuleItem, usize>> = Vec::new(); // namespace slots keep source order
+    let mut namespaces: Vec<(String, usize, usize)> = Vec::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(declaration))) = item {
+            if let (Some(block), TsModuleName::Ident(name)) = (block_of(declaration), &declaration.id) {
+                if top.contains_key(name.sym.as_ref()) {
+                    let start = hoist.items.len();
+                    hoist.block(name.sym.as_ref(), &top, block);
+                    namespaces.push((name.sym.to_string(), start, hoist.items.len()));
+                    layout.push(Err(namespaces.len() - 1));
+                    continue;
+                }
+            }
+        }
+        layout.push(Ok(item.clone()));
+    }
+    if hoist.failed {
+        return module.clone();
+    }
+    let exported = std::mem::take(&mut hoist.exported);
+    let rewrite_item = |env: &Members, item: &mut ModuleItem| {
+        item.visit_mut_with(&mut Rewrite { env, exported: &exported });
+    };
+    let mut body = Vec::new();
+    for slot in layout {
+        match slot {
+            Ok(mut item) => {
+                rewrite_item(&top, &mut item);
+                body.push(item);
+            }
+            Err(index) => {
+                let (_, start, end) = &namespaces[index];
+                for (path, item) in &hoist.items[*start..*end] {
+                    let mut item = item.clone();
+                    rewrite_item(&hoist.env[path], &mut item);
+                    body.push(item);
+                }
+            }
+        }
+    }
+    Module { body, ..module.clone() }
 }
