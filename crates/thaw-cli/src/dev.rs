@@ -10,9 +10,10 @@ fn run_dev(args: &[String]) -> Result<(), String> {
         None => Some(PathBuf::from(".")),
         _ => None,
     };
-    let output = build_output(args).unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("thaw-dev-{}", std::process::id()))
-    });
+    let output = match build_output(args) {
+        Some(output) => output,
+        None => private_temp_dir(&std::env::temp_dir(), "thaw-dev")?.join("thaw-dev"),
+    };
     let build_args = dev_build_args(args, configured_vite, &output);
     let mut roots = dev_watch_roots(&input, project_root.as_deref(), &[]);
     let mut vite_directory = dev_vite_directory(&build_args);

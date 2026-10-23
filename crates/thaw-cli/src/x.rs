@@ -361,20 +361,32 @@ fn exact_requested_version<'a>(spec: &'a str, package: &str) -> Option<&'a str> 
     semver::Version::parse(requested).ok().map(|_| requested)
 }
 
-/// `$XDG_CACHE_HOME/thaw/x` (or `$HOME/.cache/thaw/x`, or the temp
-/// directory as a last resort).
+/// `$XDG_CACHE_HOME/thaw/x` (or `$HOME/.cache/thaw/x`).
 fn x_cache_root() -> Result<PathBuf, String> {
-    Ok(thaw_cache_root().join("x"))
+    Ok(thaw_cache_root()?.join("x"))
 }
 
-/// `$XDG_CACHE_HOME/thaw` (or `$HOME/.cache/thaw`, or the temp directory as a
-/// last resort).
-fn thaw_cache_root() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("thaw")
+/// `$XDG_CACHE_HOME/thaw` (or `$HOME/.cache/thaw`). Never falls back to the
+/// shared temp directory: with neither variable set this is an error.
+fn thaw_cache_root() -> Result<PathBuf, String> {
+    cache_root_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
+fn cache_root_from(
+    xdg_cache_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let base = match (xdg_cache_home, home) {
+        (Some(xdg_cache_home), _) => PathBuf::from(xdg_cache_home),
+        (None, Some(home)) => PathBuf::from(home).join(".cache"),
+        (None, None) => {
+            return Err(
+                "neither HOME nor XDG_CACHE_HOME is set; set one so thaw has a cache directory"
+                    .into(),
+            )
+        }
+    };
+    Ok(base.join("thaw"))
 }
 
 /// Every command a package's `bin` entry declares, as `(name, path)`. A

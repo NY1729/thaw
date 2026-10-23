@@ -1157,12 +1157,17 @@ fn tsconfig_check_accepts_jsonc_and_reports_invalid_json() {
 
 #[test]
 fn run_output_lives_in_thaw_cache_not_temp_dir() {
-    let output = run_output_path(7).unwrap();
-    assert_eq!(
-        output.parent(),
-        Some(thaw_cache_root().join("run").as_path())
-    );
-    assert!(output.starts_with(thaw_cache_root()));
+    let output = run_output_path().unwrap();
+    let dir = output.parent().unwrap();
+    assert!(dir.starts_with(thaw_cache_root().unwrap().join("run")));
+    assert!(output.starts_with(thaw_cache_root().unwrap()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
