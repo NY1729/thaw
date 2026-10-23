@@ -332,7 +332,8 @@ impl StorageGraph {
             (member.obj.as_ref(), &member.prop) else { return false };
         self.lookup(object.sym.as_ref()).is_none()
             && matches!((object.sym.as_ref(), property.sym.as_ref()),
-                ("Object", "fromEntries" | "groupBy") | ("Map", "groupBy"))
+                ("Object", "fromEntries" | "groupBy") | ("Map", "groupBy")
+                | ("Buffer", "from" | "concat" | "alloc") | ("Uint8Array", "from"))
     }
 
     fn link(&mut self, left: Span, right: Span) {
@@ -998,7 +999,7 @@ impl Visit for StorageGraph {
                     }
                     if let Expr::Member(member) = callee.as_ref() {
                         // A static builtin that builds a fresh container from its arguments
-                        // (`Object.fromEntries(..)`) does not alias the argument: its result
+                        // (`Object.fromEntries(..)`, `Buffer.from([..])`) does not alias the argument: its result
                         // reaching `any` must not turn the argument literal dynamic.
                         if !self.is_fresh_static_builtin(member) {
                             self.link(span, member.obj.span());
