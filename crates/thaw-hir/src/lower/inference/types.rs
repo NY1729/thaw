@@ -2594,6 +2594,12 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable"
                     | "__thaw_json_is_primitive_operand" => return Ok(HirType::Bool),
                     "__thaw_console_bytes" => return Ok(HirType::Array(Box::new(HirType::F64))),
+                    "__thaw_console_typed" => {
+                        let [HirExpr::TypedClosure(ty, _)] = args.as_slice() else {
+                            return Err("console type tag needs its type".into());
+                        };
+                        return Ok(ty.clone());
+                    }
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_brand_wrapper" => return Ok(HirType::Json),
