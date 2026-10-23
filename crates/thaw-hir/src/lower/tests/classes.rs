@@ -2489,14 +2489,21 @@ fn native_string_union_add_does_not_construct_bigint_host_calls() {
         }
         function nativeOptional(): any { return optional(true) + 2; }
         function nativeUnion(): any { return choose(true) + 2; }
-        function nativeJson(value: any): any { return value + 2; }"#,
+        function nativeJson(value: any): any { return value + 2; }
+        function nativePrimitive(value: number): number { return value + 2; }"#,
     );
+    // Deliberate IR change: a Json-typed operand (any, or a union that lowers to
+    // Json) carries a runtime-guarded live branch so an object-like value gets the
+    // QuickJS default-hint `+`. A statically primitive operand keeps no host call.
     for name in ["nativeOptional", "nativeUnion", "nativeJson"] {
         let function = program.functions.iter().find(|function| function.name == name).unwrap();
         let body = format!("{:?}", function.body);
-        assert!(!body.contains("callDynamicValue"), "{name}: {body}");
-        assert!(!body.contains("getDynamicValue"), "{name}: {body}");
+        assert!(body.contains("callDynamicValue"), "{name}: {body}");
     }
+    let function = program.functions.iter().find(|function| function.name == "nativePrimitive").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(!body.contains("callDynamicValue"), "nativePrimitive: {body}");
+    assert!(!body.contains("getDynamicValue"), "nativePrimitive: {body}");
 }
 
 // Unrun regression: a public spelling cannot collide with a normalized # slot.
