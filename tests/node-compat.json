@@ -1997,6 +1997,16 @@
       "name": "Buffer out-of-range index write is ignored",
       "expect": "matched",
       "source": "function main(): void { const u = Buffer.from([1, 2, 3, 4]); u[10] = 1; u[-1] = 2; u[1.5] = 3; u[2] = 7; console.log(u.length, u[10], u[2]); }"
+    },
+    {
+      "name": "Buffer out-of-range compound and update index ignored",
+      "expect": "matched",
+      "source": "function main(): void { const u = new Uint8Array(4); const i = 10; u[10] += 1; u[10]++; ++u[10]; u[i] |= 1; u[-1] -= 1; u[2] += 5; u[2]++; console.log(u.length, u[10], u[2]); }"
+    },
+    {
+      "name": "sync throw in main skips registered timers and exit sees code 1",
+      "expect": "matched",
+      "source": "function main(): void { process.on('exit', (code: number) => console.log('exit', code)); setTimeout(() => console.log('timer'), 5); console.log('a'); throw new Error('boom'); }"
     }
   ]
 }
