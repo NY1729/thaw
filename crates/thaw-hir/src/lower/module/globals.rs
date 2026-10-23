@@ -924,8 +924,14 @@ fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &H
     let class_name = declaration.ident.sym.as_ref();
     let display = display_class_name(class_name);
     let global = format!("__thaw_class_value_{class_name}");
+    // Method bodies still name the class by its module-flattened symbol (`Base.count`).
+    let alias = if class_name == display {
+        String::new()
+    } else {
+        format!("const {class_name} = {display};\n")
+    };
     let script = format!(
-        "globalThis[\"{global}\"] = (function () {{ try {{ {source}\nreturn {display}; }} catch (e) {{ return Function(); }} }})();"
+        "globalThis[\"{global}\"] = (function () {{ try {{ {source}\n{alias}return {display}; }} catch (e) {{ return Function(); }} }})();"
     );
     Some((global, script))
 }

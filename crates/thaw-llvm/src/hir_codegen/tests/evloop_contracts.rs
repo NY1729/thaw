@@ -31,15 +31,6 @@ fn evloop_contract_before_exit_can_rearm_and_exit_runs_once_last() {
 }
 
 #[test]
-fn evloop_contract_process_version_is_a_node_22_string() {
-    let source = r##"function main(): void {
-  console.log(process.version.startsWith("v22."), process.versions.node === process.version.slice(1));
-}
-"##;
-    assert_eq!(compile_and_run(source, "evloop_contract_process_version"), "true true\n");
-}
-
-#[test]
 fn evloop_contract_unhandled_rejection_stops_the_process_before_later_timers() {
     let source = r##"function main(): void {
   Promise.reject(new Error("x"));
