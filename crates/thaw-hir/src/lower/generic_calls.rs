@@ -1724,7 +1724,7 @@ impl<'a> FnLowerer<'a> {
                 )));
                 // `a?.f?.()`: with the receiver narrowed, the member itself may be optional.
                 let mut inner = call.clone();
-                inner.callee = Box::new(Expr::Member(rebound));
+                *inner.callee = Expr::Member(rebound);
                 let invoked = self.lower_optional_call(&inner);
                 self.narrowings.remove(&name);
                 self.nullable_narrowings.remove(&name);
