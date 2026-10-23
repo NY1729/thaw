@@ -63,7 +63,10 @@ impl<'a> FnLowerer<'a> {
                     continue;
                 }
             }
-            let HirType::Array(inner) = element.as_ref() else { break };
+            let HirType::Array(inner) = element.as_ref() else {
+                check_flat_union_element(element.as_ref())?;
+                break
+            };
             let inner = inner.as_ref().clone();
             result = self.lower_array_flat_one(result, current_type, inner.clone())?;
             current_type = HirType::Array(Box::new(inner));
@@ -1142,6 +1145,7 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                         let HirType::Array(inner) = element.as_ref() else {
+                            check_flat_union_element(element.as_ref())?;
                             break;
                         };
                         let inner = inner.as_ref().clone();
@@ -1605,4 +1609,16 @@ impl<'a> FnLowerer<'a> {
                 }
         unreachable!("instance builtin category was checked before lowering")
     }
+}
+
+/// Splicing a union element's array members needs a per-element runtime test that
+/// the static flatten loops do not have. Until it does, fail loudly instead of
+/// silently returning those members nested.
+fn check_flat_union_element(element: &HirType) -> Result<(), String> {
+    if matches!(element, HirType::Union(members)
+        if members.iter().any(|member| matches!(member, HirType::Array(_))))
+    {
+        return Err("native `.flat()` over elements that are a union with array members is not supported yet".into());
+    }
+    Ok(())
 }

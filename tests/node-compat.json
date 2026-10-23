@@ -1823,6 +1823,11 @@
       "source": "function main(): void { const __proto__ = 7; const s: any = { __proto__ }; const c: any = { ['__proto__']: 3 }; console.log(Object.keys(s).join(','), s.__proto__, Object.keys(c).join(','), c.__proto__); }"
     },
     {
+      "name": "in operator on primitive union member throws TypeError",
+      "expect": "matched",
+      "source": "function probe(v: number | { x: number }): void { try { console.log(\"x\" in v); } catch (e) { console.log((e as Error).message); } } function main(): void { probe({ x: 1 }); probe(5); }"
+    },
+    {
       "name": "class array foreign object written through any alias keeps identity",
       "expect": "matched",
       "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } } function main(): void { const nat: C[] = []; const v: any = nat; const o: any = { n: 7 }; v[0] = o; console.log(nat[0] === o, nat[0] instanceof C, nat[0].n); }"
