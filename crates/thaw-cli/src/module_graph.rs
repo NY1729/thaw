@@ -1706,6 +1706,39 @@ pub fn source_paths(entry: &Path) -> Result<(Vec<PathBuf>, bool), String> {
     Ok((paths, complete))
 }
 
+/// Whether the entry program runs as CommonJS under Node 22 (decides `process.nextTick` vs
+/// promise ordering: a CommonJS script runs outside any microtask, so ticks drain first; an ES
+/// module body runs inside one, so promises drain first).
+///
+/// Rule: `.mts` is ESM and `.cts` is CommonJS; otherwise the file is ESM exactly when it has an
+/// `import`/`export` declaration that survives type stripping (`import type`, `export type`,
+/// `export interface` and `export type X = ..` do not count; `import x = require()` and
+/// `export =` are CommonJS forms). This is Node's syntax detection; `package.json` `"type"` is
+/// not consulted, and imports in dependencies never matter (only the entry's own syntax does).
+pub fn entry_is_commonjs(entry: &Path, source: &str) -> Result<bool, String> {
+    match entry.extension().and_then(|ext| ext.to_str()) {
+        Some("mts") => return Ok(false),
+        Some("cts") => return Ok(true),
+        _ => {}
+    }
+    let module = thaw_parser::parse_typescript(source)?;
+    Ok(!module.body.iter().any(|item| {
+        let ModuleItem::ModuleDecl(decl) = item else {
+            return false;
+        };
+        match decl {
+            ModuleDecl::Import(import) => !import.type_only,
+            ModuleDecl::ExportNamed(export) => !export.type_only,
+            ModuleDecl::ExportAll(export) => !export.type_only,
+            ModuleDecl::ExportDecl(export) => {
+                !matches!(export.decl, Decl::TsInterface(_) | Decl::TsTypeAlias(_))
+            }
+            ModuleDecl::ExportDefaultDecl(_) | ModuleDecl::ExportDefaultExpr(_) => true,
+            _ => false,
+        }
+    }))
+}
+
 pub fn uses_created_require_live_result(entry: &Path, entry_source: &str) -> Result<bool, String> {
     let mut modules = Vec::new();
     load_module(

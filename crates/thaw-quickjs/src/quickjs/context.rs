@@ -924,6 +924,32 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
             }
             return fields;
         };
+        const fromCharCode = String.fromCharCode;
+        const parseHex = Number.parseInt;
+        const segmentName = segment => {
+            const colon = apply(stringIndexOf, segment, [':', 0]);
+            const bytes = number(apply(stringSlice, segment, [0, colon]));
+            let name = '';
+            for (let index = 0; index < bytes; index++) {
+                const at = colon + 1 + index * 2;
+                name += apply(fromCharCode, String, [parseHex(apply(stringSlice, segment, [at, at + 2]), 16)]);
+            }
+            return name;
+        };
+        const markerPrefix = '__thaw_class_identity_\u001e';
+        // A subclass instance satisfies its base class layout: the wanted identity
+        // chain must be a suffix of the actual one (`Derived\u001fBase` for `Base`).
+        const segmentMatches = (have, want) => {
+            if (have === want) return true;
+            const wantName = segmentName(want);
+            if (apply(stringIndexOf, wantName, [markerPrefix, 0]) !== 0) return false;
+            const haveName = segmentName(have);
+            if (apply(stringIndexOf, haveName, [markerPrefix, 0]) !== 0) return false;
+            const wantChain = apply(stringSlice, wantName, [markerPrefix.length]);
+            const haveChain = apply(stringSlice, haveName, [markerPrefix.length]);
+            return haveChain.length > wantChain.length &&
+                apply(stringSlice, haveChain, [haveChain.length - wantChain.length - 1]) === '\u001f' + wantChain;
+        };
         const layoutContains = (actual, expected) => {
             if (actual === expected) return true;
             const have = layoutSegments(actual);
@@ -933,7 +959,7 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
             for (let desired = 0; desired < want.length; desired++) {
                 let found = false;
                 for (let index = 0; index < have.length; index++) {
-                    if (!used[index] && have[index] === want[desired]) {
+                    if (!used[index] && segmentMatches(have[index], want[desired])) {
                         used[index] = true;
                         found = true;
                         break;
@@ -1037,6 +1063,15 @@ fn install_async_context_bootstrap<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     ctx.globals().set("__thaw_async_context_bootstrap", bridge)
 }
 
+/// Callbacks `thaw-runtime` fills in (same layout as its `RuntimeHooks`): a native http.Server poll
+/// (bit 0 live, bit 1 a callback ran) and a peek at the latched unhandled-rejection failure.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RuntimeHooks {
+    server_poll: Option<extern "C" fn() -> u8>,
+    unhandled_failure: Option<extern "C" fn() -> u8>,
+}
+
 /// Hands the job barrier hooks to `thaw-runtime` (a soft dependency, looked up
 /// by symbol like `thaw_runtime_poll_one` is from this side).
 #[cfg(unix)]
@@ -1051,8 +1086,12 @@ fn register_js_job_hooks() {
         }
         std::mem::transmute::<
             *mut libc::c_void,
-            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64)),
-        >(register)(js_queue_job_barrier, js_drain_to_job_barrier);
+            extern "C" fn(
+                extern "C" fn() -> u64,
+                extern "C" fn(u64),
+                *mut RuntimeHooks,
+            ),
+        >(register)(js_queue_job_barrier, js_drain_to_job_barrier, RUNTIME_HOOKS.with(Cell::as_ptr));
     }
 }
 
@@ -3472,6 +3511,11 @@ fn install_shared_array_buffer_clone_functions(ctx: &Ctx<'_>) {
         .expect("failed to install __thaw_sab_serialize");
     globals.set("__thaw_sab_deserialize", Function::new(ctx.clone(), sab_deserialize).expect("failed to create __thaw_sab_deserialize"))
         .expect("failed to install __thaw_sab_deserialize");
+}
+
+thread_local! {
+    /// Native-runtime callbacks handed back by `thaw-runtime` when the job hooks are registered.
+    static RUNTIME_HOOKS: Cell<RuntimeHooks> = const { Cell::new(RuntimeHooks { server_poll: None, unhandled_failure: None }) };
 }
 
 thread_local! {
