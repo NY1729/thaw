@@ -629,7 +629,7 @@ impl<'a> FnLowerer<'a> {
                         | HirType::Undefined
                 )
             {
-                return self.coerce_primitive_to_string(value);
+                return self.coerce_concat_operand_to_string(value);
             }
             if callee_name == "Boolean" && ty != HirType::Json {
                 let name = format!("__thaw_boolean_value_{}", self.next_binding);

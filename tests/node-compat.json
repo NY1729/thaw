@@ -1833,6 +1833,11 @@
       "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } } function main(): void { const nat: C[] = []; const v: any = nat; const o: any = { n: 7 }; v[0] = o; console.log(nat[0] === o, nat[0] instanceof C, nat[0].n); }"
     },
     {
+      "name": "new on any-held plain function declaration runs body",
+      "expect": "matched",
+      "source": "function plain(): void { console.log(\"plain body ran\"); } function main(): void { const p: any = plain; try { const o = new p(); console.log(\"c2c ok\", typeof o); } catch (e: any) { console.log(\"c2c threw\", e && e.name, e && e.message); } }"
+    },
+    {
       "name": "extracted method receiver message names property",
       "expect": "matched",
       "source": "class K { x = 3; m(): number { return this.x; } } function main(): void { const o = { x: 7, get(): number { return this.x; } }; const e = o.get; try { console.log(e()); } catch (err) { console.log((err as Error).message); } const km = new K().m; try { console.log(km()); } catch (err) { console.log((err as Error).message); } }"
@@ -1871,6 +1876,31 @@
       "name": "buffer out of range reads and writes throw ERR_OUT_OF_RANGE",
       "expect": "matched",
       "source": "function t(f: () => any): void { try { console.log(f()); } catch (e: any) { console.log(e.name + ' ' + e.code + ' ' + e.message); } } function main(): void { const buf: Buffer = Buffer.alloc(8); t(() => buf.readUInt32BE(6)); t(() => buf.readUIntBE(7, 3)); t(() => buf.readBigInt64BE(1)); t(() => buf.readUInt8(-1)); t(() => buf.readUInt8(1.5)); t(() => buf.writeUInt32BE(1, 6)); t(() => buf.writeUInt8(256, 0)); t(() => buf.writeInt8(-129, 0)); t(() => buf.writeUInt16LE(70000, 0)); t(() => buf.readUIntBE(0, 7)); t(() => buf.writeBigInt64BE(1n, 1)); }"
+    },
+    {
+      "name": "error constructor name of builtin errors",
+      "expect": "matched",
+      "source": "function main(): void { try { JSON.parse('{'); } catch (e: any) { console.log(e.constructor.name, e.constructor === SyntaxError, e instanceof SyntaxError); } try { throw new RangeError('r'); } catch (e: any) { console.log(e.constructor.name, e.constructor === RangeError, e.constructor === TypeError); } const o: any = JSON.parse('null'); try { o.x; } catch (e: any) { console.log(e.constructor.name, e.constructor === TypeError); } try { throw new Error('plain'); } catch (e: any) { console.log(e.constructor.name, e.constructor === Error); } const t = new TypeError('t'); console.log(t.constructor.name, t.constructor === TypeError); }"
+    },
+    {
+      "name": "error string conversion keeps name prefix",
+      "expect": "matched",
+      "source": "function main(): void { const t = new TypeError('t'); console.log(String(t), `${t}`, 'x: ' + t, t + ''); let s = 'a: '; s += t; console.log(s); try { throw new RangeError('r'); } catch (e: any) { console.log(String(e), `${e}`, 'c: ' + e); } console.log('plain ' + 'text', `${'plain'}`); }"
+    },
+    {
+      "name": "error subclass string conversion",
+      "expect": "matched",
+      "source": "class MyErr extends Error { constructor(m: string) { super(m); this.name = 'MyErr'; } } class Sub extends MyErr {} class E2 extends Error {} function main(): void { const m = new MyErr('oops'); console.log(String(m), `${m}`, 'x: ' + m, m.toString()); console.log(String(new Sub('q')), `${new E2('z')}`); try { throw new MyErr('mm'); } catch (e: any) { console.log(String(e), `${e}`, 'c: ' + e); } }"
+    },
+    {
+      "name": "error call without new is an instance",
+      "expect": "matched",
+      "source": "function main(): void { const e0 = Error('x'); console.log(e0 instanceof Error, e0.message, String(e0), e0.name); const e1 = TypeError('y'); console.log(e1 instanceof TypeError, e1 instanceof Error, e1.name, String(e1)); const a = new Error('x'); console.log(a instanceof Error, a instanceof TypeError); }"
+    },
+    {
+      "name": "stack overflow is a catchable RangeError",
+      "expect": "matched",
+      "source": "function r(n: number): number { return r(n + 1) + 1; } function depth(n: number): number { return n === 0 ? 0 : depth(n - 1) + 1; } function main(): void { try { r(0); console.log('no'); } catch (e: any) { console.log('caught', e instanceof RangeError, e.message); } console.log(depth(5000)); try { r(0); } catch (e: any) { console.log(String(e)); } }"
     }
   ]
 }
