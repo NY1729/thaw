@@ -1038,7 +1038,23 @@ impl<'a> FnLowerer<'a> {
                 )),
             ));
         }
-        self.coerce_primitive_to_string(value)
+        self.coerce_concat_operand_to_string(value)
+    }
+
+    /// ToString of a user-visible `+`/template/`String()`/`toString()` operand. A `Str` that is a
+    /// caught or constructed `Error`, and an Error-family record, convert to the framed wire tag, so
+    /// both are rendered `Name: message` (`thaw_error_to_string` returns any untagged string
+    /// unchanged after one byte check). Internal conversions (console, throw) keep the raw tag.
+    pub(crate) fn coerce_concat_operand_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        let may_be_error = (ty == HirType::Str && !matches!(value, HirExpr::Lit(_)))
+            || object_type_is_error_family(&ty);
+        let text = self.coerce_primitive_to_string(value)?;
+        Ok(if may_be_error {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_error_to_string".to_string())), vec![text])
+        } else {
+            text
+        })
     }
 
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -2973,6 +2989,10 @@ impl<'a> FnLowerer<'a> {
         if let Some(result) = self.object_default_to_primitive(value.clone(), fields, &ty)? {
             return Ok((result, HirType::Json));
         }
+        // An Error-family record has no `valueOf`: `OrdinaryToPrimitive` falls to its `toString`.
+        if object_type_is_error_family(&ty) {
+            return Ok((self.coerce_primitive_to_string(value)?, HirType::Str));
+        }
         Err(format!(
             "binary `+` on an object requires a `[Symbol.toPrimitive]` method, got {ty:?}"
         ))
@@ -3182,8 +3202,8 @@ impl<'a> FnLowerer<'a> {
         let concat = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_string_concat".into())),
             vec![
-                self.coerce_primitive_to_string(HirExpr::Var(lhs_name.clone()))?,
-                self.coerce_primitive_to_string(HirExpr::Var(rhs_name.clone()))?,
+                self.coerce_concat_operand_to_string(HirExpr::Var(lhs_name.clone()))?,
+                self.coerce_concat_operand_to_string(HirExpr::Var(rhs_name.clone()))?,
             ],
         );
         let result = if guaranteed_string {

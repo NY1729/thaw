@@ -649,7 +649,7 @@ impl<'a> FnLowerer<'a> {
                             vec![receiver],
                         ));
                     }
-                    return self.coerce_primitive_to_string(receiver);
+                    return self.coerce_concat_operand_to_string(receiver);
                 }
                 if property.sym == *"valueOf" {
                     if !call.args.is_empty() {
