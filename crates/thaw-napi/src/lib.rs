@@ -164,6 +164,19 @@ const ASYNC_COMPLETE_PENDING: u8 = 3;
 const ASYNC_COMPLETED: u8 = 4;
 const ASYNC_DELETED: u8 = 5;
 
+// Addon-supplied sizes are capped so a bad length fails with an error instead
+// of aborting the process on allocation. Dense arrays are stored element by
+// element, so their cap is much lower than the byte-buffer cap.
+const NAPI_MAX_DENSE_LENGTH: usize = 1 << 26;
+const NAPI_MAX_BUFFER_LENGTH: usize = 1 << 30;
+// Node rejects string lengths above INT_MAX. The same bound keeps
+// from_raw_parts within its isize::MAX precondition.
+const NAPI_MAX_STRING_LENGTH: usize = i32::MAX as usize;
+
+fn napi_string_length_is_valid(length: usize) -> bool {
+    length == NAPI_AUTO_LENGTH || length <= NAPI_MAX_STRING_LENGTH
+}
+
 pub struct AsyncWork {
     env: usize,
     owner: std::thread::ThreadId,
@@ -621,9 +634,64 @@ enum NapiGraphWrapperKind {
     RegExp,
 }
 
+// Live handles in creation order. Membership is checked on nearly every N-API
+// call, so it goes through a hash set instead of a linear scan. Values are
+// fresh allocations, so the list never holds duplicates.
+#[derive(Default)]
+struct ValueSet {
+    list: Vec<NapiValue>,
+    members: HashSet<NapiValue>,
+}
+
+impl ValueSet {
+    fn push(&mut self, value: NapiValue) {
+        self.members.insert(value);
+        self.list.push(value);
+    }
+
+    fn contains(&self, value: &NapiValue) -> bool {
+        self.members.contains(value)
+    }
+
+    fn pop(&mut self) -> Option<NapiValue> {
+        let value = self.list.pop()?;
+        self.members.remove(&value);
+        Some(value)
+    }
+
+    fn swap_remove(&mut self, index: usize) -> NapiValue {
+        let value = self.list.swap_remove(index);
+        self.members.remove(&value);
+        value
+    }
+}
+
+impl ValueSet {
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, NapiValue> {
+        self.list.iter()
+    }
+
+    fn last(&self) -> Option<&NapiValue> {
+        self.list.last()
+    }
+}
+
+impl<'a> IntoIterator for &'a ValueSet {
+    type Item = &'a NapiValue;
+    type IntoIter = std::slice::Iter<'a, NapiValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 pub struct Env {
     owner: std::thread::ThreadId,
-    values: Vec<NapiValue>,
+    values: ValueSet,
     // Each allocation carries a generation so a private temporary removed
     // from `values` cannot be mistaken for a later Box at the same address.
     value_generations: HashMap<usize, u64>,
@@ -814,7 +882,7 @@ impl Env {
     fn new() -> Self {
         Self {
             owner: std::thread::current().id(),
-            values: Vec::new(),
+            values: ValueSet::default(),
             value_generations: HashMap::new(),
             pending_scope_values: Vec::new(),
             rooted_scope_escapes: HashSet::new(),
@@ -1285,6 +1353,9 @@ unsafe fn open_handle_scope(
     let (Ok(env_ref), Some(out)) = (env_mut(env), out.as_mut()) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
+    // Closed scopes stay listed until the next open so a double close still
+    // reports HANDLE_SCOPE_MISMATCH; reap them here to keep the list bounded.
+    env_ref.handle_scopes.retain(|scope| !scope.closed);
     let mut scope = Box::new(HandleScope {
         env: env as usize,
         kind,
@@ -2062,7 +2133,7 @@ impl Drop for Env {
                 Self::finish_cleanup(self, false);
             }
         }
-        for value in std::mem::take(&mut self.values) {
+        for value in std::mem::take(&mut self.values).list {
             unsafe { drop(Box::from_raw(value)) };
         }
     }
