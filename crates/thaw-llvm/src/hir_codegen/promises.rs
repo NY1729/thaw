@@ -2252,7 +2252,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element)?, false)
+                        .const_int(
+                            if *element == HirType::Void {
+                                ARRAY_ELEM_BYTES
+                            } else {
+                                array_element_storage_bytes(element)?
+                            },
+                            false,
+                        )
                         .into(),
                 ],
                 "promise_all_array",
