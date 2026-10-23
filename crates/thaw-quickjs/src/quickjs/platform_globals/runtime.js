@@ -609,6 +609,8 @@
         if (native) return native.isMap ? 'map' : 'set';
         return thawGraphKind(thawGraphMapSize, value) ? 'map' : thawGraphKind(thawGraphSetSize, value) ? 'set' : '';
       }
+      // 26: a null-prototype object (`Object.create(null)`), whose String() coercion throws.
+      case 26: return thawGraphGetPrototypeOf(value) === null ? '1' : '0';
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
