@@ -688,6 +688,16 @@
       "source": "async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(order.join(',')); }"
     },
     {
+      "name": "commonjs program runs nextTick before promises",
+      "expect": "matched",
+      "source": "function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); queueMicrotask((): void => console.log('microtask')); }"
+    },
+    {
+      "name": "es module runs promises before nextTick",
+      "expect": "matched",
+      "source": "import { setImmediate as wait } from 'node:timers'; async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => wait(resolve)); console.log(order.join(',')); }"
+    },
+    {
       "name": "uncaught exception monitor precedes handler",
       "expect": "matched",
       "source": "function main(): void { const order: string[] = []; process.on('uncaughtExceptionMonitor', () => order.push('monitor')); process.on('uncaughtException', () => { order.push('handler'); console.log(order.join(',')); }); queueMicrotask(() => { throw new Error('boom'); }); }"
