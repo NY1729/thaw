@@ -308,14 +308,8 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
             Some("stdout") => HostWorkerEvent::Stdout(payload),
             Some("stderr") => HostWorkerEvent::Stderr(payload),
             Some("direct") => HostWorkerEvent::DirectRequest {
-                target: event
-                    .get("target")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or_default() as u32,
-                source: event
-                    .get("source")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or_default() as u32,
+                target: worker_thread_id(&event, "target")?,
+                source: worker_thread_id(&event, "source")?,
                 request: event
                     .get("request")
                     .and_then(|value| value.as_u64())
@@ -337,6 +331,11 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
         let _ = events.send(event);
     }
     Ok(())
+}
+
+fn worker_thread_id(event: &serde_json::Value, key: &str) -> Result<u32, String> {
+    let value = event.get(key).and_then(|value| value.as_u64()).unwrap_or_default();
+    u32::try_from(value).map_err(|_| format!("ERR_OUT_OF_RANGE:The \"{key}\" thread id {value} is out of range"))
 }
 
 fn execute_worker_pending_job(ctx: &Ctx<'_>) -> Result<bool, String> {
@@ -1676,10 +1675,16 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
         .get("maxBuffer")
         .and_then(serde_json::Value::as_u64)
         .map(|bytes| bytes as usize);
-    let kill_signal = options
-        .get("killSignal")
-        .and_then(serde_json::Value::as_i64)
-        .map_or(15, |signal| signal as i32);
+    let kill_signal = match options.get("killSignal").and_then(serde_json::Value::as_i64) {
+        None => 15,
+        Some(signal @ 0..=64) => signal as i32,
+        Some(signal) => return serde_json::json!({
+            "error": format!("The \"killSignal\" argument must be a signal number between 0 and 64. Received {signal}"),
+            "code": "EINVAL",
+            "errno": null,
+            "path": command,
+        }).to_string(),
+    };
     let mut child = match spawn_retrying_text_busy(&mut child) {
         Ok(child) => child,
         Err(error) => {
@@ -2006,6 +2011,17 @@ fn sync_child_within_limits_reports_neither_flag() {
     assert_eq!(record["maxBufferExceeded"], false);
     assert_eq!(hex_decode(record["stdout"].as_str().unwrap()), b"abc");
     assert_eq!(hex_decode(record["stderr"].as_str().unwrap()), b"def");
+}
+
+#[test]
+fn sync_kill_signal_outside_0_to_64_is_rejected_before_spawn() {
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "exit 0"]).to_string(),
+        serde_json::json!({"killSignal": 65}).to_string(),
+    )).unwrap();
+    assert_eq!(record["code"], "EINVAL");
+    assert!(record.get("pid").is_none());
 }
 
 #[cfg(all(test, unix))]

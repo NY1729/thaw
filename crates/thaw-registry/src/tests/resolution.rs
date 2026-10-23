@@ -5868,3 +5868,42 @@ fn recursive_composite_export_import_keeps_leaf_owner_and_nested_path() {
     assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn module_targets_that_escape_the_package_are_rejected() {
+    let dir = temp_registry("escaping_module_target");
+    let package = dir.join("pkg");
+    fs::create_dir(&package).unwrap();
+    fs::write(dir.join("outside.js"), "module.exports = 'host';").unwrap();
+    for escaping in ["../outside.js", "../outside", "..", "/etc/passwd"] {
+        assert!(
+            resolve_module_path(&package, escaping).is_err(),
+            "`{escaping}` must not resolve outside the package"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collect_relative_files_does_not_follow_symlink_cycles() {
+    let dir = temp_registry("symlink_cycle_collect");
+    fs::write(dir.join("index.js"), "").unwrap();
+    std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+    let mut files = Vec::new();
+    collect_relative_files(&dir, &dir, &mut files).unwrap();
+    assert_eq!(files, vec!["index.js".to_string()]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collect_relative_files_bounds_directory_depth() {
+    let dir = temp_registry("deep_collect");
+    let mut deep = dir.clone();
+    for _ in 0..70 {
+        deep = deep.join("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let mut files = Vec::new();
+    assert!(collect_relative_files(&dir, &dir, &mut files).is_err());
+    let _ = fs::remove_dir_all(&dir);
+}
