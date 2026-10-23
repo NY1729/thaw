@@ -1837,6 +1837,11 @@
       "expect": "matched",
       "source": "function plain(): void { console.log(\"plain body ran\"); } function main(): void { const p: any = plain; try { const o = new p(); console.log(\"c2c ok\", typeof o); } catch (e: any) { console.log(\"c2c threw\", e && e.name, e && e.message); } }"
     },
+    {
+      "name": "extracted method receiver message names property",
+      "expect": "matched",
+      "source": "class K { x = 3; m(): number { return this.x; } } function main(): void { const o = { x: 7, get(): number { return this.x; } }; const e = o.get; try { console.log(e()); } catch (err) { console.log((err as Error).message); } const km = new K().m; try { console.log(km()); } catch (err) { console.log((err as Error).message); } }"
+    },
 {
           "name": "function length counts leading parameters",
           "expect": "matched",
