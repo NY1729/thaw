@@ -1414,6 +1414,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
             match body {
                 HirExpr::Block(stmts) => {
+                    self.emit_stack_overflow_guard()?;
                     let terminated = self.compile_block(stmts)?;
                     if !terminated {
                         if *ret == HirType::Void {

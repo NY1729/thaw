@@ -2419,10 +2419,15 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_instanceof_text_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
-                        return self.wrap_call_argument_bindings(
-                            HirExpr::Lit(HirLit::Bool(false)),
-                            &[(name, value_type, value)],
+                        // `new Error(..)`/`Error(..)` are framed strings; an unframed string is not an instance.
+                        let query = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_is_instance".into())),
+                            vec![
+                                HirExpr::Var(name.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                            ],
                         );
+                        return self.wrap_call_argument_bindings(query, &[(name, value_type, value)]);
                     }
                     // Fallback for the same dynamic-value case the early
                     // `peek_type_without_lowering` check above already
@@ -5409,10 +5414,16 @@ impl<'a> FnLowerer<'a> {
                         new_expr.callee.as_ref(),
                         Some(&HirType::JsValue),
                     )?;
-                    if matches!(
-                        self.infer_expr_type(&callee)?,
-                        HirType::JsValue | HirType::Dynamic | HirType::Json
-                    ) {
+                    let callee_type = self.infer_expr_type(&callee)?;
+                    if matches!(callee_type, HirType::JsValue | HirType::Dynamic | HirType::Json) {
+                        // The runtime construct call takes a live handle; a
+                        // `Json`-held callable (`const p: any = fn`) must be
+                        // turned back into one first.
+                        let callee = if callee_type == HirType::Json {
+                            self.coerce_to_declared(&HirType::JsValue, callee)?
+                        } else {
+                            callee
+                        };
                         let args = new_expr.args.as_deref().unwrap_or_default();
                         let values = self.dynamic_call_args_json(args)?;
                         return Ok(HirExpr::Call(
