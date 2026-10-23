@@ -1452,6 +1452,65 @@ fn malformed_elf_program_offsets_return_error_without_overflow() {
 }
 
 #[test]
+fn http_listen_callback_runs_before_timers_and_accepts_a_host() {
+    // Expected output recorded from node 22 for the same programs.
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-listen-order-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let programs = [
+        (
+            "order",
+            r#"import * as http from "node:http";
+function main(): void {
+  const server = http.createServer((req, res) => { res.end("ok"); });
+  server.listen(0, () => { console.log("cb"); });
+  setTimeout(() => { console.log("t0"); }, 0);
+  setImmediate(() => { console.log("imm"); });
+  Promise.resolve().then(() => console.log("micro"));
+  setTimeout(() => { console.log("t200"); server.close(); }, 200);
+}
+"#,
+            "micro\ncb\nt0\nimm\nt200\n",
+        ),
+        (
+            "host",
+            r#"import * as http from "node:http";
+function main(): void {
+  const server = http.createServer((req, res) => { res.end("ok"); });
+  server.listen(0, "127.0.0.1", () => { console.log("listening"); server.close(); });
+}
+"#,
+            "listening\n",
+        ),
+    ];
+    for (name, source, expected) in programs {
+        let entry = directory.join(format!("{name}.ts"));
+        std::fs::write(&entry, source).unwrap();
+        let executable = directory.join(name);
+        build_with_assets(
+            &entry,
+            &executable,
+            &[],
+            &[],
+            &[],
+            &directory.join("registry"),
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
+        let output = Command::new(&executable).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn embedded_frontend_and_api_run_without_the_asset_directory() {
     let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = probe.local_addr().unwrap().port();

@@ -688,6 +688,16 @@
       "source": "async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(order.join(',')); }"
     },
     {
+      "name": "commonjs program runs nextTick before promises",
+      "expect": "matched",
+      "source": "function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); queueMicrotask((): void => console.log('microtask')); }"
+    },
+    {
+      "name": "es module runs promises before nextTick",
+      "expect": "matched",
+      "source": "import { setImmediate as wait } from 'node:timers'; async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => wait(resolve)); console.log(order.join(',')); }"
+    },
+    {
       "name": "uncaught exception monitor precedes handler",
       "expect": "matched",
       "source": "function main(): void { const order: string[] = []; process.on('uncaughtExceptionMonitor', () => order.push('monitor')); process.on('uncaughtException', () => { order.push('handler'); console.log(order.join(',')); }); queueMicrotask(() => { throw new Error('boom'); }); }"
@@ -1883,6 +1893,17 @@
       "source": "function main(): void {\n  const b = process.hrtime.bigint();\n  console.log(typeof b, b > 0n, process.hrtime.bigint() >= b);\n  console.log(typeof process.uptime(), typeof process.memoryUsage.rss(), typeof process.getuid(), typeof process.getgid(), typeof process.umask());\n  console.log(process.release.name, process.kill(process.pid, 0));\n  process.on(\"SIGUSR2\", () => { console.log(\"got sig\"); });\n  process.kill(process.pid, \"SIGUSR2\");\n  setTimeout(() => console.log(\"end\"), 20);\n}\n"
     },
     {
+      "name": "zero ms timeout keeps insertion order with a 1 ms timeout",
+      "expect": "matched",
+      "source": "function main(): void { setTimeout((): void => console.log('one'), 1); setTimeout((): void => console.log('zero'), 0); setTimeout((): void => console.log('one-b'), 1); }"
+    },
+    {
+      "name": "process beforeExit re-arm and exit event",
+      "expect": "matched",
+      "source": "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }"
+    }
+,
+    {
       "name": "error constructor name of builtin errors",
       "expect": "matched",
       "source": "function main(): void { try { JSON.parse('{'); } catch (e: any) { console.log(e.constructor.name, e.constructor === SyntaxError, e instanceof SyntaxError); } try { throw new RangeError('r'); } catch (e: any) { console.log(e.constructor.name, e.constructor === RangeError, e.constructor === TypeError); } const o: any = JSON.parse('null'); try { o.x; } catch (e: any) { console.log(e.constructor.name, e.constructor === TypeError); } try { throw new Error('plain'); } catch (e: any) { console.log(e.constructor.name, e.constructor === Error); } const t = new TypeError('t'); console.log(t.constructor.name, t.constructor === TypeError); }"
@@ -1906,6 +1927,31 @@
       "name": "stack overflow is a catchable RangeError",
       "expect": "matched",
       "source": "function r(n: number): number { return r(n + 1) + 1; } function depth(n: number): number { return n === 0 ? 0 : depth(n - 1) + 1; } function main(): void { try { r(0); console.log('no'); } catch (e: any) { console.log('caught', e instanceof RangeError, e.message); } console.log(depth(5000)); try { r(0); } catch (e: any) { console.log(String(e)); } }"
+    },
+    {
+      "name": "json stringify runs class to json",
+      "expect": "matched",
+      "source": "class W { v = 1; toJSON(): string { return \"TJ\"; } }\nclass Sub extends W { toJSON(): string { return \"SUB\"; } }\nclass Holder { a = 1; #p = 2; w: W = new W(); list: W[] = [new W()]; }\nfunction dump(x: W): string { return JSON.stringify(x); }\nfunction main(): void {\n  console.log(JSON.stringify(new W()), JSON.stringify([new W()]));\n  console.log(JSON.stringify({ w: new W() }));\n  console.log(JSON.stringify(new Holder()));\n  console.log(dump(new Sub()), dump(new W()));\n}"
+    },
+    {
+      "name": "private fields hidden from console and for in",
+      "expect": "matched",
+      "source": "class P {\n  a = 1;\n  #x = 2;\n  b = \"s\";\n  get x(): number { return this.#x; }\n}\nfunction main(): void {\n  const p = new P();\n  console.log(p);\n  console.log([p]);\n  console.log({ p });\n  const seen: string[] = [];\n  for (const k in p) seen.push(k);\n  console.log(seen.join(), Object.keys(p).join(), p.x);\n}"
+    },
+    {
+      "name": "sort comparator on array aliased through any",
+      "expect": "matched",
+      "source": "interface R { k: string }\nfunction main(): void {\n  const names: string[] = [\"b\", \"a\", \"c\"];\n  const aliasOfNames: any = names;\n  names.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));\n  console.log(names.join(), aliasOfNames.join());\n  const nums: number[] = [3, 1, 10, 2];\n  const aliasOfNums: any = nums;\n  nums.sort((x, y) => y - x);\n  console.log(nums.join(), aliasOfNums.join());\n  const rows: R[] = [{ k: \"b\" }, { k: \"a\" }, { k: \"c\" }];\n  const aliasOfRows: any = rows;\n  rows.sort((x, y) => (x.k < y.k ? -1 : x.k > y.k ? 1 : 0));\n  console.log(rows.map((r) => r.k).join(), aliasOfRows.length);\n}"
+    },
+    {
+      "name": "super and static members through any",
+      "expect": "matched",
+      "source": "class Base {\n  static count = 0;\n  id: number;\n  constructor() { this.id = ++Base.count; }\n  who(): string { return \"b\"; }\n}\nclass Der extends Base {\n  who(): string { return \"d\" + super.who(); }\n}\nfunction main(): void {\n  const D: any = Der;\n  console.log(new D().id, D.count);\n  const list: Base[] = [new Base(), new Der()];\n  const view: any = list;\n  console.log(view.map((x: Base) => x.who()).join());\n}"
+    },
+    {
+      "name": "virtual dispatch in base constructor",
+      "expect": "matched",
+      "source": "class A {\n  constructor() { this.init(); }\n  init(): void { console.log(\"A.init\"); }\n  who(): string { return \"A\"; }\n}\nclass B extends A {\n  init(): void { console.log(\"B.init\"); }\n  who(): string { return \"B\"; }\n}\nclass C extends B {\n  who(): string { return \"C+\" + super.who(); }\n}\nfunction describe(x: A): string { return x.who(); }\nfunction main(): void {\n  new A();\n  new B();\n  new C();\n  const list: A[] = [new A(), new B(), new C()];\n  console.log(describe(new C()), list.map((x) => x.who()).join());\n}"
     }
   ]
 }

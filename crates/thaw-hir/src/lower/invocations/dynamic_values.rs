@@ -438,9 +438,13 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             Some(HirType::JsValue)
                         };
+                        let parameter = self
+                            .dynamic_callback_parameter
+                            .take()
+                            .unwrap_or(HirType::JsValue);
                         self.lower_contextual_arrow(
                             arrow,
-                            &vec![HirType::JsValue; arrow.params.len()],
+                            &vec![parameter; arrow.params.len()],
                             expected_return.as_ref(),
                         )?
                     }
