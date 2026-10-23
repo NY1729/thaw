@@ -607,6 +607,19 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn configure_unhandled_rejection_reporter(&self) {
+        // Process-entry setup shared by both C mains: arm the stack-overflow guard.
+        let limit_fn = self.module.get_function("thaw_stack_guard_limit").unwrap_or_else(|| {
+            self.module.add_function(
+                "thaw_stack_guard_limit",
+                self.context.i64_type().fn_type(&[], false),
+                Some(Linkage::External),
+            )
+        });
+        let limit = self.builder.build_call(limit_fn, &[], "stack_guard_limit").unwrap()
+            .try_as_basic_value().basic().unwrap();
+        self.builder.build_store(
+            self.module.get_global(STACK_LIMIT_SYMBOL).unwrap().as_pointer_value(), limit,
+        ).unwrap();
         let reporter = if self.uses_quickjs || self.uses_quickjs_handles {
             self.module
                 .get_function("thaw_js_emit_unhandled_rejection_result")
