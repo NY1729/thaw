@@ -747,8 +747,8 @@ fn sha3_digest(value: &[u8], output_bytes: usize) -> Vec<u8> {
     padded.resize(padded.len().div_ceil(rate) * rate, 0);
     *padded.last_mut().expect("padded block") |= 0x80;
     for block in padded.chunks(rate) {
-        for (lane, bytes) in state.iter_mut().zip(block.chunks_exact(8)) {
-            *lane ^= u64::from_le_bytes(bytes.try_into().expect("8-byte lane"));
+        for (lane, bytes) in state.iter_mut().zip(block.as_chunks::<8>().0) {
+            *lane ^= u64::from_le_bytes(*bytes);
         }
         keccak_f1600(&mut state);
     }
