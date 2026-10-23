@@ -272,11 +272,125 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     let normalized = normalize_constructor_functions(&normalized)?;
+    let normalized = specialize_new_target_functions(&normalized);
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
     specialize_named_promise_rejection_callbacks(&normalized)
+}
+
+const NEW_TARGET_CONSTRUCT_SUFFIX: &str = "__thaw_construct";
+
+/// `new.target` in a top-level function declaration. Function bodies are native functions with
+/// fixed parameters and no hidden construct flag, so such a function gets a second declaration
+/// (`F__thaw_construct`) in which `new.target` is `F`; the original body sees `undefined`, and
+/// every direct `new F(...)` is routed to the construct body. Functions that never mention
+/// `new.target` are untouched. A construct reaching `F` from QuickJS still runs the call body.
+fn specialize_new_target_functions(module: &Module) -> Module {
+    use swc_ecma_ast::{Ident, MetaPropKind};
+    struct Replace {
+        with: Ident,
+        hit: bool,
+    }
+    impl VisitMut for Replace {
+        fn visit_mut_expr(&mut self, expression: &mut Expr) {
+            if matches!(expression, Expr::MetaProp(meta) if meta.kind == MetaPropKind::NewTarget) {
+                *expression = Expr::Ident(self.with.clone());
+                self.hit = true;
+            } else {
+                expression.visit_mut_children_with(self);
+            }
+        }
+        // A nested function or class has its own `new.target`; arrows inherit ours.
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+    }
+    fn rewrite(declaration: &mut FnDecl, with: Ident) -> bool {
+        let mut replace = Replace { with, hit: false };
+        let function = &mut declaration.function;
+        function.params.visit_mut_with(&mut replace);
+        function.body.visit_mut_with(&mut replace);
+        replace.hit
+    }
+    struct BindingCounts(HashMap<Symbol, usize>);
+    impl Visit for BindingCounts {
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            *self.0.entry(declaration.ident.sym.to_string()).or_default() += 1;
+            declaration.function.visit_with(self);
+        }
+        fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+            *self.0.entry(binding.id.sym.to_string()).or_default() += 1;
+        }
+    }
+    let mut counts = BindingCounts(HashMap::new());
+    module.visit_with(&mut counts);
+    let undefined = |span| Ident::new_no_ctxt("undefined".into(), span);
+    let mut names = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) = item else {
+            continue;
+        };
+        let function = &declaration.function;
+        let mut probe = declaration.clone();
+        // ponytail: unshadowed top-level, non-async, non-generator declarations only.
+        if function.body.is_some()
+            && !function.is_async
+            && !function.is_generator
+            && counts.0.get(declaration.ident.sym.as_ref()) == Some(&1)
+            && rewrite(&mut probe, undefined(declaration.ident.span))
+        {
+            names.insert(declaration.ident.sym.to_string());
+        }
+    }
+    if names.is_empty() {
+        return module.clone();
+    }
+    struct Route<'a>(&'a HashSet<Symbol>);
+    impl VisitMut for Route<'_> {
+        fn visit_mut_expr(&mut self, expression: &mut Expr) {
+            expression.visit_mut_children_with(self);
+            let Expr::New(construction) = expression else {
+                return;
+            };
+            let Expr::Ident(callee) = construction.callee.as_ref() else {
+                return;
+            };
+            if !self.0.contains(callee.sym.as_ref()) {
+                return;
+            }
+            let mut callee = callee.clone();
+            callee.sym = format!("{}{NEW_TARGET_CONSTRUCT_SUFFIX}", callee.sym).into();
+            *expression = Expr::Call(CallExpr {
+                span: construction.span,
+                ctxt: construction.ctxt,
+                callee: Callee::Expr(Box::new(Expr::Ident(callee))),
+                args: construction.args.take().unwrap_or_default(),
+                type_args: construction.type_args.take(),
+            });
+        }
+    }
+    let mut routed = module.clone();
+    routed.visit_mut_with(&mut Route(&names));
+    let mut body = Vec::with_capacity(routed.body.len() + names.len());
+    for item in routed.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(mut declaration))) = item else {
+            body.push(item);
+            continue;
+        };
+        if !names.contains(declaration.ident.sym.as_ref()) {
+            body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))));
+            continue;
+        }
+        let function_value = declaration.ident.clone();
+        let mut construct = declaration.clone();
+        construct.ident.sym = format!("{}{NEW_TARGET_CONSTRUCT_SUFFIX}", function_value.sym).into();
+        rewrite(&mut declaration, undefined(function_value.span));
+        rewrite(&mut construct, function_value);
+        body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))));
+        body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Fn(construct))));
+    }
+    Module { body, ..routed }
 }
 
 const PROMISE_REJECTION_CALLBACK_SUFFIX: &str = "__thaw_promise_rejection";
