@@ -1,4 +1,131 @@
 impl<'a> FnLowerer<'a> {
+    /// Binds `expr` once as an `f64` local so range checks and the access share it.
+    fn bind_bytes_number(
+        &mut self,
+        prefix: &str,
+        expr: HirExpr,
+        bindings: &mut Vec<LoweredBinding>,
+    ) -> HirExpr {
+        let name = format!("{prefix}_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::F64);
+        bindings.push((name.clone(), HirType::F64, expr));
+        HirExpr::Var(name)
+    }
+
+    /// `throw new RangeError(<parts>)` carrying a Node `code`.
+    fn bytes_range_throw(parts: Vec<HirExpr>, code: &str) -> HirExpr {
+        let text = |value: &str| HirExpr::Lit(HirLit::Str(value.to_string()));
+        let mut all = vec![text("\u{1}RangeError\u{1}")];
+        all.extend(parts);
+        all.push(text(&format!("\u{3}{code}")));
+        let message = all
+            .into_iter()
+            .reduce(|left, right| {
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right])
+            })
+            .expect("non-empty message");
+        HirExpr::ThrowValue(Box::new(message), Box::new(HirExpr::Lit(HirLit::F64(0.0))))
+    }
+
+    /// Node's `byteLength` check for the 1-6 byte `readUInt*`/`writeInt*` forms.
+    fn bytes_byte_length_check(byte_length: &HirExpr) -> HirExpr {
+        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+        let error = Self::bytes_range_throw(
+            vec![
+                HirExpr::Lit(HirLit::Str(
+                    "The value of \"byteLength\" is out of range. It must be >= 1 and <= 6. Received ".to_string(),
+                )),
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_number_to_string".into())), vec![byte_length.clone()]),
+            ],
+            "ERR_OUT_OF_RANGE",
+        );
+        let bin = |op: BinOp, right: f64| {
+            Box::new(HirExpr::BinOp(op, Box::new(byte_length.clone()), Box::new(number(right))))
+        };
+        let branch = |cond: Box<HirExpr>, then: HirExpr, other: HirExpr| {
+            HirExpr::Conditional(cond, Box::new(then), Box::new(other), HirType::F64)
+        };
+        let integer = Box::new(HirExpr::BinOp(BinOp::EqEqEq, bin(BinOp::Mod, 1.0), Box::new(number(0.0))));
+        branch(
+            bin(BinOp::GtEq, 1.0),
+            branch(bin(BinOp::LtEq, 6.0), branch(integer, number(0.0), error.clone()), error.clone()),
+            error,
+        )
+    }
+
+    /// Node's `ERR_OUT_OF_RANGE` / `ERR_BUFFER_OUT_OF_BOUNDS` checks for a
+    /// fixed-width read or write at `offset` (and, for a write of an integer
+    /// type, `value` within `[min, max]`). Evaluates to `0` when valid.
+    fn bytes_access_check(
+        receiver: &HirExpr,
+        offset: &HirExpr,
+        width: &HirExpr,
+        value_range: Option<(&HirExpr, f64, f64)>,
+    ) -> HirExpr {
+        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+        let text = |value: &str| HirExpr::Lit(HirLit::Str(value.to_string()));
+        let to_text = |value: &HirExpr| {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_number_to_string".into())), vec![value.clone()])
+        };
+        let binary = |op: BinOp, left: &HirExpr, right: HirExpr| {
+            HirExpr::BinOp(op, Box::new(left.clone()), Box::new(right))
+        };
+        let branch = |cond: HirExpr, then: HirExpr, other: HirExpr| {
+            HirExpr::Conditional(Box::new(cond), Box::new(then), Box::new(other), HirType::F64)
+        };
+        let available = binary(BinOp::Sub, &HirExpr::ArrayLen(Box::new(receiver.clone())), width.clone());
+        let range_error = Self::bytes_range_throw(
+            vec![
+                text("The value of \"offset\" is out of range. It must be >= 0 and <= "),
+                to_text(&available),
+                text(". Received "),
+                to_text(offset),
+            ],
+            "ERR_OUT_OF_RANGE",
+        );
+        let bounds = branch(
+            binary(BinOp::Lt, &available, number(0.0)),
+            Self::bytes_range_throw(
+                vec![text("Attempt to access memory outside buffer bounds")],
+                "ERR_BUFFER_OUT_OF_BOUNDS",
+            ),
+            branch(
+                binary(BinOp::Lt, offset, number(0.0)),
+                range_error.clone(),
+                branch(binary(BinOp::Gt, offset, available), range_error, number(0.0)),
+            ),
+        );
+        let integer = branch(
+            binary(BinOp::EqEqEq, &binary(BinOp::Mod, offset, number(1.0)), number(0.0)),
+            bounds,
+            Self::bytes_range_throw(
+                vec![
+                    text("The value of \"offset\" is out of range. It must be an integer. Received "),
+                    to_text(offset),
+                ],
+                "ERR_OUT_OF_RANGE",
+            ),
+        );
+        let Some((value, min, max)) = value_range else {
+            return integer;
+        };
+        let value_error = Self::bytes_range_throw(
+            vec![
+                text(&format!(
+                    "The value of \"value\" is out of range. It must be >= {min} and <= {max}. Received "
+                )),
+                to_text(value),
+            ],
+            "ERR_OUT_OF_RANGE",
+        );
+        branch(
+            binary(BinOp::Lt, value, number(min)),
+            value_error.clone(),
+            branch(binary(BinOp::Gt, value, number(max)), value_error, integer),
+        )
+    }
+
     // Bind the byte buffer before argument bindings; use the raw Bytes type
     // so chained byte methods retain their native dispatch identity.
     fn bind_native_bytes_receiver(
@@ -61,9 +188,29 @@ impl<'a> FnLowerer<'a> {
             };
             let value = number(self, value.clone())?;
             let offset = number(self, offset.clone())?;
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bytes_write".to_string())),
-                vec![receiver, offset, value, width_lit, kind_lit, le_lit],
+            let value = self.bind_bytes_number("__thaw_bytes_write_value", value, &mut bindings);
+            let offset = self.bind_bytes_number("__thaw_bytes_write_offset", offset, &mut bindings);
+            // Integer writes also reject a value outside the type's range.
+            let bits = (width * 8) as i32;
+            let value_range = (!float && width <= 4).then(|| {
+                if signed {
+                    (-(2f64.powi(bits - 1)), 2f64.powi(bits - 1) - 1.0)
+                } else {
+                    (0.0, 2f64.powi(bits) - 1.0)
+                }
+            });
+            let check = Self::bytes_access_check(
+                &receiver,
+                &offset,
+                &width_lit,
+                value_range.as_ref().map(|(min, max)| (&value, *min, *max)),
+            );
+            HirExpr::EvalThen(
+                Box::new(check),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_write".to_string())),
+                    vec![receiver, offset, value, width_lit, kind_lit, le_lit],
+                )),
             )
         } else {
             let [offset] = arguments.as_slice() else {
@@ -73,9 +220,14 @@ impl<'a> FnLowerer<'a> {
                 ));
             };
             let offset = number(self, offset.clone())?;
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bytes_read".to_string())),
-                vec![receiver, offset, width_lit, kind_lit, le_lit],
+            let offset = self.bind_bytes_number("__thaw_bytes_read_offset", offset, &mut bindings);
+            let check = Self::bytes_access_check(&receiver, &offset, &width_lit, None);
+            HirExpr::EvalThen(
+                Box::new(check),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_read".to_string())),
+                    vec![receiver, offset, width_lit, kind_lit, le_lit],
+                )),
             )
         };
         self.wrap_call_argument_bindings(result, &bindings)
@@ -120,9 +272,18 @@ impl<'a> FnLowerer<'a> {
             let value = number(self, value.clone())?;
             let offset = number(self, offset.clone())?;
             let byte_length = number(self, byte_length.clone())?;
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bytes_write".to_string())),
-                vec![receiver, offset, value, byte_length, kind_lit, le_lit],
+            let offset = self.bind_bytes_number("__thaw_bytes_write_offset", offset, &mut bindings);
+            let byte_length = self.bind_bytes_number("__thaw_bytes_write_width", byte_length, &mut bindings);
+            let check = HirExpr::EvalThen(
+                Box::new(Self::bytes_byte_length_check(&byte_length)),
+                Box::new(Self::bytes_access_check(&receiver, &offset, &byte_length, None)),
+            );
+            HirExpr::EvalThen(
+                Box::new(check),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_write".to_string())),
+                    vec![receiver, offset, value, byte_length, kind_lit, le_lit],
+                )),
             )
         } else {
             let [offset, byte_length] = arguments.as_slice() else {
@@ -133,9 +294,18 @@ impl<'a> FnLowerer<'a> {
             };
             let offset = number(self, offset.clone())?;
             let byte_length = number(self, byte_length.clone())?;
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bytes_read".to_string())),
-                vec![receiver, offset, byte_length, kind_lit, le_lit],
+            let offset = self.bind_bytes_number("__thaw_bytes_read_offset", offset, &mut bindings);
+            let byte_length = self.bind_bytes_number("__thaw_bytes_read_width", byte_length, &mut bindings);
+            let check = HirExpr::EvalThen(
+                Box::new(Self::bytes_byte_length_check(&byte_length)),
+                Box::new(Self::bytes_access_check(&receiver, &offset, &byte_length, None)),
+            );
+            HirExpr::EvalThen(
+                Box::new(check),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_read".to_string())),
+                    vec![receiver, offset, byte_length, kind_lit, le_lit],
+                )),
             )
         };
         self.wrap_call_argument_bindings(result, &bindings)
@@ -186,9 +356,14 @@ impl<'a> FnLowerer<'a> {
                 &format!("`Buffer.prototype.{}` value", property.sym),
             )?;
             let offset = self.coerce_primitive_to_number(offset.clone())?;
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bytes_write_i64".to_string())),
-                vec![receiver, offset, value.clone(), le_lit],
+            let offset = self.bind_bytes_number("__thaw_bytes_write_offset", offset, &mut bindings);
+            let check = Self::bytes_access_check(&receiver, &offset, &HirExpr::Lit(HirLit::F64(8.0)), None);
+            HirExpr::EvalThen(
+                Box::new(check),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_write_i64".to_string())),
+                    vec![receiver, offset, value.clone(), le_lit],
+                )),
             )
         } else {
             let [offset] = arguments.as_slice() else {
@@ -198,9 +373,14 @@ impl<'a> FnLowerer<'a> {
                 ));
             };
             let offset = self.coerce_primitive_to_number(offset.clone())?;
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bytes_read_i64".to_string())),
-                vec![receiver, offset, le_lit],
+            let offset = self.bind_bytes_number("__thaw_bytes_read_offset", offset, &mut bindings);
+            let check = Self::bytes_access_check(&receiver, &offset, &HirExpr::Lit(HirLit::F64(8.0)), None);
+            HirExpr::EvalThen(
+                Box::new(check),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_read_i64".to_string())),
+                    vec![receiver, offset, le_lit],
+                )),
             )
         };
         self.wrap_call_argument_bindings(result, &bindings)
