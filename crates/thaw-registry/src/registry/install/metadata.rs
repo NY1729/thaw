@@ -147,15 +147,28 @@ struct PackageSubpathExport {
     types_entry: String,
 }
 
+const MAX_PACKAGE_TREE_DEPTH: usize = 64;
+
 fn collect_relative_files(root: &Path, dir: &Path, output: &mut Vec<String>) -> Result<(), String> {
+    let depth = dir.strip_prefix(root).map_or(0, |relative| relative.components().count());
+    if depth > MAX_PACKAGE_TREE_DEPTH {
+        return Err(format!(
+            "`{}` is nested more than {MAX_PACKAGE_TREE_DEPTH} levels deep",
+            dir.display()
+        ));
+    }
     for entry in
         fs::read_dir(dir).map_err(|error| format!("failed to read `{}`: {error}", dir.display()))?
     {
         let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
         let path = entry.path();
-        if path.is_dir() {
+        // file_type() does not follow symlinks, so a link cycle cannot recurse forever.
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
+        if file_type.is_dir() {
             collect_relative_files(root, &path, output)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             output.push(
                 path.strip_prefix(root)
                     .unwrap_or(&path)
@@ -388,6 +401,8 @@ fn resolve_module_path_inner(
     identity_error: &mut Option<String>,
 ) -> Result<(String, PathBuf), String> {
     let trimmed = path.trim_end_matches('/');
+    // Manifest and import targets must stay inside the package directory.
+    let directory = join_contained_path(package_dir, trimmed)?;
     let candidates = [
         path.to_string(),
         format!("{trimmed}.js"),
@@ -407,13 +422,14 @@ fn resolve_module_path_inner(
     let directory_only = is_directory_module_request(path);
     if !directory_only {
         for candidate in &candidates[..5] {
-            let resolved = package_dir.join(candidate);
+            let Ok(resolved) = join_contained_path(package_dir, candidate) else {
+                continue;
+            };
             if resolved.is_file() {
                 return Ok((candidate.clone(), resolved));
             }
         }
     }
-    let directory = package_dir.join(trimmed);
     if directory.is_dir() {
         // Canonical identity detects both lexical `.`/`..` cycles and symlink aliases.
         // Keep only the active recursion chain: a candidate may be visited again
@@ -455,7 +471,9 @@ fn resolve_module_path_inner(
         }
     }
     for candidate in &candidates[5..] {
-        let resolved = package_dir.join(candidate);
+        let Ok(resolved) = join_contained_path(package_dir, candidate) else {
+            continue;
+        };
         if resolved.is_file() {
             return Ok((candidate.clone(), resolved));
         }

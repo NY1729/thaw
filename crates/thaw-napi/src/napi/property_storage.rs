@@ -465,6 +465,9 @@ unsafe fn set_own_property(
         }
         Some(Value::Array(values)) if property_array_index(key).is_some() => {
             let index = property_array_index(key).unwrap();
+            if index >= NAPI_MAX_DENSE_LENGTH {
+                return NAPI_GENERIC_FAILURE;
+            }
             if values.len() <= index {
                 values.resize(index.saturating_add(1), None);
             }
@@ -528,7 +531,7 @@ unsafe fn is_array_length_property(object: NapiValue, key: &PropertyKey) -> bool
 
 unsafe fn extend_array_for_own_index(object: NapiValue, key: &PropertyKey) {
     if let (Some(index), Some(Value::Array(values))) = (property_array_index(key), object.as_mut()) {
-        if values.len() <= index {
+        if index < NAPI_MAX_DENSE_LENGTH && values.len() <= index {
             values.resize(index + 1, None);
         }
     }
@@ -576,7 +579,7 @@ unsafe fn set_array_length(
 ) -> NapiStatus {
     let number = match value_ref(value).and_then(number_for_typedarray) {
         Ok(number) if number.is_finite() && number >= 0.0
-            && number <= u32::MAX as f64 && number.fract() == 0.0 => number as usize,
+            && number <= NAPI_MAX_DENSE_LENGTH as f64 && number.fract() == 0.0 => number as usize,
         _ => {
             let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
             let error = owner.alloc(Value::Error("invalid array length".into()));
