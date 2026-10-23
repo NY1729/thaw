@@ -3714,3 +3714,47 @@ fn class_array_satisfies_top_level_structural_array_contract() {
     ).expect("parse");
     assert!(lower_module(&module).is_ok(), "class instances should satisfy structural array elements");
 }
+
+/// `{__proto__: v}` sets the prototype (Node semantics): every non-computed key spelling
+/// (identifier or string literal) lowers to a `proto` operation in the live object builder,
+/// which installs the prototype only for an object or null value.
+#[test]
+fn object_literal_proto_setter_key_lowers_to_prototype_install() {
+    for source in [
+        "function main(): void { const p = { x: 1 }; const o = { __proto__: p }; console.log(o); }",
+        "function main(): void { const o = { __proto__: null }; console.log(o); }",
+        "function main(): void { const o = { '__proto__': null }; console.log(o); }",
+        "function main(): void { const k = 'a'; const o = { __proto__: null, [k]: 1 }; console.log(o); }",
+    ] {
+        let hir = format!("{:?}", lower(source));
+        assert!(hir.contains("Str(\"proto\")"), "{source}: {hir}");
+    }
+}
+
+/// `{__proto__: a, __proto__: b}` is a SyntaxError in JavaScript and stays a compile error.
+#[test]
+fn object_literal_duplicate_proto_setter_is_compile_error() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const o = { __proto__: null, __proto__: null }; console.log(o); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("duplicate `__proto__` fields are not allowed"), "{error}");
+}
+
+/// Shorthand `{__proto__}` and computed `{["__proto__"]: v}` define an ordinary own
+/// property and must keep lowering.
+#[test]
+fn object_literal_proto_shorthand_and_computed_key_still_lower() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const __proto__ = 1;
+                const shorthand = { __proto__ };
+                const computed = { ["__proto__"]: 1 };
+                console.log(shorthand, computed);
+            }
+        "#,
+    );
+    assert_eq!(program.functions.len(), 1);
+}
