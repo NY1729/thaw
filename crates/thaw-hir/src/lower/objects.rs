@@ -2637,11 +2637,37 @@ impl<'a> FnLowerer<'a> {
         ])
     }
 
+    /// `member` is `<expr>.constructor` and `<expr>` is a class instance: the lowered instance.
+    fn class_instance_of_constructor(&mut self, member: &MemberExpr) -> Result<Option<HirExpr>, String> {
+        if !matches!(&member.prop, MemberProp::Ident(p) if p.sym == *"constructor") {
+            return Ok(None);
+        }
+        let is_class_name = matches!(member.obj.as_ref(), Expr::Ident(i)
+            if self.signatures.contains_key(&class_constructor_symbol(i.sym.as_ref())));
+        if is_class_name {
+            return Ok(None);
+        }
+        let instance = self.lower_expr(&member.obj)?;
+        let is_instance = class_name_from_type(&self.infer_expr_type(&instance)?).is_some();
+        Ok(is_instance.then_some(instance))
+    }
+
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
             let property = member_property_name(&member.prop)
                 .ok_or("unbound `this` member access requires a statically known property")?;
             return self.lower_unbound_this_member(&property);
+        }
+        // `instance.constructor.name` for a class instance: its most-derived class's name.
+        if let (MemberProp::Ident(name), Expr::Member(inner)) = (&member.prop, member.obj.as_ref()) {
+            if name.sym == *"name" {
+                if let Some(instance) = self.class_instance_of_constructor(inner)? {
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_object_class_name".into())),
+                        vec![instance],
+                    ));
+                }
+            }
         }
         // `f.length` on a declared function identifier: a compile-time
         // constant from its source parameter list. Anything else (aliases,
@@ -2817,7 +2843,11 @@ impl<'a> FnLowerer<'a> {
             }
             if let MemberProp::Computed(computed) = &member.prop {
                 if let Some(entries) = self.enum_reverse_values.get(enum_name.sym.as_str()) {
-                    let index = self.lower_expr(&computed.expr)?;
+                    let mut index = self.lower_expr(&computed.expr)?;
+                    if matches!(self.infer_expr_type(&index)?, HirType::Json | HirType::JsValue) {
+                        // An enum value that travelled through `any` is a dynamic number.
+                        index = self.coerce_primitive_to_number(index)?;
+                    }
                     self.expect_type(&HirType::F64, &index, "numeric enum reverse lookup")?;
                     return Ok(HirExpr::EnumReverseLookup(Box::new(index), entries.clone()));
                 }
@@ -3172,6 +3202,29 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.lower_dynamic_value_property_read(obj, key)
                     }
+                    // `s[i]` reads one character, like `s.charAt(i)` (out of range reads "").
+                    HirType::Str | HirType::StrLiteral(_)
+                        if !matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_))) =>
+                    {
+                        let span = member.span;
+                        self.lower_call(&CallExpr {
+                            span,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span,
+                                obj: member.obj.clone(),
+                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                    "charAt".into(),
+                                    span,
+                                )),
+                            }))),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: computed.expr.clone(),
+                            }],
+                            type_args: None,
+                        })
+                    }
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
             }
@@ -3212,8 +3265,11 @@ impl<'a> FnLowerer<'a> {
                         "LOG10E" => std::f64::consts::LOG10_E,
                         "SQRT1_2" => std::f64::consts::FRAC_1_SQRT_2,
                         "SQRT2" => std::f64::consts::SQRT_2,
-                        _ => {
-                            return Err(format!("unsupported Math property `{}`", prop.sym));
+                        name => {
+                            return match Self::math_function_value(name) {
+                                Some(function) => self.lower_expr(&function),
+                                None => Err(format!("unsupported Math property `{}`", prop.sym)),
+                            };
                         }
                     };
                     return Ok(HirExpr::Lit(HirLit::F64(value)));
@@ -3554,9 +3610,33 @@ impl<'a> FnLowerer<'a> {
                 MemberProp::Computed(computed) => match computed.expr.as_ref() {
                     Expr::Lit(Lit::Str(field)) => field.value.to_string_lossy().into_owned(),
                     _ => {
-                        return Err(
-                            "optional computed object keys must be string literals".into()
-                        )
+                        // `any?.[expr]`: the key is only evaluated for a non-nullish receiver.
+                        let name = format!("__thaw_optional_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Json);
+                        let mut rebound = member.clone();
+                        *rebound.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            name.clone().into(),
+                            member.span,
+                        ));
+                        let read = self.lower_member_read(&rebound)?;
+                        let read = self.coerce_to_declared(&HirType::Json, read)?;
+                        let undefined =
+                            self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+                        let is_nullish = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                            vec![HirExpr::Var(name.clone())],
+                        );
+                        let value = HirExpr::Conditional(
+                            Box::new(is_nullish),
+                            Box::new(undefined),
+                            Box::new(read),
+                            HirType::Json,
+                        );
+                        return self.wrap_call_argument_bindings(
+                            value,
+                            &[(name, HirType::Json, object)],
+                        );
                     }
                 },
                 _ => return Err("unsupported optional object member".into()),

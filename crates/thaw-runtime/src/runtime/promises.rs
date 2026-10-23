@@ -1175,7 +1175,10 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
             let destination = unsafe { state.result.add(state.element_offsets[*index]) };
             unsafe {
                 destination.write_bytes(0, state.element_sizes[*index].max(size_of::<u64>()));
-                std::ptr::copy_nonoverlapping(result, destination, state.element_sizes[*index]);
+                // A void promise fulfils without a payload.
+                if !result.is_null() {
+                    std::ptr::copy_nonoverlapping(result, destination, state.element_sizes[*index]);
+                }
             }
             if unsafe { thaw_array_provenance_set(state.result_handle, *index, record) } == 0 {
                 state.rejected = true;
