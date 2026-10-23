@@ -1006,7 +1006,7 @@ fn oversized_addon_lengths_fail_before_any_allocation_or_slice() {
             NAPI_INVALID_ARG
         );
 
-        let byte = [b'a'];
+        let byte = b"a";
         assert_eq!(
             napi_create_string_utf8(env_ptr, byte.as_ptr().cast(), usize::MAX - 1, &mut out),
             NAPI_INVALID_ARG
