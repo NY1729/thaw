@@ -22,6 +22,8 @@ unsafe extern "C" {
     ) -> u64;
     fn thaw_runtime_unwatch_fd(id: u64) -> bool;
     fn thaw_runtime_run_one_event() -> bool;
+    /// Lets a host event loop that is not `thaw_http_run_servers` (QuickJS's) poll the servers.
+    fn thaw_runtime_set_server_poll_hook(hook: extern "C" fn() -> u8);
     /// Registers a timer promise that settles after at least `milliseconds`.
     /// Used here only to bound how long the event loop blocks in `poll`, so
     /// the connection-deadline sweep runs on time.
@@ -1530,7 +1532,10 @@ struct EventListener {
 
 fn active_servers() -> &'static Mutex<Vec<usize>> {
     static SERVERS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
-    SERVERS.get_or_init(|| Mutex::new(Vec::new()))
+    SERVERS.get_or_init(|| {
+        unsafe { thaw_runtime_set_server_poll_hook(thaw_http_poll_servers) };
+        Mutex::new(Vec::new())
+    })
 }
 
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -1755,6 +1760,21 @@ pub extern "C" fn thaw_http_run_servers() {
     }
 }
 
+/// One non-blocking server-event pass for a host loop that interleaves its own work
+/// (the QuickJS event loop): bit 0 = servers or connections are still live,
+/// bit 1 = a listening/error/close callback ran and the host should drain microtasks.
+#[no_mangle]
+pub extern "C" fn thaw_http_poll_servers() -> u8 {
+    drain_pending_context_frees();
+    sweep_idle_connections();
+    let (empty, pending_event) = dispatch_server_events(active_servers());
+    let emitted = pending_event | EVENT_EMITTED.swap(false, Ordering::AcqRel);
+    u8::from(!(empty && ACTIVE_CONNECTIONS.load(Ordering::Acquire) == 0)) | (u8::from(emitted) << 1)
+}
+
+/// Set whenever `dispatch_server_events` ran a listening/error/close listener.
+static EVENT_EMITTED: AtomicBool = AtomicBool::new(false);
+
 /// Returns whether the server list is empty and whether a callback queued an
 /// event that must be handled before the next blocking event-loop poll.
 fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
@@ -1820,6 +1840,7 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
 }
 
 fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
+    EVENT_EMITTED.store(true, Ordering::Release);
     let owner = listeners as *const Mutex<Vec<EventListener>> as usize;
     let (callbacks, _delivery_roots) = {
         let mut listeners = listeners.lock().unwrap();
@@ -1876,6 +1897,7 @@ struct NativeServerError {
 }
 
 fn emit_error(listeners: &Mutex<Vec<EventListener>>, error: &ServerError) {
+    EVENT_EMITTED.store(true, Ordering::Release);
     let callbacks = listeners.lock().unwrap().clone();
     let _delivery_roots = callbacks
         .iter()
@@ -2627,9 +2649,14 @@ struct Server {
     close_with_callback: *const NativeClosure,
     on: *const NativeClosure,
     on_error: *const NativeClosure,
+    listen_with_host_callback: *const NativeClosure,
 }
 
 unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
+    listen_on(environment, "127.0.0.1", port)
+}
+
+unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const c_char {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
@@ -2641,7 +2668,7 @@ unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *co
         );
         return CString::new("").unwrap().into_raw();
     }
-    let listener = match TcpListener::bind(("127.0.0.1", port as u16)) {
+    let listener = match TcpListener::bind((host, port as u16)) {
         Ok(listener) => listener,
         Err(error) => {
             let message = if error.kind() == std::io::ErrorKind::AddrInUse {
@@ -2699,6 +2726,18 @@ unsafe extern "C" fn server_listen_with_callback(
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.listening_listeners, callback, true);
     server_listen(environment, port)
+}
+
+unsafe extern "C" fn server_listen_with_host_callback(
+    environment: *const c_void,
+    port: f64,
+    host: *const c_char,
+    callback: *const c_void,
+) -> *const c_char {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    add_event_listener(&state.listening_listeners, callback, true);
+    listen_on(environment, &string_from_ptr(host), port)
 }
 
 fn fail_server_listen(state: &ServerState, message: String, code: String, port: f64) {
@@ -2834,6 +2873,10 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_on_error as *const c_void,
         context: state.cast(),
     }));
+    let listen_with_host_callback = Box::into_raw(Box::new(NativeClosure {
+        code: server_listen_with_host_callback as *const c_void,
+        context: state.cast(),
+    }));
     let server = Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
@@ -2842,6 +2885,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         close_with_callback,
         on,
         on_error,
+        listen_with_host_callback,
     }));
     let state_address = state as usize;
     thaw_arena::replace_reference(server as usize, 0, state_address);
@@ -2853,6 +2897,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         close_with_callback,
         on,
         on_error,
+        listen_with_host_callback,
     ] {
         thaw_arena::replace_reference(closure as usize, 0, state_address);
     }

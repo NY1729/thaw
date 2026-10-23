@@ -1373,6 +1373,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     let resolved_property = match (requested_property, call.args.len()) {
                         ("listen", 2) => "__listenWithCallback",
+                        ("listen", 3) => "__listenWithHostCallback",
                         ("close", 1) => "__closeWithCallback",
                         ("on", 2)
                             if matches!(

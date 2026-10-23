@@ -615,6 +615,8 @@ pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
             .unwrap_or(source),
         None => source,
     };
+    // New code means new work: the loop may run again after an earlier natural exit.
+    PROCESS_EXITED.with(|exited| exited.set(false));
     with_context(|ctx| match load_impl(ctx, &source) {
         Ok(()) => 1,
         Err(reason) => {
@@ -1393,8 +1395,64 @@ fn finish_root_test_hooks_at_idle(ctx: &Ctx<'_>) -> rquickjs::Result<bool> {
     Ok(true)
 }
 
+/// One non-blocking pass over native `http.Server`s (bit 0: servers or connections
+/// still live, bit 1: a listening/error/close callback ran). 0 when thaw-std is not linked.
+fn poll_http_servers() -> u8 {
+    RUNTIME_HOOKS.with(|hooks| hooks.get().server_poll).map_or(0, |poll| poll())
+}
+
+/// Whether the native runtime already reported an unhandled Promise rejection (it stays latched for exit).
+fn native_unhandled_failure() -> bool {
+    RUNTIME_HOOKS.with(|hooks| hooks.get().unhandled_failure).is_some_and(|peek| peek() != 0)
+}
+
+/// The loop has nothing left: emit `beforeExit` (its listeners may schedule more work and
+/// keep the loop alive), and once it stays idle emit `exit` and return the exit code.
+fn finish_idle_process(ctx: &Ctx<'_>) -> std::ops::ControlFlow<i32> {
+    let call = |name: &str| -> rquickjs::Result<()> {
+        match ctx.globals().get::<_, Function>(name) {
+            Ok(function) => function.call::<_, ()>(()),
+            Err(_) => Ok(()),
+        }
+    };
+    let result = call("__thaw_process_before_exit").and_then(|()| {
+        run_pending_jobs(ctx);
+        let rearmed = ctx.has_exception() || unsafe {
+            rquickjs::qjs::JS_IsJobPending(rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()))
+        } || ctx.globals().get::<_, Function>("__thaw_next_tick_queue_pending")
+            .ok().and_then(|pending| pending.call::<_, bool>(()).ok()).unwrap_or(false)
+            || ctx.globals().get::<_, Function>("__thaw_next_timer_delay")
+                .ok().and_then(|delay| delay.call::<_, i64>(()).ok()).is_some_and(|delay| delay >= 0)
+            || platform_activity_pending(ctx);
+        if rearmed {
+            return Ok(true);
+        }
+        call("__thaw_process_finish").map(|()| false)
+    });
+    match result {
+        Ok(true) => std::ops::ControlFlow::Continue(()),
+        Ok(false) => std::ops::ControlFlow::Break(process_exit_code(ctx)),
+        Err(error) => {
+            eprintln!("{}", if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(ctx)
+            } else {
+                error.to_string()
+            });
+            std::ops::ControlFlow::Break(1)
+        }
+    }
+}
+
+thread_local! {
+    /// Set once `exit` was emitted: nothing runs after it, whoever drives the loop again.
+    static PROCESS_EXITED: Cell<bool> = const { Cell::new(false) };
+}
+
 fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
     with_context(|ctx| {
+        if PROCESS_EXITED.with(Cell::get) {
+            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
+        }
         dispatch_pending_process_signal(&ctx);
         if let Ok(poll) = ctx
             .globals()
@@ -1478,6 +1536,20 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
         if let Some(code) = report_unhandled_js_rejections(&ctx) {
             return std::ops::ControlFlow::Break(code);
         }
+        // Node ends the process right after the microtask drain that left a rejection unhandled.
+        if native_unhandled_failure() {
+            PROCESS_EXITED.with(|exited| exited.set(true));
+            return std::ops::ControlFlow::Break(1);
+        }
+        // Native http servers share this loop: a `listen` callback runs on the turn after the
+        // bind, before timers, and requests are served while JS timers and clients are pending.
+        let http = {
+            let _active = ActiveNapiContext::enter(&ctx);
+            poll_http_servers()
+        };
+        if http & 2 != 0 {
+            return std::ops::ControlFlow::Continue(());
+        }
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
             return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
@@ -1485,7 +1557,8 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
             return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
         if delay < 0 {
-            if platform_activity_pending(&ctx) {
+            // ponytail: a live server polls every 1 ms; block in the runtime's fd poll if idle CPU matters.
+            if platform_activity_pending(&ctx) || http & 1 != 0 {
                 std::thread::sleep(Duration::from_millis(1));
                 return std::ops::ControlFlow::Continue(());
             }
@@ -1497,7 +1570,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
                     return std::ops::ControlFlow::Break(1);
                 }
             }
-            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
+            return finish_idle_process(&ctx);
         }
         sleep_until_next_poll(delay);
         let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
@@ -1569,7 +1642,7 @@ pub extern "C" fn thaw_js_drain_next_ticks() {
 /// remain nonzero after all work is complete.
 #[no_mangle]
 pub extern "C" fn thaw_js_terminal_work_pending() -> u8 {
-    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) {
+    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) || PROCESS_EXITED.with(Cell::get) {
         return 0;
     }
     with_context(|ctx| {
