@@ -37,17 +37,28 @@
 /// meaning "whatever's newest today".
 pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
     validate_installed_package_name(split_package_spec(package).0)?;
+    // Create-exclusive and owner-only, with a random suffix: a predictable
+    // name in the shared temp dir could be pre-created by another local user
+    // and filled with files that then get installed into the registry.
+    use std::hash::{BuildHasher, Hasher};
+    use std::os::unix::fs::DirBuilderExt;
+    let nonce = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
     let scratch = std::env::temp_dir().join(format!(
-        "thaw-registry-add-{}-{}",
+        "thaw-registry-add-{}-{}-{nonce:016x}",
         package.replace(['/', '@'], "_"),
         std::process::id()
     ));
-    fs::create_dir_all(&scratch).map_err(|e| {
-        format!(
-            "failed to create scratch directory `{}`: {e}",
-            scratch.display()
-        )
-    })?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .map_err(|e| {
+            format!(
+                "failed to create scratch directory `{}`: {e}",
+                scratch.display()
+            )
+        })?;
 
     let result = fetch_and_copy(&scratch, registry_dir, package);
     let _ = fs::remove_dir_all(&scratch);
@@ -797,7 +808,7 @@ fn write_installed_subpath(
         &export.runtime_entry,
         bundle_source_cache,
     )?;
-    let types_path = package_dir.join(&export.types_entry);
+    let types_path = join_contained_path(package_dir, &export.types_entry)?;
     let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {
         format!(
             "failed to read package export `./{}` types `{}`: {error}",

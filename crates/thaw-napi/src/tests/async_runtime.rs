@@ -2131,3 +2131,28 @@ fn successful_default_loop_acquisition_records_the_env_receipt() {
         libc::dlclose(library);
     }
 }
+
+#[test]
+fn deleted_async_work_is_reaped_on_the_next_create() {
+    let _guard = lock_async_test();
+    let mut env = Env::new();
+    unsafe {
+        for _ in 0..1000 {
+            let mut work = ptr::null_mut();
+            assert_eq!(
+                napi_create_async_work(
+                    &mut env,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Some(probe_execute),
+                    None,
+                    ptr::null_mut(),
+                    &mut work,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(napi_delete_async_work(&mut env, work), NAPI_OK);
+        }
+    }
+    assert!(env.async_works.len() <= 1);
+}

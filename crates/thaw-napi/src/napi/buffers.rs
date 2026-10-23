@@ -8,6 +8,7 @@ pub unsafe extern "C" fn napi_create_buffer(
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
+    if length > NAPI_MAX_BUFFER_LENGTH { return NAPI_INVALID_ARG; }
     let value = env.alloc(Value::Buffer(vec![0; length]));
     if !data.is_null() {
         if let Value::Buffer(bytes) = &mut *value {
@@ -226,6 +227,7 @@ pub unsafe extern "C" fn napi_create_arraybuffer(
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
+    if length > NAPI_MAX_BUFFER_LENGTH { return NAPI_INVALID_ARG; }
     let value = env.alloc(Value::ArrayBuffer {
         bytes: vec![0; length],
         detached: false,
@@ -320,6 +322,7 @@ pub unsafe extern "C" fn node_api_create_sharedarraybuffer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if length > NAPI_MAX_BUFFER_LENGTH { return NAPI_INVALID_ARG; }
     let value = env.alloc(Value::SharedArrayBuffer(vec![0; length]));
     if let Some(data) = data.as_mut() {
         let Some(Value::SharedArrayBuffer(bytes)) = value.as_mut() else {
