@@ -2718,6 +2718,32 @@ fn terminal_pending_work_is_separate_from_failure_and_exit_code() {
 }
 
 #[test]
+fn zero_ms_timeout_is_one_ms_and_fires_in_insertion_order() {
+    // Node 22: a1,a0,b1 (setTimeout(f, 0) counts as 1 ms).
+    assert_eq!(
+        load("globalThis.o = []; setTimeout(() => o.push('a1'), 1); setTimeout(() => o.push('a0'), 0); setTimeout(() => o.push('b1'), 1);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("o.join()"), Ok(Some("\"a1,a0,b1\"".into())));
+}
+
+#[test]
+fn before_exit_can_rearm_and_exit_runs_once_with_the_exit_code() {
+    // Node 22: beforeExit 0 0, more, beforeExit 0 1, exit 3 (nothing scheduled in `exit` runs).
+    assert_eq!(
+        load("globalThis.o = []; let n = 0; process.on('beforeExit', c => { o.push('before' + c + n); if (n++ < 1) setTimeout(() => o.push('more'), 1); else process.exitCode = 3; }); process.on('exit', c => { o.push('exit' + c); setTimeout(() => o.push('never'), 0); });"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 3);
+    assert_eq!(thaw_js_run_event_loop(), 3);
+    assert_eq!(
+        eval_json("o.join()"),
+        Ok(Some("\"before00,more,before01,exit3\"".into()))
+    );
+}
+
+#[test]
 fn standalone_event_loop_ignores_only_unreferenced_timers() {
     assert_eq!(
         load(
