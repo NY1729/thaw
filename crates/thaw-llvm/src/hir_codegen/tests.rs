@@ -235,11 +235,23 @@ fn compile_and_run_raw(
     test_name: &str,
     envs: &[(&str, &str)],
 ) -> std::process::Output {
+    compile_and_run_raw_as(source, test_name, envs, false)
+}
+
+/// `commonjs` selects the entry's module kind (what thaw-cli derives from the source): a
+/// CommonJS entry drains `process.nextTick` right after the main script, an ES module's does not.
+fn compile_and_run_raw_as(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+    commonjs: bool,
+) -> std::process::Output {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, test_name);
+    compiler.set_commonjs_entry(commonjs);
     compiler.compile_program(&program).unwrap();
 
     let dir = std::env::temp_dir().join(format!(
@@ -520,6 +532,7 @@ include!("tests/s_contracts.rs");
 include!("tests/p_contracts.rs");
 include!("tests/r_contracts.rs");
 include!("tests/t_contracts.rs");
+include!("tests/tick_contracts.rs");
 include!("tests/z_contracts.rs");
 include!("tests/evloop_contracts.rs");
 include!("tests/an_contracts.rs");
@@ -700,10 +713,13 @@ include!("tests/ka_contracts.rs");
 include!("tests/mapalias_contracts.rs");
 include!("tests/lb_contracts.rs");
 include!("tests/looseeq_contracts.rs");
+include!("tests/construct_any_plain_contracts.rs");
 include!("tests/anyprim_contracts.rs");
 include!("tests/symkeys_contracts.rs");
 
 include!("tests/privfield_contracts.rs");
 include!("tests/hirdiv_contracts.rs");
+include!("tests/newtarget_contracts.rs");
 
 include!("tests/fnlen_contracts.rs");
+include!("tests/langcore_contracts.rs");

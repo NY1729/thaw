@@ -1,4 +1,253 @@
 impl<'a> FnLowerer<'a> {
+    fn class_to_json_method(&self, ty: &HirType) -> bool {
+        class_name_from_type(ty).is_some_and(|class| {
+            self.signatures
+                .get(&class_method_symbol(class, "toJSON"))
+                .is_some_and(|signature| signature.params.len() == 1)
+        })
+    }
+
+    /// Whether `JSON.stringify` of a `ty` value must run a class `toJSON`
+    /// somewhere inside it (the native encoder knows nothing of methods).
+    fn type_needs_class_to_json(&self, ty: &HirType, seen: &mut Vec<String>) -> bool {
+        if self.class_to_json_method(ty) {
+            return true;
+        }
+        match ty {
+            HirType::Array(element) => self.type_needs_class_to_json(element, seen),
+            HirType::Object(fields) => {
+                let class = class_name_from_type(ty);
+                if let Some(class) = class {
+                    if seen.iter().any(|name| name == class) {
+                        return false;
+                    }
+                    seen.push(class.to_string());
+                } else if fields.iter().any(|(_, field)| {
+                    matches!(field, HirType::Function(..) | HirType::CallableFunction(..) | HirType::JsValue)
+                }) {
+                    // Function-valued fields keep the existing object-literal `toJSON` handling.
+                    return false;
+                }
+                fields.iter().skip(usize::from(class.is_some())).any(|(name, field)| {
+                    !name.starts_with(PRIVATE_SLOT_PREFIX)
+                        && !is_hidden_accessor_field(name)
+                        && self.type_needs_class_to_json(field, seen)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Replaces class instances that define `toJSON()` (directly, as array
+    /// elements, or as fields of a class instance) with their `toJSON()`
+    /// result so the native encoder sees what `JSON.stringify` would.
+    fn apply_class_to_json(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        if !self.type_needs_class_to_json(ty, &mut Vec::new()) {
+            return Ok(None);
+        }
+        let span = swc_common::DUMMY_SP;
+        let name = format!("__thaw_to_json_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let ident = |name: &str| Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), span));
+        let method_call = |receiver: Expr| {
+            Expr::Call(CallExpr {
+                span,
+                ctxt: Default::default(),
+                callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                    span,
+                    obj: Box::new(receiver),
+                    prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("toJSON".into(), span)),
+                }))),
+                args: Vec::new(),
+                type_args: None,
+            })
+        };
+        let result = if self.class_to_json_method(ty) {
+            self.lower_expr(&method_call(ident(&name)))?
+        } else if let HirType::Array(element) = ty {
+            if !self.class_to_json_method(element) {
+                return Ok(None);
+            }
+            let callback = Expr::Arrow(swc_ecma_ast::ArrowExpr {
+                span,
+                ctxt: Default::default(),
+                params: vec![swc_ecma_ast::Pat::Ident(swc_ecma_ast::BindingIdent {
+                    id: swc_ecma_ast::Ident::new_no_ctxt("__thaw_to_json_item".into(), span),
+                    type_ann: None,
+                })],
+                body: Box::new(swc_ecma_ast::ArrowFunctionBody::Expr(Box::new(method_call(
+                    ident("__thaw_to_json_item"),
+                )))),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+            });
+            self.lower_expr(&Expr::Call(CallExpr {
+                span,
+                ctxt: Default::default(),
+                callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                    span,
+                    obj: Box::new(ident(&name)),
+                    prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("map".into(), span)),
+                }))),
+                args: vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(callback) }],
+                type_args: None,
+            }))?
+        } else if let HirType::Object(fields) = ty {
+            let mut snapshot = Vec::new();
+            for (field, field_type) in fields.iter().skip(usize::from(class_name_from_type(ty).is_some())) {
+                if field.starts_with(PRIVATE_SLOT_PREFIX)
+                    || is_hidden_accessor_field(field)
+                    || matches!(
+                        field_type,
+                        HirType::Function(..) | HirType::CallableFunction(..) | HirType::JsValue
+                    )
+                {
+                    continue;
+                }
+                let read = self.lower_fixed_object_property_read(
+                    HirExpr::Var(name.clone()),
+                    fields,
+                    field,
+                )?;
+                let read = match self.apply_class_to_json(read.clone(), field_type)? {
+                    Some((converted, _)) => converted,
+                    None => read,
+                };
+                snapshot.push((field.clone(), read));
+            }
+            HirExpr::ObjectLit(snapshot)
+        } else {
+            return Ok(None);
+        };
+        let result_type = self.infer_expr_type(&result)?;
+        let wrapped = self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)])?;
+        Ok(Some((wrapped, result_type)))
+    }
+
+    /// Native subclasses of `class_name` that declare their own instance
+    /// `method` with the same signature, shallowest first. A call through a
+    /// base-typed receiver must dispatch to these when the runtime identity
+    /// says so, because method calls are otherwise bound statically.
+    fn virtual_method_overrides(&self, class_name: &str, method: &str) -> Vec<(Symbol, HirType)> {
+        let base_symbol = class_method_symbol(class_name, method);
+        let Some(base) = self.signatures.get(&base_symbol) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for (name, ty) in self.interfaces {
+            let HirType::Object(fields) = ty else { continue };
+            let Some(ancestry) = fields
+                .first()
+                .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+            else {
+                continue;
+            };
+            let chain: Vec<&str> = ancestry.split('\u{1f}').collect();
+            if chain.first() != Some(&name.as_str()) || !chain[1..].contains(&class_name) {
+                continue;
+            }
+            let Some(own) = self.signatures.get(&class_method_symbol(name, method)) else {
+                continue;
+            };
+            if own.accessor_owner.as_deref() == Some(name.as_str())
+                && own.params.get(1..) == base.params.get(1..)
+                && own.ret == base.ret
+                && own.is_async == base.is_async
+                && own.native_rest == base.native_rest
+            {
+                found.push((chain.len(), name.clone(), ty.clone()));
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        found.into_iter().map(|(_, name, ty)| (name, ty)).collect()
+    }
+
+    /// `recv.m(...)` where a subclass overrides `m`: test the runtime class
+    /// identity (most derived first) and call that class's implementation.
+    fn lower_virtual_class_method_call(
+        &mut self,
+        call: &CallExpr,
+        member: &MemberExpr,
+        receiver_type: &HirType,
+        property: &str,
+        overrides: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let class_name = class_name_from_type(receiver_type)
+            .expect("virtual dispatch receivers are native classes")
+            .to_string();
+        let receiver = self.lower_expr(&member.obj)?;
+        let receiver_name = format!("__thaw_virtual_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+        let build_call = |this: &mut Self, class: &str, receiver: &str| {
+            let mut args = vec![swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    receiver.into(),
+                    call.span,
+                ))),
+            }];
+            args.extend(call.args.iter().cloned());
+            this.lower_call_with_class_guard(
+                &CallExpr {
+                    span: call.span,
+                    ctxt: call.ctxt,
+                    callee: Callee::Expr(Box::new(Expr::Ident(
+                        swc_ecma_ast::Ident::new_no_ctxt(
+                            class_method_symbol(class, property).into(),
+                            call.span,
+                        ),
+                    ))),
+                    args,
+                    type_args: None,
+                },
+                Some(class),
+            )
+        };
+        let mut result = build_call(self, &class_name, &receiver_name)?;
+        let result_type = self.infer_expr_type(&result)?;
+        for (derived, derived_type) in overrides {
+            let derived_name = format!("__thaw_virtual_receiver_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(derived_name.clone(), derived_type.clone());
+            let invoked = build_call(self, derived, &derived_name)?;
+            let invoked = self.wrap_call_argument_bindings(
+                invoked,
+                &[(
+                    derived_name,
+                    derived_type.clone(),
+                    HirExpr::TypedClosure(
+                        derived_type.clone(),
+                        Box::new(HirExpr::Var(receiver_name.clone())),
+                    ),
+                )],
+            )?;
+            result = HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                    vec![
+                        HirExpr::Var(receiver_name.clone()),
+                        HirExpr::Lit(HirLit::Str(derived.to_string())),
+                    ],
+                )),
+                Box::new(invoked),
+                Box::new(result),
+                result_type.clone(),
+            );
+        }
+        self.wrap_call_argument_bindings(
+            result,
+            &[(receiver_name, receiver_type.clone(), receiver)],
+        )
+    }
+
     fn is_ordinary_quickjs_typed_call(backend: DynamicBackend, symbol: &str) -> bool {
         is_ordinary_quickjs_symbol(backend, symbol)
     }
@@ -562,6 +811,16 @@ impl<'a> FnLowerer<'a> {
                             return Err(format!(
                                 "native class method `{class_name}.{property}` is not generic"
                             ));
+                        }
+                        let overrides = self.virtual_method_overrides(class_name, &property);
+                        if !overrides.is_empty() && !self.class_static_context {
+                            return self.lower_virtual_class_method_call(
+                                call,
+                                member,
+                                &class_receiver_type,
+                                &property,
+                                &overrides,
+                            );
                         }
                         let mut args = Vec::with_capacity(call.args.len() + 1);
                         args.push(swc_ecma_ast::ExprOrSpread {

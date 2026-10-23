@@ -1631,6 +1631,28 @@ pub extern "C" fn thaw_js_collect_garbage() {
     }
 }
 
+/// Drains the `process.nextTick` queue once. A CommonJS entry calls this right after the main
+/// script returns, so ticks run before the promise jobs it queued; an ES module's body runs
+/// inside a microtask, so its entry skips the call (promises first, then ticks).
+#[no_mangle]
+pub extern "C" fn thaw_js_drain_next_ticks() {
+    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) {
+        return;
+    }
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        if let Err(error) = drain_next_tick_queue(&ctx) {
+            let message = if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(&ctx)
+            } else {
+                error.to_string()
+            };
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    });
+}
+
 /// Reports queued work independently of `thaw_js_run_event_loop`'s exit
 /// status. A failed job can leave later jobs queued, while `exitCode` can
 /// remain nonzero after all work is complete.
@@ -5141,6 +5163,29 @@ fn dynamic_property_key<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Value<'js>, B
         .map_err(|error| error.to_string().into())
 }
 
+/// The native `http.Server` exposes Node's overloaded `listen`/`close`/`on` as separately named
+/// fields (`__listenWithCallback`, ...); a dynamically dispatched call picks the field by
+/// argument shape, as the compiler does for a statically typed receiver.
+fn native_server_overload<'js>(object: &Object<'js>, name: &str, arguments: &Array<'js>) -> Option<Function<'js>> {
+    let is_function = |index: usize| arguments.get::<Value>(index).is_ok_and(|value| value.is_function());
+    let target = match name {
+        "listen" if arguments.len() >= 3 && is_function(2) => "__listenWithHostCallback",
+        "listen" if arguments.len() == 2 && is_function(1) => "__listenWithCallback",
+        "close" if arguments.len() == 1 && is_function(0) => "__closeWithCallback",
+        "on" if arguments.len() == 2 && arguments.get::<String>(0).is_ok_and(|event| event == "error") => "__onError",
+        _ => return None,
+    };
+    match object.get::<_, Function>(target) {
+        Ok(function) => Some(function),
+        Err(rquickjs::Error::Exception) => {
+            // A throwing getter/proxy trap on an unrelated object must not leave a pending exception.
+            let _ = object.ctx().catch();
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 // A member call captures its property before arguments and invokes it later.
 fn invoke_selected_method<'js>(
     ctx: &Ctx<'js>, receiver: u64, selected: u64, name: &str, args_json: &str,
@@ -5203,21 +5248,6 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
         Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
-}
-
-/// The native `http.Server` exposes Node's overloaded `listen`/`close`/`on` as separately named
-/// fields (`__listenWithCallback`, ...); a dynamically dispatched call picks the field by
-/// argument shape, as the compiler does for a statically typed receiver.
-fn native_server_overload<'js>(object: &Object<'js>, name: &str, arguments: &Array<'js>) -> Option<Function<'js>> {
-    let is_function = |index: usize| arguments.get::<Value>(index).is_ok_and(|value| value.is_function());
-    let target = match name {
-        "listen" if arguments.len() >= 3 && is_function(2) => "__listenWithHostCallback",
-        "listen" if arguments.len() == 2 && is_function(1) => "__listenWithCallback",
-        "close" if arguments.len() == 1 && is_function(0) => "__closeWithCallback",
-        "on" if arguments.len() == 2 && arguments.get::<String>(0).is_ok_and(|event| event == "error") => "__onError",
-        _ => return None,
-    };
-    object.get::<_, Function>(target).ok()
 }
 
 fn invoke_method<'js>(

@@ -5419,10 +5419,16 @@ impl<'a> FnLowerer<'a> {
                         new_expr.callee.as_ref(),
                         Some(&HirType::JsValue),
                     )?;
-                    if matches!(
-                        self.infer_expr_type(&callee)?,
-                        HirType::JsValue | HirType::Dynamic | HirType::Json
-                    ) {
+                    let callee_type = self.infer_expr_type(&callee)?;
+                    if matches!(callee_type, HirType::JsValue | HirType::Dynamic | HirType::Json) {
+                        // The runtime construct call takes a live handle; a
+                        // `Json`-held callable (`const p: any = fn`) must be
+                        // turned back into one first.
+                        let callee = if callee_type == HirType::Json {
+                            self.coerce_to_declared(&HirType::JsValue, callee)?
+                        } else {
+                            callee
+                        };
                         let args = new_expr.args.as_deref().unwrap_or_default();
                         let values = self.dynamic_call_args_json(args)?;
                         return Ok(HirExpr::Call(
@@ -5433,6 +5439,13 @@ impl<'a> FnLowerer<'a> {
                 }
                 self.lower_promise_new(new_expr)
             }
+
+            Expr::MetaProp(meta) if meta.kind == swc_ecma_ast::MetaPropKind::NewTarget => Err(
+                "SyntaxError: `new.target` is only supported inside a top-level, non-async, non-generator \
+                 function declaration; it is not supported at the top level, in class constructors, \
+                 methods, nested functions or exported functions"
+                    .into(),
+            ),
 
             other => Err(format!(
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"

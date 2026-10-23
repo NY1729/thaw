@@ -924,6 +924,32 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
             }
             return fields;
         };
+        const fromCharCode = String.fromCharCode;
+        const parseHex = Number.parseInt;
+        const segmentName = segment => {
+            const colon = apply(stringIndexOf, segment, [':', 0]);
+            const bytes = number(apply(stringSlice, segment, [0, colon]));
+            let name = '';
+            for (let index = 0; index < bytes; index++) {
+                const at = colon + 1 + index * 2;
+                name += apply(fromCharCode, String, [parseHex(apply(stringSlice, segment, [at, at + 2]), 16)]);
+            }
+            return name;
+        };
+        const markerPrefix = '__thaw_class_identity_\u001e';
+        // A subclass instance satisfies its base class layout: the wanted identity
+        // chain must be a suffix of the actual one (`Derived\u001fBase` for `Base`).
+        const segmentMatches = (have, want) => {
+            if (have === want) return true;
+            const wantName = segmentName(want);
+            if (apply(stringIndexOf, wantName, [markerPrefix, 0]) !== 0) return false;
+            const haveName = segmentName(have);
+            if (apply(stringIndexOf, haveName, [markerPrefix, 0]) !== 0) return false;
+            const wantChain = apply(stringSlice, wantName, [markerPrefix.length]);
+            const haveChain = apply(stringSlice, haveName, [markerPrefix.length]);
+            return haveChain.length > wantChain.length &&
+                apply(stringSlice, haveChain, [haveChain.length - wantChain.length - 1]) === '\u001f' + wantChain;
+        };
         const layoutContains = (actual, expected) => {
             if (actual === expected) return true;
             const have = layoutSegments(actual);
@@ -933,7 +959,7 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
             for (let desired = 0; desired < want.length; desired++) {
                 let found = false;
                 for (let index = 0; index < have.length; index++) {
-                    if (!used[index] && have[index] === want[desired]) {
+                    if (!used[index] && segmentMatches(have[index], want[desired])) {
                         used[index] = true;
                         found = true;
                         break;

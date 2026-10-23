@@ -255,9 +255,15 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(merge_block);
+        // A void arm yields a placeholder whose physical type is not `basic_type(Void)`.
+        let phi_type = if *ty == HirType::Void && consequent.get_type() == alternate.get_type() {
+            consequent.get_type()
+        } else {
+            self.basic_type(ty)?
+        };
         let phi = self
             .builder
-            .build_phi(self.basic_type(ty)?, "conditional_value")
+            .build_phi(phi_type, "conditional_value")
             .map_err(|error| error.to_string())?;
         phi.add_incoming(&[
             (&consequent, consequent_end),
