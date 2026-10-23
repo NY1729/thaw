@@ -2654,6 +2654,9 @@ impl<'a> FnLowerer<'a> {
                         }
                         let value = arguments[0].clone();
                         let value_type = self.infer_expr_type(&value)?;
+                        let (value, value_type) = self
+                            .apply_class_to_json(value.clone(), &value_type)?
+                            .unwrap_or((value, value_type));
                         if value_type == HirType::JsValue && arguments.len() == 1 {
                             // The source handle belongs to its caller. The exact mixed
                             // call consumes only the independent reference acquired

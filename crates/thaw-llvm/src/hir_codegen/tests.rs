@@ -706,3 +706,4 @@ include!("tests/privfield_contracts.rs");
 include!("tests/hirdiv_contracts.rs");
 
 include!("tests/fnlen_contracts.rs");
+include!("tests/langcore_contracts.rs");
