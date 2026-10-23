@@ -1836,6 +1836,11 @@
       "name": "new on any-held plain function declaration runs body",
       "expect": "matched",
       "source": "function plain(): void { console.log(\"plain body ran\"); } function main(): void { const p: any = plain; try { const o = new p(); console.log(\"c2c ok\", typeof o); } catch (e: any) { console.log(\"c2c threw\", e && e.name, e && e.message); } }"
+    },
+{
+          "name": "function length counts leading parameters",
+          "expect": "matched",
+          "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
     }
   ]
 }
