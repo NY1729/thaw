@@ -1873,11 +1873,14 @@
       "source": "function main(): void {\n  const b = process.hrtime.bigint();\n  console.log(typeof b, b > 0n, process.hrtime.bigint() >= b);\n  console.log(typeof process.uptime(), typeof process.memoryUsage.rss(), typeof process.getuid(), typeof process.getgid(), typeof process.umask());\n  console.log(process.release.name, process.kill(process.pid, 0));\n  process.on(\"SIGUSR2\", () => { console.log(\"got sig\"); });\n  process.kill(process.pid, \"SIGUSR2\");\n  setTimeout(() => console.log(\"end\"), 20);\n}\n"
     },
     {
+<<<<<<< HEAD
       "name": "buffer out of range reads and writes throw ERR_OUT_OF_RANGE",
       "expect": "matched",
       "source": "function t(f: () => any): void { try { console.log(f()); } catch (e: any) { console.log(e.name + ' ' + e.code + ' ' + e.message); } } function main(): void { const buf: Buffer = Buffer.alloc(8); t(() => buf.readUInt32BE(6)); t(() => buf.readUIntBE(7, 3)); t(() => buf.readBigInt64BE(1)); t(() => buf.readUInt8(-1)); t(() => buf.readUInt8(1.5)); t(() => buf.writeUInt32BE(1, 6)); t(() => buf.writeUInt8(256, 0)); t(() => buf.writeInt8(-129, 0)); t(() => buf.writeUInt16LE(70000, 0)); t(() => buf.readUIntBE(0, 7)); t(() => buf.writeBigInt64BE(1n, 1)); }"
     },
     {
+=======
+>>>>>>> e8e5aac6feccaa8d7b90c47b6157cc00297e3f8a
       "name": "error constructor name of builtin errors",
       "expect": "matched",
       "source": "function main(): void { try { JSON.parse('{'); } catch (e: any) { console.log(e.constructor.name, e.constructor === SyntaxError, e instanceof SyntaxError); } try { throw new RangeError('r'); } catch (e: any) { console.log(e.constructor.name, e.constructor === RangeError, e.constructor === TypeError); } const o: any = JSON.parse('null'); try { o.x; } catch (e: any) { console.log(e.constructor.name, e.constructor === TypeError); } try { throw new Error('plain'); } catch (e: any) { console.log(e.constructor.name, e.constructor === Error); } const t = new TypeError('t'); console.log(t.constructor.name, t.constructor === TypeError); }"
