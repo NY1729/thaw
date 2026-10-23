@@ -1064,9 +1064,9 @@ fn tls_client_prepare(options: &TlsClientOptions<'_>) -> Result<TlsClientJob, St
     let name = ServerName::try_from(server_name.to_string()).map_err(|error| format!("err:{error}"))?;
     let mut ca_certificates = Vec::new();
     for encoded in ca_spec.unwrap_or("").split(',').filter(|encoded| !encoded.is_empty()) {
-        if let Ok(certificates) = decode_ca_certificates(&hex_decode(encoded)) {
-            ca_certificates.extend(certificates.into_iter().map(|certificate| certificate.as_ref().to_vec()));
-        }
+        let certificates = decode_ca_certificates(&hex_decode(encoded))
+            .map_err(|error| format!("err:invalid CA certificate: {error}"))?;
+        ca_certificates.extend(certificates.into_iter().map(|certificate| certificate.as_ref().to_vec()));
     }
     Ok(TlsClientJob {
         config: Arc::new(config),
