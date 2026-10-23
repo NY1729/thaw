@@ -3276,11 +3276,39 @@
     ? JSON.parse(globalThis.__thaw_os_identity()) : {};
   const processClockNanoseconds = () => thawProcessBigInt(thawProcessMonotonicClock());
   const processListeners = new Map();
+  const processSignalNumbers = {
+    SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11,
+    SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17, SIGCONT: 18,
+    SIGSTOP: 19, SIGTSTP: 20
+  };
+  const processSyscall = (name, first = NaN, second = NaN) => globalThis.__thaw_process_syscall(name, first, second);
+  const processKill = (pid, signal = 'SIGTERM') => {
+    if (typeof pid !== 'number' || !Number.isInteger(pid)) {
+      const error = new TypeError('The "pid" argument must be of type number.');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const number = typeof signal === 'number' ? signal : signal === 0 ? 0 : processSignalNumbers[signal];
+    if (number === undefined) {
+      const error = new TypeError(`Unknown signal: ${String(signal)}`);
+      error.code = 'ERR_UNKNOWN_SIGNAL';
+      throw error;
+    }
+    const errno = processSyscall('kill', pid, number);
+    if (errno !== 0) {
+      const error = new Error(`kill ${errno === 3 ? 'ESRCH' : errno === 1 ? 'EPERM' : 'EINVAL'}`);
+      error.errno = -errno;
+      error.code = errno === 3 ? 'ESRCH' : errno === 1 ? 'EPERM' : 'EINVAL';
+      error.syscall = 'kill';
+      throw error;
+    }
+    return true;
+  };
   const processOn = (event, listener, once = false) => {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     const name = String(event);
     const listeners = processListeners.get(name) || [];
-    if (listeners.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
+    if (listeners.length === 0 && processSignalNumbers[name] !== undefined && name !== 'SIGKILL' && name !== 'SIGSTOP') {
       globalThis.__thaw_process_configure_signal(name, true);
     }
     listeners.push({ listener, once });
@@ -3293,7 +3321,7 @@
     if (index === -1) return globalThis.process;
     listeners.splice(index, 1);
     processListeners.set(name, listeners);
-    if (listeners.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
+    if (listeners.length === 0 && processSignalNumbers[name] !== undefined && name !== 'SIGKILL' && name !== 'SIGSTOP') {
       globalThis.__thaw_process_configure_signal(name, false);
     }
     return globalThis.process;
@@ -3331,6 +3359,7 @@
   globalThis.__thaw_process_before_exit = () => {
     if (!processExiting) processEmit('beforeExit', Number(globalThis.process.exitCode || 0));
   };
+  globalThis.__thaw_process_fail = emitProcessExit;
   globalThis.__thaw_process_finish = () => {
     emitProcessExit(Number(globalThis.process.exitCode || 0));
   };
@@ -3550,6 +3579,7 @@
     arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',
     execPath: globalThis.process.execPath || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
+    argv0: globalThis.process.argv0 || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     execArgv: globalThis.process.execArgv || JSON.parse(globalThis.__thaw_host_exec_argv_json || '[]'),
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
@@ -3582,8 +3612,23 @@
         + Number(nanoseconds % 1000000000n) / 1000000000;
     },
     hrtime,
-    memoryUsage: () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }),
+    memoryUsage: Object.assign(
+      () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }),
+      { rss: () => processSyscall('rss') }),
     cpuUsage: () => ({ user: 0, system: 0 }),
+    umask: mask => {
+      if (mask === undefined) return processSyscall('umask');
+      return processSyscall('umask', typeof mask === 'string' ? parseInt(mask, 8) : Number(mask));
+    },
+    getuid: () => processSyscall('getuid'),
+    geteuid: () => processSyscall('geteuid'),
+    getgid: () => processSyscall('getgid'),
+    getegid: () => processSyscall('getegid'),
+    kill: processKill,
+    release: { name: 'node' },
+    pid: globalThis.process.pid || processSyscall('getpid'),
+    ppid: globalThis.process.ppid || processSyscall('getppid'),
+    features: globalThis.process.features || { inspector: false, debug: false, uv: true, ipv6: true, tls_alpn: true, tls_sni: true, tls_ocsp: true, tls: true },
     on: (event, listener) => processOn(event, listener),
     once: (event, listener) => processOn(event, listener, true),
     off: processOff,

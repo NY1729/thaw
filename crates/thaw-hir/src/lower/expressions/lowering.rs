@@ -4277,7 +4277,12 @@ impl<'a> FnLowerer<'a> {
             Expr::Update(update) => self.lower_update(update),
 
             Expr::Await(await_expr) => {
-                let value = self.lower_expr(&await_expr.arg)?;
+                // `fetch` is the native body-text fetch; a `Response`-typed (opaque) result needs the realm's.
+                let realm_fetch = (self.expected_return_hint == Some(HirType::JsValue))
+                    .then(|| Self::realm_fetch_call(&await_expr.arg))
+                    .flatten()
+                    .filter(|_| !self.scope.contains_key("fetch"));
+                let value = self.lower_expr(realm_fetch.as_ref().unwrap_or(&await_expr.arg))?;
                 let value_type = self.infer_expr_type(&value)?;
                 if value_type == HirType::JsValue {
                     Ok(HirExpr::Call(
@@ -5869,6 +5874,33 @@ impl<'a> FnLowerer<'a> {
             Vec::new(),
         );
         self.wrap_call_argument_bindings(result, &[(source_name, source_type, source)])
+    }
+
+    /// `fetch(...)` rewritten to `(globalThis as any).fetch(...)`, the realm's Response-returning fetch.
+    fn realm_fetch_call(arg: &Expr) -> Option<Expr> {
+        let Expr::Call(call) = arg else { return None };
+        let swc_ecma_ast::Callee::Expr(callee) = &call.callee else { return None };
+        if !matches!(callee.as_ref(), Expr::Ident(name) if &*name.sym == "fetch") {
+            return None;
+        }
+        let global = Expr::Paren(swc_ecma_ast::ParenExpr {
+            span: swc_common::DUMMY_SP,
+            expr: Box::new(Expr::TsAs(swc_ecma_ast::TsAsExpr {
+                span: swc_common::DUMMY_SP,
+                expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("globalThis".into(), swc_common::DUMMY_SP))),
+                type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+                    span: swc_common::DUMMY_SP,
+                    kind: swc_ecma_ast::TsKeywordTypeKind::TsAnyKeyword,
+                })),
+            })),
+        });
+        let mut rewritten = call.clone();
+        rewritten.callee = swc_ecma_ast::Callee::Expr(Box::new(Expr::Member(swc_ecma_ast::MemberExpr {
+            span: swc_common::DUMMY_SP,
+            obj: Box::new(global),
+            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("fetch".into(), swc_common::DUMMY_SP)),
+        })));
+        Some(Expr::Call(rewritten))
     }
 
     /// Lowers `expr` exactly like `lower_expr`, except that if `expr` is
