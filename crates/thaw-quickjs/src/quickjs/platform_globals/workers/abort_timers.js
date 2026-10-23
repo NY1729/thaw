@@ -290,6 +290,7 @@
     globalThis.AbortController = AbortController;
   }
   globalThis.__thaw_next_timer_delay = () => {
+    loopNow = timerNow();
     if (![...timers.values()].some(timer => timer.refed && !timer.clock)) return -1;
     let due = Infinity;
     for (const timer of timers.values()) if (!timer.clock) due = Math.min(due, timer.due);
@@ -303,7 +304,7 @@
     return due === Infinity ? -1 : Math.ceil(Math.max(0, due - timerNow()));
   };
   globalThis.__thaw_run_due_timers = () => {
-    const now = timerNow();
+    const now = loopNow = timerNow();
     const due = [...timers.entries()]
       .filter(([, timer]) => !timer.clock && timer.due <= now)
       .sort((a, b) => a[1].due - b[1].due || a[0] - b[0]);

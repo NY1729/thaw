@@ -1836,6 +1836,21 @@
           "name": "function length counts leading parameters",
           "expect": "matched",
           "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
+    },
+    {
+      "name": "zero ms timeout keeps insertion order with a 1 ms timeout",
+      "expect": "matched",
+      "source": "function main(): void { setTimeout((): void => console.log('one'), 1); setTimeout((): void => console.log('zero'), 0); setTimeout((): void => console.log('one-b'), 1); }"
+    },
+    {
+      "name": "process beforeExit re-arm and exit event",
+      "expect": "matched",
+      "source": "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }"
+    },
+    {
+      "name": "process version is a v22 string",
+      "expect": "matched",
+      "source": "function main(): void { console.log(process.version.startsWith('v22.'), process.versions.node === process.version.slice(1)); }"
     }
   ]
 }

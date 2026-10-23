@@ -2318,25 +2318,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("detach Promise expects one operand".into());
                 };
                 let promise = self.compile_expr(promise)?;
-                let pending = if name == "__thaw_detach_rejection" {
-                    self.pending_rejection()
-                } else {
-                    self.pending_exception()
-                };
-                return self
-                    .builder
-                    .build_call(
-                        self.module.get_function(if name == "__thaw_detach_rejection" {
-                            "thaw_promise_detach_for_report"
-                        } else {
-                            "thaw_promise_detach"
-                        }).unwrap(),
-                        &[
-                            promise.into(),
-                            pending.as_pointer_value().into(),
-                        ],
+                let call = if name == "__thaw_detach_rejection" {
+                    self.builder.build_call(
+                        self.module.get_function("thaw_promise_detach_unhandled").unwrap(),
+                        &[promise.into()],
                         "detach_promise",
                     )
+                } else {
+                    self.builder.build_call(
+                        self.module.get_function("thaw_promise_detach").unwrap(),
+                        &[promise.into(), self.pending_exception().as_pointer_value().into()],
+                        "detach_promise",
+                    )
+                };
+                return call
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
