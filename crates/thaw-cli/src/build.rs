@@ -666,6 +666,7 @@ fn build_with_native_mode(
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
+    compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
     compiler.compile_program(&program)?;
     compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();

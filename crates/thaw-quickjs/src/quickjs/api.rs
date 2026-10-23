@@ -1542,6 +1542,28 @@ pub extern "C" fn thaw_js_collect_garbage() {
     }
 }
 
+/// Drains the `process.nextTick` queue once. A CommonJS entry calls this right after the main
+/// script returns, so ticks run before the promise jobs it queued; an ES module's body runs
+/// inside a microtask, so its entry skips the call (promises first, then ticks).
+#[no_mangle]
+pub extern "C" fn thaw_js_drain_next_ticks() {
+    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) {
+        return;
+    }
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        if let Err(error) = drain_next_tick_queue(&ctx) {
+            let message = if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(&ctx)
+            } else {
+                error.to_string()
+            };
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    });
+}
+
 /// Reports queued work independently of `thaw_js_run_event_loop`'s exit
 /// status. A failed job can leave later jobs queued, while `exitCode` can
 /// remain nonzero after all work is complete.
