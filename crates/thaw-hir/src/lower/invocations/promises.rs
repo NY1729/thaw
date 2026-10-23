@@ -18,6 +18,46 @@ fn is_untyped_promise_reject(expr: &Expr) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// `Promise.resolve(arg)` as source AST, so awaiting or joining a plain value
+    /// goes through the already-tested promise path.
+    pub(crate) fn promise_resolve_call(span: swc_common::Span, arg: &Expr) -> CallExpr {
+        CallExpr {
+            span,
+            ctxt: Default::default(),
+            callee: Callee::Expr(Box::new(Expr::Member(swc_ecma_ast::MemberExpr {
+                span,
+                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    "Promise".into(),
+                    span,
+                ))),
+                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("resolve".into(), span)),
+            }))),
+            args: vec![swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(arg.clone()),
+            }],
+            type_args: None,
+        }
+    }
+
+    /// Lowers a `Promise.all`/`allSettled` input; a plain primitive is joined as
+    /// `Promise.resolve(value)`. (`race`/`any` keep rejecting non-promises, which a test pins.)
+    fn lower_promise_input(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        let value = self.lower_expr(expr)?;
+        let is_async_call = matches!(&value, HirExpr::Call(callee, _)
+            if matches!(callee.as_ref(), HirExpr::Var(name)
+                if self.signatures.get(name).is_some_and(|signature| signature.is_async)));
+        if !is_async_call
+            && matches!(
+                self.infer_expr_type(&value)?,
+                HirType::F64 | HirType::Bool | HirType::Str | HirType::StrLiteral(_)
+            )
+        {
+            return self.lower_call(&Self::promise_resolve_call(expr.span(), expr));
+        }
+        Ok(value)
+    }
+
     fn lower_promise_try(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         let Some((callback_arg, argument_exprs)) = call.args.split_first() else {
             return Err("`Promise.try` expects a callback".into());
@@ -818,7 +858,7 @@ impl<'a> FnLowerer<'a> {
                     if element.spread.is_some() {
                         return Err("spread elements are not supported in `Promise.all`".into());
                     }
-                    let value = self.lower_expr(&element.expr)?;
+                    let value = self.lower_promise_input(&element.expr)?;
                     let resolved = match self.infer_expr_type(&value)? {
                         HirType::Promise(inner) => *inner,
                         returned
@@ -932,7 +972,7 @@ impl<'a> FnLowerer<'a> {
                             "spread elements are not supported in `Promise.allSettled`".into(),
                         );
                     }
-                    let value = self.lower_expr(&element.expr)?;
+                    let value = self.lower_promise_input(&element.expr)?;
                     let resolved = match self.infer_expr_type(&value)? {
                         HirType::Promise(inner) => *inner,
                         returned

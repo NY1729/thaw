@@ -761,6 +761,16 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// A literal (`await 5`, `await null`, `await undefined`, `await -1`): nothing to join.
+    fn is_plain_await_operand(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Lit(_) => true,
+            Expr::Unary(unary) => matches!(unary.arg.as_ref(), Expr::Lit(_)),
+            Expr::Ident(ident) => ident.sym == *"undefined" && !self.scope.contains_key("undefined"),
+            _ => false,
+        }
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         if has_dynamic_storage(expr.span()) {
             match expr {
@@ -1968,6 +1978,43 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Bin(bin) => {
+                // `instance.constructor === Class`: the instance's exact class.
+                if matches!(
+                    bin.op,
+                    BinaryOp::EqEq | BinaryOp::EqEqEq | BinaryOp::NotEq | BinaryOp::NotEqEq
+                ) {
+                    for (constructor, class) in [(&bin.left, &bin.right), (&bin.right, &bin.left)] {
+                        let (Expr::Member(inner), Expr::Ident(class)) =
+                            (constructor.as_ref(), class.as_ref())
+                        else {
+                            continue;
+                        };
+                        if !self.signatures.contains_key(&class_constructor_symbol(class.sym.as_ref())) {
+                            continue;
+                        }
+                        if let Some(instance) = self.class_instance_of_constructor(inner)? {
+                            let same = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_object_class_name".into())),
+                                    vec![instance],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::Str(
+                                    display_class_name(class.sym.as_ref()).to_string(),
+                                ))),
+                            );
+                            return Ok(if matches!(bin.op, BinaryOp::NotEq | BinaryOp::NotEqEq) {
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(same),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                )
+                            } else {
+                                same
+                            });
+                        }
+                    }
+                }
                 if bin.op == BinaryOp::InstanceOf {
                     if !matches!(bin.right.as_ref(), Expr::Ident(_)) {
                         // A property-valued constructor needs the realm's exact
@@ -3235,6 +3282,9 @@ impl<'a> FnLowerer<'a> {
                                 | HirType::Nullable(_)
                                 | HirType::Nullish(_)
                                 | HirType::Object(_)
+                                | HirType::Str
+                                | HirType::StrLiteral(_)
+                                | HirType::Bool
                         ) {
                             self.coerce_primitive_to_number(value)?
                         } else if matches!(value_type, HirType::Json | HirType::JsValue) {
@@ -3259,6 +3309,14 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     UnaryOp::Tilde => {
+                        if self.infer_expr_type(&value)? == HirType::I64 {
+                            // `~n` is `-n - 1n`, i.e. `n ^ -1n`.
+                            return Ok(HirExpr::BinOp(
+                                BinOp::BitXor,
+                                Box::new(value),
+                                Box::new(HirExpr::Lit(HirLit::I64(-1))),
+                            ));
+                        }
                         self.expect_type(&HirType::F64, &value, "bitwise not")?;
                         HirExpr::BinOp(
                             BinOp::BitXor,
@@ -3937,18 +3995,41 @@ impl<'a> FnLowerer<'a> {
                             // `__thaw_symbol_iterator` field), adapt the
                             // returned iterator object, and collect it into
                             // an array -- the same path `for...of` uses.
-                            let iterator = HirExpr::Call(
-                                Box::new(HirExpr::PropAccess(
-                                    Box::new(value.clone()),
-                                    spread_source_type.clone(),
-                                    "__thaw_symbol_iterator".to_string(),
-                                )),
-                                Vec::new(),
-                            );
+                            let iterator = if class_name_from_type(&spread_source_type).is_some() {
+                                // A class instance keeps `[Symbol.iterator]` as a method, not a field.
+                                let span = swc_common::DUMMY_SP;
+                                self.lower_expr(&Expr::Call(CallExpr {
+                                    span,
+                                    ctxt: Default::default(),
+                                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                        span,
+                                        obj: element.expr.clone(),
+                                        prop: MemberProp::Ident(IdentName::new(
+                                            "__thaw_symbol_iterator".into(),
+                                            span,
+                                        )),
+                                    }))),
+                                    args: Vec::new(),
+                                    type_args: None,
+                                }))?
+                            } else {
+                                HirExpr::Call(
+                                    Box::new(HirExpr::PropAccess(
+                                        Box::new(value.clone()),
+                                        spread_source_type.clone(),
+                                        "__thaw_symbol_iterator".to_string(),
+                                    )),
+                                    Vec::new(),
+                                )
+                            };
                             let iterator_type = self.infer_expr_type(&iterator)?;
                             let name = format!("__thaw_iterator_{}", self.next_binding);
                             self.next_binding += 1;
-                            if let Some((producer, producer_type)) =
+                            if let Some((collected, _)) =
+                                self.collect_generator_for_array_spread(iterator.clone(), &iterator_type)?
+                            {
+                                value = collected;
+                            } else if let Some((producer, producer_type)) =
                                 iterator_object_adapter(self, iterator, &iterator_type, name, false)
                             {
                                 if let Some((collected, _)) = self
@@ -4257,6 +4338,25 @@ impl<'a> FnLowerer<'a> {
                         Ok(value)
                     } else if value_type == HirType::Json {
                         self.lower_await_json_thenable(value)
+                    } else if matches!(
+                        value_type,
+                        HirType::F64 | HirType::Bool | HirType::Str | HirType::StrLiteral(_)
+                            | HirType::Null | HirType::Undefined
+                    ) && self.is_plain_await_operand(&await_expr.arg)
+                    // Only literals: a call such as `fetch(..)` is typed by its resolved value.
+                    {
+                        // Awaiting a plain value is `await Promise.resolve(value)`
+                        // (one microtask turn), not a raw await of a non-promise.
+                        let resolve = self.lower_call(&Self::promise_resolve_call(
+                            await_expr.span,
+                            &await_expr.arg,
+                        ))?;
+                        Ok(match self.infer_expr_type(&resolve)? {
+                            HirType::Promise(resolved) if *resolved != HirType::Void => {
+                                HirExpr::AwaitPromise(Box::new(resolve), *resolved)
+                            }
+                            _ => HirExpr::Await(Box::new(resolve)),
+                        })
                     } else {
                         Ok(HirExpr::Await(Box::new(value)))
                     }
@@ -4265,6 +4365,13 @@ impl<'a> FnLowerer<'a> {
 
             Expr::New(new_expr) => {
                 if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                    if class.sym == *"Array" {
+                        return self.lower_array_constructor(
+                            new_expr.args.as_deref().unwrap_or_default(),
+                            new_expr.type_args.as_deref(),
+                            None,
+                        );
+                    }
                     if class.sym == *"Function" {
                         return self.lower_function_constructor(new_expr);
                     }
@@ -5793,6 +5900,11 @@ impl<'a> FnLowerer<'a> {
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         let expected_object_fields = expected.and_then(expected_object_fields);
+        if let (Some((args, type_args)), Some(HirType::Array(element))) =
+            (Self::array_constructor_parts(expr), expected)
+        {
+            return self.lower_array_constructor(args, type_args, Some(element.as_ref().clone()));
+        }
         if has_dynamic_storage(expr.span()) {
             self.validate_storage_call_source(expr)?;
             if let Some(expected) = expected
