@@ -917,7 +917,8 @@ fn promise_reject_uses_the_same_json_exception_owner_without_coercion() {
     let text = format!("{:?}", program.functions[0].body);
     assert!(text.contains("__thaw_clear_pending_exception_provenance"), "{text}");
     assert!(text.contains("__thaw_set_pending_exception_json"), "{text}");
-    assert!(text.contains("[exception value]"), "{text}");
+    assert!(text.contains("__thaw_console_inspect_text"), "{text}");
+    assert!(!text.contains("[exception value]"), "{text}");
     assert!(!text.contains("__thaw_js_handle_to_string"), "{text}");
 }
 
@@ -1853,55 +1854,6 @@ fn thaw_rethrow_cleanup_assert_number_typeof_condition(
     thaw_rethrow_cleanup_assert_typeof_member_chain(branches, &parameter.name, members, 0);
 }
 
-fn thaw_rethrow_cleanup_expected_carrier_display(
-    thrown_name: &str,
-    members: &[HirType],
-) -> HirExpr {
-    let mut display = HirExpr::Lit(HirLit::Str("[exception value]".into()));
-    for index in (0..members.len()).rev() {
-        let tag = HirExpr::BinOp(
-            BinOp::EqEqEq,
-            Box::new(HirExpr::UnionTag(
-                Box::new(HirExpr::Var(thrown_name.into())),
-                members.to_vec(),
-            )),
-            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-        );
-        let member_value = thaw_rethrow_cleanup_member_value(thrown_name, index, members);
-        let selected = match (&members[index], index) {
-            (HirType::F64, 0) => HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
-                vec![member_value],
-            ),
-            (HirType::I64, 1) => HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_i64_to_string".into())),
-                vec![member_value],
-            ),
-            (HirType::Bool, 2) => HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_bool_to_string".into())),
-                vec![member_value],
-            ),
-            (HirType::Str, 3) => member_value,
-            (HirType::Undefined, 4) => HirExpr::Lit(HirLit::Str("undefined".into())),
-            (HirType::Null, 5) => HirExpr::Lit(HirLit::Str("null".into())),
-            (HirType::Object(_), 6)
-            | (HirType::Json, 7)
-            | (HirType::JsValue, 8)
-            | (HirType::NativeException, 9) => {
-                HirExpr::Lit(HirLit::Str("[exception value]".into()))
-            }
-            other => panic!("unexpected carrier display member {other:?} at {index}"),
-        };
-        display = HirExpr::Conditional(
-            Box::new(tag),
-            Box::new(selected),
-            Box::new(display),
-            HirType::Str,
-        );
-    }
-    display
-}
-
 fn thaw_rethrow_cleanup_assert_projection_prelude(
     prelude: &HirExpr,
     thrown_name: &str,
@@ -2047,7 +1999,14 @@ fn thaw_rethrow_cleanup_assert_carrier_publication(
         unreachable!("publisher helper checked the final throw");
     };
     assert_eq!(callee.as_ref(), &HirExpr::Var("@@thaw_published_exception_text".into()));
-    assert_eq!(args, &vec![thaw_rethrow_cleanup_expected_carrier_display(thrown_name, members)]);
+    // Members 6 (Object) and 7 (Json) inspect at run time; the placeholder
+    // stays only for the 8/9 members and the chain's fallback.
+    let [display] = args.as_slice() else {
+        panic!("expected one display argument: {args:#?}");
+    };
+    let display = format!("{display:?}");
+    assert_eq!(display.matches("__thaw_console_inspect_text").count(), 2, "{display}");
+    assert_eq!(display.matches("[exception value]").count(), 3, "{display}");
 }
 
 #[test]
