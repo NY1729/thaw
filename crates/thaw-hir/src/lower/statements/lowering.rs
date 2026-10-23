@@ -440,7 +440,7 @@ impl<'a> FnLowerer<'a> {
                 self.coerce_primitive_to_string(value)
             }
             HirType::Void => Ok(HirExpr::Lit(HirLit::Str("undefined".into()))),
-            HirType::Json | HirType::Dictionary(_) => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
+            HirType::Json | HirType::Dictionary(_) => self.inspect_rejection_value(value),
             HirType::Union(members) => {
                 let mut result = HirExpr::Lit(HirLit::Str("[exception value]".into()));
                 for (index, member) in members.iter().enumerate().rev() {
@@ -510,7 +510,28 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right]);
                 Ok(concat(concat(field("name"), HirExpr::Lit(HirLit::Str(": ".into()))), field("message")))
             }
+            // Plain (non-Error) aggregates print like console.log, from the
+            // materialized Json copy made at throw time.
+            HirType::Object(fields) if !fields.iter().any(|(name, _)|
+                name.starts_with("__thaw_class_identity_\u{1e}")
+                    && name.rsplit('\u{1f}').next().is_some_and(is_error_family_name)) => {
+                self.inspect_rejection_value(value)
+            }
+            HirType::Array(_) | HirType::Tuple(_) => self.inspect_rejection_value(value),
             _ => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
+        }
+    }
+
+    /// Run-time console-style text for a thrown aggregate: convert it to
+    /// Json and format it with the same helper `console.log` uses. Falls
+    /// back to the fixed placeholder when no Json projection exists.
+    fn inspect_rejection_value(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        match self.coerce_to_declared_aliasing(&HirType::Json, value) {
+            Ok(json) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_console_inspect_text".into())),
+                vec![json],
+            )),
+            Err(_) => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
         }
     }
     /// The `HirType::JsValue` sibling of `iterator_object_adapter` above --

@@ -1857,3 +1857,52 @@ fn promise_then_keeps_single_value_callback_validation() {
         assert!(lower_module(&module).is_err(), "accepted incompatible fixed prefix/return: {source}");
     }
 }
+
+fn lower_function_length_program(source: &str) -> Result<String, String> {
+    let module = thaw_parser::parse_typescript(source).expect("parse error");
+    lower_module(&module).map(|program| format!("{program:?}"))
+}
+
+#[test]
+fn function_length_counts_params_before_default() {
+    let debug = lower_function_length_program(
+        "function h(a = 1, b: number) {} function main(): void { console.log(h.length); }",
+    )
+    .expect("declared function length lowers");
+    assert!(debug.contains("F64(0.0)"), "{debug}");
+}
+
+#[test]
+fn function_length_counts_params_before_rest() {
+    let debug = lower_function_length_program(
+        "function r(a: number, ...rest: number[]) {} function main(): void { console.log(r.length); }",
+    )
+    .expect("declared function length lowers");
+    assert!(debug.contains("F64(1.0)"), "{debug}");
+}
+
+#[test]
+fn function_length_counts_optional_marker_params() {
+    let debug = lower_function_length_program(
+        "function o(a?: number) {} function main(): void { console.log(o.length); }",
+    )
+    .expect("declared function length lowers");
+    assert!(debug.contains("F64(1.0)"), "{debug}");
+}
+
+#[test]
+fn function_length_rest_only_is_zero() {
+    let debug = lower_function_length_program(
+        "function z(...r: number[]) {} function main(): void { console.log(z.length); }",
+    )
+    .expect("declared function length lowers");
+    assert!(debug.contains("F64(0.0)"), "{debug}");
+}
+
+#[test]
+fn function_length_alias_still_rejected() {
+    let result = lower_function_length_program(
+        "function f(a: number, b: number) {} const g = f; function main(): void { console.log(g.length); }",
+    );
+    assert!(result.is_err(), "alias `.length` must stay rejected");
+}
