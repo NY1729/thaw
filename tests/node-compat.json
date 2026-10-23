@@ -1836,6 +1836,26 @@
           "name": "function length counts leading parameters",
           "expect": "matched",
           "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
+    },
+    {
+      "name": "console.log of an inline array method result",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [3, 1, 2]; console.log([10, 9, 1, 100].sort()); console.log(a.toSorted()); }"
+    },
+    {
+      "name": "console.log of an inline Date and Date array",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Date(0)); console.log([new Date(0)]); }"
+    },
+    {
+      "name": "console.log of a null-prototype object",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.create(null)); }"
+    },
+    {
+      "name": "console.log of querystring.parse and parseArgs results",
+      "expect": "matched",
+      "source": "import * as qs from \"node:querystring\"; import { parseArgs } from \"node:util\"; function main(): void { console.log(qs.parse(\"a=1&a=2&b=%20x&c\")); console.log(parseArgs({ args: [\"-f\"], options: { foo: { type: \"boolean\", short: \"f\" } } })); }"
     }
   ]
 }
