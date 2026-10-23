@@ -129,6 +129,11 @@ fn bytes_accessors_reject_overflowed_offsets() {
     unsafe { thaw_bytes_write(buffer, f64::MAX, 42.0, 4.0, 0.0, 1.0) };
     unsafe { thaw_bytes_write_i64(buffer, f64::MAX, 42, 1.0) };
     assert_eq!(
+        unsafe { thaw_bytes_write(buffer, 6.0, 42.0, 4.0, 0.0, 1.0) },
+        6.0
+    );
+    assert_eq!(unsafe { thaw_bytes_write_i64(buffer, 1.0, 42, 1.0) }, 1.0);
+    assert_eq!(
         unsafe { read_byte_array(buffer) }.unwrap(),
         [1, 2, 3, 4, 5, 6, 7, 8]
     );
