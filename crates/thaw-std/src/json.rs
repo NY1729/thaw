@@ -6664,6 +6664,28 @@ pub extern "C" fn thaw_json_is_not_iterable(value: *const Value) -> u8 {
     }
 }
 
+/// The right operand of `in` that is not an object: null, undefined, boolean,
+/// number, BigInt or string. Node throws a TypeError for these instead of
+/// answering `false`. Arrays, objects and live hosts are objects.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_is_primitive_operand(value: *const Value) -> u8 {
+    if unsafe { thaw_json_is_nullish(value) } != 0 {
+        return 1;
+    }
+    match unsafe { value.as_ref() } {
+        None
+        | Some(
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::BigInt(_)
+            | Value::String(_)
+            | Value::Wtf8(_),
+        ) => 1,
+        Some(Value::Array(_) | Value::Object(_) | Value::Host(_)) => 0,
+    }
+}
+
 /// Recognize a trusted native or graph Date wrapper, or a live Host value
 /// with a genuine Date internal slot. A plain user `{timestamp: ...}` object
 /// is not enough to establish Date origin.

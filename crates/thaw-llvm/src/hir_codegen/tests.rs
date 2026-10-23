@@ -701,3 +701,4 @@ include!("tests/anyprim_contracts.rs");
 include!("tests/symkeys_contracts.rs");
 
 include!("tests/privfield_contracts.rs");
+include!("tests/hirdiv_contracts.rs");

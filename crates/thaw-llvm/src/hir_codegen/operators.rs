@@ -331,6 +331,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys_string_space"
                         | "fetch"
                         | "__thaw_string_concat"
+                        | "__thaw_console_inspect_text"
                         | "__thaw_bool_to_string"
                         | "__thaw_number_to_string"
                         | "__thaw_number_array_to_string"

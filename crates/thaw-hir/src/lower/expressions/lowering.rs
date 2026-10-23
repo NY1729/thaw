@@ -2625,14 +2625,47 @@ impl<'a> FnLowerer<'a> {
                             let right_name = format!("__thaw_in_object_{}", self.next_binding);
                             self.next_binding += 1;
                             self.scope.insert(right_name.clone(), right_type.clone());
-                            self.wrap_call_argument_bindings(
-                                HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_json_has".into())),
-                                    vec![
-                                        HirExpr::Var(right_name.clone()),
-                                        HirExpr::Var(left_name.clone()),
-                                    ],
+                            let has = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_has".into())),
+                                vec![
+                                    HirExpr::Var(right_name.clone()),
+                                    HirExpr::Var(left_name.clone()),
+                                ],
+                            );
+                            // Node throws a TypeError for `in` on a primitive operand (number,
+                            // string, boolean, null, undefined), so only objects reach the lookup.
+                            let is_primitive = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_is_primitive_operand".into())),
+                                vec![HirExpr::Var(right_name.clone())],
+                            );
+                            let concat = |left, right| HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right]);
+                            let message = concat(
+                                concat(
+                                    HirExpr::Lit(HirLit::Str(
+                                        "\u{1}TypeError\u{1}Cannot use 'in' operator to search for '".into(),
+                                    )),
+                                    HirExpr::Var(left_name.clone()),
                                 ),
+                                concat(
+                                    HirExpr::Lit(HirLit::Str("' in ".into())),
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_console_inspect_text".into())),
+                                        vec![HirExpr::Var(right_name.clone())],
+                                    ),
+                                ),
+                            );
+                            let guarded = HirExpr::Conditional(
+                                Box::new(is_primitive),
+                                Box::new(HirExpr::ThrowValue(
+                                    Box::new(message),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                )),
+                                Box::new(has),
+                                HirType::Bool,
+                            );
+                            self.wrap_call_argument_bindings(
+                                guarded,
                                 &[
                                     (left_name, HirType::Str, lhs),
                                     (right_name, right_type, rhs),
@@ -2741,6 +2774,46 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                                 );
                                 result = self.lower_logical_expr(result, check, false)?;
+                            }
+                            // Node throws a TypeError for `in` on a primitive right-hand side,
+                            // so each primitive member's tag throws instead of answering false.
+                            for (index, element) in elements.iter().enumerate().rev() {
+                                if !matches!(
+                                    element,
+                                    HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
+                                        | HirType::StrLiteral(_) | HirType::Symbol
+                                        | HirType::Null | HirType::Undefined | HirType::Void
+                                ) {
+                                    continue;
+                                }
+                                let member = HirExpr::UnionValue(
+                                    Box::new(HirExpr::Var(name.clone())), index, elements.clone(),
+                                );
+                                let text = self.rejection_display_without_user_coercion(member, element)?;
+                                let message = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                                    vec![
+                                        HirExpr::Lit(HirLit::Str(format!(
+                                            "\u{1}TypeError\u{1}Cannot use 'in' operator to search for '{property}' in "
+                                        ))),
+                                        text,
+                                    ],
+                                );
+                                let throw = HirExpr::ThrowValue(
+                                    Box::new(message),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                );
+                                let condition = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        elements.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                );
+                                result = HirExpr::Conditional(
+                                    Box::new(condition), Box::new(throw), Box::new(result), HirType::Bool,
+                                );
                             }
                             self.wrap_call_argument_bindings(result, &[(name, right_type, rhs)])?
                         } else {
