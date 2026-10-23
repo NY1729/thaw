@@ -5414,10 +5414,16 @@ impl<'a> FnLowerer<'a> {
                         new_expr.callee.as_ref(),
                         Some(&HirType::JsValue),
                     )?;
-                    if matches!(
-                        self.infer_expr_type(&callee)?,
-                        HirType::JsValue | HirType::Dynamic | HirType::Json
-                    ) {
+                    let callee_type = self.infer_expr_type(&callee)?;
+                    if matches!(callee_type, HirType::JsValue | HirType::Dynamic | HirType::Json) {
+                        // The runtime construct call takes a live handle; a
+                        // `Json`-held callable (`const p: any = fn`) must be
+                        // turned back into one first.
+                        let callee = if callee_type == HirType::Json {
+                            self.coerce_to_declared(&HirType::JsValue, callee)?
+                        } else {
+                            callee
+                        };
                         let args = new_expr.args.as_deref().unwrap_or_default();
                         let values = self.dynamic_call_args_json(args)?;
                         return Ok(HirExpr::Call(

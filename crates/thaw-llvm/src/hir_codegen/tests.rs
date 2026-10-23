@@ -700,6 +700,7 @@ include!("tests/ka_contracts.rs");
 include!("tests/mapalias_contracts.rs");
 include!("tests/lb_contracts.rs");
 include!("tests/looseeq_contracts.rs");
+include!("tests/construct_any_plain_contracts.rs");
 include!("tests/anyprim_contracts.rs");
 include!("tests/symkeys_contracts.rs");
 
