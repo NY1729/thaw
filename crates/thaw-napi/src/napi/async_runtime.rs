@@ -479,6 +479,11 @@ pub unsafe extern "C" fn napi_create_async_work(
     if env_ref.finalizing || env_ref.finalized {
         return record_status(env, NAPI_CLOSING);
     }
+    // napi_delete_async_work keeps a deleted item until the next create so
+    // stale-pointer calls still report GENERIC_FAILURE; reap them here.
+    env_ref
+        .async_works
+        .retain(|candidate| candidate.state.load(Ordering::Acquire) != ASYNC_DELETED);
     let work = Arc::new(AsyncWork {
         env: env as usize,
         owner: std::thread::current().id(),

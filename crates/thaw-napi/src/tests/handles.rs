@@ -1322,3 +1322,17 @@ fn unheld_javascript_callback_wrapper_is_retired_and_reported() {
         assert_eq!(crate::take_pending_js_reference_releases(), vec![8102]);
     }
 }
+
+#[test]
+fn closed_handle_scopes_are_reaped_on_the_next_open() {
+    let mut env = Env::new();
+    let env_ptr: NapiEnv = &mut env;
+    unsafe {
+        for _ in 0..1000 {
+            let mut scope = ptr::null_mut();
+            assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+            assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        }
+    }
+    assert!(env.handle_scopes.len() <= 1);
+}
