@@ -1,4 +1,185 @@
 impl<'a> FnLowerer<'a> {
+    /// `Math.f` used as a function value: `(x: number) => Math.f(x)` (variadic
+    /// `max`/`min`/`hypot` take `...args: number[]`).
+    fn math_function_value(name: &str) -> Option<Expr> {
+        use swc_ecma_ast::{
+            ArrowExpr, ArrowFunctionBody, BindingIdent, ExprOrSpread, Ident, RestPat, TsArrayType,
+            TsKeywordType, TsKeywordTypeKind, TsType, TsTypeAnn,
+        };
+        let sp = swc_common::DUMMY_SP;
+        let number = || {
+            Box::new(TsType::TsKeywordType(TsKeywordType {
+                span: sp,
+                kind: TsKeywordTypeKind::TsNumberKeyword,
+            }))
+        };
+        let annotate = |ty: Box<TsType>| Some(Box::new(TsTypeAnn { span: sp, type_ann: ty }));
+        let param = |id: &str, ty: Box<TsType>| {
+            Pat::Ident(BindingIdent { id: Ident::new_no_ctxt(id.into(), sp), type_ann: annotate(ty) })
+        };
+        let arg = |id: &str, spread: bool| ExprOrSpread {
+            spread: spread.then_some(sp),
+            expr: Box::new(Expr::Ident(Ident::new_no_ctxt(id.into(), sp))),
+        };
+        let (params, args) = match name {
+            "max" | "min" | "hypot" => (
+                vec![Pat::Rest(RestPat {
+                    span: sp,
+                    dot3_token: sp,
+                    arg: Box::new(Pat::Ident(BindingIdent {
+                        id: Ident::new_no_ctxt("a".into(), sp),
+                        type_ann: None,
+                    })),
+                    type_ann: annotate(Box::new(TsType::TsArrayType(TsArrayType {
+                        span: sp,
+                        elem_type: number(),
+                    }))),
+                })],
+                vec![arg("a", true)],
+            ),
+            "pow" | "atan2" | "imul" => (
+                vec![param("a", number()), param("b", number())],
+                vec![arg("a", false), arg("b", false)],
+            ),
+            "abs" | "ceil" | "floor" | "round" | "trunc" | "sqrt" | "cbrt" | "sin" | "cos" | "tan"
+            | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "exp" | "expm1" | "log" | "log2"
+            | "log10" | "log1p" | "sign" | "fround" | "clz32" => {
+                (vec![param("a", number())], vec![arg("a", false)])
+            }
+            _ => return None,
+        };
+        let body = Expr::Call(CallExpr {
+            span: sp,
+            ctxt: Default::default(),
+            callee: Callee::Expr(Box::new(Expr::Member(swc_ecma_ast::MemberExpr {
+                span: sp,
+                obj: Box::new(Expr::Ident(Ident::new_no_ctxt("Math".into(), sp))),
+                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(name.into(), sp)),
+            }))),
+            args,
+            type_args: None,
+        });
+        Some(Expr::Arrow(ArrowExpr {
+            span: sp,
+            ctxt: Default::default(),
+            params,
+            body: Box::new(ArrowFunctionBody::Expr(Box::new(body))),
+            is_async: false,
+            is_generator: false,
+            type_params: None,
+            return_type: None,
+        }))
+    }
+
+    /// `new Array(...)` / `Array(...)` (no other callee): its arguments and type arguments.
+    fn array_constructor_parts(
+        expr: &Expr,
+    ) -> Option<(&[swc_ecma_ast::ExprOrSpread], Option<&swc_ecma_ast::TsTypeParamInstantiation>)>
+    {
+        match expr {
+            Expr::New(new_expr) => match new_expr.callee.as_ref() {
+                Expr::Ident(class) if class.sym == *"Array" => Some((
+                    new_expr.args.as_deref().unwrap_or_default(),
+                    new_expr.type_args.as_deref(),
+                )),
+                _ => None,
+            },
+            Expr::Call(call) => match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(class) if class.sym == *"Array" => {
+                        Some((call.args.as_slice(), call.type_args.as_deref()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `new Array(n)` is an array of `n` holes; `new Array(a, b)` is `[a, b]`. The
+    /// element type is the explicit type argument, else `element_hint`, else `any`.
+    fn lower_array_constructor(
+        &mut self,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        type_args: Option<&swc_ecma_ast::TsTypeParamInstantiation>,
+        element_hint: Option<HirType>,
+    ) -> Result<HirExpr, String> {
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("`Array(...)` does not support spread arguments".into());
+        }
+        let element = match type_args.map(|type_args| type_args.params.as_slice()) {
+            Some([element]) => lower_ts_type(element, self.interfaces, self.generic_interfaces)?,
+            Some(_) => return Err("`Array` expects one type argument".into()),
+            None => element_hint.unwrap_or(HirType::Json),
+        };
+        let length = match args {
+            [single] => {
+                let length = self.lower_expr(&single.expr)?;
+                if self.infer_expr_type(&length)? == HirType::F64 {
+                    Some(length)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some(length) = length else {
+            // A single non-number argument or several arguments are the elements.
+            let literal = Expr::Array(swc_ecma_ast::ArrayLit {
+                span: swc_common::DUMMY_SP,
+                elems: args.iter().cloned().map(Some).collect(),
+            });
+            return self.lower_expr(&literal);
+        };
+        let array_type = HirType::Array(Box::new(element.clone()));
+        let name = format!("__thaw_array_ctor_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), array_type.clone());
+        let body = HirExpr::Block(vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_resize".into())),
+                vec![HirExpr::Var(name.clone()), length],
+            )),
+            HirStmt::Return(Some(HirExpr::Var(name.clone()))),
+        ]);
+        let empty = HirExpr::ArrayAlloc(Box::new(HirExpr::Lit(HirLit::F64(0.0))), element);
+        self.wrap_call_argument_bindings(body, &[(name, array_type, empty)])
+    }
+
+    /// `new Array(n).fill(v)` with no type argument: the element type is `v`'s.
+    fn array_constructor_fill_receiver(&mut self, call: &CallExpr) -> Option<Expr> {
+        let Callee::Expr(callee) = &call.callee else { return None };
+        let Expr::Member(member) = callee.as_ref() else { return None };
+        if !matches!(&member.prop, MemberProp::Ident(p) if p.sym == *"fill") {
+            return None;
+        }
+        let (_, type_args) = Self::array_constructor_parts(&member.obj)?;
+        let value = call.args.first()?;
+        if type_args.is_some() || value.spread.is_some() {
+            return None;
+        }
+        let kind = match self.lower_expr(&value.expr).ok().and_then(|v| self.infer_expr_type(&v).ok())? {
+            HirType::F64 => swc_ecma_ast::TsKeywordTypeKind::TsNumberKeyword,
+            HirType::Str | HirType::StrLiteral(_) => swc_ecma_ast::TsKeywordTypeKind::TsStringKeyword,
+            HirType::Bool => swc_ecma_ast::TsKeywordTypeKind::TsBooleanKeyword,
+            _ => return None,
+        };
+        let instantiation = Box::new(swc_ecma_ast::TsTypeParamInstantiation {
+            span: swc_common::DUMMY_SP,
+            params: vec![Box::new(swc_ecma_ast::TsType::TsKeywordType(
+                swc_ecma_ast::TsKeywordType { span: swc_common::DUMMY_SP, kind },
+            ))],
+        });
+        let mut receiver = member.obj.as_ref().clone();
+        match &mut receiver {
+            Expr::New(new_expr) => new_expr.type_args = Some(instantiation),
+            Expr::Call(inner) => inner.type_args = Some(instantiation),
+            _ => return None,
+        }
+        Some(receiver)
+    }
+
     fn validate_array_callback_value(
         &self,
         callback: HirExpr,
@@ -37,7 +218,7 @@ impl<'a> FnLowerer<'a> {
                         "`Promise.{combinator}` expects an array of promises"
                     ));
                 };
-                if *resolved == HirType::Void {
+                if *resolved == HirType::Void && combinator != "all" {
                     return Err(format!(
                         "`Promise.{combinator}` elements must not resolve to void"
                     ));
@@ -623,6 +804,45 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// `arr.filter(Boolean)` / `arr.map(Number)`: the callback `(x) => Boolean(x)`.
+    fn builtin_conversion_callback(&self, expr: &Expr) -> Option<Expr> {
+        match expr {
+            Expr::Ident(ident)
+                if matches!(ident.sym.as_ref(), "Boolean" | "Number" | "String")
+                    && !self.scope.contains_key(ident.sym.as_ref())
+                    && !self.signatures.contains_key(ident.sym.as_ref()) =>
+            {
+                let span = ident.span;
+                let param = swc_ecma_ast::Ident::new_no_ctxt("x".into(), span);
+                Some(Expr::Arrow(swc_ecma_ast::ArrowExpr {
+                    span,
+                    ctxt: Default::default(),
+                    params: vec![Pat::Ident(swc_ecma_ast::BindingIdent {
+                        id: param.clone(),
+                        type_ann: None,
+                    })],
+                    body: Box::new(swc_ecma_ast::ArrowFunctionBody::Expr(Box::new(Expr::Call(
+                        CallExpr {
+                            span,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(expr.clone())),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(Expr::Ident(param)),
+                            }],
+                            type_args: None,
+                        },
+                    )))),
+                    is_async: false,
+                    is_generator: false,
+                    type_params: None,
+                    return_type: None,
+                }))
+            }
+            _ => None,
+        }
+    }
+
     fn lower_array_callback(
         &mut self,
         expr: &Expr,
@@ -630,6 +850,8 @@ impl<'a> FnLowerer<'a> {
         array_type: &HirType,
         expected_return: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        let conversion = self.builtin_conversion_callback(expr);
+        let expr = conversion.as_ref().unwrap_or(expr);
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
             Expr::Fn(function) => function.function.params.len(),
@@ -779,6 +1001,8 @@ impl<'a> FnLowerer<'a> {
         element_type: &HirType,
         array_type: &HirType,
     ) -> Result<HirExpr, String> {
+        let conversion = self.builtin_conversion_callback(expr);
+        let expr = conversion.as_ref().unwrap_or(expr);
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
             Expr::Fn(function) => function.function.params.len(),
