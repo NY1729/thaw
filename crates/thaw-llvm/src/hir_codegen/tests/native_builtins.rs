@@ -5008,8 +5008,12 @@ fn byte_buffer_numeric_accessors() {
             // Signed wrap-around.
             buf.writeInt8(-2, 1);
             console.log(buf.readInt8(1) + " " + buf.readUInt8(1));
-            // Out of range: read is 0, write is a no-op past the end.
-            console.log(buf.readUInt32BE(6));
+            // Out of range: Node throws ERR_OUT_OF_RANGE.
+            try {
+                console.log(buf.readUInt32BE(6));
+            } catch (e: any) {
+                console.log(e.name + " " + e.code + " " + e.message);
+            }
             // Float round-trip.
             buf.writeFloatLE(1.5, 0);
             console.log(buf.readFloatLE(0));
@@ -5026,7 +5030,7 @@ fn byte_buffer_numeric_accessors() {
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_numeric_accessors"),
-        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n3 001e2832\n14 -1\n3\ntrue 16\n"
+        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\nRangeError ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 and <= 4. Received 6\n1.5\n3 001e2832\n14 -1\n3\ntrue 16\n"
     );
 }
 
@@ -5059,15 +5063,17 @@ fn byte_buffer_variable_width_numeric_accessors() {
             // without BigInt).
             buf.writeIntLE(-123456, 0, 6);
             console.log(buf.readIntLE(0, 6) + " " + buf.readUIntLE(0, 6));
-            // Out of range: read is 0, write is a no-op (no thrown
-            // RangeError across this boundary, matching every other
-            // accessor here).
-            console.log(buf.readUIntBE(7, 3));
+            // Out of range: Node throws ERR_OUT_OF_RANGE.
+            try {
+                console.log(buf.readUIntBE(7, 3));
+            } catch (e: any) {
+                console.log(e.name + " " + e.code + " " + e.message);
+            }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_variable_width_numeric_accessors"),
-        "1234565634120000\n1193046 1193046\n3 11259375\n-2 16777214\n4328719365\n-123456 281474976587200\n0\n"
+        "1234565634120000\n1193046 1193046\n3 11259375\n-2 16777214\n4328719365\n-123456 281474976587200\nRangeError ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 and <= 5. Received 7\n"
     );
 }
 
@@ -5087,10 +5093,7 @@ fn byte_buffer_variable_width_numeric_accessors() {
 /// displays as negative (no genuine unsigned 64-bit type exists),
 /// unlike real Node's arbitrary-precision `BigInt`. Every value below
 /// is cross-checked against a real `node` run of the same `Buffer`
-/// calls (except the final out-of-range read, where real Node throws a
-/// `RangeError` and Thaw instead reads `0`, matching every other
-/// accessor's own established no-throw-across-this-boundary
-/// convention).
+/// calls, including the final out-of-range read (a Node `RangeError`).
 #[test]
 fn byte_buffer_bigint_accessors() {
     let source = r#"
@@ -5125,13 +5128,17 @@ fn byte_buffer_bigint_accessors() {
             console.log(buf.readBigInt64LE(0));
             console.log(buf.readBigUInt64LE(0));
 
-            // Out of range: reads as 0n (no thrown RangeError).
-            console.log(buf.readBigInt64BE(1));
+            // Out of range: Node throws ERR_OUT_OF_RANGE.
+            try {
+                console.log(buf.readBigInt64BE(1));
+            } catch (e: any) {
+                console.log(e.name + " " + e.code + " " + e.message);
+            }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_bigint_accessors"),
-        "0000000000000000\n0n\n0n\nffffffffffffff7f\n9223372036854775807n\n9223372036854775807n\n8\n8000000000000000\n-9223372036854775808n\n-9223372036854775808n\nffffffffffffffff\n-1n\n-1n\n0n\n"
+        "0000000000000000\n0n\n0n\nffffffffffffff7f\n9223372036854775807n\n9223372036854775807n\n8\n8000000000000000\n-9223372036854775808n\n-9223372036854775808n\nffffffffffffffff\n-1n\n-1n\nRangeError ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 and <= 0. Received 1\n"
     );
 }
 
