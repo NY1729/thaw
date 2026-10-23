@@ -2724,6 +2724,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_drain_next_ticks",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_collect_garbage",
             self.context.void_type().fn_type(&[], false),
             Some(Linkage::External),
@@ -3659,6 +3664,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context
                 .i8_type()
                 .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_detach_unhandled",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

@@ -483,12 +483,49 @@ thread_local! {
 /// Registers the QuickJS job barrier hooks for this thread: `queue` returns a
 /// barrier id for the jobs pending now (0 if none), `drain` runs jobs until
 /// that barrier ran. Called once by `thaw-quickjs` when its context is created.
+/// # Safety
+/// `hooks` must be null or point to writable `RuntimeHooks` storage.
 #[no_mangle]
-pub extern "C" fn thaw_runtime_set_js_job_hooks(
+pub unsafe extern "C" fn thaw_runtime_set_js_job_hooks(
     queue: extern "C" fn() -> u64,
     drain: extern "C" fn(u64),
+    hooks: *mut RuntimeHooks,
 ) {
-    JS_JOB_HOOKS.with(|hooks| hooks.set(Some((queue, drain))));
+    JS_JOB_HOOKS.with(|slot| slot.set(Some((queue, drain))));
+    if !hooks.is_null() {
+        // SAFETY: the engine passes a pointer to its own slot, valid for this call.
+        unsafe {
+            *hooks = RuntimeHooks {
+                server_poll: Some(poll_registered_servers),
+                unhandled_failure: Some(peek_unhandled_failure),
+            };
+        }
+    }
+}
+
+/// Runtime callbacks the JS engine can call (same layout as the engine's `RuntimeHooks`).
+#[repr(C)]
+pub struct RuntimeHooks {
+    server_poll: Option<extern "C" fn() -> u8>,
+    unhandled_failure: Option<extern "C" fn() -> u8>,
+}
+
+extern "C" fn peek_unhandled_failure() -> u8 {
+    u8::from(UNHANDLED_FAILURE.with(Cell::get))
+}
+
+thread_local! {
+    /// Native `http.Server` poll registered by thaw-std (bit 0 live, bit 1 callback ran).
+    static SERVER_POLL_HOOK: Cell<Option<extern "C" fn() -> u8>> = const { Cell::new(None) };
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_runtime_set_server_poll_hook(hook: extern "C" fn() -> u8) {
+    SERVER_POLL_HOOK.with(|slot| slot.set(Some(hook)));
+}
+
+extern "C" fn poll_registered_servers() -> u8 {
+    SERVER_POLL_HOOK.with(Cell::get).map_or(0, |hook| hook())
 }
 
 /// Queues a QuickJS job marker behind the jobs pending now (0 if none pending
@@ -772,6 +809,10 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
             continue;
         }
         if thaw_runtime_poll_one() != 0 {
+            continue;
+        }
+        // A native http.Server's listening/close callbacks run here, so code awaiting them proceeds.
+        if poll_registered_servers() & 2 != 0 {
             continue;
         }
         if unsafe { thaw_promise_state(promise) } != 0 {

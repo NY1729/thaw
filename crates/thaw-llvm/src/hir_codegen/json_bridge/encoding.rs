@@ -314,6 +314,15 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(object)
     }
 
+    /// Field order for encoding; console output hides `#private` slots like Node does.
+    fn visible_object_field_order(&self, fields: &[(String, HirType)]) -> Vec<usize> {
+        let mut order = ecmascript_object_field_order(fields);
+        if self.console_omit_absent_fields {
+            order.retain(|&index| !fields[index].0.starts_with("__thaw_private_"));
+        }
+        order
+    }
+
     fn compile_native_object_to_json_with_undefined(
         &mut self,
         object: PointerValue<'ctx>,
@@ -361,7 +370,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
             // Only marker visibility/reveal can alter relative physical order.
             // A copied layout with no marker retains its static key order.
-            for index in ecmascript_object_field_order(fields) {
+            for index in self.visible_object_field_order(fields) {
                 self.compile_native_object_json_field(
                     object, ty, fields, index, json, preserve_undefined,
                 )?;
@@ -369,7 +378,7 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
         let i64_type = self.context.i64_type();
         let mut ranks = Vec::new();
-        for (static_rank, index) in ecmascript_object_field_order(fields).into_iter().enumerate() {
+        for (static_rank, index) in self.visible_object_field_order(fields).into_iter().enumerate() {
             let name = &fields[index].0;
             let key = self.compile_expr(&HirExpr::Lit(HirLit::Str(name.clone())))?
                 .into_pointer_value();
