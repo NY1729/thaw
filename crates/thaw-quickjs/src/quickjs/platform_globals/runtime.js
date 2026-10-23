@@ -2908,9 +2908,14 @@
   });
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
+  // Set once 'exit' was emitted: nothing scheduled after that point ever runs, as in Node.
+  let processExiting = false;
   const nativeDateNow = Date.now.bind(Date);
   // Timer deadlines use the monotonic process clock, so a wall-clock step cannot move them (Node does the same).
   const timerNow = () => Number(thawProcessMonotonicClock()) / 1e6;
+  // Like libuv's cached loop time, refreshed once per loop turn. A 1 ms timer (setTimeout 0 is 1 ms) counts from it,
+  // so timers set by the main script are due on the first turn and fire before setImmediate, as they do in Node.
+  let loopNow = timerNow();
   const nativeDate = Date;
   const nativeReflectConstruct = Reflect.construct;
   const nativeReflectApply = Reflect.apply;
@@ -2965,12 +2970,13 @@
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
     }
+    if (processExiting) return timerHandle(0, null);
     const id = nextTimerId++;
     const milliseconds = alreadyValidatedDelay ? delay : normalizeDelay(delay);
     const clock = forceReal ? null : activeMockClock(api);
     const record = { callback, args, repeat, milliseconds, refed,
                      asyncContext: thawAsyncContext.get(),
-                     clock, due: (clock ? clock.now : timerNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
+                     clock, due: (clock ? clock.now : milliseconds === 1 && api !== 'setImmediate' ? loopNow : timerNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
     timers.set(id, record);
     const handle = timerHandle(id, record);
     const hookBus = globalThis.__thaw_async_hook_bus;
@@ -2982,11 +2988,13 @@
   const destroyTimerResource = timer => {
     if (timer && timer.asyncId) globalThis.__thaw_async_hook_bus.destroy(timer.asyncId);
   };
+  // Node treats a delay below 1 ms as 1 ms, so equal-deadline timers fire in insertion order.
+  const realTimerDelay = (delay, api) => activeMockClock(api) ? delay : normalizeDelay(delay) || 1;
   globalThis.setTimeout = (callback, delay = 0, ...args) =>
-    schedule(callback, delay, false, args, true, 'setTimeout');
+    schedule(callback, realTimerDelay(delay, 'setTimeout'), false, args, true, 'setTimeout');
   globalThis.clearTimeout = id => { const key = Number(id), timer = timers.get(key); if (timer) timer.cancelled = true; timers.delete(key); destroyTimerResource(timer); };
   globalThis.setInterval = (callback, delay = 0, ...args) =>
-    schedule(callback, delay, true, args, true, 'setInterval');
+    schedule(callback, realTimerDelay(delay, 'setInterval'), true, args, true, 'setInterval');
   globalThis.clearInterval = globalThis.clearTimeout;
   globalThis.setImmediate = (callback, ...args) =>
     schedule(callback, 0, false, args, true, 'setImmediate');
@@ -3315,6 +3323,19 @@
     }
     return listeners.length !== 0;
   };
+  // 'exit' is emitted once: a process.exit() inside an exit listener must not recurse.
+  const emitProcessExit = status => {
+    if (processExiting) return;
+    processExiting = true;
+    processEmit('exit', status);
+  };
+  // Host calls at the natural end of the loop: 'beforeExit' (may schedule more work), then 'exit'.
+  globalThis.__thaw_process_before_exit = () => {
+    if (!processExiting) processEmit('beforeExit', Number(globalThis.process.exitCode || 0));
+  };
+  globalThis.__thaw_process_finish = () => {
+    emitProcessExit(Number(globalThis.process.exitCode || 0));
+  };
   const hrtime = previous => {
     const nanoseconds = processClockNanoseconds();
     let seconds = Number(nanoseconds / 1000000000n);
@@ -3553,7 +3574,7 @@
     exit: code => {
       const status = code === undefined ? Number(globalThis.process.exitCode || 0) : Number(code);
       globalThis.process.exitCode = status;
-      processEmit('exit', status);
+      emitProcessExit(status);
       globalThis.__thaw_process_exit(status);
     },
     nextTick,

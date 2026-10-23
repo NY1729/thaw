@@ -1770,3 +1770,19 @@ fn renames_instanceof_value_rhs_and_preserves_external_class_identifiers() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn entry_module_kind_follows_node_syntax_detection() {
+    let kind = |file: &str, source: &str| {
+        module_graph::entry_is_commonjs(std::path::Path::new(file), source).unwrap()
+    };
+    assert!(kind("a.ts", "function main(): void {}"));
+    assert!(kind("a.ts", "import type { X } from './x'; export interface Y {} export type Z = number;"));
+    assert!(kind("a.ts", "import fs = require('fs'); export = fs;"));
+    assert!(!kind("a.ts", "import process from 'node:process';"));
+    assert!(!kind("a.ts", "export const x = 1;"));
+    assert!(!kind("a.ts", "export {};"));
+    assert!(!kind("a.ts", "export default 1;"));
+    assert!(!kind("a.mts", "function main(): void {}"));
+    assert!(kind("a.cts", "function main(): void {}"));
+}
