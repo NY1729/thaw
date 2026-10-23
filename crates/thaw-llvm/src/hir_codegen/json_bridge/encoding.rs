@@ -809,6 +809,27 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_object_set_native_with_undefined(json, key, value, field_type, false, false)
     }
 
+    /// A `Str` handed to a QuickJS dynamic call: a framed `Error` string must reach JS as a real
+    /// Error, so it is converted through `thaw_json_receiver_string` (owned Json) instead of a plain
+    /// string field/element. Native-only marshaling (console, N-API) keeps the plain string.
+    fn compile_dynamic_argument_string(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_receiver_string").unwrap(),
+                &[value.into()],
+                "dynamic_string_argument",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("string argument conversion returned no value")?;
+        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+    }
+
     fn compile_json_object_set_native_with_undefined(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -871,7 +892,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null => value = self.compile_json_null()?,
             _ => {}
         }
+        let dynamic_string = matches!(field_type, HirType::Str) && self.compiling_quickjs_dynamic_arguments;
         let owned = owned
+            || dynamic_string
             || matches!(field_type, HirType::Null | HirType::Undefined | HirType::I64
                 | HirType::Map(..) | HirType::Set(_)
                 | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
@@ -880,6 +903,10 @@ impl<'ctx> HirCompiler<'ctx> {
             || (matches!(field_type, HirType::Symbol) && self.live_native_projection_ledger().is_some());
         let mut setter = match field_type {
                 HirType::F64 => "thaw_json_object_set_number",
+                HirType::Str if dynamic_string => {
+                    value = self.compile_dynamic_argument_string(value)?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::Str => "thaw_json_object_set_string",
                 HirType::Symbol if self.live_native_projection_ledger().is_some() => {
                     let ledger = self.live_native_projection_ledger().unwrap();
@@ -1663,7 +1690,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             _ => {}
         }
-        let generated_owned = matches!(element_type,
+        let dynamic_string = matches!(element_type, HirType::Str) && self.compiling_quickjs_dynamic_arguments;
+        let generated_owned = dynamic_string || matches!(element_type,
             HirType::Null | HirType::Undefined | HirType::Void | HirType::I64
             | HirType::Map(..) | HirType::Set(_)
             | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
@@ -1672,6 +1700,10 @@ impl<'ctx> HirCompiler<'ctx> {
             || (matches!(element_type, HirType::Symbol) && self.live_native_projection_ledger().is_some());
         let push = match element_type {
             HirType::F64 => "thaw_json_array_push_number",
+            HirType::Str if dynamic_string => {
+                value = self.compile_dynamic_argument_string(value)?;
+                "thaw_json_array_push_json"
+            }
             HirType::Str => "thaw_json_array_push_string",
             HirType::Symbol if self.live_native_projection_ledger().is_some() => {
                 let ledger = self.live_native_projection_ledger().unwrap();

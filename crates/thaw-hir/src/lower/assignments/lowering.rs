@@ -682,8 +682,8 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                                 vec![
-                                    self.coerce_primitive_to_string(current)?,
-                                    self.coerce_primitive_to_string(rhs)?,
+                                    self.coerce_concat_operand_to_string(current)?,
+                                    self.coerce_concat_operand_to_string(rhs)?,
                                 ],
                             )
                         } else {
@@ -730,8 +730,8 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                                 vec![
-                                    self.coerce_primitive_to_string(current)?,
-                                    self.coerce_primitive_to_string(rhs)?,
+                                    self.coerce_concat_operand_to_string(current)?,
+                                    self.coerce_concat_operand_to_string(rhs)?,
                                 ],
                             )
                         } else {
@@ -972,7 +972,7 @@ impl<'a> FnLowerer<'a> {
                     let updated = if assign.op == AssignOp::AddAssign && rhs_type == HirType::Str {
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".into())),
-                            vec![self.coerce_primitive_to_string(old)?, value],
+                            vec![self.coerce_concat_operand_to_string(old)?, value],
                         )
                     } else {
                         HirExpr::BinOp(operator,
@@ -1048,8 +1048,8 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_concat".into())),
                                 vec![
-                                    self.coerce_primitive_to_string(old)?,
-                                    self.coerce_primitive_to_string(rhs_value)?,
+                                    self.coerce_concat_operand_to_string(old)?,
+                                    self.coerce_concat_operand_to_string(rhs_value)?,
                                 ],
                             )
                         } else {
@@ -1642,8 +1642,8 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                     vec![
-                        self.coerce_primitive_to_string(current)?,
-                        self.coerce_primitive_to_string(rhs)?,
+                        self.coerce_concat_operand_to_string(current)?,
+                        self.coerce_concat_operand_to_string(rhs)?,
                     ],
                 )
             } else {
