@@ -52,7 +52,7 @@ fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
             out
         }
         "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => String::from_utf16_lossy(
-            &bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect::<Vec<_>>(),
+            &bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect::<Vec<_>>(),
         ),
         "ascii" => bytes.iter().map(|&b| (b & 0x7f) as char).collect(),
         "latin1" | "binary" => bytes.iter().map(|&b| b as char).collect(),
