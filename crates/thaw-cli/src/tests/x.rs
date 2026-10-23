@@ -559,3 +559,17 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn write_manifest(dir: &std::path::Path, manifest: &str) {
     std::fs::write(dir.join("package.json"), manifest).unwrap();
 }
+
+#[test]
+fn cache_root_requires_home_or_xdg_cache_home() {
+    let error = cache_root_from(None, None).unwrap_err();
+    assert!(error.contains("XDG_CACHE_HOME"), "{error}");
+    assert_eq!(
+        cache_root_from(Some("/xdg".into()), None).unwrap(),
+        PathBuf::from("/xdg/thaw")
+    );
+    assert_eq!(
+        cache_root_from(None, Some("/home/u".into())).unwrap(),
+        PathBuf::from("/home/u/.cache/thaw")
+    );
+}
