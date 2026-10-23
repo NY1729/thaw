@@ -434,7 +434,20 @@ impl<'a> FnLowerer<'a> {
         let receiver_name = format!("__thaw_json_array_receiver_{id}");
         let copy_name = format!("__thaw_json_array_copy_{id}");
         let result_name = format!("__thaw_json_array_result_{id}");
-        let array_type = HirType::Array(Box::new(HirType::Json));
+        // A comparator over an array declared `number[]`/`string[]` sees its real element type;
+        // `Json` parameters would reject arithmetic and compare strings wrongly.
+        let declared_element = match member.obj.as_ref() {
+            Expr::Ident(ident) if matches!(name, "sort" | "toSorted") && !call.args.is_empty() => {
+                match self.source_scope.get(&self.resolve_binding(ident.sym.as_ref())) {
+                    Some(HirType::Array(element)) if matches!(**element, HirType::F64 | HirType::Str | HirType::Object(_)) => {
+                        (**element).clone()
+                    }
+                    _ => HirType::Json,
+                }
+            }
+            _ => HirType::Json,
+        };
+        let array_type = HirType::Array(Box::new(declared_element.clone()));
         self.scope.insert(receiver_name.clone(), HirType::Json);
         self.scope.insert(copy_name.clone(), array_type.clone());
         let ident = |name: &str| {
@@ -519,7 +532,12 @@ impl<'a> FnLowerer<'a> {
         let native_non_array = non_array.is_some();
         let non_array = match non_array {
             Some(expr) => expr,
-            None => self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?,
+            None => {
+                self.dynamic_callback_parameter = (declared_element != HirType::Json).then(|| declared_element.clone());
+                let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span);
+                self.dynamic_callback_parameter = None;
+                live?
+            }
         };
         let non_array = if self.infer_expr_type(&non_array)? == HirType::Void {
             HirExpr::EvalThen(Box::new(non_array), Box::new(undefined.clone()))
