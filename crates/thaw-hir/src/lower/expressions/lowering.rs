@@ -5435,6 +5435,13 @@ impl<'a> FnLowerer<'a> {
                 self.lower_promise_new(new_expr)
             }
 
+            Expr::MetaProp(meta) if meta.kind == swc_ecma_ast::MetaPropKind::NewTarget => Err(
+                "SyntaxError: `new.target` is only supported inside a top-level, non-async, non-generator \
+                 function declaration; it is not supported at the top level, in class constructors, \
+                 methods, nested functions or exported functions"
+                    .into(),
+            ),
+
             other => Err(format!(
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
             )),
