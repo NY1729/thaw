@@ -74,6 +74,9 @@ const TOP_LEVEL_INIT_GUARD_SYMBOL: &str = "__thaw_top_level_initialized";
 /// generated-module state preserves the existing function ABI (important for
 /// C FFI) while allowing callers to branch to their nearest lexical catch.
 const PENDING_EXCEPTION_SYMBOL: &str = "__thaw_pending_exception";
+/// Lowest stack address compiled code may reach (0 = no guard, e.g. off the main thread); set at
+/// process entry by `thaw_stack_guard_limit` and checked in every function prologue.
+const STACK_LIMIT_SYMBOL: &str = "__thaw_stack_limit";
 const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// The exact rejection text currently being delivered to a Promise callback.
 /// This scoped provenance lets structural casts distinguish their own string
@@ -478,6 +481,8 @@ pub struct HirCompiler<'ctx> {
     /// Non-arrow Json receivers and live Json literals create owned boxes
     /// that may escape through generated globals or captured arena cells.
     tracks_owned_json_roots: bool,
+    /// Emit the stack-overflow prologue guard; whole-program (`compile_program`) builds only.
+    stack_guard: bool,
     /// True while compiling a QuickJS-backed dynamic call's own JSON-shaped
     /// arguments (set/restored around that one argument-marshaling loop in
     /// `compile_typed_dynamic_call`, so a nested dynamic call compiled
@@ -817,6 +822,7 @@ impl<'ctx> HirCompiler<'ctx> {
             tracks_physical_object_layouts: false,
             tracks_object_integrity: false,
             tracks_owned_json_roots: false,
+            stack_guard: false,
             compiling_quickjs_dynamic_arguments: false,
             validating_native_argument: false,
             fresh_event_key_argument_scopes: Vec::new(),
@@ -830,6 +836,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
+        self.stack_guard = true;
         self.projects_native_objects =
             hir_contains_named_call(program, "__thaw_build_native_object_wrapper")
                 || hir_contains_non_arrow_this_value(program);
@@ -910,6 +917,11 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn declare_exception_state(&self) {
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let stack_limit = self
+            .module
+            .add_global(self.context.i64_type(), None, STACK_LIMIT_SYMBOL);
+        stack_limit.set_linkage(Linkage::Internal);
+        stack_limit.set_initializer(&self.context.i64_type().const_zero());
         let pending = self
             .module
             .add_global(ptr_ty, None, PENDING_EXCEPTION_SYMBOL);
@@ -1985,6 +1997,59 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    /// Function prologue: when the stack is within the guard margin of its end, throw a catchable
+    /// `RangeError` instead of faulting. Costs one load, one compare and a cold branch per call.
+    fn emit_stack_overflow_guard(&mut self) -> Result<(), String> {
+        if !self.stack_guard {
+            return Ok(());
+        }
+        let function = self.current_function();
+        let i64_type = self.context.i64_type();
+        let probe = self.allocate_variable_cell(self.context.i8_type().into(), "stack_probe")?;
+        let sp = self
+            .builder
+            .build_ptr_to_int(probe, i64_type, "stack_pointer")
+            .map_err(|e| e.to_string())?;
+        let limit_slot = self
+            .module
+            .get_global(STACK_LIMIT_SYMBOL)
+            .expect("stack limit is declared with the exception state");
+        let limit = self
+            .builder
+            .build_load(i64_type, limit_slot.as_pointer_value(), "stack_limit")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let overflow = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::ULT, sp, limit, "stack_overflow")
+            .map_err(|e| e.to_string())?;
+        let cold = self.context.append_basic_block(function, "stack_overflow");
+        let ok = self.context.append_basic_block(function, "stack_ok");
+        let weights = self.context.metadata_node(&[
+            self.context.metadata_string("branch_weights").into(),
+            self.context.i32_type().const_int(1, false).into(),
+            self.context.i32_type().const_int(1 << 20, false).into(),
+        ]);
+        let branch = self
+            .builder
+            .build_conditional_branch(overflow, cold, ok)
+            .map_err(|e| e.to_string())?;
+        branch
+            .set_metadata(weights, self.context.get_kind_id("prof"))
+            .map_err(|e| e.to_string())?;
+        self.builder.position_at_end(cold);
+        // The trusted-text marker keeps this cold path free of runtime calls (JIT-mapped modules
+        // must not gain external symbols) and of the arena-owned literal frame.
+        self.compile_stmt(&HirStmt::Throw(HirExpr::Call(
+            Box::new(HirExpr::Var("@@thaw_trusted_exception_text".to_string())),
+            vec![HirExpr::Lit(HirLit::Str(
+                "\u{1}RangeError\u{1}Maximum call stack size exceeded".to_string(),
+            ))],
+        )))?;
+        self.builder.position_at_end(ok);
+        Ok(())
+    }
+
     /// Checks the module exception slot immediately after a generated Thaw
     /// function call. FFI and runtime calls do not participate in this ABI.
     fn branch_on_pending_exception(&mut self) -> Result<(), String> {
@@ -2117,6 +2182,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
+        self.emit_stack_overflow_guard()?;
         let terminated = self.compile_block(&func.body)?;
 
         if !terminated {
