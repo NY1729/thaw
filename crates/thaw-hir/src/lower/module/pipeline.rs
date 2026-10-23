@@ -1349,7 +1349,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             is_extern: false,
                             source_range: (method.span.lo.0, method.span.hi.0),
                             source_length: None,
-                            accessor_owner: matches!(method.kind, MethodKind::Getter | MethodKind::Setter).then(|| name.clone()),
+                            accessor_owner: Some(name.clone()),
                             generic_type_params: Vec::new(),
                             generic_type_constraints: Vec::new(),
                             generic_type_defaults: Vec::new(),
