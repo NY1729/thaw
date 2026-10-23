@@ -1831,6 +1831,11 @@
       "name": "class array foreign object written through any alias keeps identity",
       "expect": "matched",
       "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } } function main(): void { const nat: C[] = []; const v: any = nat; const o: any = { n: 7 }; v[0] = o; console.log(nat[0] === o, nat[0] instanceof C, nat[0].n); }"
+    },
+{
+          "name": "function length counts leading parameters",
+          "expect": "matched",
+          "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
     }
   ]
 }
