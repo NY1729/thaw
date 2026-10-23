@@ -2454,3 +2454,17 @@ fn bare_call_of_this_function_coerces_default_any_parameter_to_json() {
     // A number passed to the closure's physical Json parameter must be boxed and read back as Json.
     assert!(body.contains("JsonGet"), "bare-call argument was not coerced to Json: {body}");
 }
+
+#[test]
+fn flat_over_union_elements_with_array_members_is_rejected_not_nested() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void {
+             const inner: number[] = [2, 3];
+             const a: (number | number[])[] = [1, inner];
+             console.log(JSON.stringify(a.flat(Infinity)));
+         }",
+    )
+    .unwrap();
+    let error = lower_module(&module).expect_err("flat over a union element must be rejected");
+    assert!(error.contains("not supported yet"), "{error}");
+}

@@ -2590,7 +2590,8 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::I64);
                     }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
-                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable" => return Ok(HirType::Bool),
+                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable"
+                    | "__thaw_json_is_primitive_operand" => return Ok(HirType::Bool),
                     "__thaw_console_bytes" => return Ok(HirType::Array(Box::new(HirType::F64))),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),
