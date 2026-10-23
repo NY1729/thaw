@@ -645,6 +645,9 @@ impl<'a> FnLowerer<'a> {
             if callee_name == "Number" && ty == HirType::F64 {
                 return Ok(value);
             }
+            if callee_name == "Number" && ty == HirType::I64 {
+                return self.bigint_to_number(value);
+            }
             if callee_name == "Number" && ty == HirType::Bool {
                 return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),

@@ -3518,6 +3518,18 @@ impl<'a> FnLowerer<'a> {
                     (source, source_type) = self.lower_union_array_sequence(source, members)?;
                             }
                         }
+                        if !has_spread && class_name_from_type(&source_type).is_some() {
+                            // A user iterable class collects like `[...source]`.
+                            let spread = Expr::Array(swc_ecma_ast::ArrayLit {
+                                span: swc_common::DUMMY_SP,
+                                elems: vec![Some(swc_ecma_ast::ExprOrSpread {
+                                    spread: Some(swc_common::DUMMY_SP),
+                                    expr: call.args[0].expr.clone(),
+                                })],
+                            });
+                            source = self.lower_expr(&spread)?;
+                            source_type = self.infer_expr_type(&source)?;
+                        }
                         if let HirType::Object(fields) = &source_type {
                             if let [(field_name, HirType::F64)] = fields.as_slice() {
                                 if field_name == "length" {
