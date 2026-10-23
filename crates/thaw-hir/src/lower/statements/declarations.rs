@@ -851,7 +851,17 @@ impl<'a> FnLowerer<'a> {
                                 }
                         )
                 );
-                let inferred_expected = if annotated.is_none() && dynamic_call {
+                // `const r = await fetch(u)` whose `r` is used as a receiver (`r.status`) is a Response.
+                let awaited_fetch = matches!(init, Expr::Await(a)
+                    if matches!(a.arg.as_ref(), Expr::Call(c)
+                        if matches!(&c.callee, Callee::Expr(e)
+                            if matches!(e.as_ref(), Expr::Ident(i) if &*i.sym == "fetch"))));
+                let inferred_expected = if annotated.is_none()
+                    && awaited_fetch
+                    && self.member_receiver_bindings.contains(&name)
+                {
+                    Some(HirType::JsValue)
+                } else if annotated.is_none() && dynamic_call {
                     if self.awaited_bindings.contains(&name) {
                         Some(HirType::Dynamic)
                     } else if self.member_receiver_bindings.contains(&name) {
