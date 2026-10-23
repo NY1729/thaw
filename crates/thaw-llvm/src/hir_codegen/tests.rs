@@ -526,6 +526,7 @@ include!("tests/aa_contracts.rs");
 include!("tests/ci_contracts.rs");
 include!("tests/uc_contracts.rs");
 include!("tests/function_length_contracts.rs");
+include!("tests/errfam_contracts.rs");
 include!("tests/lv_contracts.rs");
 include!("tests/rm_contracts.rs");
 include!("tests/hs_contracts.rs");
