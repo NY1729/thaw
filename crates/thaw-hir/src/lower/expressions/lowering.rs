@@ -2836,9 +2836,13 @@ impl<'a> FnLowerer<'a> {
                         // the JS realm's default-hint `+` operator.
                         let live = self.infer_expr_type(&lhs)? == HirType::JsValue
                             || self.infer_expr_type(&rhs)? == HirType::JsValue;
+                        let json_side = Self::add_operand_is_json(&self.infer_expr_type(&lhs)?)
+                            || Self::add_operand_is_json(&self.infer_expr_type(&rhs)?);
                         if live {
                             let added = self.lower_add_with_live_json(lhs, rhs)?;
                             self.coerce_to_declared(&HirType::Str, added)?
+                        } else if json_side {
+                            self.lower_add_json_guarded(lhs, rhs, true)?
                         } else {
                             self.lower_add_with_to_primitive(lhs, rhs)?
                         }
@@ -2877,7 +2881,9 @@ impl<'a> FnLowerer<'a> {
                                 || self.infer_expr_type(&rhs)?
                                     == HirType::Optional(Box::new(HirType::Json))) =>
                     {
-                        self.lower_add_with_to_primitive(lhs, rhs)?
+                        // A Json operand may be a live host handle: JS picks the
+                        // default-hint ToPrimitive, not the string/number hint.
+                        self.lower_add_json_guarded(lhs, rhs, false)?
                     }
                     other
                         if (matches!(
