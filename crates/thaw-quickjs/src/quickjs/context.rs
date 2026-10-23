@@ -1277,6 +1277,11 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_process_exit", exit)
                     .expect("failed to install process exit bridge");
+                let syscall = Function::new(ctx.clone(), process_syscall)
+                    .expect("failed to create process syscall bridge");
+                ctx.globals()
+                    .set("__thaw_process_syscall", syscall)
+                    .expect("failed to install process syscall bridge");
                 let configure_signal = Function::new(ctx.clone(), configure_process_signal)
                     .expect("failed to create process signal bridge");
                 ctx.globals()

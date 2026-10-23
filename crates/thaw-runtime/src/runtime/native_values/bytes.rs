@@ -51,6 +51,9 @@ fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
             }
             out
         }
+        "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => String::from_utf16_lossy(
+            &bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect::<Vec<_>>(),
+        ),
         "ascii" => bytes.iter().map(|&b| (b & 0x7f) as char).collect(),
         "latin1" | "binary" => bytes.iter().map(|&b| b as char).collect(),
         // "utf8" / "utf-8" / anything else: lossy UTF-8 decode.
@@ -99,6 +102,9 @@ fn decode_string(text: &[u8], encoding: &str) -> Vec<u8> {
                 }
             }
             out
+        }
+        "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => {
+            wtf8_decode_utf16(text).into_iter().flat_map(u16::to_le_bytes).collect()
         }
         "latin1" | "binary" | "ascii" => wtf8_decode_utf16(text).into_iter().map(|unit| unit as u8).collect(),
         _ => wtf8_to_well_formed(text),

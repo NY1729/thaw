@@ -103,6 +103,25 @@ impl<'a> FnLowerer<'a> {
                 vec![HirExpr::Lit(HirLit::Str("ReferenceError".into())), message],
             ));
         }
+        // `process.hrtime.bigint()`: a BigInt cannot cross the JSON boundary of a
+        // dynamic `process` call, so rebuild the exact value from `hrtime()`'s
+        // `[seconds, nanoseconds]` pair as a native bigint.
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(bigint) = callee.as_ref() {
+                if let (Expr::Member(hrtime), MemberProp::Ident(property)) = (bigint.obj.as_ref(), &bigint.prop) {
+                    if let (Expr::Ident(process), MemberProp::Ident(method)) = (hrtime.obj.as_ref(), &hrtime.prop) {
+                        if property.sym == "bigint"
+                            && method.sym == "hrtime"
+                            && process.sym == "process"
+                            && call.args.is_empty()
+                            && !self.scope.contains_key(&self.resolve_binding("process"))
+                        {
+                            return self.lower_expr(&hrtime_bigint_expression(process.sym.as_ref()));
+                        }
+                    }
+                }
+            }
+        }
         if matches!(
             &call.callee,
             Callee::Expr(callee)
@@ -3204,6 +3223,25 @@ impl<'a> FnLowerer<'a> {
                 // fewer either (an optional trailing parameter, like
                 // `size?` above, can legitimately be omitted; arity is
                 // somebody else's job, not this coercion step's).
+                // `fs.readSync(fd, buf, offset, ..)` declares `buf: any`, so a
+                // native Buffer reaches QuickJS as a copy and the bytes read
+                // never come back. Keep the (side-effect free) buffer and
+                // offset operands to copy them back after the call.
+                let read_sync_writeback = if symbol == "node:fs::readSync"
+                    && call.args.len() == 5
+                    && call.args.iter().all(|argument| argument.spread.is_none())
+                    && matches!(call.args[1].expr.as_ref(), Expr::Ident(_))
+                    && matches!(call.args[2].expr.as_ref(), Expr::Ident(_) | Expr::Lit(_))
+                {
+                    let buffer = self.lower_expr(&call.args[1].expr)?;
+                    if self.infer_expr_type_inner(&buffer)? == HirType::Bytes {
+                        Some((buffer, self.lower_expr(&call.args[2].expr)?))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let fixed_count = params.len().min(args.len());
                 let mut args = args.into_iter();
                 let mut coerced_args = params
@@ -3334,7 +3372,7 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     params
                 };
-                let result = HirExpr::DynamicCall(
+                let mut result = HirExpr::DynamicCall(
                     DynamicSignature {
                         backend,
                         symbol,
@@ -3343,6 +3381,34 @@ impl<'a> FnLowerer<'a> {
                     },
                     args,
                 );
+                if let Some((buffer, offset)) = read_sync_writeback {
+                    let count = format!("__thaw_read_sync_count_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(count.clone(), HirType::F64);
+                    let fill = HirExpr::DynamicCall(
+                        DynamicSignature {
+                            backend,
+                            symbol: "node:fs::__thawTakeReadSync".into(),
+                            params: Vec::new(),
+                            ret: HirType::Bytes,
+                        },
+                        Vec::new(),
+                    );
+                    let copy = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_bytes_copy".into())),
+                        vec![
+                            fill,
+                            buffer,
+                            offset,
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                            HirExpr::Lit(HirLit::F64(-1.0)),
+                        ],
+                    );
+                    result = self.wrap_call_argument_bindings(
+                        HirExpr::EvalThen(Box::new(copy), Box::new(HirExpr::Var(count.clone()))),
+                        &[(count, HirType::F64, result)],
+                    )?;
+                }
                 return self.wrap_call_argument_bindings(result, &argument_bindings);
             }
             // A plain (non-`__thaw_typed_*`) generic extern function's own
@@ -3883,4 +3949,57 @@ impl<'a> FnLowerer<'a> {
             ],
         )
     }
+}
+
+/// `((t: any) => BigInt(Number(t[0])) * BigInt(1000000000) + BigInt(Number(t[1])))(process.hrtime())`
+fn hrtime_bigint_expression(process: &str) -> Expr {
+    use swc_common::{SyntaxContext, DUMMY_SP};
+    use swc_ecma_ast::*;
+    let ident = |name: &str| Ident::new_no_ctxt(name.into(), DUMMY_SP);
+    let call = |callee: Expr, args: Vec<Expr>| {
+        Expr::Call(CallExpr {
+            span: DUMMY_SP,
+            ctxt: SyntaxContext::empty(),
+            callee: Callee::Expr(Box::new(callee)),
+            args: args.into_iter().map(|expr| ExprOrSpread { spread: None, expr: Box::new(expr) }).collect(),
+            type_args: None,
+        })
+    };
+    let number = |value: f64| Expr::Lit(Lit::Num(swc_ecma_ast::Number { span: DUMMY_SP, value, raw: None }));
+    let part = |index: f64| {
+        let element = Expr::Member(MemberExpr {
+            span: DUMMY_SP,
+            obj: Box::new(Expr::Ident(ident("__thaw_hr"))),
+            prop: MemberProp::Computed(ComputedPropName { span: DUMMY_SP, expr: Box::new(number(index)) }),
+        });
+        call(Expr::Ident(ident("BigInt")), vec![call(Expr::Ident(ident("Number")), vec![element])])
+    };
+    let scale = call(Expr::Ident(ident("BigInt")), vec![number(1_000_000_000.0)]);
+    let binary = |op: BinaryOp, left: Expr, right: Expr| {
+        Expr::Bin(BinExpr { span: DUMMY_SP, op, left: Box::new(left), right: Box::new(right) })
+    };
+    let body = binary(BinaryOp::Add, binary(BinaryOp::Mul, part(0.0), scale), part(1.0));
+    let parameter = Pat::Ident(BindingIdent {
+        id: ident("__thaw_hr"),
+        type_ann: Some(Box::new(TsTypeAnn {
+            span: DUMMY_SP,
+            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType { span: DUMMY_SP, kind: TsKeywordTypeKind::TsAnyKeyword })),
+        })),
+    });
+    let arrow = Expr::Arrow(ArrowExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        params: vec![parameter],
+        body: Box::new(ArrowFunctionBody::Expr(Box::new(body))),
+        is_async: false,
+        is_generator: false,
+        type_params: None,
+        return_type: None,
+    });
+    let hrtime = Expr::Member(MemberExpr {
+        span: DUMMY_SP,
+        obj: Box::new(Expr::Ident(ident(process))),
+        prop: MemberProp::Ident(IdentName::new("hrtime".into(), DUMMY_SP)),
+    });
+    call(Expr::Paren(ParenExpr { span: DUMMY_SP, expr: Box::new(arrow) }), vec![call(hrtime, Vec::new())])
 }
