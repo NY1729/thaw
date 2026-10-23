@@ -2634,6 +2634,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 let placeholder = self.compile_dynamic_value_placeholder_unchecked(value)?;
                 self.compile_json_array_push_owned(array, placeholder)
             }
+            // A framed `Error` string must reach JS as a real Error, not its wire text.
+            HirType::Str => {
+                let json = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_receiver_string").unwrap(),
+                        &[value.into()],
+                        "dynamic_string_argument",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string argument conversion returned no value")?;
+                let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+                self.compile_json_array_push_owned(array, json)
+            }
             _ => self.compile_json_array_push_native(array, value, ty),
         }
     }

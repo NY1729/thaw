@@ -45,6 +45,17 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
     }
 
+    /// `err.constructor` of a framed error string: the live global class of its most-derived name.
+    pub(crate) fn error_constructor_value(error: HirExpr) -> HirExpr {
+        HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_constructor_name".into())),
+                vec![error],
+            )],
+        )
+    }
+
     fn optional_fixed_object_property_read_type(
         fields: &[(Symbol, HirType)],
         property: &str,
@@ -92,6 +103,12 @@ impl<'a> FnLowerer<'a> {
                 _ => None,
             };
             let framed_field = match error_helper {
+                _ if property == "constructor" => {
+                    let constructor = Self::error_constructor_value(
+                        HirExpr::UnionValue(Box::new(bound.clone()), 3, elements.to_vec()),
+                    );
+                    self.coerce_to_declared(&HirType::Json, constructor)?
+                }
                 Some(helper) => HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_json_receiver_string".into())),
                     vec![HirExpr::Call(
