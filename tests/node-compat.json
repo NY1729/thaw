@@ -1992,6 +1992,17 @@
       "name": "fetch Response from a local http server",
       "expect": "matched",
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
+    },
+    {
+      "name": "sync throw escaping main exits with failure",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void { console.log('before'); throw new Error('sync fatal'); }"
+    },
+    {
+      "name": "unannotated await fetch is a Response",
+      "expect": "matched",
+      "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.end('hi'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok); console.log(await r.text()); srv.close(); }"
     }
   ]
 }
