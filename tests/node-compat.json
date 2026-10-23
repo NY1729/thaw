@@ -1979,6 +1979,81 @@
       "source": "class A {\n  constructor() { this.init(); }\n  init(): void { console.log(\"A.init\"); }\n  who(): string { return \"A\"; }\n}\nclass B extends A {\n  init(): void { console.log(\"B.init\"); }\n  who(): string { return \"B\"; }\n}\nclass C extends B {\n  who(): string { return \"C+\" + super.who(); }\n}\nfunction describe(x: A): string { return x.who(); }\nfunction main(): void {\n  new A();\n  new B();\n  new C();\n  const list: A[] = [new A(), new B(), new C()];\n  console.log(describe(new C()), list.map((x) => x.who()).join());\n}"
     },
     {
+      "name": "valid ts rejects: any let reassign",
+      "expect": "matched",
+      "source": "function main(): void {\n  let a: any = 5; a = \"s\"; console.log(a);\n  let b: any = \"s\"; b = true; console.log(b);\n  let c: any = null; c = 4; console.log(c);\n  let d: any = \"x\"; d = 8; console.log(d);\n  let n: any = null, z: any = 0, e: any = \"\", f: any = \"x\";\n  n ??= 5; z ||= 6; e &&= 7; f &&= 8;\n  console.log(n, z, e, f);\n}"
+    },
+    {
+      "name": "valid ts rejects: array constructor",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = new Array(3);\n  console.log(a.length);\n  const b = Array(3).fill(0);\n  console.log(b.join(\",\"));\n  const c = new Array<number>(2).fill(1);\n  console.log(c);\n  const d: number[] = new Array(4);\n  d[1] = 7;\n  console.log(d.length, d[1]);\n  const e = new Array(4).fill(\"x\");\n  console.log(e.join(\"-\"));\n  const f = new Array(1, 2, 3);\n  console.log(f);\n  const g = new Array(3).fill(true).map((v, i) => i);\n  console.log(g);\n  const h: string[] = Array(2).fill(\"q\");\n  console.log(h);\n  console.log([...Array(3).keys()]);\n  const u = new Array(3);\n  u[0] = 5; u[1] = \"s\";\n  console.log(u[0], u[1], u.length);\n  const grid = Array.from({ length: 2 }, () => new Array(2).fill(0));\n  grid[1][0] = 3;\n  console.log(grid);\n  console.log(new Array(3).fill(0).map((_, i) => i * i));\n}"
+    },
+    {
+      "name": "valid ts rejects: arrow field inference",
+      "expect": "matched",
+      "source": "class Counter {\n  count = 0;\n  label = \"c\";\n  inc = () => { this.count++; };\n  add = (by: number) => { this.count += by; };\n  show = () => this.label + this.count;\n  double = (x: number) => { return x * 2; };\n}\nfunction main(): void {\n  const c = new Counter();\n  c.inc(); c.add(5);\n  const f = c.show;\n  console.log(f(), c.double(4));\n}"
+    },
+    {
+      "name": "valid ts rejects: await plain value iife",
+      "expect": "matched",
+      "source": "async function h(): Promise<void> { await null; console.log(\"h\"); }\nasync function main(): Promise<void> {\n  console.log(\"start\");\n  const pending = (async () => {\n    await null;\n    console.log(\"iife after null\");\n  })();\n  console.log(\"sync\");\n  await pending;\n  await h();\n  const x = await 5;\n  const s = await \"str\";\n  console.log(x, s);\n  const f = async () => { const y = await 7; console.log(y); };\n  await f();\n  const v = await (async () => { await Promise.resolve(1); return 5; })();\n  console.log(v);\n}"
+    },
+    {
+      "name": "valid ts rejects: bigint operators",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(~5n, ~-1n, 1n < 2, 10n > 5, 3n == 3, 5n != 5, 2n > 1.5, 5n == 5.5);\n  console.log(!!0n, !!7n, 0n ? \"a\" : \"b\", 0n || 9, 1n && 2n);\n  console.log(2n ** 10n, 3n ** 20n, Number(5n) + 1);\n  let n = 3n;\n  if (n) console.log(\"truthy\");\n  n = 0n;\n  if (!n) console.log(\"falsy\");\n}"
+    },
+    {
+      "name": "valid ts rejects: builtin conversion callbacks",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log([0, 1, 2, 0, 3].filter(Boolean));\n  console.log([\"a\", \"\", \"b\"].filter(Boolean).length);\n  console.log([\"1\", \"2\"].map(Number));\n  console.log([1, 2].map(String));\n}"
+    },
+    {
+      "name": "valid ts rejects: class constructor name",
+      "expect": "matched",
+      "source": "class Animal { speak(): string { return \"...\"; } }\nclass Dog extends Animal { speak(): string { return \"woof\"; } }\nclass Puppy extends Dog {}\nfunction describe(a: Animal): string { return a.constructor.name + \":\" + a.speak(); }\nfunction main(): void {\n  const d = new Dog();\n  console.log(d.constructor.name, new Animal().constructor.name, new Puppy().constructor.name);\n  console.log(describe(new Dog()), describe(new Puppy()), describe(new Animal()));\n  console.log(d.constructor === Dog, d.constructor === Animal, d.constructor !== Dog);\n  const list: Animal[] = [new Animal(), new Dog()];\n  for (const a of list) console.log(a.constructor.name, a.constructor === Dog);\n}"
+    },
+    {
+      "name": "valid ts rejects: class iterable spread",
+      "expect": "matched",
+      "source": "class R {\n  n: number;\n  constructor(n: number) { this.n = n; }\n  *[Symbol.iterator](): Generator<number> { for (let i = 0; i < this.n; i++) yield i; }\n}\nfunction main(): void {\n  for (const x of new R(3)) console.log(x);\n  console.log([...new R(2)]);\n  console.log([9, ...new R(2), 8]);\n  const a = Array.from(new R(3));\n  console.log(a.length, a[0], a[2]);\n  const b = Array.from(new R(2), (x) => x * 2);\n  console.log(b.join(\",\"));\n}"
+    },
+    {
+      "name": "valid ts rejects: math function values",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log([1.5, 2.5, -1.2].map(Math.floor));\n  console.log([-1, 2].map(Math.abs));\n  const f = Math.max;\n  console.log(f(1, 5, 3));\n  const g = Math.min;\n  console.log(g(4, 2), g());\n  const p = Math.pow;\n  console.log(p(2, 10), [4, 9].map(Math.sqrt));\n}"
+    },
+    {
+      "name": "valid ts rejects: optional on any",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: any = { a: { c: () => 5, d: (x: number) => x + 1 }, arr: [1] };\n  console.log(o.a.c?.());\n  console.log(o.z?.());\n  console.log(o.a.zz?.());\n  console.log(o.a.d?.(4));\n  console.log(o.arr?.[0], o.q?.[0]);\n  let calls = 0;\n  const f = () => { calls++; return 1; };\n  console.log(o.nothing?.[f()], calls);\n  const i = 0;\n  console.log(o.arr?.[i]);\n}"
+    },
+    {
+      "name": "valid ts rejects: promise all plain values",
+      "expect": "matched",
+      "source": "async function d(x: number): Promise<number> { await Promise.resolve(0); return x * 2; }\nasync function main(): Promise<void> {\n  const r = await Promise.all([1, Promise.resolve(2), d(3)]);\n  console.log(r.join(\",\"));\n  const w = await Promise.all([\"a\", Promise.resolve(\"b\")]);\n  console.log(w.join(\",\"));\n}"
+    },
+    {
+      "name": "valid ts rejects: promise all void array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const out: number[] = [];\n  const arr = [1, 2, 3];\n  await Promise.all(arr.map(async (n) => { out.push(n * 2); }));\n  console.log(out.join(\",\"));\n  const r = await Promise.all(arr.map(async (n) => n + 1));\n  console.log(r.join(\",\"));\n  const tasks = [1, 2].map(async (n) => { await Promise.resolve(n); console.log(\"task\", n); });\n  await Promise.all(tasks);\n  console.log(\"end\");\n}"
+    },
+    {
+      "name": "valid ts rejects: unary plus string",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s: string = \"12\";\n  console.log(+s + 1, +\"3.5\", +\"abc\");\n  const t = \"  7 \";\n  console.log(+t, +true, +\"\", +\" 0x10 \", +\"1e3\", +\"-5\");\n  const a: any = \"42\";\n  const arr = [\"1\", \"2\"];\n  console.log(+a, +arr[1]);\n  console.log([\"10\", \"20\"].map((x) => +x).reduce((p, c) => p + c, 0));\n}"
+    },
+    {
+      "name": "valid ts rejects: optional member call chain",
+      "expect": "matched",
+      "source": "function main(): void {\n  const t: { a?: { f?: () => number } } = { a: { f: () => 3 } };\n  console.log(t.a?.f?.());\n  const u: { a?: { f?: () => number } } = {};\n  console.log(u.a?.f?.());\n  const v: { a?: { f?: () => number } } = { a: {} };\n  console.log(v.a?.f?.());\n}"
+    },
+    {
+      "name": "valid ts rejects: string index read",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s = \"Hello\";\n  console.log(s[1], s[s.length - 1], s[0] + s[4]);\n  let n = 0;\n  for (let i = 0; i < s.length; i++) { if (s[i] === \"l\") n++; }\n  console.log(n);\n  const words = [\"ab\", \"cd\"];\n  console.log(words[1][0], words.map((w) => w[1]).join(\"\"));\n}"
+    },
+    {
       "name": "process version is a v22 string",
       "expect": "matched",
       "source": "function main(): void { console.log(process.version.startsWith('v22.'), typeof process.versions.node); }"

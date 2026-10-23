@@ -976,6 +976,13 @@ fn decimal_magnitude(text: &str) -> (bool, String) {
     (negative && digits != "0", digits.to_string())
 }
 
+/// `base ** exp` for fixed-width native `bigint` values; wraps on overflow like the
+/// other native `bigint` operators and yields 0 for a negative exponent.
+#[no_mangle]
+pub extern "C" fn thaw_bigint_pow(base: i64, exp: i64) -> i64 {
+    u32::try_from(exp).map_or(0, |exp| base.wrapping_pow(exp))
+}
+
 #[no_mangle]
 /// Compares two decimal integer strings (`BigInt.prototype.toString()`
 /// output) as `-1`/`0`/`1`. Lets a fixed-width native `bigint` be compared

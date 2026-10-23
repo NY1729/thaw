@@ -348,6 +348,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_string_trim_start"
                         | "__thaw_string_trim_end" => return Some(HirType::Str),
                         "__thaw_i64_to_string"
+                        | "__thaw_object_class_name"
                         | "__thaw_i64_to_bigint_string"
                         | "__thaw_i64_to_radix_string" => return Some(HirType::Str),
                         "__thaw_i64_from_number"
@@ -369,6 +370,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "__thaw_string_length"
                         | "__thaw_string_to_number"
                         | "__thaw_bool_to_number"
+                        | "__thaw_i64_to_number"
                         | "__thaw_parse_int"
                         | "__thaw_parse_float" => return Some(HirType::F64),
                         // The manual dynamic-value escape hatches
@@ -682,7 +684,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 BinOp::Gt => self.builder.build_int_compare(IntPredicate::SGT, lhs, rhs, "bigint_gt"),
                 BinOp::LtEq => self.builder.build_int_compare(IntPredicate::SLE, lhs, rhs, "bigint_le"),
                 BinOp::GtEq => self.builder.build_int_compare(IntPredicate::SGE, lhs, rhs, "bigint_ge"),
-                BinOp::Exp => return Err("bigint exponentiation is not implemented".into()),
+                BinOp::Exp => {
+                    return self
+                        .builder
+                        .build_call(
+                            self.module.get_function("thaw_bigint_pow").unwrap(),
+                            &[lhs.into(), rhs.into()],
+                            "bigint_pow",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| "thaw_bigint_pow did not return a value".to_string())
+                }
                 BinOp::ZeroFillRShift | BinOp::EqEqEq => unreachable!(),
             }
             .map(Into::into)
