@@ -485,6 +485,21 @@ fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
     Ok(merged)
 }
 
+/// `Function.prototype.length` of a declared function: the leading parameters
+/// before the first default-valued or rest parameter. TypeScript `?` markers
+/// are erased by SWC's pattern, so optional parameters still count.
+fn source_parameter_count(params: &[swc_ecma_ast::Param]) -> usize {
+    params
+        .iter()
+        .take_while(|parameter| {
+            !matches!(
+                parameter.pat,
+                swc_ecma_ast::Pat::Assign(_) | swc_ecma_ast::Pat::Rest(_)
+            )
+        })
+        .count()
+}
+
 fn generic_receiver_pattern_from_annotation(
     ty: &TsType,
     substitutions: &HashMap<Symbol, GenericTypePattern>,
@@ -870,6 +885,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: func.this_param.is_some(),
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
+                        source_length: Some(source_parameter_count(&func.params)),
                         accessor_owner: None,
                         generic_type_params: generic_type_params.clone(),
                         generic_type_constraints,
@@ -995,6 +1011,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
+                        source_length: None,
                         accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),
@@ -1035,6 +1052,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
+                        source_length: None,
                         accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),
@@ -1216,6 +1234,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             uses_this: function_uses_this(&method.function),
                             is_extern: false,
                             source_range: (method.span.lo.0, method.span.hi.0),
+                            source_length: None,
                             accessor_owner: matches!(method.kind, MethodKind::Getter | MethodKind::Setter).then(|| name.clone()),
                             generic_type_params: Vec::new(),
                             generic_type_constraints: Vec::new(),
@@ -1668,6 +1687,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         uses_this: false,
                         is_extern: false,
                         source_range,
+                        source_length: None,
                         accessor_owner: None,
                         generic_type_params: Vec::new(),
                         generic_type_constraints: Vec::new(),
@@ -1743,6 +1763,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             uses_this: false,
                             is_extern: false,
                             source_range,
+                            source_length: None,
                             accessor_owner: None,
                             generic_type_params: Vec::new(),
                             generic_type_constraints: Vec::new(),
