@@ -139,6 +139,10 @@ struct FnSignature {
     /// `HirExpr::FfiCall`, not `HirExpr::Call`.
     is_extern: bool,
     source_range: (u32, u32),
+    /// `length` a plain top-level function declaration reports; `None` for every
+    /// other signature (arrows, classes, methods, specializations), which stay
+    /// rejected when read as `.length`.
+    source_length: Option<usize>,
     /// Original class declaring an accessor; inherited signature clones keep this owner.
     accessor_owner: Option<Symbol>,
     generic_type_params: Vec<Symbol>,
