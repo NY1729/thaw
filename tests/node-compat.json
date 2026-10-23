@@ -1831,6 +1831,11 @@
       "name": "class array foreign object written through any alias keeps identity",
       "expect": "matched",
       "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } } function main(): void { const nat: C[] = []; const v: any = nat; const o: any = { n: 7 }; v[0] = o; console.log(nat[0] === o, nat[0] instanceof C, nat[0].n); }"
+    },
+    {
+      "name": "new on any-held plain function declaration runs body",
+      "expect": "matched",
+      "source": "function plain(): void { console.log(\"plain body ran\"); } function main(): void { const p: any = plain; try { const o = new p(); console.log(\"c2c ok\", typeof o); } catch (e: any) { console.log(\"c2c threw\", e && e.name, e && e.message); } }"
     }
   ]
 }
