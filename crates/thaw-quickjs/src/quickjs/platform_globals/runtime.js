@@ -3359,6 +3359,7 @@
   globalThis.__thaw_process_before_exit = () => {
     if (!processExiting) processEmit('beforeExit', Number(globalThis.process.exitCode || 0));
   };
+  globalThis.__thaw_process_fail = emitProcessExit;
   globalThis.__thaw_process_finish = () => {
     emitProcessExit(Number(globalThis.process.exitCode || 0));
   };

@@ -2631,6 +2631,16 @@ fn unhandled_timer_exception_fails_the_event_loop() {
 }
 
 #[test]
+fn exit_event_is_emitted_with_code_1_when_the_loop_fails() {
+    assert_eq!(
+        load("globalThis.exitSeen = []; process.on('exit', code => exitSeen.push(code)); setTimeout(() => { throw new Error('boom'); }, 0);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 1);
+    assert_eq!(eval_json("exitSeen"), Ok(Some("[1]".into())));
+}
+
+#[test]
 fn unhandled_js_promise_rejection_reaches_the_process_event_surface() {
     // Node's default (`--unhandled-rejections=throw`): offered to 'unhandledRejection' first.
     assert_eq!(

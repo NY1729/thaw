@@ -2650,6 +2650,57 @@ struct Server {
     on: *const NativeClosure,
     on_error: *const NativeClosure,
     listen_with_host_callback: *const NativeClosure,
+    address: *const NativeClosure,
+}
+
+#[repr(C)]
+struct NativeServerAddress {
+    address: *const c_char,
+    family: *const c_char,
+    port: f64,
+}
+
+/// Physical layout of `T | null` (presence tag plus payload).
+#[repr(C)]
+struct NativeNullableAddress {
+    present: u8,
+    payload: *const NativeServerAddress,
+}
+
+/// `server.address()`: `{ address, family, port }` of the bound listener, `null` when not listening.
+unsafe extern "C" fn server_address(environment: *const c_void) -> NativeNullableAddress {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    let Some(bound) = state
+        .listener
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|l| l.local_addr().ok())
+    else {
+        return NativeNullableAddress {
+            present: 0,
+            payload: std::ptr::null(),
+        };
+    };
+    let object = thaw_arena::thaw_arena_alloc(std::mem::size_of::<NativeServerAddress>(), 8)
+        .cast::<NativeServerAddress>();
+    if object.is_null() {
+        return NativeNullableAddress {
+            present: 0,
+            payload: std::ptr::null(),
+        };
+    }
+    // ponytail: the two small strings are never freed; add arena ownership if address() is polled hot.
+    object.write(NativeServerAddress {
+        address: thaw_arena::owned_string(bound.ip().to_string()),
+        family: thaw_arena::owned_string(if bound.is_ipv4() { "IPv4" } else { "IPv6" }),
+        port: f64::from(bound.port()),
+    });
+    NativeNullableAddress {
+        present: 1,
+        payload: object,
+    }
 }
 
 unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
@@ -2877,6 +2928,10 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_listen_with_host_callback as *const c_void,
         context: state.cast(),
     }));
+    let address = Box::into_raw(Box::new(NativeClosure {
+        code: server_address as *const c_void,
+        context: state.cast(),
+    }));
     let server = Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
@@ -2886,6 +2941,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         on,
         on_error,
         listen_with_host_callback,
+        address,
     }));
     let state_address = state as usize;
     thaw_arena::replace_reference(server as usize, 0, state_address);
@@ -2898,6 +2954,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         on,
         on_error,
         listen_with_host_callback,
+        address,
     ] {
         thaw_arena::replace_reference(closure as usize, 0, state_address);
     }

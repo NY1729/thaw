@@ -1957,6 +1957,16 @@
       "name": "virtual dispatch in base constructor",
       "expect": "matched",
       "source": "class A {\n  constructor() { this.init(); }\n  init(): void { console.log(\"A.init\"); }\n  who(): string { return \"A\"; }\n}\nclass B extends A {\n  init(): void { console.log(\"B.init\"); }\n  who(): string { return \"B\"; }\n}\nclass C extends B {\n  who(): string { return \"C+\" + super.who(); }\n}\nfunction describe(x: A): string { return x.who(); }\nfunction main(): void {\n  new A();\n  new B();\n  new C();\n  const list: A[] = [new A(), new B(), new C()];\n  console.log(describe(new C()), list.map((x) => x.who()).join());\n}"
+    },
+    {
+      "name": "http server address and listen callback",
+      "expect": "matched",
+      "source": "import * as http from 'node:http'; function main(): void { const srv = http.createServer(() => {}); console.log(srv.address()); srv.listen(0, '127.0.0.1', () => { const a = (srv as any).address(); console.log(typeof a.port, a.family, a.address); srv.close(() => console.log(srv.address())); }); }"
+    },
+    {
+      "name": "fetch Response from a local http server",
+      "expect": "matched",
+      "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
     }
   ]
 }

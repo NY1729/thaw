@@ -1511,6 +1511,91 @@ function main(): void {
 }
 
 #[test]
+fn http_server_address_and_response_typed_fetch_match_node() {
+    // Expected output recorded from node 22 for the same programs (explicit host: node's default
+    // host for `listen(0)` is the IPv6 wildcard).
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-server-address-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let programs = [
+        (
+            "address",
+            r#"import * as http from "node:http";
+function main(): void {
+  const srv = http.createServer(() => {});
+  console.log(srv.address());
+  srv.listen(0, "127.0.0.1", () => {
+    const a = (srv as any).address();
+    console.log(typeof a.port, a.family, a.address);
+    srv.close(() => console.log(srv.address()));
+  });
+}
+"#,
+            "null\nnumber IPv4 127.0.0.1\nnull\n",
+        ),
+        (
+            "get_in_callback",
+            r#"import * as http from "node:http";
+function main(): void {
+  const srv = http.createServer((req, res) => { res.statusCode = 201; res.end("body"); });
+  srv.listen(0, "127.0.0.1", () => {
+    const port = (srv.address() as any).port;
+    http.get("http://127.0.0.1:" + port + "/", (res: any) => {
+      let data = "";
+      res.on("data", (c: any) => { data += c; });
+      res.on("end", () => { console.log("got", res.statusCode, data); srv.close(); });
+    });
+  });
+}
+"#,
+            "got 201 body\n",
+        ),
+        (
+            "response",
+            r#"import * as http from "node:http";
+async function main(): Promise<void> {
+  const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader("x-a", "b"); res.end('{"k":1}'); });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as any).port;
+  const r: Response = await fetch("http://127.0.0.1:" + port + "/");
+  console.log(r.status, r.ok, r.headers.get("x-a"), r.statusText);
+  console.log(await r.json());
+  const r2: Response = await fetch("http://127.0.0.1:" + port + "/");
+  console.log(await r2.text());
+  srv.close();
+}
+"#,
+            "201 true b Created\n{ k: 1 }\n{\"k\":1}\n",
+        ),
+    ];
+    for (name, source, expected) in programs {
+        let entry = directory.join(format!("{name}.ts"));
+        std::fs::write(&entry, source).unwrap();
+        let executable = directory.join(name);
+        build_with_assets(
+            &entry,
+            &executable,
+            &[],
+            &[],
+            &[],
+            &directory.join("registry"),
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
+        let output = Command::new(&executable).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn embedded_frontend_and_api_run_without_the_asset_directory() {
     let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = probe.local_addr().unwrap().port();
