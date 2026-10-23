@@ -457,7 +457,7 @@ pub unsafe extern "C" fn thaw_bytes_write(
     }
     let offset = offset as usize;
     let Some(end) = offset.checked_add(width) else { return offset as f64; };
-    if end > length { return end as f64; }
+    if end > length { return offset as f64; }
     let encoded = encode_scalar(value, width, kind as u32);
     for index in 0..width {
         let byte = if le != 0.0 {
@@ -538,7 +538,7 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
     }
     let offset = offset as usize;
     let Some(end) = offset.checked_add(8) else { return offset as f64; };
-    if end > length { return end as f64; }
+    if end > length { return offset as f64; }
     let encoded = value.to_le_bytes();
     for index in 0..8 {
         let byte = if le != 0.0 {

@@ -694,6 +694,7 @@ fn typed_quickjs_wrapper_lease_requires_all_paths_to_return_native_jsvalue() {
 include!("tests/fb_contracts.rs");
 
 include!("tests/ka_contracts.rs");
+include!("tests/mapalias_contracts.rs");
 include!("tests/lb_contracts.rs");
 include!("tests/looseeq_contracts.rs");
 include!("tests/anyprim_contracts.rs");

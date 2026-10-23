@@ -976,3 +976,48 @@ fn strict_equality_compares_bigint_values_and_date_coercion_uses_milliseconds() 
         );
     }
 }
+
+#[test]
+fn oversized_addon_lengths_fail_before_any_allocation_or_slice() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut array = ptr::null_mut();
+        assert_eq!(napi_create_array(env_ptr, &mut array), NAPI_OK);
+        // Index u32::MAX - 1 would grow the dense Vec to about 32 GiB.
+        assert_eq!(
+            napi_set_element(env_ptr, array, u32::MAX - 1, env.alloc(Value::Undefined)),
+            NAPI_GENERIC_FAILURE
+        );
+        let Value::Array(values) = &*array else {
+            panic!("expected an array");
+        };
+        assert!(values.is_empty());
+
+        let mut out = ptr::null_mut();
+        assert_eq!(
+            napi_create_array_with_length(env_ptr, 1 << 40, &mut out),
+            NAPI_INVALID_ARG
+        );
+        assert_eq!(napi_create_buffer(env_ptr, 1 << 40, ptr::null_mut(), &mut out), NAPI_INVALID_ARG);
+        assert_eq!(napi_create_arraybuffer(env_ptr, 1 << 40, ptr::null_mut(), &mut out), NAPI_INVALID_ARG);
+        assert_eq!(
+            node_api_create_sharedarraybuffer(env_ptr, 1 << 40, ptr::null_mut(), &mut out),
+            NAPI_INVALID_ARG
+        );
+
+        let byte = b"a";
+        assert_eq!(
+            napi_create_string_utf8(env_ptr, byte.as_ptr().cast(), usize::MAX - 1, &mut out),
+            NAPI_INVALID_ARG
+        );
+        assert_eq!(
+            napi_create_string_latin1(env_ptr, byte.as_ptr().cast(), usize::MAX - 1, &mut out),
+            NAPI_INVALID_ARG
+        );
+        assert_eq!(
+            napi_create_string_utf16(env_ptr, byte.as_ptr().cast(), usize::MAX - 1, &mut out),
+            NAPI_INVALID_ARG
+        );
+    }
+}

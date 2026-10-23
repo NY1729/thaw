@@ -275,6 +275,7 @@ pub unsafe extern "C" fn napi_create_string_utf8(
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
+        if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
         std::slice::from_raw_parts(value.cast(), length)
     };
     let string = String::from_utf8_lossy(bytes).into_owned();
@@ -298,6 +299,7 @@ pub unsafe extern "C" fn napi_create_string_latin1(
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
+        if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let string: String = bytes.iter().map(|byte| char::from(*byte)).collect();
@@ -327,6 +329,7 @@ pub unsafe extern "C" fn napi_create_string_utf16(
     } else {
         length
     };
+    if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
     let units = std::slice::from_raw_parts(value, length);
     let exact = String::from_utf16(units);
     let string = exact.as_ref().cloned().unwrap_or_else(|_| String::from_utf16_lossy(units));
@@ -362,6 +365,7 @@ pub unsafe extern "C" fn node_api_create_property_key_utf8(
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
+        if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let key = String::from_utf8_lossy(bytes).into_owned();
@@ -386,6 +390,7 @@ pub unsafe extern "C" fn node_api_create_property_key_latin1(
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
+        if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let key = bytes.iter().map(|byte| char::from(*byte)).collect();
@@ -416,6 +421,7 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
     } else {
         length
     };
+    if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
     let units = std::slice::from_raw_parts(value, length);
     let env_ptr = env as *mut Env;
     if let Ok(key) = String::from_utf16(units) {
@@ -528,6 +534,7 @@ pub unsafe extern "C" fn node_api_symbol_for(
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(description).to_bytes()
     } else {
+        if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
         std::slice::from_raw_parts(description.cast::<u8>(), length)
     };
     let description = String::from_utf8_lossy(bytes).into_owned();
@@ -673,6 +680,7 @@ pub unsafe extern "C" fn napi_create_array_with_length(
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
+    if length > NAPI_MAX_DENSE_LENGTH { return NAPI_INVALID_ARG; }
     let value = env.alloc(Value::Array(vec![None; length]));
     write_value(out, value)
 }
@@ -701,6 +709,7 @@ pub unsafe extern "C" fn napi_create_function(
         let bytes = if length == NAPI_AUTO_LENGTH {
             CStr::from_ptr(name).to_bytes()
         } else {
+            if !napi_string_length_is_valid(length) { return NAPI_INVALID_ARG; }
             std::slice::from_raw_parts(name.cast::<u8>(), length)
         };
         String::from_utf8_lossy(bytes).into_owned()
