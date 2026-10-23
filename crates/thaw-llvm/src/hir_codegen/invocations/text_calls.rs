@@ -11,6 +11,7 @@ impl<'ctx> HirCompiler<'ctx> {
             || matches!(
                 name,
                 "__thaw_bool_to_string"
+                    | "__thaw_console_inspect_text"
                     | "__thaw_number_to_string"
                     | "__thaw_bool_to_number"
                     | "__thaw_parse_float"
@@ -56,6 +57,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
             }
             "__thaw_bool_to_string" => return self.compile_bool_to_string(args),
+            "__thaw_console_inspect_text" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_console_string",
+                    args,
+                    "console inspect",
+                )
+            }
             "__thaw_number_to_string" => {
                 return self.compile_single_arg_call(
                     "thaw_number_to_string",

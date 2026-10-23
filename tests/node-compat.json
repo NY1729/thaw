@@ -1816,6 +1816,11 @@
       "name": "object literal __proto__ shorthand and computed key stay own",
       "expect": "matched",
       "source": "function main(): void { const __proto__ = 7; const s: any = { __proto__ }; const c: any = { ['__proto__']: 3 }; console.log(Object.keys(s).join(','), s.__proto__, Object.keys(c).join(','), c.__proto__); }"
+    },
+    {
+      "name": "in operator on primitive union member throws TypeError",
+      "expect": "matched",
+      "source": "function probe(v: number | { x: number }): void { try { console.log(\"x\" in v); } catch (e) { console.log((e as Error).message); } } function main(): void { probe({ x: 1 }); probe(5); }"
     }
   ]
 }
