@@ -2737,6 +2737,7 @@ impl<'a> FnLowerer<'a> {
                     let keys = match &object_type {
                         HirType::Object(fields) => ecmascript_field_order(fields)
                             .into_iter()
+                            .filter(|&index| !fields[index].0.starts_with("__thaw_class_identity_\u{1e}"))
                             .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))
                             .collect::<Vec<_>>(),
                         HirType::Json | HirType::Dictionary(_) => Vec::new(),

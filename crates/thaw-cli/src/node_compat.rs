@@ -73,8 +73,19 @@ fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
             .unwrap_or_default();
         let case_dir = root.join(index.to_string());
         std::fs::create_dir_all(&case_dir).map_err(|error| error.to_string())?;
-        let node_source = case_dir.join("main.mts");
-        std::fs::write(&node_source, format!("{source}\nawait main();\n"))
+        // Node runs a file without import/export as CommonJS and the rest as an ES module,
+        // and `process.nextTick` vs promise ordering differs between the two, so the reference
+        // run mirrors the module kind Thaw derives from the same source.
+        // Strict mode is kept for the CommonJS run: ES modules (what every case used to run
+        // as) are strict, and Thaw follows strict semantics.
+        let (node_name, node_head, node_tail) =
+            if module_graph::entry_is_commonjs(&case_dir.join("main.ts"), source)? {
+                ("main.cts", "'use strict';\n", "main();")
+            } else {
+                ("main.mts", "", "await main();")
+            };
+        let node_source = case_dir.join(node_name);
+        std::fs::write(&node_source, format!("{node_head}{source}\n{node_tail}\n"))
             .map_err(|error| error.to_string())?;
         let node = command_output_with_timeout(
             Command::new("node").arg(&node_source).args(&arguments),

@@ -533,6 +533,9 @@ struct DetachedPromise {
     promise: *mut ThawPromise,
     pending_exception: *mut *const u8,
     owned_report: bool,
+    /// Report a rejection at the next poll (Node: right after the microtask drain) instead of
+    /// parking it in `pending_exception` for the terminal report.
+    queue_unhandled: bool,
 }
 
 fn promise_report_bytes(source: &ThawPromise) -> Vec<u8> {
@@ -562,7 +565,20 @@ fn is_detached_report_text(text: *const c_char) -> bool {
 
 extern "C" fn destroy_detached_promise(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<DetachedPromise>()) };
-    if unsafe { thaw_promise_state(state.promise) } == 2 && !state.pending_exception.is_null() {
+    if state.queue_unhandled {
+        if unsafe { thaw_promise_state(state.promise) } == 2 {
+            // Snapshot producer-owned text and typed fields while the source Promise is live.
+            let source = unsafe { &mut *state.promise };
+            source.reported_unhandled = true;
+            let record = UnhandledRejection {
+                error: result,
+                text: source.rejection_text.clone(),
+                diagnostic: promise_report_bytes(source),
+                _root: (!result.is_null()).then(|| thaw_arena::ArenaRoot::new(result as usize)),
+            };
+            ORPHANED_REJECTIONS.with(|orphaned| orphaned.borrow_mut().push(record));
+        }
+    } else if unsafe { thaw_promise_state(state.promise) } == 2 && !state.pending_exception.is_null() {
         let pending = unsafe { &mut *state.pending_exception };
         if pending.is_null() {
             if !state.owned_report && !result.is_null()
@@ -593,7 +609,7 @@ pub unsafe extern "C" fn thaw_promise_detach(
     promise: *mut ThawPromise,
     pending_exception: *mut *const u8,
 ) -> u8 {
-    unsafe { detach_promise(promise, pending_exception, false) }
+    unsafe { detach_promise(promise, pending_exception, false, false) }
 }
 
 /// Compiler-private variant for the terminal rejection slot. The slot owns
@@ -603,13 +619,24 @@ pub unsafe extern "C" fn thaw_promise_detach_for_report(
     promise: *mut ThawPromise,
     pending_rejection: *mut *const u8,
 ) -> u8 {
-    unsafe { detach_promise(promise, pending_rejection, true) }
+    unsafe { detach_promise(promise, pending_rejection, true, false) }
+}
+
+/// Fire-and-forget statement Promise: a rejection nobody handled is reported at the next poll
+/// like any other unhandled rejection (the compiler's `__thaw_detach_rejection`).
+///
+/// # Safety
+/// `promise` must be null or a live, exclusively accessible `ThawPromise`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_detach_unhandled(promise: *mut ThawPromise) -> u8 {
+    unsafe { detach_promise(promise, std::ptr::null_mut(), true, true) }
 }
 
 unsafe fn detach_promise(
     promise: *mut ThawPromise,
     pending_exception: *mut *const u8,
     owned_report: bool,
+    queue_unhandled: bool,
 ) -> u8 {
     if promise.is_null() {
         return 0;
@@ -618,6 +645,7 @@ unsafe fn detach_promise(
         promise,
         pending_exception,
         owned_report,
+        queue_unhandled,
     }));
     let subscribed = unsafe {
         thaw_promise_subscribe(promise, destroy_detached_promise, state.cast::<u8>())
@@ -2243,10 +2271,19 @@ struct UnhandledRejection {
     error: *const u8,
     text: Option<Vec<u8>>,
     diagnostic: Vec<u8>,
+    /// Keeps `error` alive for a rejection whose Promise was already destroyed.
+    _root: Option<thaw_arena::ArenaRoot>,
+}
+
+thread_local! {
+    /// Rejections of Promises dropped (e.g. a discarded `Promise.reject(...)` statement) before any
+    /// handler attached: reported at the next poll like a live unhandled rejection.
+    static ORPHANED_REJECTIONS: RefCell<Vec<UnhandledRejection>> = const { RefCell::new(Vec::new()) };
 }
 
 fn collect_unhandled_rejections() -> Vec<UnhandledRejection> {
-    ACTIVE_PROMISES.with(|active| {
+    let mut orphaned = ORPHANED_REJECTIONS.with(|orphaned| std::mem::take(&mut *orphaned.borrow_mut()));
+    let active = ACTIVE_PROMISES.with(|active| {
         active
             .borrow()
             .iter()
@@ -2258,9 +2295,12 @@ fn collect_unhandled_rejections() -> Vec<UnhandledRejection> {
                         error: promise.result.unwrap_or(std::ptr::null()),
                         text: promise.rejection_text.clone(),
                         diagnostic: promise_report_bytes(promise),
+                        _root: None,
                     }
                 })
             })
             .collect::<Vec<_>>()
-    })
+    });
+    orphaned.extend(active);
+    orphaned
 }
