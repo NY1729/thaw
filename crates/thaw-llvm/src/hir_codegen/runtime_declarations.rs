@@ -1799,6 +1799,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // exposing the marker byte itself to generated code.
         for name in [
             "thaw_error_name",
+            "thaw_error_constructor_name",
             "thaw_error_message",
             "thaw_error_cause",
             "thaw_error_code",

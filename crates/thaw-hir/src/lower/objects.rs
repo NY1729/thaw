@@ -3375,6 +3375,7 @@ impl<'a> FnLowerer<'a> {
                     // defaults to `Error`, with itself as the message,
                     // matching JavaScript's own default
                     // `Error.prototype.name`.
+                    HirType::Str if prop.sym == *"constructor" => Ok(Self::error_constructor_value(obj)),
                     HirType::Str if prop.sym == *"message" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_error_message".to_string())),
                         vec![obj],
