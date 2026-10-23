@@ -85,6 +85,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
         });
+        if self.uses_quickjs && self.commonjs_entry {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_js_drain_next_ticks").unwrap(),
+                    &[],
+                    "drain_next_ticks_after_commonjs_main",
+                )
+                .unwrap();
+        }
         if let Some(completion) = completion.filter(|_| main_returns_promise) {
             let completion = completion.into_pointer_value();
             self.builder

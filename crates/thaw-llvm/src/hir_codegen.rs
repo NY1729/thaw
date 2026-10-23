@@ -465,6 +465,9 @@ pub struct HirCompiler<'ctx> {
     next_lambda: usize,
     uses_napi: bool,
     uses_quickjs: bool,
+    /// Entry is a CommonJS program: `process.nextTick` callbacks run before the promise jobs
+    /// the main script queued (an ES module's body runs inside a microtask, so they run after).
+    commonjs_entry: bool,
     uses_quickjs_handles: bool,
     /// Compile full-layout native projection adapters only in modules whose
     /// completed HIR actually crosses a fixed object into QuickJS.
@@ -812,6 +815,7 @@ impl<'ctx> HirCompiler<'ctx> {
             next_lambda: 0,
             uses_napi: false,
             uses_quickjs: false,
+            commonjs_entry: false,
             uses_quickjs_handles: false,
             projects_native_objects: false,
             tracks_physical_object_layouts: false,
@@ -894,6 +898,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .verify()
             .map_err(|e| format!("module verification failed:\n{e}"))
+    }
+
+    /// Selects CommonJS (`true`) or ES module (`false`, the default) `process.nextTick` ordering
+    /// for the process entry point.
+    pub fn set_commonjs_entry(&mut self, commonjs: bool) {
+        self.commonjs_entry = commonjs;
     }
 
     /// Whether the generated module actually calls the QuickJS fallback host.
