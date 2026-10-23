@@ -7435,7 +7435,7 @@ fn crypto_rsa_and_ecdsa_sign_and_verify_interoperate_with_real_openssl() {
     assert_eq!(call("oneShotSignVerify", "[]"), "true");
     assert_eq!(
         call("keyObjectAsymmetricInfo", "[]"),
-        r#"["private","rsa","public","rsa","ec","P-256"]"#
+        r#"["private","rsa","public","rsa","ec","prime256v1"]"#
     );
 }
 
@@ -7484,7 +7484,7 @@ fn crypto_p521_and_ed25519_sign_and_verify_interoperate_with_real_openssl() {
     assert_eq!(call("ed25519RoundTrip", "[]"), "[true,false,true]");
     assert_eq!(
         call("keyObjectAsymmetricInfoP521AndEd25519", "[]"),
-        r#"["ec","P-521","ed25519"]"#
+        r#"["ec","secp521r1","ed25519"]"#
     );
 }
 
@@ -7783,7 +7783,10 @@ fn crypto_generates_rsa_ec_and_ed25519_key_pairs_that_round_trip() {
         call("rsaKeyObjectRoundTrip", "[]"),
         r#"[true,true,"rsa","rsa",true]"#
     );
-    assert_eq!(call("ecPemRoundTrip", "[]"), r#"[true,"ec","P-256",true]"#);
+    assert_eq!(
+        call("ecPemRoundTrip", "[]"),
+        r#"[true,"ec","prime256v1",true]"#
+    );
     assert_eq!(
         call("ed25519DerRoundTrip", "[]"),
         r#"[true,"ed25519",true]"#
@@ -7930,7 +7933,10 @@ fn crypto_generates_pkcs1_and_sec1_keys_with_a_custom_rsa_exponent() {
         call("rsaPkcs1WithCustomExponent", "[]"),
         "[true,true,true,true]"
     );
-    assert_eq!(call("ecSec1PrivateKey", "[]"), r#"[true,"P-256",true]"#);
+    assert_eq!(
+        call("ecSec1PrivateKey", "[]"),
+        r#"[true,"prime256v1",true]"#
+    );
     assert_eq!(call("rsaDefaultExponentIsStill65537", "[]"), "true");
 }
 
