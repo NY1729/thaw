@@ -1722,9 +1722,10 @@ impl<'a> FnLowerer<'a> {
                     name.clone().into(),
                     member.span,
                 )));
-                let mut ordinary = CallExpr::from(call.clone());
-                ordinary.callee = Callee::Expr(Box::new(Expr::Member(rebound)));
-                let invoked = self.lower_call(&ordinary);
+                // `a?.f?.()`: with the receiver narrowed, the member itself may be optional.
+                let mut inner = call.clone();
+                inner.callee = Box::new(Expr::Member(rebound));
+                let invoked = self.lower_optional_call(&inner);
                 self.narrowings.remove(&name);
                 self.nullable_narrowings.remove(&name);
                 self.nullish_narrowings.remove(&name);
@@ -1765,6 +1766,39 @@ impl<'a> FnLowerer<'a> {
             // shared target path conditionally invoke the property value;
             // otherwise this is an ordinary member call.
             let property_name = member_property_name(&member.prop);
+            // `any.m?.()`: skip the call when the dynamic member is nullish.
+            if receiver_type == HirType::Json {
+                if let Some(property) = property_name.clone() {
+                    let name = format!("__thaw_optional_method_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), HirType::Json);
+                    let mut rebound = member.clone();
+                    rebound.obj = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        name.clone().into(),
+                        member.span,
+                    )));
+                    let mut ordinary = CallExpr::from(call.clone());
+                    ordinary.callee = Callee::Expr(Box::new(Expr::Member(rebound)));
+                    let invoked = self.lower_call(&ordinary)?;
+                    let invoked = self.coerce_to_declared(&HirType::Json, invoked)?;
+                    let undefined =
+                        self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+                    let member_value =
+                        HirExpr::JsonGet(Box::new(HirExpr::Var(name.clone())), property);
+                    let is_nullish = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                        vec![member_value],
+                    );
+                    let result = HirExpr::Conditional(
+                        Box::new(is_nullish),
+                        Box::new(undefined),
+                        Box::new(invoked),
+                        HirType::Json,
+                    );
+                    return self
+                        .wrap_call_argument_bindings(result, &[(name, HirType::Json, receiver)]);
+                }
+            }
             let property_uses_optional_target = match (&receiver_type, property_name.as_deref()) {
                 (HirType::Object(fields), Some(property)) => fields
                     .iter()

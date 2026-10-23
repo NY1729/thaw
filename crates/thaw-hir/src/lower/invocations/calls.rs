@@ -289,6 +289,22 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        if let Callee::Expr(callee) = &call.callee {
+            if matches!(callee.as_ref(), Expr::Ident(class) if class.sym == *"Array")
+                && !self.scope.contains_key("Array")
+            {
+                return self.lower_array_constructor(&call.args, call.type_args.as_deref(), None);
+            }
+        }
+        if let Some(receiver) = self.array_constructor_fill_receiver(call) {
+            let mut typed = call.clone();
+            if let Callee::Expr(callee) = &mut typed.callee {
+                if let Expr::Member(member) = callee.as_mut() {
+                    *member.obj = receiver;
+                }
+            }
+            return self.lower_call_with_class_guard_and_target(&typed, None, None);
+        }
         self.lower_call_with_class_guard_and_target(call, None, None)
     }
 
