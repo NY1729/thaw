@@ -2219,6 +2219,16 @@
       "name": "assert ifError match doesNotMatch",
       "expect": "matched",
       "source": "import assert from \"node:assert\";\n\nfunction attempt(label: string, run: () => void): void {\n  try {\n    run();\n    console.log(label, \"ok\");\n  } catch (e: any) {\n    console.log(label, e.name, e.code, e.operator, JSON.stringify(e.message));\n  }\n}\n\nfunction main(): void {\n  attempt(\"ifError null\", () => assert.ifError(null));\n  attempt(\"ifError undefined\", () => assert.ifError(undefined));\n  attempt(\"ifError error\", () => assert.ifError(new Error(\"boom\")));\n  attempt(\"ifError string\", () => assert.ifError(\"str\"));\n  attempt(\"ifError zero\", () => assert.ifError(0));\n  attempt(\"match ok\", () => assert.match(\"abc\", /b/));\n  attempt(\"match fail\", () => assert.match(\"abc\", /x/));\n  attempt(\"match custom\", () => assert.match(\"abc\", /x/, \"custom\"));\n  attempt(\"match number\", () => assert.match(5 as any, /x/));\n  attempt(\"doesNotMatch ok\", () => assert.doesNotMatch(\"abc\", /x/));\n  attempt(\"doesNotMatch fail\", () => assert.doesNotMatch(\"abc\", /b/));\n}\n"
+    },
+    {
+      "name": "typeof out-of-range string index",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s = \"abc\";\n  console.log(typeof s[5], typeof s[1], typeof s[0]);\n  const i = 7;\n  console.log(typeof s[i]);\n}\n"
+    },
+    {
+      "name": "string index destructuring",
+      "expect": "matched",
+      "source": "function main(): void {\n  const { 0: x, 2: z } = \"xyz\";\n  console.log(x, z);\n  const { 1: y, length } = \"pqr\";\n  console.log(y, length);\n}\n"
     }
   ]
 }
