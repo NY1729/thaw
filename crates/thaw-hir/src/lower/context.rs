@@ -99,6 +99,9 @@ struct FnLowerer<'a> {
     native_method_values: HashMap<Symbol, NativeMethodValue>,
     native_class_aliases: HashMap<Symbol, HirType>,
     member_receiver_bindings: HashSet<Symbol>,
+    /// Names assigned somewhere after an uninitialized `let x: T;` in the
+    /// same statement list (definite-assignment approximation).
+    assigned_later: HashSet<Symbol>,
     awaited_bindings: HashSet<Symbol>,
     /// Names bound by a `catch (e)` clause. `typeof e` reports `"object"`
     /// for these (real JavaScript throws an `Error` object), even though

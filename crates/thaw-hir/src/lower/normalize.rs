@@ -1273,10 +1273,25 @@ pub fn normalize_uninitialized_globals(module: &Module) -> Module {
                     })),
                 }));
             }
-            declarator.init = Some(Box::new(Expr::Ident(Ident::new_no_ctxt(
-                "undefined".into(),
-                swc_common::DUMMY_SP,
-            ))));
+            // `let n: number;` starts from the type's zero value; the
+            // runtime can't hold `undefined` in a native scalar.
+            let kind = binding.type_ann.as_ref().and_then(|a| match a.type_ann.as_ref() {
+                TsType::TsKeywordType(k) => Some(k.kind),
+                _ => None,
+            });
+            let sp = swc_common::DUMMY_SP;
+            declarator.init = Some(Box::new(match kind {
+                Some(TsKeywordTypeKind::TsNumberKeyword) => {
+                    Expr::Lit(Lit::Num(Number { span: sp, value: 0.0, raw: None }))
+                }
+                Some(TsKeywordTypeKind::TsStringKeyword) => {
+                    Expr::Lit(Lit::Str(Str { span: sp, value: "".into(), raw: None }))
+                }
+                Some(TsKeywordTypeKind::TsBooleanKeyword) => {
+                    Expr::Lit(Lit::Bool(Bool { span: sp, value: false }))
+                }
+                _ => Expr::Ident(Ident::new_no_ctxt("undefined".into(), sp)),
+            }));
         }
     }
     normalized
