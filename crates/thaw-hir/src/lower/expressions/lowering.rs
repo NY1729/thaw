@@ -2513,8 +2513,11 @@ impl<'a> FnLowerer<'a> {
                     }
                     let native_builtin_match =
                         native_builtin_instanceof_static_match(class.sym.as_ref(), &value_type);
+                    let native_collection_subclass = native_base_type(&value_type).is_some()
+                        && matches!(class.sym.as_ref(), "Map" | "Set");
                     if !extends_error_family
                         && native_builtin_match.is_none()
+                        && !native_collection_subclass
                         && !self
                             .signatures
                             .contains_key(&class_constructor_symbol(class.sym.as_ref()))
@@ -3982,6 +3985,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let mut value = self.lower_expr(&element.expr)?;
                     if element.spread.is_some() {
+                        value = self.project_native_base(value)?;
                         // A string/`Map`/`Set` spread source iterates the
                         // same way `for...of` already does for each --
                         // snapshot to an array up front via the exact same
@@ -4582,6 +4586,7 @@ impl<'a> FnLowerer<'a> {
                                 ));
                             };
                             let mut entries = self.lower_expr(&argument.expr)?;
+                            entries = self.project_native_base(entries)?;
                             let actual_type = self.infer_expr_type(&entries)?;
                             if !is_weak {
                                 if let HirType::Union(members) = &actual_type {
@@ -4819,6 +4824,7 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         let mut iterable = self.lower_expr(&argument.expr)?;
+                        iterable = self.project_native_base(iterable)?;
                         let actual_type = self.infer_expr_type(&iterable)?;
                         if !is_weak {
                             if let HirType::Union(members) = &actual_type {
@@ -6241,6 +6247,10 @@ pub(in crate::lower) fn split_type_assertion(expr: &Expr) -> Option<(&Expr, &TsT
 /// determines it, since none of the eight is ever ambiguous at its own
 /// native, non-`Json`/`JsValue` type.
 fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<bool> {
+    // A `Map`/`Set` subclass instance is an object: its identity chain decides.
+    if native_base_type(ty).is_some() && matches!(class, "Map" | "Set") {
+        return None;
+    }
     Some(match class {
         "Date" => *ty == date_object_type(),
         "RegExp" => *ty == regex_object_type(),

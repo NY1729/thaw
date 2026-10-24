@@ -3354,6 +3354,7 @@ impl<'a> FnLowerer<'a> {
                         for argument in &call.args {
                             let mut value = self.lower_expr(&argument.expr)?;
                             if argument.spread.is_some() {
+                                value = self.project_native_base(value)?;
                                 // Same snapshot conversion array-literal spreads
                                 // (`[...str]`/`[...map]`/`[...set]`) already use.
                                 let mut spread_source_type = self.infer_expr_type(&value)?;

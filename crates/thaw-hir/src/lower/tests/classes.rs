@@ -2704,3 +2704,146 @@ fn non_null_assertion_of_narrowed_optional_number_adds_no_branch() {
     let main = program.functions.iter().find(|f| f.name == "main").unwrap();
     assert!(!format!("{:?}", main.body).contains("__thaw_nonnull_value_"));
 }
+
+fn native_subclass_layout(program: &HirProgram, class: &str) -> Vec<(String, HirType)> {
+    let HirType::Object(fields) = &program
+        .functions
+        .iter()
+        .find(|function| function.name == class_constructor_symbol(class))
+        .unwrap()
+        .ret
+    else {
+        panic!("{class} constructor must return an object")
+    };
+    fields.clone()
+}
+
+#[test]
+fn map_and_set_subclasses_wrap_a_hidden_native_collection() {
+    let program = lower(
+        r#"class Counter extends Map<string, number> {}
+        class Leaf extends Counter {}
+        class Tags extends Set<string> { label: string = "t"; }
+        function main(): void {
+            const c = new Counter();
+            const l = new Leaf();
+            const t = new Tags();
+        }"#,
+    );
+    let counter = native_subclass_layout(&program, "Counter");
+    assert_eq!(counter[0].0, "__thaw_class_identity_\u{1e}Counter\u{1f}Map");
+    assert_eq!(
+        counter[1],
+        (
+            "__thaw_base".to_string(),
+            HirType::Map(Box::new(HirType::Str), Box::new(HirType::F64))
+        )
+    );
+    let leaf = native_subclass_layout(&program, "Leaf");
+    assert_eq!(leaf[0].0, "__thaw_class_identity_\u{1e}Leaf\u{1f}Counter\u{1f}Map");
+    assert_eq!(leaf[1], counter[1]);
+    let tags = native_subclass_layout(&program, "Tags");
+    assert_eq!(tags[0].0, "__thaw_class_identity_\u{1e}Tags\u{1f}Set");
+    assert_eq!(
+        tags[1],
+        ("__thaw_base".to_string(), HirType::Set(Box::new(HirType::Str)))
+    );
+    assert_eq!(tags[2].0, "label");
+}
+
+#[test]
+fn generic_map_and_set_subclasses_substitute_their_type_arguments() {
+    let program = lower(
+        r#"class Q<T> extends Set<T> {}
+        class Base<K, V> extends Map<K, V> {}
+        class Leaf extends Base<string, number> {}
+        function main(): void {
+            const q = new Q<number>();
+            const l = new Leaf();
+        }"#,
+    );
+    let leaf = native_subclass_layout(&program, "Leaf");
+    assert_eq!(
+        leaf[1].1,
+        HirType::Map(Box::new(HirType::Str), Box::new(HirType::F64))
+    );
+    let body = format!("{:?}", program.functions);
+    assert!(body.contains("__thaw_base\", Set(F64)"), "{body}");
+}
+
+#[test]
+fn rejects_native_collection_subclasses_without_type_arguments_or_unsupported_bases() {
+    for (source, fragment) in [
+        ("class C extends Map {} function main(): void { new C(); }", "needs explicit type arguments"),
+        ("class C extends Set {} function main(): void { new C(); }", "needs explicit type arguments"),
+        ("class C extends WeakMap<object, number> {} function main(): void { new C(); }", "extends unknown native class `WeakMap`"),
+        ("class C extends Array<number> {} function main(): void { new C(); }", "extends unknown native class `Array`"),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains(fragment), "{error}");
+    }
+}
+
+#[test]
+fn map_subclass_super_call_builds_and_stores_the_native_collection() {
+    let program = lower(
+        r#"class Reg extends Map<string, number> {
+            constructor(entries: [string, number][]) { super(entries); }
+        }
+        class Plain extends Set<number> {}
+        function main(): void { new Reg([["a", 1]]); new Plain(); }"#,
+    );
+    for class in ["Reg", "Plain"] {
+        let initializer = program
+            .functions
+            .iter()
+            .find(|function| function.name == class_initializer_symbol(class))
+            .unwrap();
+        let body = format!("{:?}", initializer.body);
+        assert!(body.contains("PropAssign") && body.contains("\"__thaw_base\""), "{body}");
+        assert!(body.contains("__thaw_map_new"), "{body}");
+    }
+}
+
+#[test]
+fn map_subclass_members_project_to_the_wrapped_collection() {
+    let program = lower(
+        r#"class Counter extends Map<string, number> {
+            get2(k: string): number | undefined { return super.get(k); }
+        }
+        function total(m: Map<string, number>): number { return m.size; }
+        function main(): void {
+            const c = new Counter();
+            c.set("a", 1);
+            console.log(c.size, c.get("a"), total(c), [...c].length);
+            for (const [k, v] of c) console.log(k, v);
+        }"#,
+    );
+    let main = program.functions.iter().find(|f| f.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.matches("\"__thaw_base\"").count() >= 5, "{body}");
+    assert!(body.contains("__thaw_map_size"), "{body}");
+    let method = program
+        .functions
+        .iter()
+        .find(|f| f.name == class_method_symbol("Counter", "get2"))
+        .unwrap();
+    assert!(format!("{:?}", method.body).contains("\"__thaw_base\""));
+}
+
+#[test]
+fn map_subclass_instanceof_queries_the_allocation_identity() {
+    let program = lower(
+        r#"class Counter extends Map<string, number> {}
+        function main(): boolean {
+            const c = new Counter();
+            const plain = new Map<string, number>();
+            return c instanceof Map && c instanceof Counter && !(c instanceof Set)
+                && !(plain instanceof Counter);
+        }"#,
+    );
+    let main = program.functions.iter().find(|f| f.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.matches("__thaw_object_has_class_identity").count() >= 3, "{body}");
+}

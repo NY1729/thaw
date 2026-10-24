@@ -1140,7 +1140,10 @@ impl<'a> FnLowerer<'a> {
                 }
                 // `any` holds a Json snapshot, not the native object: an alias
                 // would dispatch methods on a pointer that is not a class instance.
+                // A `Map`/`Set` subclass bound to its collection type was projected to the
+                // wrapped collection: the binding holds the native collection itself.
                 if class_name_from_type(&actual_type).is_some() && actual_type != storage_type
+                    && native_base_type(&actual_type) != Some(&storage_type)
                     && !matches!(storage_type, HirType::Dynamic | HirType::Json | HirType::JsValue) {
                     self.native_class_aliases
                         .insert(hir_name.clone(), actual_type);
