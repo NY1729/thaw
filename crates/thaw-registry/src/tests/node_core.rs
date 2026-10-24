@@ -413,7 +413,7 @@ fn assert_builtin_reports_structured_failures_through_commonjs_require() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,"AssertionError","ERR_ASSERTION",1,2,"strictEqual","different"]"#
+        r#"[true,"AssertionError","ERR_ASSERTION",1,2,"strictEqual","different\n\n1 !== 2\n"]"#
     );
 
     let _ = fs::remove_dir_all(&dir);
