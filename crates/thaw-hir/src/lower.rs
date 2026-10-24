@@ -450,6 +450,7 @@ pub fn lower_module_with_source_map(
 include!("lower/normalize.rs");
 
 include!("lower/classes/normalization.rs");
+include!("lower/classes/local_classes.rs");
 include!("lower/classes/generic_classes.rs");
 include!("lower/classes/generic_methods.rs");
 
