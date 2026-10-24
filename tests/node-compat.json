@@ -2276,6 +2276,36 @@
       "source": "class Base {\n  tag: string;\n  isBase: boolean;\n  constructor() {\n    this.isBase = new.target === Base;\n    const read = () => new.target.name;\n    this.tag = read();\n    if (new.target === undefined) throw new Error(\"never\");\n  }\n}\nclass Mid extends Base {}\nclass Leaf extends Mid {\n  constructor() {\n    super();\n    Object.setPrototypeOf(this, Leaf.prototype);\n  }\n}\nfunction show(o: Base): void {\n  console.log(o.tag, o.isBase, o instanceof Base, o instanceof Mid, o instanceof Leaf);\n}\nfunction main(): void {\n  show(new Base()); show(new Mid()); show(new Leaf());\n}\n"
     },
     {
+      "name": "any class any param of function variable receives a class value",
+      "expect": "matched",
+      "source": "class C { x = 1; }\nconst show = (K: any) => typeof K;\nfunction f1(): number { return 1; }\nfunction main(): void { console.log(show(f1), show({ a: 1 }), show(5), show(C), show(() => 2), show(Date), show(Map)); const k: any = C; console.log(show(k)); }\n"
+    },
+    {
+      "name": "any class new through any parameter class value is native instance",
+      "expect": "matched",
+      "source": "function helper(n: number): number { return n * 2; }\nclass C { x = 1; dbl(): number { return helper(this.x); } }\nconst mk = (K: any) => new K();\nconst id = (K: any) => K;\nfunction main(): void {\n  const o = mk(C); const t: C = o; t.x = 3;\n  console.log(t.dbl(), o.x, t === o, typeof o);\n  const k2 = id(C); const p = new k2(); console.log(p.dbl());\n}\n"
+    },
+    {
+      "name": "any class new through any variable builds native instance",
+      "expect": "matched",
+      "source": "function helper(n: number): number { return n * 2; }\nclass C { x = 1; dbl(): number { return helper(this.x); } }\nfunction main(): void {\n  const k: any = C; const o = new k(); const p = new k();\n  console.log(o.dbl(), o instanceof k, o.x, p === o);\n  o.x = 7; console.log(o.dbl(), p.x, o.constructor === k);\n}\n"
+    },
+    {
+      "name": "any class any class value constructor reaches native helpers",
+      "expect": "matched",
+      "source": "function helper(n: number): number { return n * 2; }\nclass C { x = 1; dbl(): number { return helper(this.x); } }\nclass D { c: C = new C(); run(): number { return this.c.dbl(); } }\nclass E extends C { y = 5; sum(): number { return this.dbl() + this.y; } }\nfunction main(): void {\n  const k: any = D; console.log(new k().run());\n  const e: any = E; const inst = new e(); console.log(inst.sum(), inst instanceof e);\n}\n"
+    },
+    {
+      "name": "any class any class value constructor args and throw",
+      "expect": "matched",
+      "source": "class Q { v: number; constructor(v: number) { if (v < 0) throw new RangeError(\"neg\"); this.v = v; } get(): number { return this.v; } }\nclass In { a = 2; get(): number { return this.a; } }\nclass W { items: number[]; inner: In; label: string;\n  constructor(items: number[], inner: In, label: string) { this.items = items; this.inner = inner; this.label = label; }\n  total(): number { return this.items.reduce((s, x) => s + x, 0) + this.inner.get(); }\n  add(n: number): void { this.items.push(n); }\n}\nfunction main(): void {\n  const q: any = Q; console.log(new q(4).get());\n  try { new q(-1); } catch (e: any) { console.log(\"caught\", e.message); }\n  const k: any = W; const i = new In(); const arr = [1, 2];\n  const w = new k(arr, i, \"hi\"); w.add(4);\n  console.log(w.total(), w.label, arr.length, w.items.length);\n}\n"
+    },
+    {
+      "name": "any class any class value with default parameter keeps working",
+      "expect": "matched",
+      "source": "class P { n: number; tag: string; constructor(n: number, tag: string = \"t\") { this.n = n; this.tag = tag; } get twice(): number { return this.n * 2; } }\nfunction main(): void {\n  const k: any = P; const o = new k(21, \"z\");\n  console.log(o.n, o.tag, o.twice);\n  const d = new k(1); console.log(d.tag);\n}\n"
+    },
+    {
       "name": "class optional fields print as undefined",
       "expect": "matched",
       "source": "class P { o?: number; s?: string; n: number = 1; }\nclass D extends P { x?: boolean; }\ninterface I { o?: number }\nfunction main(): void {\n  console.log(new P());\n  console.log(new D());\n  const lit: I = {};\n  console.log(lit);\n  console.log({ p: new P() });\n  console.log(JSON.stringify(new P()));\n}\n"
