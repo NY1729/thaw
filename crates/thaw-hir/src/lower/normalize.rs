@@ -2104,6 +2104,162 @@ pub fn annotate_untyped_default_parameters(module: &Module) -> Module {
     module
 }
 
+/// The object real JS builds for an enum: members and (numeric) reverse entries, keys as given.
+fn enum_object_expr(
+    name: &str,
+    keys: impl Iterator<Item = String>,
+    values: &EnumValues,
+    reverse: &EnumReverseValues,
+) -> Expr {
+    use swc_ecma_ast::*;
+    let text = |value: &str| Expr::Lit(Lit::Str(Str { span: swc_common::DUMMY_SP, value: value.into(), raw: None }));
+    let props = keys
+        .map(|key| {
+            let value = match values.get(&(name.to_string(), key.clone())) {
+                Some(HirLit::F64(number)) => Expr::Lit(Lit::Num(Number { span: swc_common::DUMMY_SP, value: *number, raw: None })),
+                Some(HirLit::Str(value)) => text(value),
+                _ => text(
+                    reverse
+                        .get(name)
+                        .and_then(|entries| entries.iter().find(|(number, _)| format!("{number}") == key))
+                        .map_or("", |(_, member)| member.as_str()),
+                ),
+            };
+            PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                key: PropName::Str(Str { span: swc_common::DUMMY_SP, value: key.as_str().into(), raw: None }),
+                value: Box::new(value),
+            })))
+        })
+        .collect();
+    Expr::Object(ObjectLit { span: swc_common::DUMMY_SP, props })
+}
+
+/// `E[name]` with a string-typed `name`: the same lookup against the enum object.
+fn enum_dynamic_index(
+    name: &str,
+    index: &Expr,
+    values: &EnumValues,
+    reverse: &EnumReverseValues,
+) -> Expr {
+    use swc_ecma_ast::*;
+    let mut keys: Vec<String> = values.keys().filter(|(n, _)| n == name).map(|(_, m)| m.clone()).collect();
+    keys.sort();
+    keys.extend(reverse.get(name).into_iter().flatten().map(|(number, _)| format!("{number}")));
+    Expr::Member(MemberExpr {
+        span: swc_common::DUMMY_SP,
+        obj: Box::new(enum_object_expr(name, keys.into_iter(), values, reverse)),
+        prop: MemberProp::Computed(ComputedPropName { span: swc_common::DUMMY_SP, expr: Box::new(index.clone()) }),
+    })
+}
+
+/// Makes a top-level enum usable as a value: a bare `E` (not `E.A` / `E[x]`) becomes the object
+/// `{ "0": "A", ..., A: 0, ... }` real JS builds (integer keys first), and `typeof E` becomes the
+/// matching object type. Shadowing of the enum name by a local is not tracked.
+// ponytail: only top-level non-exported enums (the ones `collect_enums` sees).
+pub fn enums_as_values(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    use swc_ecma_visit::{VisitMut, VisitMutWith};
+
+    let Ok((values, reverse, _)) = collect_enums(module) else {
+        return module.clone();
+    };
+    // name -> ordered (key, is_numeric_value) list, integer reverse keys first.
+    let mut shapes: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(declaration))) = item else { continue };
+        let name = declaration.id.sym.to_string();
+        let shape = shapes.entry(name.clone()).or_default();
+        let mut ints: Vec<(f64, String)> = Vec::new();
+        let mut rest: Vec<(String, bool)> = Vec::new();
+        for member in &declaration.members {
+            let member = enum_member_name(&member.id);
+            let numeric = matches!(values.get(&(name.clone(), member.clone())), Some(HirLit::F64(_)));
+            rest.push((member, numeric));
+        }
+        for (number, _) in reverse.get(&name).into_iter().flatten() {
+            if number.fract() == 0.0 && *number >= 0.0 && *number < 4294967295.0 {
+                ints.push((*number, format!("{number}")));
+            } else {
+                rest.push((format!("{number}"), false));
+            }
+        }
+        ints.sort_by(|a, b| a.0.total_cmp(&b.0));
+        shape.extend(ints.into_iter().map(|(_, key)| (key, false)));
+        shape.extend(rest);
+    }
+    if shapes.is_empty() {
+        return module.clone();
+    }
+    fn matches_name<'a>(shapes: &'a HashMap<String, Vec<(String, bool)>>, name: &str) -> Option<&'a str> {
+        // Types keep their bare names while module flattening mangles value names.
+        shapes.keys().map(String::as_str).find(|key| {
+            *key == name
+                || key.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')).is_some_and(
+                    |(digits, original)| digits.bytes().all(|b| b.is_ascii_digit()) && original == name,
+                )
+        })
+    }
+    struct Rewrite<'a> {
+        shapes: &'a HashMap<String, Vec<(String, bool)>>,
+        values: &'a EnumValues,
+        reverse: &'a EnumReverseValues,
+    }
+    impl Rewrite<'_> {
+        fn object(&self, name: &str) -> Expr {
+            enum_object_expr(name, self.shapes[name].iter().map(|(key, _)| key.clone()), self.values, self.reverse)
+        }
+        fn type_literal(&self, name: &str) -> TsType {
+            let members = self.shapes[name]
+                .iter()
+                .map(|(key, numeric)| {
+                    let is_member = self.values.contains_key(&(name.to_string(), key.clone()));
+                    let kind = if is_member && *numeric { TsKeywordTypeKind::TsNumberKeyword } else { TsKeywordTypeKind::TsStringKeyword };
+                    TsTypeElement::TsPropertySignature(TsPropertySignature {
+                        span: swc_common::DUMMY_SP,
+                        readonly: false,
+                        key: Box::new(Expr::Lit(Lit::Str(Str { span: swc_common::DUMMY_SP, value: key.as_str().into(), raw: None }))),
+                        computed: false,
+                        optional: false,
+                        type_ann: Some(Box::new(TsTypeAnn {
+                            span: swc_common::DUMMY_SP,
+                            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType { span: swc_common::DUMMY_SP, kind })),
+                        })),
+                    })
+                })
+                .collect();
+            TsType::TsTypeLit(TsTypeLit { span: swc_common::DUMMY_SP, members })
+        }
+    }
+    impl VisitMut for Rewrite<'_> {
+        fn visit_mut_expr(&mut self, expr: &mut Expr) {
+            match expr {
+                // `E.A` / `E[x]` keep their compile-time lowering; only the index is visited.
+                Expr::Member(member) if matches!(member.obj.as_ref(), Expr::Ident(id) if self.shapes.contains_key(id.sym.as_ref())) => {
+                    member.prop.visit_mut_with(self);
+                }
+                Expr::Ident(id) if self.shapes.contains_key(id.sym.as_ref()) => {
+                    *expr = self.object(id.sym.as_ref());
+                }
+                _ => expr.visit_mut_children_with(self),
+            }
+        }
+        fn visit_mut_ts_type(&mut self, ty: &mut TsType) {
+            if let TsType::TsTypeQuery(query) = ty {
+                if let TsTypeQueryExpr::TsEntityName(TsEntityName::Ident(id)) = &query.expr_name {
+                    if let Some(name) = matches_name(self.shapes, id.sym.as_ref()) {
+                        *ty = self.type_literal(name);
+                        return;
+                    }
+                }
+            }
+            ty.visit_mut_children_with(self);
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rewrite { shapes: &shapes, values: &values, reverse: &reverse });
+    module
+}
+
 /// Flattens `namespace NS { export const a = 1; export function f() {} }` into top-level
 /// declarations named `NS__a`/`NS__f`, and rewrites `NS.a` (value and type position) and the
 /// namespace body's own unqualified references to match. Types stay under their bare names, as
@@ -2175,14 +2331,68 @@ pub fn flatten_namespaces(module: &Module) -> Module {
         exported: HashMap<String, Members>,
         env: HashMap<String, Members>,
         items: Vec<(String, ModuleItem)>,
+        /// Exported names per namespace in declaration order, and the type of each value member
+        /// (when its declaration spells one out) for `typeof NS`.
+        order: HashMap<String, Vec<String>>,
+        types: HashMap<String, TsType>,
         failed: bool,
     }
     impl Hoist {
+        /// Records the declared type of a (renamed) value declaration, for `typeof NS`.
+        fn record_type(&mut self, decl: &Decl) {
+            let ann = |ann: &Option<Box<TsTypeAnn>>| ann.as_ref().map(|a| a.type_ann.clone());
+            match decl {
+                Decl::Fn(function) if function.function.type_params.is_none() => {
+                    let (params, ret) = (
+                        function
+                            .function
+                            .params
+                            .iter()
+                            .map(|param| match &param.pat {
+                                Pat::Ident(binding) if binding.type_ann.is_some() => Some(TsFnParam::Ident(binding.clone())),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                        function.function.return_type.clone(),
+                    );
+                    if let (Some(params), Some(ret)) = (params, ret) {
+                        self.types.insert(
+                            function.ident.sym.to_string(),
+                            TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(TsFnType {
+                                span: swc_common::DUMMY_SP,
+                                params,
+                                type_params: None,
+                                type_ann: ret,
+                            })),
+                        );
+                    }
+                }
+                Decl::Var(var) => {
+                    for declarator in &var.decls {
+                        let Pat::Ident(binding) = &declarator.name else { continue };
+                        let kind = match declarator.init.as_deref() {
+                            _ if binding.type_ann.is_some() => None,
+                            Some(Expr::Lit(Lit::Num(_))) => Some(TsKeywordTypeKind::TsNumberKeyword),
+                            Some(Expr::Lit(Lit::Str(_))) => Some(TsKeywordTypeKind::TsStringKeyword),
+                            Some(Expr::Lit(Lit::Bool(_))) => Some(TsKeywordTypeKind::TsBooleanKeyword),
+                            _ => continue,
+                        };
+                        let ty = match kind {
+                            Some(kind) => Box::new(TsType::TsKeywordType(TsKeywordType { span: swc_common::DUMMY_SP, kind })),
+                            None => ann(&binding.type_ann).expect("checked above"),
+                        };
+                        self.types.insert(binding.id.sym.to_string(), *ty);
+                    }
+                }
+                _ => {}
+            }
+        }
         fn block(&mut self, path: &str, parent: &Members, block: &TsModuleBlock) {
             let mut counts = Bindings::default();
             block.visit_with(&mut counts);
             let mut members = parent.clone();
             let mut exported = Members::new();
+            let mut order = Vec::new();
             let mut hoisted = Vec::new();
             for item in &block.body {
                 let Some((decl, is_export)) = declared(item) else {
@@ -2230,6 +2440,7 @@ pub fn flatten_namespaces(module: &Module) -> Module {
                                 members.insert(name.clone(), binding.clone());
                                 if is_export {
                                     exported.insert(name.clone(), binding.clone());
+                                    order.push(name.clone());
                                 }
                             }
                             continue;
@@ -2244,12 +2455,15 @@ pub fn flatten_namespaces(module: &Module) -> Module {
                     }
                     members.insert(name.clone(), binding.clone());
                     if is_export {
+                        order.push(name.clone());
                         exported.insert(name, binding);
                     }
                 }
+                self.record_type(&decl);
                 hoisted.push(ModuleItem::Stmt(Stmt::Decl(decl)));
             }
             // Reopened namespaces merge their exports.
+            self.order.entry(path.to_string()).or_default().extend(order);
             self.exported.entry(path.to_string()).or_default().extend(exported);
             self.env.entry(path.to_string()).or_default().extend(members);
             for item in hoisted {
@@ -2261,8 +2475,47 @@ pub fn flatten_namespaces(module: &Module) -> Module {
     struct Rewrite<'a> {
         env: &'a Members,
         exported: &'a HashMap<String, Members>,
+        order: &'a HashMap<String, Vec<String>>,
+        types: &'a HashMap<String, TsType>,
     }
     impl Rewrite<'_> {
+        /// `NS` used as a value: an object of its exported values (types are skipped; a type
+        /// keeps its bare name, so it is the only kind whose flat name equals its own).
+        fn namespace_object(&self, path: &str) -> Expr {
+            let mut props = Vec::new();
+            for name in self.order.get(path).into_iter().flatten() {
+                let value = match self.exported.get(path).and_then(|m| m.get(name)) {
+                    Some(Binding::Flat(flat)) if flat != name => Expr::Ident(Ident::new_no_ctxt(flat.as_str().into(), swc_common::DUMMY_SP)),
+                    Some(Binding::Namespace(inner)) => self.namespace_object(inner),
+                    _ => continue,
+                };
+                props.push(PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                    key: PropName::Ident(IdentName::new(name.as_str().into(), swc_common::DUMMY_SP)),
+                    value: Box::new(value),
+                }))));
+            }
+            Expr::Object(ObjectLit { span: swc_common::DUMMY_SP, props })
+        }
+        /// `typeof NS` as an object type, or `None` when a member's type is not spelled out.
+        fn namespace_type(&self, path: &str) -> Option<TsType> {
+            let mut members = Vec::new();
+            for name in self.order.get(path).into_iter().flatten() {
+                let ty = match self.exported.get(path).and_then(|m| m.get(name)) {
+                    Some(Binding::Flat(flat)) if flat != name => self.types.get(flat)?.clone(),
+                    Some(Binding::Namespace(inner)) => self.namespace_type(inner)?,
+                    _ => continue,
+                };
+                members.push(TsTypeElement::TsPropertySignature(TsPropertySignature {
+                    span: swc_common::DUMMY_SP,
+                    readonly: false,
+                    key: Box::new(Expr::Ident(Ident::new_no_ctxt(name.as_str().into(), swc_common::DUMMY_SP))),
+                    computed: false,
+                    optional: false,
+                    type_ann: Some(Box::new(TsTypeAnn { span: swc_common::DUMMY_SP, type_ann: Box::new(ty) })),
+                }));
+            }
+            Some(TsType::TsTypeLit(TsTypeLit { span: swc_common::DUMMY_SP, members }))
+        }
         fn namespace_of_expr(&self, expr: &Expr) -> Option<&str> {
             match expr {
                 Expr::Ident(ident) => match self.env.get(ident.sym.as_ref()) {
@@ -2323,6 +2576,10 @@ pub fn flatten_namespaces(module: &Module) -> Module {
                 }
             }
             if let Expr::Ident(ident) = expr {
+                if let Some(Binding::Namespace(path)) = self.env.get(ident.sym.as_ref()) {
+                    *expr = self.namespace_object(path);
+                    return;
+                }
                 if let Some(flat) = self.flat(ident) {
                     ident.sym = flat.into();
                 }
@@ -2350,6 +2607,17 @@ pub fn flatten_namespaces(module: &Module) -> Module {
                 return;
             }
             target.visit_mut_children_with(self);
+        }
+        fn visit_mut_ts_type(&mut self, ty: &mut TsType) {
+            if let TsType::TsTypeQuery(query) = ty {
+                if let TsTypeQueryExpr::TsEntityName(entity) = &query.expr_name {
+                    if let Some(object) = self.namespace_of_entity(entity).and_then(|path| self.namespace_type(path)) {
+                        *ty = object;
+                        return;
+                    }
+                }
+            }
+            ty.visit_mut_children_with(self);
         }
         fn visit_mut_ts_entity_name(&mut self, name: &mut TsEntityName) {
             match name {
@@ -2392,6 +2660,8 @@ pub fn flatten_namespaces(module: &Module) -> Module {
         exported: HashMap::new(),
         env: HashMap::new(),
         items: Vec::new(),
+        order: HashMap::new(),
+        types: HashMap::new(),
         failed: false,
     };
     let mut layout: Vec<Result<ModuleItem, usize>> = Vec::new(); // namespace slots keep source order
@@ -2414,8 +2684,9 @@ pub fn flatten_namespaces(module: &Module) -> Module {
         return module.clone();
     }
     let exported = std::mem::take(&mut hoist.exported);
+    let (order, types) = (std::mem::take(&mut hoist.order), std::mem::take(&mut hoist.types));
     let rewrite_item = |env: &Members, item: &mut ModuleItem| {
-        item.visit_mut_with(&mut Rewrite { env, exported: &exported });
+        item.visit_mut_with(&mut Rewrite { env, exported: &exported, order: &order, types: &types });
     };
     let mut body = Vec::new();
     for slot in layout {
