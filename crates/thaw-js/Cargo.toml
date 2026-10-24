@@ -10,3 +10,5 @@ crate-type = ["rlib"]
 
 [dependencies]
 thaw-parser = { path = "../thaw-parser" }
+swc_ecma_visit = "29.0.0"
+regress = "0.11.1"
