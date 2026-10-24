@@ -932,6 +932,18 @@ impl<'a> FnLowerer<'a> {
             } else {
                 self.infer_expr_type(&value)?
             };
+            // `[a, b] = "hi"` iterates the string's code points.
+            let (value, ty) = if ty == HirType::Str && matches!(pattern, Pat::Array(_)) {
+                (
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
+                        vec![value],
+                    ),
+                    HirType::Array(Box::new(HirType::Str)),
+                )
+            } else {
+                (value, ty)
+            };
             let destructurable_union = matches!(
                 &ty,
                 HirType::Union(elements)

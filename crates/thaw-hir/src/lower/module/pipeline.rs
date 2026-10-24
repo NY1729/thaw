@@ -269,6 +269,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let merged = normalize_interface_merges(module)?;
     let merged = flatten_namespaces(&merged);
     let normalized = normalize_top_level_destructuring(&merged)?;
+    let normalized = lift_local_classes(&normalized);
     let normalized = normalize_top_level_class_expressions(&normalized)?;
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
