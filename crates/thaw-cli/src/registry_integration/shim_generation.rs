@@ -232,6 +232,10 @@ fn native_addon_path_component(name: &str) -> String {
     component
 }
 
+/// Packages whose bundle the thaw-js runtime can run for this program (see
+/// `thaw_js_package_eligible`), computed by a first generation pass.
+type ThawJsPackages = std::collections::HashSet<String>;
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -243,6 +247,11 @@ fn native_addon_path_component(name: &str) -> String {
 /// call). Returns the generated shim text, the native lib paths to
 /// link, and any cross-package name-collision rewrites the caller must
 /// also apply to the user's own source (`rewrite_qualified_calls`).
+///
+/// `generate_registry_shims_pass`, with experimental thaw-js routing: when `thaw_js_routing` is
+/// set, a first pass finds the packages thaw-js can serve and a second pass regenerates the
+/// shims with those packages' typed calls targeting `__thaw_typed_tjs_*` and their bundles loaded
+/// by `loadThawJs`. Off (the default) this is exactly the single QuickJS pass.
 #[allow(clippy::too_many_arguments)]
 fn generate_registry_shims(
     registry_dir: &Path,
@@ -256,7 +265,42 @@ fn generate_registry_shims(
     output: &Path,
     external_native_staging: Option<&Path>,
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
+    thaw_js_routing: bool,
 ) -> Result<RegistryShims, String> {
+    let routed = ThawJsPackages::new();
+    let (first, eligible) = generate_registry_shims_pass(
+        registry_dir, use_packages, runtime_packages, static_packages, dynamic_packages,
+        user_source, user_source_name, embed_native_addons, output, external_native_staging,
+        forced_jit_fallbacks, thaw_js_routing, &routed,
+    )?;
+    if eligible.is_empty() {
+        return Ok(first);
+    }
+    generate_registry_shims_pass(
+        registry_dir, use_packages, runtime_packages, static_packages, dynamic_packages,
+        user_source, user_source_name, embed_native_addons, output, external_native_staging,
+        forced_jit_fallbacks, thaw_js_routing, &eligible,
+    )
+    .map(|(second, _)| second)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_registry_shims_pass(
+    registry_dir: &Path,
+    use_packages: &[String],
+    runtime_packages: &std::collections::HashSet<String>,
+    static_packages: &std::collections::HashSet<String>,
+    dynamic_packages: &std::collections::HashSet<String>,
+    user_source: &str,
+    user_source_name: &thaw_parser::common::FileName,
+    embed_native_addons: bool,
+    output: &Path,
+    external_native_staging: Option<&Path>,
+    forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
+    thaw_js_routing: bool,
+    thaw_js_routed: &ThawJsPackages,
+) -> Result<(RegistryShims, ThawJsPackages), String> {
+    let mut thaw_js_eligible = ThawJsPackages::new();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities = observed_constructor_arities_named(user_source, user_source_name)?;
     let observed_identifier_arities = observed_identifier_call_arities_named(user_source, user_source_name)?;
@@ -648,6 +692,14 @@ fn generate_registry_shims(
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
+        let thaw_js_package = thaw_js_routed.contains(&pkg.name);
+        // Name handed to the typed-declaration generators: the mark retargets them to thaw-js.
+        let declaration_package = if thaw_js_package {
+            format!("{THAW_JS_PACKAGE_MARK}{}", pkg.name)
+        } else {
+            pkg.name.clone()
+        };
+        let segment_start = shim.len();
         let mut constructor_arities_for_package = observed_constructor_arities.clone();
         let qualifier = &qualifier_by_package[&pkg.name];
         let callback_context_start = callback_instance_rewrites.len();
@@ -1005,7 +1057,9 @@ fn generate_registry_shims(
             // function, mime's `Mime` instance is a ready-made package
             // export), but hono's `Hono` -- constructed directly via
             // `new Hono()` -- does.
-            for class in &pkg.classes {
+            // A thaw-js package has no unreferenced-class QuickJS declarations (its used classes, if
+            // any, make it ineligible).
+            for class in pkg.classes.iter().filter(|_| !thaw_js_package) {
                 let mut runtime_class = class.clone();
                 runtime_class.name = format!("{}::{}", pkg.name, class.name);
                 if let Some(arities) = constructor_arities_for_package.get(&class.name).cloned() {
@@ -1151,7 +1205,7 @@ fn generate_registry_shims(
                 .filter(|f| f.name == name)
                 .collect::<Vec<_>>();
             if let Some((symbol, declaration, rewrites)) =
-                union_overload_dispatch_declaration(&pkg.name, name, &overloads)
+                union_overload_dispatch_declaration(&declaration_package, name, &overloads)
             {
                 shim.push_str(&declaration);
                 typed_targets.insert((pkg.name.clone(), name.to_string()), symbol);
@@ -1213,7 +1267,7 @@ fn generate_registry_shims(
                         let call_arities = observed_function_arities
                             .get(&function.name)
                             .unwrap_or(&empty_arities);
-                        typed_dynamic_declaration(&pkg.name, function, napi, call_arities, None)
+                        typed_dynamic_declaration(&declaration_package, function, napi, call_arities, None)
                     });
                 // First successful overload wins, matching TS's own
                 // overload-resolution convention of preferring the first
@@ -1267,7 +1321,7 @@ fn generate_registry_shims(
                             jit_operation.is_some(),
                             napi,
                         ) {
-                            shim.push_str(&alias);
+                            shim.push_str(&thaw_js_retarget_alias(alias, thaw_js_package));
                             bare_aliased.insert(function.name.clone());
                         }
                     }
@@ -1300,7 +1354,7 @@ fn generate_registry_shims(
                             jit_operation.is_some(),
                             napi,
                         ) {
-                            shim.push_str(&alias);
+                            shim.push_str(&thaw_js_retarget_alias(alias, thaw_js_package));
                             bare_aliased.insert(function.name.clone());
                         }
                     }
@@ -1373,10 +1427,12 @@ fn generate_registry_shims(
                                 .contains(&function.name.as_str())
                             && generic.contextual_rest_param_type.is_some()
                         {
-                            let direct = symbol.replace(
-                                "__thaw_typed_wrapper_",
-                                "__thaw_typed_",
-                            );
+                            let direct = symbol
+                                .replace("__thaw_typed_wrapper_", "__thaw_typed_")
+                                .replace(
+                                    "__thaw_typed_js_",
+                                    if thaw_js_package { "__thaw_typed_tjs_" } else { "__thaw_typed_js_" },
+                                );
                             let specialized = generic_rest_array_result(generic).is_some();
                             for &arity in arities {
                                 let mut params = scoring_param_hir_types(function, napi);
@@ -1450,7 +1506,7 @@ fn generate_registry_shims(
                     continue;
                 }
                 let Some((symbol, declaration)) =
-                    typed_dynamic_declaration(&pkg.name, function, napi, call_arities, Some(index))
+                    typed_dynamic_declaration(&declaration_package, function, napi, call_arities, Some(index))
                 else {
                     continue;
                 };
@@ -1460,7 +1516,12 @@ fn generate_registry_shims(
                     .as_ref()
                     .filter(|_| function.rest_param.is_some())
                 {
-                    let direct = symbol.replace("__thaw_typed_wrapper_", "__thaw_typed_");
+                    let direct = symbol
+                        .replace("__thaw_typed_wrapper_", "__thaw_typed_")
+                        .replace(
+                            "__thaw_typed_js_",
+                            if thaw_js_package { "__thaw_typed_tjs_" } else { "__thaw_typed_js_" },
+                        );
                     let specialized = generic_rest_array_result(generic).is_some();
                     for &arity in call_arities {
                         let mut params = scoring_param_hir_types(function, napi);
@@ -1554,7 +1615,9 @@ fn generate_registry_shims(
                 qualified,
                 &bare_aliased,
             ));
-        } else {
+        } else if !thaw_js_package {
+            // (A thaw-js package has no untyped QuickJS `callDynamic` wrappers: every function the
+            // program mentions has a typed target, see `thaw_js_package_eligible`.)
             shim.push_str(&thaw_bridge::generate_shim(
                 &pkg.functions,
                 native_lib_available,
@@ -1643,6 +1706,7 @@ fn generate_registry_shims(
                 ));
             }
         }
+        let segment_end = shim.len();
         if let Some(bundle_js) = &pkg.bundle_js {
             let runtime_package = runtime_packages.contains(&pkg.name);
             // `class_targets` (populated by `generate_napi_class_
@@ -1766,6 +1830,8 @@ fn generate_registry_shims(
                         .map(|value| (value.name.clone(), value)),
                 )
                 .chain(nested_values.iter().map(|(path, value)| (path.clone(), value)))
+                // A thaw-js package has no live value exports (the program mentions none).
+                .filter(|_| !thaw_js_package)
                 .filter_map(|(export_name, value)| {
                     let dynamic;
                     let ty = match &value.ty {
@@ -1914,6 +1980,19 @@ fn generate_registry_shims(
                 || pkg.classes.iter().any(|class| !pkg.type_only_value_names.contains(&class.name))
                 || !value_exports.is_empty())
             {
+                if thaw_js_routing
+                    && !value_exports.iter().any(|(name, ..)| thaw_js_mentions(user_source, name))
+                    && nested_namespace_aliases.is_empty()
+                    && thaw_js_package_eligible(
+                        pkg,
+                        bundle_js,
+                        user_source,
+                        &typed_targets,
+                        &shim[segment_start..segment_end],
+                    )
+                {
+                    thaw_js_eligible.insert(pkg.name.clone());
+                }
                 bundles.push((
                     pkg.name.clone(),
                     bundle_js.clone(),
@@ -1932,6 +2011,7 @@ fn generate_registry_shims(
         .map(
             |(name, js, fallback_names, class_names, qualified_aliases, nested_namespace_aliases, value_exports)| {
                 thaw_bridge::ModuleBundle {
+                    thaw_js: thaw_js_routed.contains(name),
                     package_name: name.as_str(),
                     js_source: js.as_str(),
                     fallback_names,
@@ -1981,6 +2061,7 @@ fn generate_registry_shims(
     shim.push_str(&thaw_bridge::generate_native_addon_path_init(&eager_paths));
     let eager_bundles = module_bundles.iter().filter(|bundle| static_packages.contains(bundle.package_name))
         .map(|bundle| thaw_bridge::ModuleBundle {
+            thaw_js: bundle.thaw_js,
             package_name: bundle.package_name, js_source: bundle.js_source,
             fallback_names: bundle.fallback_names, class_names: bundle.class_names,
             qualified_aliases: bundle.qualified_aliases,
@@ -2011,6 +2092,7 @@ fn generate_registry_shims(
         shim.push_str(&format!("\"__thaw_internal_module:{index}:{eager}:1:\";\n"));
         let bundle = module_bundles.iter().filter(|bundle| bundle.package_name == package.name)
             .map(|bundle| thaw_bridge::ModuleBundle {
+                thaw_js: bundle.thaw_js,
                 package_name: bundle.package_name,
                 js_source: bundle.js_source,
                 fallback_names: bundle.fallback_names,
@@ -2174,7 +2256,7 @@ fn generate_registry_shims(
         }
         external_exports.insert(pkg.name.clone(), package_exports);
     }
-    Ok((
+    Ok(((
         shim,
         native_libs,
         rewrites,
@@ -2196,7 +2278,7 @@ fn generate_registry_shims(
         jit_fallback_reasons,
         runtime_features,
         jit_symbol_origins,
-    ))
+    ), thaw_js_eligible))
 }
 
 fn restrict_type_only_class_values(

@@ -46,6 +46,9 @@ impl Interp {
                 let pairs = match &*o.kind.borrow() {
                     Kind::Array(items) => return Some(items.clone()),
                     Kind::Set(items) => return Some(items.clone()),
+                    Kind::Typed(t) => {
+                        return Some(t.to_vec().into_iter().map(Value::Number).collect())
+                    }
                     Kind::Map(entries) => entries.clone(),
                     _ => return None,
                 };
@@ -57,6 +60,39 @@ impl Interp {
                 )
             }
             _ => None,
+        }
+    }
+
+    /// `iter_items`, extended with the `Symbol.iterator` protocol for user-defined iterables
+    /// (collected eagerly).
+    pub(crate) fn iter_protocol(&mut self, v: &Value) -> R<Option<Vec<Value>>> {
+        if let Some(items) = self.iter_items(v) {
+            return Ok(Some(items));
+        }
+        if !matches!(v, Value::Object(_)) {
+            return Ok(None);
+        }
+        let sym = self
+            .lookup(&self.global.clone(), "Symbol")
+            .unwrap_or(Value::Undefined);
+        let tag = self.get(&sym, "iterator")?;
+        let key = self.key_of(&tag);
+        let method = self.get(v, &key)?;
+        if !method.is_callable() {
+            return Ok(None);
+        }
+        let iter = self.call(&method, v, &[])?;
+        let next = self.get(&iter, "next")?;
+        let mut out = Vec::new();
+        loop {
+            let r = self.call(&next, &iter, &[])?;
+            if !matches!(r, Value::Object(_)) {
+                return self.throw_error("TypeError", "Iterator result is not an object");
+            }
+            if self.get(&r, "done")?.truthy() {
+                return Ok(Some(out));
+            }
+            out.push(self.get(&r, "value")?);
         }
     }
 
@@ -90,6 +126,8 @@ impl Interp {
                     },
                 );
                 put_hidden(&o, "description", desc.map_or(Value::Undefined, Value::Str));
+                let id = it.next_symbol;
+                it.rt.symbols.insert(id, o.clone());
                 Ok(Value::Object(o))
             }
         });
@@ -112,6 +150,8 @@ impl Interp {
                 );
                 put_hidden(&o, "description", Value::Str(key.clone()));
                 put_hidden(&registry, &key, Value::Object(o.clone()));
+                let id = it.next_symbol;
+                it.rt.symbols.insert(id, o.clone());
                 Ok(Value::Object(o))
             });
             for name in [
@@ -132,6 +172,7 @@ impl Interp {
                     },
                 );
                 put_hidden(&o, "description", Value::Str(desc));
+                self.rt.symbols.insert(self.next_symbol, o.clone());
                 put_hidden(s, name, Value::Object(o));
             }
         }
@@ -154,7 +195,7 @@ impl Interp {
             let mp = mp.clone();
             move |it, _, args| {
                 let mut entries: Vec<(Value, Value)> = Vec::new();
-                if let Some(items) = it.iter_items(&arg(args, 0)) {
+                if let Some(items) = it.iter_protocol(&arg(args, 0))? {
                     for item in items {
                         let kv = it.iter_items(&item).unwrap_or_default();
                         let (k, v) = (
@@ -262,7 +303,7 @@ impl Interp {
             let sp = sp.clone();
             move |it, _, args| {
                 let mut items: Vec<Value> = Vec::new();
-                for v in it.iter_items(&arg(args, 0)).unwrap_or_default() {
+                for v in it.iter_protocol(&arg(args, 0))?.unwrap_or_default() {
                     if !items.iter().any(|x| same_value_zero(x, &v)) {
                         items.push(v);
                     }

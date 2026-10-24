@@ -1,0 +1,74 @@
+["name","version","count","neg","hex","oct","exp","inf","nan","yes","no","nothing","tilde","date","datetime","str","single","multi","folded","list","map","anchors"]
+name "Thaw"
+version 1.5
+count 42
+neg -7
+hex 255
+oct 15
+exp 1500
+inf Infinity
+nan NaN
+yes true
+no false
+nothing null
+tilde null
+date "2020-01-02"
+datetime "2020-01-02T03:04:05Z"
+str "quoted: \"x\" \n line"
+single "it's"
+multi "line one\nline two\n"
+folded "folded text\n"
+list ["a",{"b":1,"c":[1,2,{"d":"e"}]},["nested","seq"]]
+map {"x":1,"y":[2,3]}
+anchors {"base":{"p":1,"q":2},"copy":{"p":1,"q":2},"merged":{"<<":{"p":1,"q":2},"q":3}}
+a: 1
+b:
+  - 1
+  - 2
+  - c: x y
+d: |-
+  multi
+  line
+e: null
+f: true
+g: 'true'
+h: '123'
+i: 2020-01-02T00:00:00.000Z
+j:
+  k: {}
+l: []
+m: 'with: colon'
+'n': -0.5
+o: é
+p: ' lead'
+
+- 1
+- [2, 3]
+- {x: 1}
+
+a: 2
+z: 1
+ plain
+ null
+ 3
+ {}
+
+[{"a":1},{"b":2},[3]]
+YAMLException unexpected end of the stream within a flow collection 0 8
+YAMLException bad indentation of a mapping entry 0 4
+YAMLException end of the stream or a document separator is expected 0 2
+YAMLException unidentified alias "missing" 0 4
+YAMLException end of the stream or a document separator is expected 0 6
+YAMLException unexpected end of the stream within a double quoted scalar 0 18
+2 {"a":2}
+duplicated mapping key
+{"x":3,"y":"5","z":7}
+undefined function undefined true true
+long: >-
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+
+ERR unknown scalar tag !<tag:yaml.org,2002:binary>
+ERR unknown mapping tag !<tag:yaml.org,2002:set>
+ERR unknown sequence tag !<tag:yaml.org,2002:omap>
+ERR unknown scalar tag !<tag:yaml.org,2002:timestamp>

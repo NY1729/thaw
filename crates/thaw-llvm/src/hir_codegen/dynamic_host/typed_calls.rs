@@ -1,3 +1,23 @@
+/// Types that cross the thaw-js JSON boundary without losing identity or behavior.
+pub(crate) fn thaw_js_plain_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::F64
+        | HirType::Bool
+        | HirType::Str
+        | HirType::Json
+        | HirType::Null
+        | HirType::Undefined
+        | HirType::Void => true,
+        HirType::Array(element) | HirType::Dictionary(element) => thaw_js_plain_type(element),
+        HirType::Union(members) => members.iter().all(thaw_js_plain_type),
+        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+            thaw_js_plain_type(inner)
+        }
+        HirType::Object(fields) => fields.iter().all(|(_, ty)| thaw_js_plain_type(ty)),
+        _ => false,
+    }
+}
+
 fn ordinary_quickjs_typed_call(signature: &DynamicSignature) -> bool {
     signature.backend == DynamicBackend::QuickJs
         && ![
@@ -444,6 +464,9 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if signature.backend == DynamicBackend::ThawJs {
+            return self.compile_typed_thaw_js_call(signature, args);
+        }
         if signature.backend == DynamicBackend::QuickJs {
             self.uses_quickjs = true;
         }
@@ -1595,6 +1618,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let backend = match signature.backend {
                 DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
                 DynamicBackend::QuickJs => unreachable!("QuickJS calls use exact exception transport"),
+                DynamicBackend::ThawJs => unreachable!("thaw-js calls return before this match"),
                 DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
             };
             let json = self.compile_json_backend_values_with_extra(
@@ -1619,6 +1643,80 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(argument.into());
         }
         Ok(result)
+    }
+
+    /// `DynamicBackend::ThawJs`: plain JSON text both ways through `thaw_tjs_call_typed_result`
+    /// (`"<package>::<export>"`, JSON argument array). Only plain-data signatures are accepted
+    /// (see `thaw_js_plain_type`); the shim generator routes nothing else here.
+    fn compile_typed_thaw_js_call(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_thaw_js = true;
+        if let Some(bad) = signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .find(|ty| !thaw_js_plain_type(ty))
+        {
+            // The shim generator only routes plain-data signatures the program calls here, but
+            // every generated wrapper is compiled, called or not. Calling this one throws.
+            let message = format!(
+                "\u{1}thaw-js: `{}` has the non-plain-data type {bad:?}, which cannot cross the thaw-js boundary",
+                signature.symbol
+            );
+            let name = self
+                .builder
+                .build_global_string_ptr(&message, "thaw_js_unsupported")
+                .map_err(|error| error.to_string())?;
+            let empty = self
+                .builder
+                .build_call(self.module.get_function("thaw_json_array_new").unwrap(), &[], "thaw_js_no_args")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap();
+            self.compile_json_backend_values_with_extra(
+                name.as_pointer_value().into(),
+                empty,
+                "thaw_tjs_call_typed_result",
+                &[],
+                &[],
+            )?;
+            return Ok(self.basic_type(&signature.ret)?.const_zero());
+        }
+        let array = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_array_new").unwrap(), &[], "thaw_js_args")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
+            let value = self.compile_expr(arg)?;
+            if value.is_int_value() && matches!(ty, HirType::Json) {
+                return Err(format!(
+                    "thaw-js call `{}`: argument {} is a live JsValue handle",
+                    signature.symbol,
+                    index + 1
+                ));
+            }
+            self.compile_typed_dynamic_argument(array, value, ty)
+                .map_err(|error| format!("thaw-js argument {} ({ty:?}): {error}", index + 1))?;
+        }
+        let name = self
+            .builder
+            .build_global_string_ptr(&signature.symbol, "thaw_js_symbol")
+            .map_err(|error| error.to_string())?;
+        let json = self.compile_json_backend_values_with_extra(
+            name.as_pointer_value().into(),
+            array,
+            "thaw_tjs_call_typed_result",
+            &[],
+            &[],
+        )?;
+        self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
     fn compile_typed_quickjs_exact_call(

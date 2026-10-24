@@ -3312,6 +3312,17 @@ impl<'ctx> HirCompiler<'ctx> {
             js_call_result_type,
             Some(Linkage::External),
         );
+        // thaw-js (experimental `DynamicBackend::ThawJs`): same `{value, error}` result as napi.
+        self.module.add_function(
+            "thaw_tjs_call_typed_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_tjs_register",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_napi_call_handle_typed_result",
             result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),

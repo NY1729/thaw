@@ -1,0 +1,16 @@
+<Buffer 68 c3 a9 6c 6c 6f 20 77 c3 b6 72 6c 64 20 e2 82 ac f0 9f 98 80> 21 héllo wörld €😀 68c3a96c6c6f2077c3b6726c6420e282acf09f9880 aMOpbGxvIHfDtnJsZCDigqzwn5iA aMOpbGxvIHfDtnJsZCDigqzwn5iA 21 él
+hello hello hello 255,239 0
+<Buffer 01 02 03 00 ff> <Buffer 00 00 00> <Buffer 61 62 61 62> <Buffer 07 07 07> <Buffer 09 08> <Buffer 78 79>
+abcd ab 3 1 true false true
+-1 true -1
+<Buffer ff 12 34 ef be ad de fe 18 2d 44 54 fb 21 09 40> 255 4660 3735928559 6398 0.000 3.141592653589793 -1 255
+<Buffer 12 34> 2 el 2 3 true 3 4
+.xyz. zzz 2 .xyQQ
+{"type":"Buffer","data":[104,105]} { type: 'Buffer', data: [ 104, 105 ] } hi
+11 Uint8Array €uro 😀 utf-8 utf-8 �A
+hi é hi
+TypeError ERR_ENCODING_INVALID_ENCODED_DATA
+RangeError ERR_BUFFER_OUT_OF_BOUNDS
+TypeError ERR_INVALID_ARG_TYPE
+TypeError ERR_UNKNOWN_ENCODING Unknown encoding: nope
+{ read: 2, written: 3 } hi hi â¬ <Buffer 68 00 69 00> hi

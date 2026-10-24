@@ -1,0 +1,8 @@
+[ 1, 2, 3 ]
+[{"status":"fulfilled","value":1},{"status":"rejected","reason":"no"}]
+fast
+ok
+AggregateError All promises were rejected [ 'a', 'b' ]
+caught boom
+[]
+[]
