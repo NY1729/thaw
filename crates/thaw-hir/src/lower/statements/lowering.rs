@@ -1203,7 +1203,7 @@ impl<'a> FnLowerer<'a> {
                 self.call_class_static_setter(symbol, value)?
             } else {
                 self.call_class_instance_setter(
-                    &owner, symbol, HirExpr::Var(self.resolve_binding("this")), value,
+                    &owner, None, symbol, HirExpr::Var(self.resolve_binding("this")), value,
                 )?
             };
             return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
@@ -1255,7 +1255,7 @@ impl<'a> FnLowerer<'a> {
         let receiver = self.bind_generator_assignment_reference(
             &mut before_yield, receiver,
         )?;
-        let write = self.call_class_instance_setter(&owner, symbol, receiver, value)?;
+        let write = self.call_class_instance_setter(&owner, Some(&property), symbol, receiver, value)?;
         Ok(Some((before_yield, vec![HirStmt::Expr(write)])))
     }
 
