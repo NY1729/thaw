@@ -84,12 +84,15 @@ pub(crate) enum Node {
         ctor: Ctor,
         entries: Vec<(Vec<u16>, Node)>,
     },
+    /// `ctor` is the name of a user subclass (`Counter(1) [Map] { .. }`).
     Map {
         id: usize,
+        ctor: Option<String>,
         entries: Vec<(Node, Node)>,
     },
     Set {
         id: usize,
+        ctor: Option<String>,
         items: Vec<Node>,
     },
     /// ISO string, or `None` for an invalid date (`Invalid Date`).
@@ -109,6 +112,19 @@ pub(crate) enum Node {
     /// Text that something else already formatted (a live host value).
     Raw(String),
     Circular(usize),
+}
+
+/// Node's name, tag suffix and depth-cutoff label for a `Map`/`Set`: a subclass
+/// shows `Counter(1) [Map] {` and `[Counter [Map]]`.
+fn collection_label(base: &str, ctor: &Option<String>) -> (String, String, String) {
+    match ctor {
+        Some(name) if name != base => (
+            name.clone(),
+            format!(" [{base}]"),
+            format!("{name} [{base}]"),
+        ),
+        _ => (base.to_string(), String::new(), base.to_string()),
+    }
 }
 
 fn len16(text: &str) -> usize {
@@ -488,30 +504,37 @@ impl Ctx<'_> {
                 keys = &[];
                 ctx_style = name.clone();
             }
-            Node::Set { id: node_id, items } => {
+            Node::Set {
+                id: node_id,
+                ctor,
+                items,
+            } => {
+                let (label, tag, style) = collection_label("Set", ctor);
                 if items.is_empty() {
-                    return "Set(0) {}".into();
+                    return format!("{label}(0){tag} {{}}");
                 }
                 id = *node_id;
-                braces = [format!("Set({}) {{", items.len()), "}".into()];
+                braces = [format!("{label}({}){tag} {{", items.len()), "}".into()];
                 extras = Extras::Object;
                 kind = Kind::Set(items);
                 keys = &[];
-                ctx_style = "Set".into();
+                ctx_style = style;
             }
             Node::Map {
                 id: node_id,
+                ctor,
                 entries,
             } => {
+                let (label, tag, style) = collection_label("Map", ctor);
                 if entries.is_empty() {
-                    return "Map(0) {}".into();
+                    return format!("{label}(0){tag} {{}}");
                 }
                 id = *node_id;
-                braces = [format!("Map({}) {{", entries.len()), "}".into()];
+                braces = [format!("{label}({}){tag} {{", entries.len()), "}".into()];
                 extras = Extras::Object;
                 kind = Kind::Map(entries);
                 keys = &[];
-                ctx_style = "Map".into();
+                ctx_style = style;
             }
             Node::Object {
                 id: node_id,
@@ -1005,10 +1028,21 @@ mod corpus_tests {
                         .iter()
                         .map(|pair| (decode(&pair[0]), decode(&pair[1])))
                         .collect();
-                    Node::Map { id, entries }
+                    Node::Map {
+                        id,
+                        ctor: map
+                            .get("k")
+                            .and_then(|name| name.as_str())
+                            .map(str::to_string),
+                        entries,
+                    }
                 } else if let Some(items) = map.get("e") {
                     Node::Set {
                         id,
+                        ctor: map
+                            .get("k")
+                            .and_then(|name| name.as_str())
+                            .map(str::to_string),
                         items: items.as_array().unwrap().iter().map(decode).collect(),
                     }
                 } else if let Some(iso) = map.get("d") {
@@ -1274,12 +1308,14 @@ mod unit_tests {
     fn maps_sets_buffers_and_functions() {
         let map = Node::Map {
             id: 0,
+            ctor: None,
             entries: vec![(s("a"), num(1.0))],
         };
         assert_eq!(show(&map), "Map(1) { 'a' => 1 }");
         assert_eq!(
             show(&Node::Set {
                 id: 0,
+                ctor: None,
                 items: vec![num(1.0), s("x")]
             }),
             "Set(2) { 1, 'x' }"
