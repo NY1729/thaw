@@ -641,6 +641,26 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
             println!("quickjs-reason: {kind}{package}{operation}{location}{detail}");
         }
     }
+    if let Some(entries) = manifest["thaw_js"].as_array() {
+        for entry in entries {
+            let package = entry["package"].as_str().unwrap_or("?");
+            if entry["eligible"].as_bool() == Some(true) {
+                println!("thaw-js: package={package} eligible=true");
+            } else {
+                let blockers = entry["blockers"]
+                    .as_object()
+                    .map(|map| {
+                        map.iter()
+                            .map(|(feature, count)| format!("{feature}x{count}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .or_else(|| entry["error"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                println!("thaw-js: package={package} eligible=false blockers={blockers}");
+            }
+        }
+    }
     println!("napi: {}", manifest["napi"].as_bool().unwrap_or(false));
     Ok(())
 }

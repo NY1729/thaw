@@ -1,0 +1,344 @@
+use super::*;
+
+/// Run `src` and return the console.log lines (or the uncaught error text).
+fn run(src: &str) -> Vec<String> {
+    let mut it = Interp::new();
+    match it.run(src) {
+        Ok(_) => it.out,
+        Err(Ctl::Throw(v)) => {
+            let mut out = it.out.clone();
+            out.push(format!("Uncaught {}", it.to_str(&v)));
+            out
+        }
+        Err(Ctl::Unsupported(f)) => vec![format!("unsupported: {f}")],
+        Err(_) => vec!["stray completion".into()],
+    }
+}
+
+fn one(src: &str) -> String {
+    run(src).join("|")
+}
+
+#[test]
+fn arithmetic_strings_and_coercion() {
+    assert_eq!(
+        one("console.log(1 + 2 * 3, 7 % 4, 2 ** 10, 1 / 4, 0.1 + 0.2)"),
+        "7 3 1024 0.25 0.30000000000000004"
+    );
+    assert_eq!(
+        one("console.log('a' + 1, 1 + '2', '3' * '4', true + 1, null + 1, undefined + 1)"),
+        "a1 12 12 2 1 NaN"
+    );
+    assert_eq!(
+        one("console.log(5 / 0, -5 / 0, 0 / 0, -0, 1e21, 123456789012)"),
+        "Infinity -Infinity NaN -0 1e+21 123456789012"
+    );
+    assert_eq!(
+        one("console.log(5 >> 1, -5 >>> 28, 1 << 31, 6 & 3, 6 | 3, 6 ^ 3, ~5)"),
+        "2 15 -2147483648 2 7 5 -6"
+    );
+    assert_eq!(one("console.log(`x${1 + 1}y${'z'}`)"), "x2yz");
+}
+
+#[test]
+fn number_formatting_matches_js() {
+    assert_eq!(one("console.log(1e21, 1e-7, 1.5e-7, 123e20, 0.000001, 1.5e300, -1e21, String(-0), 100, 1.5)"), "1e+21 1e-7 1.5e-7 1.23e+22 0.000001 1.5e+300 -1e+21 0 100 1.5");
+}
+
+#[test]
+fn equality_and_typeof() {
+    assert_eq!(one("console.log(1 == '1', 1 === '1', null == undefined, null === undefined, NaN == NaN, 'a' < 'b')"), "true false true false false true");
+    assert_eq!(one("console.log(typeof 1, typeof 'a', typeof undefined, typeof null, typeof {}, typeof function(){}, typeof nope)"), "number string undefined object object function undefined");
+}
+
+#[test]
+fn closures_and_per_iteration_bindings() {
+    assert_eq!(one("function mk(){ var n = 0; return function(){ return ++n; }; } var c = mk(); c(); c(); console.log(c(), mk()())"), "3 1");
+    assert_eq!(one("var fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); console.log(fs[0](), fs[1](), fs[2]())"), "0 1 2");
+    assert_eq!(one("var fs = []; for (var i = 0; i < 3; i++) fs.push(() => i); console.log(fs[0](), fs[2]())"), "3 3");
+}
+
+#[test]
+fn recursion_hoisting_and_default_rest_params() {
+    assert_eq!(
+        one("console.log(fib(15)); function fib(n){ return n < 2 ? n : fib(n-1) + fib(n-2); }"),
+        "610"
+    );
+    assert_eq!(one("function f(a, b = 10, ...r){ return a + b + r.length; } console.log(f(1), f(1, 2), f(1, 2, 3, 4))"), "11 3 5");
+    assert_eq!(
+        one("console.log(h()); var h = function(){ return 1; }"),
+        "Uncaught TypeError: h is not a function"
+    );
+    assert_eq!(
+        one("var x = 1; { var x = 2; } console.log(x); let y = 1; { let y = 2; } console.log(y)"),
+        "2|1"
+    );
+}
+
+#[test]
+fn objects_arrays_prototypes_and_new() {
+    assert_eq!(one("var o = {a: 1, 'b c': [1, 2], f(){ return this.a; }}; console.log(o.a, o['b c'].length, o.f()); o.z = 5; delete o.a; console.log(Object.keys(o).join())"), "1 2 1|b c,f,z");
+    assert_eq!(one("function P(n){ this.n = n; } P.prototype.get = function(){ return this.n; }; var p = new P(7); console.log(p.get(), p instanceof P, p.constructor === P, 'get' in p)"), "7 true true true");
+    assert_eq!(one("var a = [3, 1, 2]; a.push(4); a[6] = 9; console.log(a.length, a.join('-'), a.indexOf(2), [1,2,3].slice(1).join(), [1].concat([2],[3,4]).length)"), "7 3-1-2-4---9 2 2,3 4");
+    assert_eq!(one("console.log([1,2,3].map(x => x * 2).filter(x => x > 2).reduce((s, x) => s + x, 0), [1,2,3].reduce((s, x) => s + x))"), "10 6");
+    assert_eq!(one("var x = {a: 1, b: {c: [1, 'two']}}; console.log(x); console.log([], {}, 'top', ['in'])"), "{ a: 1, b: { c: [ 1, 'two' ] } }|[] {} top [ 'in' ]");
+    assert_eq!(one("var o = Object.create({inherited: 1}); o.own = 2; console.log(o.inherited, o.own, Object.keys(o).join())"), "1 2 own");
+}
+
+#[test]
+fn control_flow_labels_switch_and_loops() {
+    assert_eq!(one("var s = 0; outer: for (var i = 0; i < 5; i++) { for (var j = 0; j < 5; j++) { if (j == 2) continue outer; if (i == 3) break outer; s += 1; } } console.log(s, i)"), "6 3");
+    assert_eq!(one("function f(x){ switch (x) { case 1: return 'one'; case 2: case 3: return 'few'; default: return 'many'; } } console.log(f(1), f(3), f(9))"), "one few many");
+    assert_eq!(one("var i = 0, s = ''; do { s += i; i++; } while (i < 3); while (true) { if (++i > 5) break; } for (var k in {p: 1, q: 2}) s += k; for (var ch of 'xy') s += ch; console.log(s, i)"), "012pqxy 6");
+}
+
+#[test]
+fn exceptions_and_runtime_errors() {
+    assert_eq!(one("try { throw new Error('boom'); } catch (e) { console.log(e.message, e instanceof Error, String(e)); } finally { console.log('fin'); }"), "boom true Error: boom|fin");
+    assert_eq!(
+        one("try { null.x } catch (e) { console.log(e.name + ': ' + e.message) }"),
+        "TypeError: Cannot read properties of null (reading 'x')"
+    );
+    assert_eq!(
+        one("try { nope } catch (e) { console.log(e instanceof ReferenceError, e.message) }"),
+        "true nope is not defined"
+    );
+    assert_eq!(
+        one("const c = 1; try { c = 2 } catch (e) { console.log(e.message) }"),
+        "Assignment to constant variable."
+    );
+    assert_eq!(
+        one("function f(){ try { return 1 } finally { console.log('cleanup') } } console.log(f())"),
+        "cleanup|1"
+    );
+    assert_eq!(one("throw new TypeError('t')"), "Uncaught TypeError: t");
+}
+
+#[test]
+fn stack_overflow_is_a_range_error_not_a_crash() {
+    let src = "function r(n){ return r(n + 1); } try { r(0) } catch (e) { console.log(e instanceof RangeError, e.message) }";
+    // deep native recursion needs a big stack in debug test threads
+    let out = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || one(src))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(out, "true Maximum call stack size exceeded");
+}
+
+#[test]
+fn strings_and_math_builtins() {
+    assert_eq!(one("var s = 'Hello, World'; console.log(s.length, s.charAt(1), s.charCodeAt(0), s.indexOf('World'), s.slice(-5), s.toUpperCase(), s.split(', ').length, s[0])"), "12 e 72 7 World HELLO, WORLD 2 H");
+    assert_eq!(one("console.log(Math.floor(2.7), Math.max(1, 5, 3), Math.min(), Math.round(2.5), Math.pow(2, 8), parseInt('42px'), parseInt('ff', 16), isNaN('x'), Number('  12 '))"), "2 5 Infinity 3 256 42 255 true 12");
+}
+
+#[test]
+fn unsupported_constructs_name_the_feature() {
+    assert_eq!(one("async function f(){}"), "unsupported: async");
+    assert_eq!(one("function* g(){}"), "unsupported: generator");
+    assert_eq!(one("var r = 10n"), "unsupported: bigint");
+    assert_eq!(one("var t = tag`x`"), "unsupported: tagged-template");
+    assert_eq!(
+        one("function f(){ return new.target }  f()"),
+        "unsupported: new.target"
+    );
+    assert_eq!(one("class A { #p = 1 }"), "unsupported: private-name");
+    assert_eq!(one("import x from 'y'"), "unsupported: esm-syntax");
+}
+
+#[test]
+fn destructuring_spread_and_accessors() {
+    assert_eq!(one("var {a, b: [c, d = 4], ...r} = {a: 1, b: [2], x: 5, y: 6}; console.log(a, c, d, Object.keys(r).join())"), "1 2 4 x,y");
+    assert_eq!(
+        one("var [x, , y = 9, ...z] = [1, 2, undefined, 4, 5]; console.log(x, y, z.join())"),
+        "1 9 4,5"
+    );
+    assert_eq!(
+        one("function f({a, b = 2}, [c]) { return a + b + c } console.log(f({a: 1}, [3]))"),
+        "6"
+    );
+    assert_eq!(
+        one("var a = 1, b = 2; [a, b] = [b, a]; console.log(a, b)"),
+        "2 1"
+    );
+    assert_eq!(one("var o = {get v(){ return this._v * 2 }, set v(x){ this._v = x }, _v: 1}; o.v = 21; console.log(o.v, Object.keys(o).join())"), "42 v,_v");
+    assert_eq!(one("var base = {a: 1}; var o = {...base, b: 2, ...{c: 3}}; console.log(JSON.stringify(o)); console.log(Math.max(...[1, 5, 3]))"), "{\"a\":1,\"b\":2,\"c\":3}|5");
+    assert_eq!(one("function f(){ return arguments.length + ':' + Array.prototype.slice.call(arguments, 1).join() } console.log(f(1, 2, 3))"), "3:2,3");
+    assert_eq!(one("var o = {}; Object.defineProperty(o, 'h', {value: 1}); o.e = 2; console.log(Object.keys(o).join(), o.h, JSON.stringify(o))"), "e 1 {\"e\":2}");
+}
+
+#[test]
+fn classes_inheritance_and_super() {
+    let src = "class A { constructor(n) { this.n = n } get dbl() { return this.n * 2 } static make(n) { return new this(n) } hi() { return 'A' + this.n } }
+               class B extends A { f = 10; constructor(n) { super(n + 1); this.g = this.f + this.n } hi() { return 'B' + super.hi() } }
+               var b = B.make(1); console.log(b.hi(), b.dbl, b.g, b instanceof A, b instanceof B, typeof A, Object.keys(b).join());
+               try { A(1) } catch (e) { console.log(e.message) }";
+    assert_eq!(
+        one(src),
+        "BA2 4 12 true true function n,f,g|Class constructor A cannot be invoked without 'new'"
+    );
+    assert_eq!(one("class E extends Error { constructor(m) { super(m); this.name = 'E' } } try { throw new E('bad') } catch (e) { console.log(e instanceof E, e instanceof Error, String(e)) }"), "true true E: bad");
+    assert_eq!(one("class S { static count = 0; static inc() { return ++S.count } } S.inc(); console.log(S.inc())"), "2");
+}
+
+#[test]
+fn map_set_symbol_and_optional_chaining() {
+    assert_eq!(one("var m = new Map([['a', 1]]); m.set('b', 2).set('a', 3); var s = []; m.forEach((v, k) => s.push(k + v)); console.log(m.size, m.get('a'), m.has('z'), s.join(), [...m.keys()].join(), m.keys().next().value)"), "2 3 false a3,b2 a,b a");
+    assert_eq!(one("var s = new Set([1, 2, 2, 3]); s.add(4).delete(1); var t = 0; for (var v of s) t += v; console.log(s.size, t, s.has(2), [...s].join())"), "3 9 true 2,3,4");
+    assert_eq!(one("var a = Symbol('x'), b = Symbol('x'); var o = {}; o[a] = 1; o[b] = 2; console.log(typeof a, a === b, o[a], o[b], Object.keys(o).length, Symbol.for('k') === Symbol.for('k'))"), "symbol false 1 2 0 true");
+    assert_eq!(one("var o = {a: {b: null, f() { return 7 }}}; console.log(o?.a?.b?.c, o.a?.f?.(), o.x?.y.z, o.a.g?.(), o?.['a']?.b)"), "undefined 7 undefined undefined null");
+}
+
+#[test]
+fn regexp_and_string_methods() {
+    assert_eq!(one("var m = /(\\d+)-(?<w>[a-z]+)/i.exec('x 12-Ab y'); console.log(m[0], m[1], m.index, m.groups.w, m.length)"), "12-Ab 12 2 Ab 3");
+    assert_eq!(one("var r = /a(b)?/g; var out = []; var m; while ((m = r.exec('ab a ab')) !== null) out.push(m[0] + '@' + m.index + ':' + r.lastIndex); console.log(out.join())"), "ab@0:2,a@3:4,ab@5:7");
+    assert_eq!(one("console.log('a-b_c d'.replace(/[-_ ]/g, '.'), 'abc'.replace(/(b)/, '[$1$&]'), 'x1y22'.replace(/\\d+/g, d => d * 2), 'aaa'.replace('a', 'b'), 'aaa'.replaceAll('a', 'b'))"), "a.b.c.d a[bb]c x2y44 baa bbb");
+    assert_eq!(one("console.log('a1b22c'.split(/\\d+/).join('|'), 'abc'.split('').length, 'a,b,,c'.split(',').length, 'a1b'.split(/(\\d)/).join('|'), 'ab'.split(/(?:)/).join('|'))"), "a|b|c 3 4 a|1|b a|b");
+    assert_eq!(one("console.log('foo bar'.match(/o+/)[0], 'a1b2'.match(/\\d/g).join(), 'abc'.match(/z/), 'abc'.search(/c/), /^a.c$/.test('abc'), /^a.c$/.test('abcd'), new RegExp('x+', 'g').flags, String(/a\\/b/gi))"), "oo 1,2 null 2 true false g /a\\/b/gi");
+}
+
+#[test]
+fn json_dates_and_misc_builtins() {
+    assert_eq!(one("console.log(JSON.stringify({a: [1, 'x', null, undefined, function(){}], b: undefined, c: {d: true}}), JSON.stringify([1, {a: 2}], null, 2).split('\\n').length, JSON.stringify('a\"b\\n'))"), "{\"a\":[1,\"x\",null,null,null],\"c\":{\"d\":true}} 6 \"a\\\"b\\n\"");
+    assert_eq!(one("var v = JSON.parse('{\"a\":[1,2,{\"b\":null}],\"s\":\"x\\\\u0041\",\"n\":-1.5e2}'); console.log(v.a[2].b, v.s, v.n, JSON.stringify(v))"), "null xA -150 {\"a\":[1,2,{\"b\":null}],\"s\":\"xA\",\"n\":-150}");
+    assert_eq!(one("try { JSON.parse('{bad') } catch (e) { console.log(e instanceof SyntaxError, e.name) }"), "true SyntaxError");
+    assert_eq!(one("var d = new Date(Date.UTC(2024, 1, 29, 13, 5, 9, 7)); console.log(d.toISOString(), d.getUTCDay(), d.getTime(), new Date('2020-02-03').getTime(), JSON.stringify({d: new Date(0)}))"), "2024-02-29T13:05:09.007Z 4 1709211909007 1580688000000 {\"d\":\"1970-01-01T00:00:00.000Z\"}");
+    assert_eq!(one("console.log([3, 1, 2].sort().join(), [10, 9, 1].sort().join(), [3, 1, 2].sort((a, b) => b - a).join(), ['b', undefined, 'a'].sort().length, [1, 2, 3].some(x => x > 2), [1, 2, 3].every(x => x > 2), [1, 2, 3].find(x => x > 1), [[1], [2]].map(x => x[0]).reverse().join(), [1, 2, 3, 4].splice(1, 2).join())"), "1,2,3 1,10,9 3,2,1 3 true false 2 2,1 2,3");
+    assert_eq!(one("console.log((255).toString(16), (0.5).toFixed(2), (1234.5678).toFixed(1), Number.isInteger(5), parseFloat('3.14abc'), parseInt('0x1f'), encodeURIComponent('a b&c/d'), decodeURIComponent('%E3%81%82'), 'abc'.padStart(5, '*'), 'abc'.substring(2, 0))"), "ff 0.50 1234.6 true 3.14 31 a%20b%26c%2Fd あ **abc ab");
+    assert_eq!(one("var f = function(a, b){ return this.x + a + b }; console.log(f.call({x: 1}, 2, 3), f.apply({x: 1}, [2, 3]), f.bind({x: 1}, 2)(3), Object.prototype.toString.call([]), (function(){ return typeof this }).call(undefined))"), "6 6 6 [object Array] object");
+}
+
+/// The shape of the real use case: a CommonJS package bundle whose exports are called from
+/// "compiled" code with plain values, no JSON text and no handle table. Source mirrors the `tj`
+/// fixture used in the Phase 0 measurements (`/home/fedora/work/thaw-tmp/tmp-run/jsr/proj/tj`).
+#[test]
+fn commonjs_package_exports_are_callable() {
+    let bundle = r#"
+        function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        exports.fib = fib;
+        exports.fibq = function (n) {
+          const f = (k) => (k < 2 ? k : f(k - 1) + f(k - 2));
+          return [n].map((x) => f(x))[0];
+        };
+        exports.wc = function (s) {
+          const m = {};
+          for (const w of s.split(" ")) m[w] = (m[w] || 0) + 1;
+          return Object.keys(m).length;
+        };
+        // an ms-like parser, without regexp
+        exports.secs = function (str) {
+          var parts = String(str).trim().split(' ');
+          var n = parseInt(parts[0], 10);
+          switch (parts[1]) { case 'min': return n * 60; case 'h': return n * 3600; case 'd': return n * 86400; default: return undefined; }
+        };
+    "#;
+    let mut it = Interp::new();
+    let exports = it.run_commonjs(bundle).expect("bundle evaluates");
+    let n = |v: R<Value>| v.expect("call ok").as_number().expect("number");
+    assert_eq!(
+        n(it.call_export(&exports, "fib", &[Value::Number(20.0)])),
+        6765.0
+    );
+    assert_eq!(
+        n(it.call_export(&exports, "fibq", &[Value::Number(15.0)])),
+        610.0
+    );
+    assert_eq!(
+        n(it.call_export(&exports, "wc", &[Value::str("a b c a b d e f g a")])),
+        7.0
+    );
+    assert_eq!(
+        n(it.call_export(&exports, "secs", &[Value::str("2 d")])),
+        172800.0
+    );
+    // a missing export is a TypeError, like in JS
+    assert!(matches!(
+        it.call_export(&exports, "nope", &[]),
+        Err(Ctl::Throw(_))
+    ));
+}
+
+const MINI: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
+  var h = require('./h');
+  exports.twice = function (x) { return h.dbl(x); };
+  exports.greet = function (o) { return { msg: 'hi ' + o.name, tags: o.tags.map(function (t) { return t.toUpperCase(); }) }; };
+  exports.boom = function () { throw new RangeError('nope'); };
+  exports.VERSION = '1.0';
+},
+"p/h.js": function(module, exports) { exports.dbl = function (x) { return x * 2; }; },
+"p/unused.js": function(module, exports) { function* g() {} },
+};
+var __thaw_bundle_require_maps = { "p/index.js": {"./h": "p/h.js"}, "p/h.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+#[test]
+fn package_host_loads_modules_and_exchanges_plain_data() {
+    use crate::host::{HostError, Native, Package};
+    let mut p = Package::load(MINI).expect("loads");
+    assert_eq!(
+        p.call("twice", &[Native::Number(21.0)]).ok(),
+        Some(Native::Number(42.0))
+    );
+    let arg = Native::from_json(r#"{"name":"bo","tags":["a","b"]}"#)
+        .ok()
+        .unwrap();
+    assert_eq!(
+        p.call("greet", &[arg]).ok().unwrap().to_json(),
+        r#"{"msg":"hi bo","tags":["A","B"]}"#
+    );
+    assert_eq!(p.get("VERSION").ok(), Some(Native::Str("1.0".into())));
+    match p.call("boom", &[]) {
+        Err(HostError::Thrown(m)) => assert_eq!(m, "RangeError: nope"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(p.call("twice", &[]), Ok(Native::Number(n)) if n.is_nan()));
+}
+
+#[test]
+fn package_host_reports_unsupported_constructs_by_name() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.VERSION = (async function () {});",
+    );
+    match Package::load(&bundle) {
+        Err(HostError::Unsupported(f)) => assert_eq!(f, "async"),
+        other => panic!("{:?}", other.err()),
+    }
+}
+
+#[test]
+fn c_abi_round_trips_json() {
+    use std::ffi::{CStr, CString};
+    let bundle = CString::new(MINI).unwrap();
+    let handle = crate::host::thaw_tjs_load(bundle.as_ptr());
+    assert!(handle >= 0);
+    let (path, args) = (CString::new("twice").unwrap(), CString::new("[4]").unwrap());
+    let out = crate::host::thaw_tjs_call(handle, path.as_ptr(), args.as_ptr());
+    assert!(!out.is_null());
+    // SAFETY: `out` was just returned by thaw_tjs_call and is freed exactly once below.
+    unsafe {
+        assert_eq!(CStr::from_ptr(out).to_str().unwrap(), "8");
+        crate::host::thaw_tjs_free(out);
+    }
+    let missing = CString::new("missing").unwrap();
+    assert!(crate::host::thaw_tjs_call(handle, missing.as_ptr(), args.as_ptr()).is_null());
+    crate::host::thaw_tjs_unload(handle);
+}
+
+#[test]
+fn scan_reports_reachable_blockers_only() {
+    let clean = crate::scan::scan_bundle(MINI).ok().unwrap();
+    assert!(clean.is_clean(), "{:?}", clean.blockers);
+    assert_eq!((clean.factories_total, clean.factories_reachable), (3, 2)); // the unused generator is unreachable
+    let blocked = MINI.replace("exports.VERSION = '1.0';", "exports.V = async () => await Buffer.from('x'); var fs = require('fs'); label: for (;;) { break label; } if (typeof process !== 'undefined') {}");
+    let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
+    let names: Vec<&str> = r.blockers.keys().map(String::as_str).collect();
+    assert_eq!(names, ["async", "await", "global:Buffer", "require:fs"]); // typeof-probed `process` and labels are not reported
+    assert!(crate::scan::scan_bundle("var x = 1;").is_err());
+}
