@@ -3265,7 +3265,15 @@ impl<'a> FnLowerer<'a> {
                     };
                     return Ok(HirExpr::JsonDelete(Box::new(object), Box::new(key)));
                 }
-                let value = self.lower_expr(&unary.arg)?;
+                let string_index = if unary.op == UnaryOp::TypeOf {
+                    self.lower_string_index_optional(&unary.arg)?
+                } else {
+                    None
+                };
+                let value = match string_index {
+                    Some(read) => read,
+                    None => self.lower_expr(&unary.arg)?,
+                };
                 let value = if matches!(
                     unary.op,
                     UnaryOp::TypeOf | UnaryOp::Bang | UnaryOp::Plus | UnaryOp::Minus
