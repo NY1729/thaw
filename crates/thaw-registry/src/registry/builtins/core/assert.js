@@ -100,6 +100,24 @@ ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = 
 function deepEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepEqual', deepEqual, deepText(actual, expected)); }
 function notDeepEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepEqual', notDeepEqual, notText(actual, 'Expected "actual" not to be loosely deep-equal to', 'Expected "actual" not to be loosely deep-equal to')); }
 ok.deepEqual = deepEqual; ok.notDeepEqual = notDeepEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;
+function received(value) {
+if (value === null || value === undefined) return String(value);
+if (typeof value === 'function') return 'function ' + value.name;
+if (typeof value === 'object') return value.constructor && value.constructor.name ? 'an instance of ' + value.constructor.name : show(value);
+return 'type ' + typeof value + ' (' + show(value) + ')';
+}
+function ifError(value) { if (value !== null && value !== undefined) failure(value, null, undefined, 'ifError', ifError, 'ifError got unwanted exception: ' + (value instanceof Error ? value.message : show(value)), true); }
+function matchWith(wantMatch, operator, input, regexp, message) {
+if (!(regexp instanceof RegExp)) { var bad = new TypeError('The "regexp" argument must be an instance of RegExp. Received ' + received(regexp)); bad.code = 'ERR_INVALID_ARG_TYPE'; throw bad; }
+var text;
+if (typeof input !== 'string') text = 'The "string" argument must be of type string. Received ' + received(input);
+else if (regexp.test(input) === wantMatch) return;
+else text = wantMatch ? 'The input did not match the regular expression ' + String(regexp) + '. Input:\n\n' + show(input) + '\n' : 'The input was expected to not match the regular expression ' + String(regexp) + '. Input:\n\n' + show(input) + '\n';
+failure(input, regexp, message, operator, wantMatch ? match : doesNotMatch, text);
+}
+function match(input, regexp, message) { matchWith(true, 'match', input, regexp, message); }
+function doesNotMatch(input, regexp, message) { matchWith(false, 'doesNotMatch', input, regexp, message); }
+ok.ifError = ifError; ok.match = match; ok.doesNotMatch = doesNotMatch;
 ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.default = ok; ok.__esModule = true;
 function strict(value, message) { if (!value) failure(value, true, message, '==', strict, arguments.length ? show(value) + ' == true' : 'No value argument passed to `assert.ok()`'); }
 Object.assign(strict, ok, { equal: strictEqual, notEqual: notStrictEqual, deepEqual: deepStrictEqual, notDeepEqual: notDeepStrictEqual }); strict.strict = strict; strict.default = strict; ok.strict = strict;
