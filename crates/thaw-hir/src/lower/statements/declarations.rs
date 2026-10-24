@@ -412,9 +412,25 @@ impl<'a> FnLowerer<'a> {
                         })
                         .transpose()?;
                     let ty = annotated.unwrap_or(HirType::Json);
-                    let value = self
-                        .coerce_to_declared(&ty, HirExpr::Lit(HirLit::Undefined))
-                        .map_err(|error| {
+                    // `let x: number;` with a later assignment: start from the
+                    // type's zero value (ponytail: a read before the first
+                    // assignment sees 0/""/false, not `undefined`).
+                    let zero = if self.assigned_later.contains(&name) {
+                        match ty {
+                            HirType::F64 => Some(HirLit::F64(0.0)),
+                            HirType::I64 => Some(HirLit::I64(0)),
+                            HirType::Bool => Some(HirLit::Bool(false)),
+                            HirType::Str => Some(HirLit::Str(String::new())),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let value = match zero {
+                        Some(lit) => Ok(HirExpr::Lit(lit)),
+                        None => self.coerce_to_declared(&ty, HirExpr::Lit(HirLit::Undefined)),
+                    }
+                    .map_err(|error| {
                             format!(
                                 "`{name}` needs an initializer (its declared type `{ty:?}` has \
                                  no default value: {error})"

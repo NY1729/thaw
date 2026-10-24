@@ -1499,8 +1499,13 @@ impl VisitMut for RenameReferences<'_> {
 
     fn visit_mut_var_declarator(&mut self, declaration: &mut thaw_parser::ast::VarDeclarator) {
         declaration.visit_mut_children_with(self);
+        // A block/loop-scoped binding is shadowed (its references are not
+        // renamed), so renaming only its declaration would orphan them.
         if self.function_depth == 0 {
             if let thaw_parser::ast::Pat::Ident(binding) = &mut declaration.name {
+                if self.shadowed.contains(binding.id.sym.as_ref()) {
+                    return;
+                }
                 if let Some(replacement) = self.names.get(binding.id.sym.as_ref()) {
                     binding.id.sym = replacement.clone().into();
                 }
