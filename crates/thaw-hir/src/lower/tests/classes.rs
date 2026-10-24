@@ -2704,3 +2704,28 @@ fn lowers_live_handle_instanceof_through_the_native_owner_with_a_realm_fallback(
     assert_eq!(body.matches("__thaw_object_has_class_identity").count(), 2, "{body}");
     assert_eq!(body.matches("\"__thaw_instanceof_dynamic_value\"").count(), 2, "{body}");
 }
+
+#[test]
+fn non_null_assertion_of_optional_number_yields_nan_when_absent() {
+    let program = lower(
+        r#"class P { o?: number }
+        function main(): void { const p = new P(); console.log(p.o! + 1); }"#,
+    );
+    let main = program.functions.iter().find(|f| f.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("OptionalIsNone") && body.contains("NaN"), "{body}");
+}
+
+#[test]
+fn non_null_assertion_of_narrowed_optional_number_adds_no_branch() {
+    let program = lower(
+        r#"class P { o?: number }
+        function main(): void {
+            const p = new P();
+            const v = p.o;
+            if (v !== undefined) { console.log(v! + 1); }
+        }"#,
+    );
+    let main = program.functions.iter().find(|f| f.name == "main").unwrap();
+    assert!(!format!("{:?}", main.body).contains("__thaw_nonnull_value_"));
+}

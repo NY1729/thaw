@@ -2241,6 +2241,21 @@
       "source": "import { EventEmitter } from \"node:events\";\nfunction main(): void { const arr = [1, 2]; const ee = new EventEmitter(); ee.on(\"e\", (o: any) => { o.push(3); console.log(o === arr, arr.length); }); ee.emit(\"e\", arr); }\n"
     },
     {
+      "name": "buffer in array literal keeps Buffer type",
+      "expect": "matched",
+      "source": "function main(): void {\n  const b = Buffer.from(\"hello\");\n  const arr = [b, b];\n  arr[0][0] = 72;\n  console.log(arr[1].toString(), arr[0].toString(\"hex\"), arr.length);\n  const c = Buffer.from(\"xy\");\n  const mixed = [b, c];\n  console.log(Buffer.concat(mixed).toString());\n  console.log(Buffer.concat([b, c]).toString());\n  console.log(Buffer.isBuffer(mixed[1]), mixed[1].readUInt8(0));\n  const nums: number[][] = [b];\n  console.log(nums[0].length, nums[0][0]);\n}\n"
+    },
+    {
+      "name": "buffer nested in console.log containers",
+      "expect": "matched",
+      "source": "function main(): void {\n  const b = Buffer.from(\"hi\");\n  console.log({ b });\n  console.log({ b: Buffer.from(\"hi\") });\n  console.log([b, Buffer.from(\"yo\")]);\n  console.log({ list: [b], n: 1 });\n  const o = { b };\n  o.b[0] = 72;\n  console.log(b.toString(), o.b.length, Buffer.isBuffer(o.b));\n}\n"
+    },
+    {
+      "name": "buffer list through hash update loop",
+      "expect": "matched",
+      "source": "import { createHash } from \"node:crypto\";\nfunction main(): void {\n  const h = createHash(\"sha1\");\n  const parts = [Buffer.from(\"a\"), Buffer.from(\"b\")];\n  for (const p of parts) h.update(p);\n  console.log(h.digest(\"hex\"));\n}\n"
+    },
+    {
       "name": "typeof out-of-range string index",
       "expect": "matched",
       "source": "function main(): void {\n  const s = \"abc\";\n  console.log(typeof s[5], typeof s[1], typeof s[0]);\n  const i = 7;\n  console.log(typeof s[i]);\n}\n"
@@ -2259,6 +2274,16 @@
       "name": "new.target in derived constructor chain with arrow",
       "expect": "matched",
       "source": "class Base {\n  tag: string;\n  isBase: boolean;\n  constructor() {\n    this.isBase = new.target === Base;\n    const read = () => new.target.name;\n    this.tag = read();\n    if (new.target === undefined) throw new Error(\"never\");\n  }\n}\nclass Mid extends Base {}\nclass Leaf extends Mid {\n  constructor() {\n    super();\n    Object.setPrototypeOf(this, Leaf.prototype);\n  }\n}\nfunction show(o: Base): void {\n  console.log(o.tag, o.isBase, o instanceof Base, o instanceof Mid, o instanceof Leaf);\n}\nfunction main(): void {\n  show(new Base()); show(new Mid()); show(new Leaf());\n}\n"
+    },
+    {
+      "name": "class optional fields print as undefined",
+      "expect": "matched",
+      "source": "class P { o?: number; s?: string; n: number = 1; }\nclass D extends P { x?: boolean; }\ninterface I { o?: number }\nfunction main(): void {\n  console.log(new P());\n  console.log(new D());\n  const lit: I = {};\n  console.log(lit);\n  console.log({ p: new P() });\n  console.log(JSON.stringify(new P()));\n}\n"
+    },
+    {
+      "name": "non-null assertion on absent optional number is NaN",
+      "expect": "matched",
+      "source": "class P { o?: number }\nfunction main(): void {\n  console.log(new P().o! + 1);\n  const q = new P();\n  q.o = 2;\n  console.log(q.o! + 1);\n}\n"
     }
   ]
 }
