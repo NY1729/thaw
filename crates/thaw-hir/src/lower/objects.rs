@@ -3598,6 +3598,12 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
                         vec![obj],
                     )),
+                    // Any other own property of an Error value (`err.status = 404` earlier): the
+                    // runtime side table, `undefined` when absent (also for a plain string).
+                    HirType::Str => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_get_prop".to_string())),
+                        vec![obj, HirExpr::Lit(HirLit::Str(prop.sym.to_string()))],
+                    )),
                     HirType::Map(_, _) | HirType::Set(_) if prop.sym == *"size" => {
                         Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_map_size".to_string())),

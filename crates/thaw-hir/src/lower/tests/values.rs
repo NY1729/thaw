@@ -3759,6 +3759,87 @@ fn object_literal_proto_shorthand_and_computed_key_still_lower() {
     assert_eq!(program.functions.len(), 1);
 }
 
+/// `err.code = x` on an Error value (a framed `Str`) and every read of its own properties lower
+/// to the runtime side table intrinsics instead of a "cannot assign to `.code` on Str" error.
+#[test]
+fn error_own_properties_lower_to_side_table_intrinsics() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const e = new Error("boom") as any;
+                e.code = "E_X";
+                e["dyn"] = 1;
+                console.log(e.code, e.status, Object.keys(e), Object.getOwnPropertyNames(e));
+                console.log("code" in e, delete e.code, JSON.stringify(e));
+                Object.assign(e, { extra: 1 });
+                Error.captureStackTrace(e);
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    for intrinsic in [
+        "__thaw_error_set_prop",
+        "__thaw_error_get_prop",
+        "__thaw_error_own_keys",
+        "__thaw_error_has_prop",
+        "__thaw_error_delete_prop",
+        "__thaw_error_json_stringify",
+    ] {
+        assert!(source.contains(intrinsic), "missing {intrinsic}:\n{source}");
+    }
+}
+
+/// Compound assignment and `++` on an Error property are rejected, not mis-lowered.
+#[test]
+fn error_property_compound_assignment_is_rejected() {
+    for body in ["e.count += 1;", "e.count++;"] {
+        let source = format!(
+            "function main(): void {{ const e = new Error(\"x\") as any; {body} }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse error");
+        let error = lower_module(&module).unwrap_err();
+        if body.contains("+=") {
+            assert!(error.contains("Error property"), "{body}: {error}");
+        }
+    }
+}
+
+/// Reading a built-in string property keeps its dedicated lowering: only unknown names reach the
+/// Error side table.
+#[test]
+fn string_builtin_property_reads_are_unchanged_by_error_properties() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const s = "abc";
+                console.log(s.length);
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(source.contains("__thaw_string_length"), "{source}");
+    assert!(!source.contains("__thaw_error_get_prop"), "{source}");
+}
+
+/// The side-table intrinsics are typed: set/has/delete are `Bool`, get is `Json`, keys is `Str`.
+#[test]
+fn error_side_table_intrinsics_are_typed() {
+    let program = lower(
+        r#"
+            function main(): void {
+                const e = new Error("x") as any;
+                const has: boolean = "k" in e;
+                const gone: boolean = delete e.k;
+                const keys: string[] = Object.keys(e);
+                const text: string = JSON.stringify(e);
+                const value: any = e.k;
+                console.log(has, gone, keys, text, value);
+            }
+        "#,
+    );
+    assert_eq!(program.functions.len(), 1);
+}
+
 #[test]
 fn closure_call_keeps_a_class_value_argument_live_for_an_any_parameter() {
     let program = lower(

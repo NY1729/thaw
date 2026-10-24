@@ -1715,14 +1715,60 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error custom property access returned no value".into());
             }
-            "__thaw_error_property_json" => {
+            "__thaw_error_set_prop" | "__thaw_error_has_prop" | "__thaw_error_delete_prop"
+            | "__thaw_error_assign_json" | "__thaw_error_json_stringify" => {
+                let mut values = Vec::new();
+                for arg in args {
+                    values.push(self.compile_expr(arg)?.into());
+                }
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                let function = self.module.get_function(&runtime).unwrap();
+                if values.len() != function.count_params() as usize {
+                    return Err(format!("{name} received the wrong number of operands"));
+                }
+                return self
+                    .builder
+                    .build_call(function, &values, "error_extras")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("error extras call returned no value".into());
+            }
+            "__thaw_error_own_keys" => {
+                let [receiver, hidden] = args else {
+                    return Err("__thaw_error_own_keys expects a receiver and a hidden-keys flag".into());
+                };
+                let receiver = self.compile_expr(receiver)?;
+                let hidden = self.compile_expr(hidden)?.into_int_value();
+                let hidden = self
+                    .builder
+                    .build_int_z_extend(hidden, self.context.i8_type(), "hidden_keys")
+                    .map_err(|error| error.to_string())?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_error_own_keys").unwrap(),
+                        &[receiver.into(), hidden.into()],
+                        "error_own_keys",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("error own keys returned no value".into());
+            }
+            "__thaw_error_property_json" | "__thaw_error_get_prop" => {
                 let [receiver, key] = args else {
-                    return Err("__thaw_error_property_json expects a receiver and a property name".into());
+                    return Err(format!("{name} expects a receiver and a property name"));
                 };
                 let receiver = self.compile_expr(receiver)?;
                 let key = self.compile_expr(key)?;
+                let runtime_lookup = if name == "__thaw_error_get_prop" {
+                    "thaw_error_get_prop_json"
+                } else {
+                    "thaw_error_property_json"
+                };
                 let text = self.builder.build_call(
-                    self.module.get_function("thaw_error_property_json").unwrap(),
+                    self.module.get_function(runtime_lookup).unwrap(),
                     &[receiver.into(), key.into()],
                     "error_custom_property_json_text",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()

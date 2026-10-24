@@ -8311,6 +8311,17 @@ fn reset_native_error_text_identity(_: bool) {
     NATIVE_ERROR_TEXT_IDENTITY.with(|table| table.borrow_mut().clear());
 }
 
+/// Canonical identity pointer of a (possibly copied) caught Error text; every Error side-table
+/// lookup keys through this. Non-error strings map to themselves.
+#[no_mangle]
+pub extern "C" fn thaw_error_canonical_pointer(pointer: *const u8) -> usize {
+    let pointer = pointer as usize;
+    NATIVE_ERROR_TEXT_IDENTITY
+        .with(|table| table.borrow().get(&pointer).copied())
+        .or_else(|| thaw_arena::native_error_alias(pointer))
+        .unwrap_or(pointer)
+}
+
 /// Pointer identity of two string values for `e === err`: a caught Error's text copy maps back to
 /// the framed pointer of the thrown Error, so the same Error compares equal; other strings compare
 /// by pointer only.
@@ -8319,13 +8330,7 @@ pub unsafe extern "C" fn thaw_str_pointer_same(left: *const u8, right: *const u8
     if left.is_null() || right.is_null() {
         return 0;
     }
-    let canonical = |pointer: usize| {
-        NATIVE_ERROR_TEXT_IDENTITY
-            .with(|table| table.borrow().get(&pointer).copied())
-            .or_else(|| thaw_arena::native_error_alias(pointer))
-            .unwrap_or(pointer)
-    };
-    u8::from(canonical(left as usize) == canonical(right as usize))
+    u8::from(thaw_error_canonical_pointer(left) == thaw_error_canonical_pointer(right))
 }
 
 fn host_error_from_result(result: HostHandleResult, operation: &str) -> Option<u64> {
@@ -9346,6 +9351,27 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn error_canonical_pointer_maps_a_copy_to_the_original_and_keeps_others() {
+        let (original, copy, other) = (0x1000_usize, 0x2000_usize, 0x3000_usize);
+        NATIVE_ERROR_TEXT_IDENTITY.with(|table| table.borrow_mut().insert(copy, original));
+        assert_eq!(thaw_error_canonical_pointer(copy as *const u8), original);
+        assert_eq!(
+            thaw_error_canonical_pointer(original as *const u8),
+            original
+        );
+        assert_eq!(thaw_error_canonical_pointer(other as *const u8), other);
+        assert_eq!(
+            unsafe { thaw_str_pointer_same(copy as *const u8, original as *const u8) },
+            1
+        );
+        assert_eq!(
+            unsafe { thaw_str_pointer_same(copy as *const u8, other as *const u8) },
+            0
+        );
+        NATIVE_ERROR_TEXT_IDENTITY.with(|table| table.borrow_mut().clear());
+    }
+
     use super::*;
 
     extern "C" fn raw_receiver_test_retain(handle: u64) -> u8 {

@@ -1334,6 +1334,9 @@ impl<'a> FnLowerer<'a> {
                 self.bind_generator_assignment_reference(&mut before_yield, object)?,
                 Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
             ),
+            Target::ErrorProp(..) => {
+                return Err("`yield` assigned to an Error property is not supported yet".into())
+            }
         };
         if let Target::Var(name) = &target {
             if self.immutable_bindings.contains(name) {
@@ -1384,6 +1387,7 @@ impl<'a> FnLowerer<'a> {
                     "cannot assign to field `{field}` on value of type {other:?}"
                 ))
             }
+            Target::ErrorProp(..) => unreachable!("rejected while binding the yield reference"),
         };
         if let Target::Var(name) = &target {
             self.record_binding_write(name);
