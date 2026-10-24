@@ -67,9 +67,11 @@ return true;
 function ok(value, message) { if (!value) failure(value, true, message, '==', ok, arguments.length ? show(value) + ' == true' : 'No value argument passed to `assert.ok()`'); }
 function equal(actual, expected, message) { if (actual != expected) failure(actual, expected, message, '==', equal, show(actual) + ' == ' + show(expected)); }
 function notEqual(actual, expected, message) { if (actual == expected) failure(actual, expected, message, '!=', notEqual, show(actual) + ' != ' + show(expected)); }
-function strictEqual(actual, expected, message) { if (!Object.is(actual, expected)) failure(actual, expected, message, 'strictEqual', strictEqual, strictText(actual, expected)); }
+// Node 22 appends the diff body (generated text minus its header line) to a custom string message for the strict-equal family only.
+function withBody(message, text) { return typeof message === 'string' ? message + '\n' + text.slice(text.indexOf('\n') + 1) : message; }
+function strictEqual(actual, expected, message) { if (!Object.is(actual, expected)) { var text = strictText(actual, expected); failure(actual, expected, withBody(message, text), 'strictEqual', strictEqual, text); } }
 function notStrictEqual(actual, expected, message) { if (Object.is(actual, expected)) failure(actual, expected, message, 'notStrictEqual', notStrictEqual, notText(actual, 'Expected "actual" to be strictly unequal to', 'Expected "actual" not to be strictly unequal to')); }
-function deepStrictEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepStrictEqual', deepStrictEqual, deepText(actual, expected)); }
+function deepStrictEqual(actual, expected, message) { if (!deep(actual, expected)) { var text = deepText(actual, expected); failure(actual, expected, withBody(message, text), 'deepStrictEqual', deepStrictEqual, text); } }
 function notDeepStrictEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepStrictEqual', notDeepStrictEqual, notText(actual, 'Expected "actual" not to be strictly deep-equal to', 'Expected "actual" not to be strictly deep-equal to')); }
 function fail(message) { failure(undefined, undefined, message, 'fail', fail, 'Failed'); }
 function matches(error, expected) {
@@ -94,7 +96,10 @@ return caught;
 }
 function doesNotThrow(block, expected, message) { try { block(); } catch (error) { if (typeof expected === 'string') { message = expected; expected = undefined; } if (matches(error, expected)) failure(error, expected, undefined, 'doesNotThrow', doesNotThrow, 'Got unwanted exception' + (message ? ': ' + message : '.') + '\nActual message: "' + (error && error.message) + '"', true); throw error; } }
 ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = notEqual; ok.strictEqual = strictEqual; ok.notStrictEqual = notStrictEqual;
-ok.deepEqual = deepStrictEqual; ok.notDeepEqual = notDeepStrictEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;
+// ponytail: loose deepEqual/notDeepEqual still use strict comparison; only the operator and (diff-free) message follow Node.
+function deepEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepEqual', deepEqual, deepText(actual, expected)); }
+function notDeepEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepEqual', notDeepEqual, notText(actual, 'Expected "actual" not to be loosely deep-equal to', 'Expected "actual" not to be loosely deep-equal to')); }
+ok.deepEqual = deepEqual; ok.notDeepEqual = notDeepEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;
 ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.default = ok; ok.__esModule = true;
 function strict(value, message) { if (!value) failure(value, true, message, '==', strict, arguments.length ? show(value) + ' == true' : 'No value argument passed to `assert.ok()`'); }
 Object.assign(strict, ok, { equal: strictEqual, notEqual: notStrictEqual, deepEqual: deepStrictEqual, notDeepEqual: notDeepStrictEqual }); strict.strict = strict; strict.default = strict; ok.strict = strict;
