@@ -258,6 +258,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_receiver_bool"
                         | "__thaw_json_receiver_string"
                         | "__thaw_json_receiver_bigint"
+                        | "__thaw_error_get_prop"
                         | "__thaw_json_from_consumed_dynamic"
                         | "__thaw_json_host_from_dynamic"
                         | "__thaw_json_host_from_borrowed_dynamic" => return Some(HirType::Json),
@@ -411,6 +412,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "deleteDynamicProperty"
                         | "hasDynamicProperty"
                         | "__thaw_error_is_error"
+                        | "__thaw_error_set_prop"
+                        | "__thaw_error_has_prop"
+                        | "__thaw_error_delete_prop"
+                        | "__thaw_error_assign_json"
                         | "__thaw_native_wrapper_is_live"
                         | "__thaw_error_is_instance" => {
                             return Some(HirType::Bool)

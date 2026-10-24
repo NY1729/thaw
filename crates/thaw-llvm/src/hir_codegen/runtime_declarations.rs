@@ -1834,6 +1834,41 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        // Own extensible properties of an Error value (runtime side table): (error, key[, json]).
+        self.module.add_function(
+            "thaw_error_set_prop",
+            self.context
+                .bool_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_assign_json",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["thaw_error_has_prop", "thaw_error_delete_prop"] {
+            self.module.add_function(
+                name,
+                self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_error_get_prop_json",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_own_keys",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_json_stringify",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_error_property",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),

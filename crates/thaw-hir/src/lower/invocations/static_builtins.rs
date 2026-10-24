@@ -467,7 +467,7 @@ impl<'a> FnLowerer<'a> {
                 )
                 | ("Uint8Array", "fromHex" | "fromBase64" | "from")
                 | ("BigInt", "asIntN" | "asUintN")
-                | ("Error", "isError")
+                | ("Error", "isError" | "captureStackTrace")
                 | ("Proxy", "revocable")
                 | ("Intl", "getCanonicalLocales" | "supportedValuesOf")
                 | ("Map", "groupBy")
@@ -2658,6 +2658,32 @@ impl<'a> FnLowerer<'a> {
                         let (value, value_type) = self
                             .apply_class_to_json(value.clone(), &value_type)?
                             .unwrap_or((value, value_type));
+                        if value_type == HirType::Str && arguments.len() == 1 {
+                            // An Error value serializes as its own enumerable properties (`{}` for
+                            // a fresh one); any other string stays a quoted JSON string.
+                            let name = format!("__thaw_json_stringify_text_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), HirType::Str);
+                            let var = HirExpr::Var(name.clone());
+                            let plain = self.coerce_to_declared(&HirType::Json, var.clone())?;
+                            let conditional = HirExpr::Conditional(
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_error_is_error".into())),
+                                    vec![var.clone()],
+                                )),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_error_json_stringify".into())),
+                                    vec![var],
+                                )),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("JSON.stringify".into())),
+                                    vec![plain],
+                                )),
+                                HirType::Str,
+                            );
+                            bindings.push((name, HirType::Str, value));
+                            return self.wrap_call_argument_bindings(conditional, &bindings);
+                        }
                         if value_type == HirType::JsValue && arguments.len() == 1 {
                             // The source handle belongs to its caller. The exact mixed
                             // call consumes only the independent reference acquired
@@ -4118,6 +4144,58 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        if let (true, HirType::Union(members)) =
+                            (property.sym == *"keys" && ty == crate::caught_exception_carrier_type(), &ty)
+                        {
+                            // `catch (e: any)`: the active member decides between an Error text
+                            // (side-table keys) and a live object snapshot.
+                            let name = format!("__thaw_keys_carrier_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            let var = HirExpr::Var(name.clone());
+                            let is_text = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(Box::new(var.clone()), members.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                            );
+                            let text = HirExpr::UnionValue(Box::new(var.clone()), 3, members.clone());
+                            let error_keys = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
+                                vec![HirExpr::Call(
+                                    Box::new(HirExpr::Var("JSON.parse".to_string())),
+                                    vec![HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_error_own_keys".to_string())),
+                                        vec![text, HirExpr::Lit(HirLit::Bool(false))],
+                                    )],
+                                )],
+                            );
+                            let live_keys = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
+                                vec![self.caught_carrier_as_json(var)?],
+                            );
+                            let result = HirExpr::Conditional(
+                                Box::new(is_text),
+                                Box::new(error_keys),
+                                Box::new(live_keys),
+                                HirType::Array(Box::new(HirType::Str)),
+                            );
+                            bindings.push((name, ty.clone(), value));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if ty == HirType::Str {
+                            // An Error value: its own keys come from the runtime side table (a
+                            // plain string yields its index keys, like `Object.keys("ab")`).
+                            let text = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_own_keys".to_string())),
+                                vec![value, HirExpr::Lit(HirLit::Bool(property.sym != *"keys"))],
+                            );
+                            let parsed = HirExpr::Call(Box::new(HirExpr::Var("JSON.parse".to_string())), vec![text]);
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
+                                vec![parsed],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
                                 "`{label}` currently requires a fixed object, got {ty:?}"
@@ -4575,6 +4653,57 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        // An Error target (a framed string): copy own properties into its side table.
+                        if target_type == HirType::Str {
+                            let target_name = format!("__thaw_assign_target_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(target_name.clone(), HirType::Str);
+                            let mut statements = Vec::new();
+                            for (source, source_type) in sources.iter().zip(&source_types) {
+                                match source_type {
+                                    HirType::Object(fields) => {
+                                        let source_name = format!("__thaw_assign_source_{}", self.next_binding);
+                                        self.next_binding += 1;
+                                        self.scope.insert(source_name.clone(), source_type.clone());
+                                        statements.push(HirStmt::Let(source_name.clone(), source_type.clone(), source.clone()));
+                                        for index in ecmascript_field_order(fields) {
+                                            let (name, field_type) = &fields[index];
+                                            if !json_convertible_native_type(field_type) {
+                                                return Err(format!("`Object.assign` onto an Error cannot copy field `{name}` of type {field_type:?}"));
+                                            }
+                                            let value = HirExpr::PropAccess(
+                                                Box::new(HirExpr::Var(source_name.clone())),
+                                                source_type.clone(),
+                                                name.clone(),
+                                            );
+                                            let json = self.coerce_to_declared(&HirType::Json, value)?;
+                                            statements.push(HirStmt::Expr(HirExpr::Call(
+                                                Box::new(HirExpr::Var("__thaw_error_set_prop".to_string())),
+                                                vec![
+                                                    HirExpr::Var(target_name.clone()),
+                                                    HirExpr::Lit(HirLit::Str(name.clone())),
+                                                    HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".to_string())), vec![json]),
+                                                ],
+                                            )));
+                                        }
+                                    }
+                                    HirType::Json => statements.push(HirStmt::Expr(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_error_assign_json".to_string())),
+                                        vec![
+                                            HirExpr::Var(target_name.clone()),
+                                            HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".to_string())), vec![source.clone()]),
+                                        ],
+                                    ))),
+                                    other => {
+                                        return Err(format!("`Object.assign` onto an Error requires object or JSON sources, got {other:?}"));
+                                    }
+                                }
+                            }
+                            statements.push(HirStmt::Return(Some(HirExpr::Var(target_name.clone()))));
+                            let mut assign_bindings = bindings.clone();
+                            assign_bindings.push((target_name, HirType::Str, target.clone()));
+                            return self.wrap_call_argument_bindings(HirExpr::Block(statements), &assign_bindings);
+                        }
                         // A native object target mutates in place: each source
                         // field is written to the same-named, same-typed target
                         // field in source order, and the target is the result.
@@ -5001,6 +5130,30 @@ impl<'a> FnLowerer<'a> {
                     );
                             }
                         }
+                    }
+                    if object.sym == *"Error" && property.sym == *"captureStackTrace" {
+                        // `Error.captureStackTrace(target[, constructorOpt])`: there are no call
+                        // frames to capture, so an Error value only fixes its `stack` header (read
+                        // once, V8 serializes it lazily) and any other target is left unchanged.
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?;
+                        let Some(target) = arguments.first().cloned() else {
+                            return Err("`Error.captureStackTrace` expects a target object".into());
+                        };
+                        let mut statements = Vec::new();
+                        for extra in arguments.iter().skip(1) {
+                            statements.push(HirStmt::Expr(extra.clone()));
+                        }
+                        if self.infer_expr_type(&target)? == HirType::Str {
+                            statements.insert(0, HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+                                vec![target],
+                            )));
+                        } else {
+                            statements.insert(0, HirStmt::Expr(target));
+                        }
+                        statements.push(HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))));
+                        return self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings);
                     }
                     if object.sym == *"Error" && property.sym == *"isError" {
                         // `Error.isError(value)`: true for a tagged error
