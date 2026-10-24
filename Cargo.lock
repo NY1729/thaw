@@ -3182,6 +3182,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-js"
+version = "0.1.0"
+dependencies = [
+ "thaw-parser",
+]
+
+[[package]]
 name = "thaw-llvm"
 version = "0.1.0"
 dependencies = [
