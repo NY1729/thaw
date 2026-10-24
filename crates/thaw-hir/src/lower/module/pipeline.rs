@@ -278,6 +278,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
+    let normalized = normalize_any_async_call_aliases(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
     specialize_named_promise_rejection_callbacks(&normalized)
 }
