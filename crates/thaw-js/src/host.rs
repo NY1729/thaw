@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
+use std::ptr;
 use std::rc::Rc;
 
 use crate::scan::{parse_bundle, BundleParts};
@@ -122,7 +123,8 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
 
 /// A loaded package: one interpreter, the bundle's modules, and its entry exports.
 pub struct Package {
-    interp: Interp,
+    /// Boxed: async functions hold its address while suspended.
+    interp: Box<Interp>,
     exports: Value,
 }
 
@@ -130,7 +132,7 @@ impl Package {
     /// Parse `bundle_js` (registry `bundle.js`) and evaluate its entry module.
     pub fn load(bundle_js: &str) -> Result<Package, HostError> {
         let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
-        let mut interp = Interp::new();
+        let mut interp = Box::new(Interp::new());
         interp.run_id += 1; // factory spans come from this one parse
         let entry = parts.entry.clone();
         let mut factories = HashMap::new();
@@ -153,15 +155,27 @@ impl Package {
 
     /// Call `path` (`"name"` or `"a.b"`) on the package exports with plain-data arguments.
     pub fn call(&mut self, path: &str, args: &[Native]) -> Result<Native, HostError> {
-        self.call_or_get(path, Some(args))
+        self.call_or_get(path, Some(args), false)
+    }
+
+    /// Call an export addressed the way registry shims name it (the `.d.ts` function name). A package
+    /// whose `module.exports` is itself the function (`ms`, `minimist`) has no property of that name,
+    /// so an absent property falls back to `exports.default`, then to `exports` when callable.
+    pub fn call_export(&mut self, name: &str, args: &[Native]) -> Result<Native, HostError> {
+        self.call_or_get(name, Some(args), true)
     }
 
     /// Read the value at `path` (`"VERSION"`, `"a.b"`) without calling it.
     pub fn get(&mut self, path: &str) -> Result<Native, HostError> {
-        self.call_or_get(path, None)
+        self.call_or_get(path, None, false)
     }
 
-    fn call_or_get(&mut self, path: &str, args: Option<&[Native]>) -> Result<Native, HostError> {
+    fn call_or_get(
+        &mut self,
+        path: &str,
+        args: Option<&[Native]>,
+        export_fallback: bool,
+    ) -> Result<Native, HostError> {
         let it = &mut self.interp;
         let mut this = self.exports.clone();
         let mut f = this.clone();
@@ -169,14 +183,42 @@ impl Package {
             this = f.clone();
             f = it.get(&this, part).map_err(|c| classify(it, c))?;
         }
+        if export_fallback && matches!(f, Value::Undefined) {
+            let default = it
+                .get(&self.exports, "default")
+                .map_err(|c| classify(it, c))?;
+            f = if default.is_callable() {
+                default
+            } else {
+                self.exports.clone()
+            };
+            this = self.exports.clone();
+        }
         let r = match args {
             Some(args) => {
                 let args: Vec<Value> = args.iter().map(|a| to_value(it, a)).collect();
-                it.call(&f, &this, &args).map_err(|c| classify(it, c))?
+                let r = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
+                // an async export: run the event loop and unwrap the settled promise
+                if it.is_promise(&r) {
+                    it.mark_handled(&r);
+                    it.run_event_loop().map_err(|c| classify(it, c))?;
+                    match it.promise_state(&r) {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Err(classify(it, Ctl::Throw(e))),
+                        None => return Err(HostError::Thrown("promise never settled".into())),
+                    }
+                } else {
+                    r
+                }
             }
             None => f,
         };
         from_value(it, &r, 0)
+    }
+
+    /// The entry module's `module.exports`.
+    pub fn exports(&self) -> Value {
+        self.exports.clone()
     }
 
     pub fn interp(&mut self) -> &mut Interp {
@@ -195,6 +237,7 @@ fn classify(it: &mut Interp, c: Ctl) -> HostError {
                 _ => text.to_string(),
             })
         }
+        Ctl::Exit(code) => HostError::Thrown(format!("process.exit({code})")),
         Ctl::Return(_) | Ctl::Break(_) | Ctl::Continue(_) => {
             HostError::Thrown("stray completion".into())
         }
@@ -411,4 +454,85 @@ pub unsafe extern "C" fn thaw_tjs_free(p: *mut c_char) {
     if !p.is_null() {
         drop(unsafe { CString::from_raw(p) });
     }
+}
+
+// ----- typed-call ABI used by compiled programs (`DynamicBackend::ThawJs`) -----
+
+/// Same layout as thaw-napi's `ThawResult`: JSON text or an error string, both `thaw_arena`-owned.
+#[repr(C)]
+pub struct ThawResult {
+    pub value: *mut c_char,
+    pub error: *mut c_char,
+}
+
+thread_local! {
+    static BY_NAME: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+}
+
+fn text_result(r: Result<String, String>) -> ThawResult {
+    match r {
+        Ok(v) => ThawResult {
+            value: thaw_arena::owned_string(v),
+            error: ptr::null_mut(),
+        },
+        Err(e) => ThawResult {
+            value: ptr::null_mut(),
+            error: thaw_arena::owned_string(e),
+        },
+    }
+}
+
+/// Load `bundle` (registry `bundle.js`, uncompressed) under `name`. Returns 1 on success.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) -> u8 {
+    let (Some(name), Some(src)) = (cstr(name), cstr(bundle)) else {
+        return 0;
+    };
+    match Package::load(&src) {
+        Ok(p) => {
+            PACKAGES.with(|ps| {
+                let mut ps = ps.borrow_mut();
+                ps.push(Some(p));
+                BY_NAME.with(|m| m.borrow_mut().insert(name, ps.len() - 1));
+            });
+            1
+        }
+        Err(e) => {
+            LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
+            0
+        }
+    }
+}
+
+/// Call `"<package>::<export>"` with a JSON array of arguments; the result is JSON text.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_call_typed_result(
+    symbol: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    text_result((|| {
+        let (Some(symbol), Some(args)) = (cstr(symbol), cstr(args_json)) else {
+            return Err("invalid call text".to_string());
+        };
+        // The compiler routes a call whose signature cannot cross the boundary here as an error.
+        if let Some(message) = symbol.strip_prefix('\u{1}') {
+            return Err(message.to_string());
+        }
+        let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
+        let handle = BY_NAME
+            .with(|m| m.borrow().get(package).copied())
+            .ok_or_else(|| format!("thaw-js package `{package}` is not loaded"))?;
+        let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
+            return Err("arguments must be a JSON array".into());
+        };
+        PACKAGES
+            .with(
+                |ps| match ps.borrow_mut().get_mut(handle).and_then(Option::as_mut) {
+                    Some(p) => p.call_export(export, &args),
+                    None => Err(HostError::Bundle("bad handle".into())),
+                },
+            )
+            .map(|v| v.to_json())
+            .map_err(|e| e.to_string())
+    })())
 }

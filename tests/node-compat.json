@@ -2226,6 +2226,21 @@
       "source": "import assert from \"node:assert\";\n\nfunction attempt(label: string, run: () => void): void {\n  try {\n    run();\n    console.log(label, \"ok\");\n  } catch (e: any) {\n    console.log(label, e.name, e.code, e.operator, JSON.stringify(e.message));\n  }\n}\n\nfunction main(): void {\n  attempt(\"ifError null\", () => assert.ifError(null));\n  attempt(\"ifError undefined\", () => assert.ifError(undefined));\n  attempt(\"ifError error\", () => assert.ifError(new Error(\"boom\")));\n  attempt(\"ifError string\", () => assert.ifError(\"str\"));\n  attempt(\"ifError zero\", () => assert.ifError(0));\n  attempt(\"match ok\", () => assert.match(\"abc\", /b/));\n  attempt(\"match fail\", () => assert.match(\"abc\", /x/));\n  attempt(\"match custom\", () => assert.match(\"abc\", /x/, \"custom\"));\n  attempt(\"match number\", () => assert.match(5 as any, /x/));\n  attempt(\"doesNotMatch ok\", () => assert.doesNotMatch(\"abc\", /x/));\n  attempt(\"doesNotMatch fail\", () => assert.doesNotMatch(\"abc\", /b/));\n}\n"
     },
     {
+      "name": "any callback param keeps identity and instanceof after a write",
+      "expect": "matched",
+      "source": "import { EventEmitter } from \"node:events\";\nclass C { x = 1; inc(): number { this.x += 1; return this.x; } }\nclass E extends C { y = 2; }\nclass D { z = 0; }\nfunction main(): void {\n  const c = new C(); const e = new E(); const m = new Map<string, number>();\n  const ee = new EventEmitter();\n  ee.on(\"c\", (o: any) => { o.x = 10; console.log(o === c, o instanceof C, o instanceof D, o === e, c.x, o.inc()); });\n  ee.on(\"e\", (o: any) => { o.y = 7; console.log(o === e, o instanceof E, o instanceof C, o instanceof D, e.y); });\n  ee.on(\"m\", (o: any) => { o.set(\"a\", 1); console.log(o === m, m.size); });\n  ee.on(\"p\", (o: any) => { o.x = 2; console.log(o === c, o instanceof C, o.x); });\n  ee.emit(\"c\", c); ee.emit(\"e\", e); ee.emit(\"m\", m); ee.emit(\"p\", { x: 1 });\n}\n"
+    },
+    {
+      "name": "any timer callback param keeps identity and instanceof",
+      "expect": "matched",
+      "source": "class C { x = 1; }\nconst c = new C();\nfunction main(): void {\n  setTimeout((o: any) => { o.x = 5; console.log(o === c, o instanceof C, c.x); }, 1, c);\n}\n"
+    },
+    {
+      "name": "any callback param array identity after mutation",
+      "expect": "matched",
+      "source": "import { EventEmitter } from \"node:events\";\nfunction main(): void { const arr = [1, 2]; const ee = new EventEmitter(); ee.on(\"e\", (o: any) => { o.push(3); console.log(o === arr, arr.length); }); ee.emit(\"e\", arr); }\n"
+    },
+    {
       "name": "buffer in array literal keeps Buffer type",
       "expect": "matched",
       "source": "function main(): void {\n  const b = Buffer.from(\"hello\");\n  const arr = [b, b];\n  arr[0][0] = 72;\n  console.log(arr[1].toString(), arr[0].toString(\"hex\"), arr.length);\n  const c = Buffer.from(\"xy\");\n  const mixed = [b, c];\n  console.log(Buffer.concat(mixed).toString());\n  console.log(Buffer.concat([b, c]).toString());\n  console.log(Buffer.isBuffer(mixed[1]), mixed[1].readUInt8(0));\n  const nums: number[][] = [b];\n  console.log(nums[0].length, nums[0][0]);\n}\n"

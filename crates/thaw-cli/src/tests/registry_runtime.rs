@@ -3273,7 +3273,7 @@ fn external_native_addons_keep_colliding_package_names_in_separate_sidecars() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(),
         "function main(): void {}",
         &thaw_parser::common::FileName::Custom("sidecar fixture.ts".into()),
-        false, &dir.join("app"), Some(&staging), &std::collections::HashSet::new(),
+        false, &dir.join("app"), Some(&staging), &std::collections::HashSet::new(), false,
     ).unwrap();
     for (name, addon, dependency) in [
         ("foo-bar", b"first addon".as_slice(), b"first dependency".as_slice()),

@@ -1,0 +1,4 @@
+TypeError ERR_INVALID_ARG_TYPE The "callback" argument must be of type function. Received type string ('x')
+TypeError ERR_INVALID_ARG_TYPE
+TypeError ERR_INVALID_ARG_TYPE
+function function function function

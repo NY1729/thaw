@@ -2097,7 +2097,7 @@ impl<'a> FnLowerer<'a> {
                                     &bin.left,
                                     Some(&HirType::JsValue),
                                 )?;
-                            return self.dynamic_value_check_by_name(class.sym.as_ref(), value);
+                            return self.lower_live_handle_instanceof(value, class.sym.as_ref());
                             }
                             // `bin.left` is only ever lowered *inside* a
                             // branch that immediately returns -- `WeakMap`/
@@ -2496,7 +2496,7 @@ impl<'a> FnLowerer<'a> {
                     // as any other unrecognized class. Generic over any
                     // class name, same as the early check above.
                     if value_type == HirType::JsValue {
-                        return self.dynamic_value_check_by_name(class.sym.as_ref(), value);
+                        return self.lower_live_handle_instanceof(value, class.sym.as_ref());
                     }
                     // `Date`/`RegExp`/`Map`/`Set`/`WeakMap`/`WeakSet`
                     // aren't registered in `self.signatures` (see

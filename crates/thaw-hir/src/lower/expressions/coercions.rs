@@ -1705,6 +1705,16 @@ impl<'a> FnLowerer<'a> {
             let lhs = self.coerce_live_view_operand(lhs)?;
             return self.lower_strict_equality(lhs, rhs);
         }
+        // A live handle (a mutated `any` callback parameter is retyped `JsValue`) against a native
+        // object/array it may alias.
+        if lhs_type == HirType::JsValue && self.has_live_view_identity(&rhs_type) {
+            let rhs = self.coerce_live_view_operand(rhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
+        if rhs_type == HirType::JsValue && self.has_live_view_identity(&lhs_type) {
+            let lhs = self.coerce_live_view_operand(lhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
         // The sparse-array index check needs the original TypedIndex shape.
         // Its helper binds the index expression first and then the undefined
         // operand, so it remains a separate source-order-preserving path.
@@ -4119,6 +4129,62 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::ArrayLit(vec![value, target]),
             ],
         ))))
+    }
+
+    /// `value instanceof class` for a live `JsValue` handle. A handle that is the interned view of a
+    /// native instance is answered from the owner's allocation identity (ancestry included); any
+    /// other handle asks the realm, through the class token when it has one.
+    fn lower_live_handle_instanceof(
+        &mut self,
+        value: HirExpr,
+        class: &str,
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_live_instanceof_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::JsValue);
+        let fallback = match self.decorator_class_token(class) {
+            Some(token) => self.dynamic_value_instanceof(HirExpr::Var(name.clone()), HirExpr::Var(token))?,
+            None => self.dynamic_value_check_by_name(class, HirExpr::Var(name.clone()))?,
+        };
+        let native = self.interfaces.get(class).cloned().filter(|ty| {
+            let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+            let live = self.class_instance_supports_live_methods(ty);
+            self.alias_native_arrays = nested;
+            live
+        });
+        let Some(ty @ HirType::Object(_)) = native else {
+            return self.wrap_call_argument_bindings(fallback, &[(name, HirType::JsValue, value)]);
+        };
+        let HirType::Object(fields) = &ty else { unreachable!() };
+        let owner = format!("__thaw_live_instanceof_owner_{}", self.next_binding);
+        self.next_binding += 1;
+        let owner_type = HirType::Optional(Box::new(ty.clone()));
+        self.scope.insert(owner.clone(), owner_type.clone());
+        let owner_call = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_native_view_target".into())),
+            vec![
+                HirExpr::Var(name.clone()),
+                HirExpr::Lit(HirLit::Str(crate::native_object_layout_token(fields))),
+                HirExpr::TypedClosure(ty.clone(), Box::new(HirExpr::Lit(HirLit::Undefined))),
+            ],
+        );
+        let identity = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+            vec![
+                HirExpr::OptionalValue(Box::new(HirExpr::Var(owner.clone())), ty.clone()),
+                HirExpr::Lit(HirLit::Str(class.to_string())),
+            ],
+        );
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::OptionalIsNone(Box::new(HirExpr::Var(owner.clone())), ty.clone())),
+            Box::new(fallback),
+            Box::new(identity),
+            HirType::Bool,
+        );
+        self.wrap_call_argument_bindings(
+            result,
+            &[(name, HirType::JsValue, value), (owner, owner_type, owner_call)],
+        )
     }
 
     /// `left instanceof right` through the realm's own `instanceof` (custom
