@@ -203,7 +203,7 @@ fn compiles_native_number_to_fixed() {
     "#;
     assert_eq!(
         compile_and_run(source, "number_to_fixed"),
-        "1.50\n4\n5\n-1.00\n1e+21\nNaN\nreceiver\ndigits\n1.50\nawaited receiver\n3.142\ntoFixed() digits argument must be between 0 and 100\ntoFixed() digits argument must be between 0 and 100\n"
+        "1.50\n4\n5\n-1.00\n1e+21\nNaN\nreceiver\ndigits\n1.50\nawaited receiver\n3.142\nRangeError: toFixed() digits argument must be between 0 and 100\nRangeError: toFixed() digits argument must be between 0 and 100\n"
     );
 }
 
@@ -305,7 +305,7 @@ fn compiles_decode_uri_component() {
     "#;
     assert_eq!(
         compile_and_run(source, "decode_uri_component"),
-        "a b\na=1&b=2\nabc-_.!~*'()123\ncafé\nargument\na=1&b=2\nawaited argument\n😀\nURI malformed\nURI malformed\nURI malformed\n"
+        "a b\na=1&b=2\nabc-_.!~*'()123\ncafé\nargument\na=1&b=2\nawaited argument\n😀\nURIError: URI malformed\nURIError: URI malformed\nURIError: URI malformed\n"
     );
 }
 
@@ -349,7 +349,7 @@ fn compiles_native_number_to_precision() {
     "#;
     assert_eq!(
         compile_and_run(source, "number_to_precision"),
-        "123.5\n0.000012\n1.2e+5\n0.00\n-123.5\n42\nNaN\nreceiver\ndigits\n123.5\nawaited receiver\n1.2e+5\ntoPrecision() argument must be between 1 and 100\ntoPrecision() argument must be between 1 and 100\n"
+        "123.5\n0.000012\n1.2e+5\n0.00\n-123.5\n42\nNaN\nreceiver\ndigits\n123.5\nawaited receiver\n1.2e+5\nRangeError: toPrecision() argument must be between 1 and 100\nRangeError: toPrecision() argument must be between 1 and 100\n"
     );
 }
 
@@ -412,7 +412,7 @@ fn compiles_decode_uri() {
     "#;
     assert_eq!(
         compile_and_run(source, "decode_uri"),
-        "http://a.com/a b?x=1&y=2#frag\n%3B%2F%3F%3A%40%26%3D%2B%24%2C%23\na %2Fb\ncafé\nargument\nhttp://a.com/a b\nawaited argument\n😀\nURI malformed\nURI malformed\n"
+        "http://a.com/a b?x=1&y=2#frag\n%3B%2F%3F%3A%40%26%3D%2B%24%2C%23\na %2Fb\ncafé\nargument\nhttp://a.com/a b\nawaited argument\n😀\nURIError: URI malformed\nURIError: URI malformed\n"
     );
 }
 
@@ -496,7 +496,7 @@ fn compiles_string_from_code_point() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_from_code_point"),
-        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\n"
+        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nRangeError: Invalid code point\nRangeError: Invalid code point\nRangeError: Invalid code point\n"
     );
 }
 
@@ -1731,7 +1731,7 @@ fn compiles_number_to_string_with_radix() {
     "#;
     assert_eq!(
         compile_and_run(source, "number_to_string_radix"),
-        "ff\n1000\nz\n255\n255\n-ff\n0.1\n3.14159\ntoString() radix argument must be between 2 and 36\ntoString() radix argument must be between 2 and 36\n"
+        "ff\n1000\nz\n255\n255\n-ff\n0.1\n3.14159\nRangeError: toString() radix argument must be between 2 and 36\nRangeError: toString() radix argument must be between 2 and 36\n"
     );
 }
 
@@ -2739,7 +2739,7 @@ fn generator_try_catch_finally_survives_suspension() {
     "#;
     assert_eq!(
         compile_and_run(source, "generator_try_catch_finally"),
-        "1 0\nboom\n2 11\n3 111\ntrue 111\n"
+        "1 0\nError: boom\n2 11\n3 111\ntrue 111\n"
     );
 }
 
@@ -8548,7 +8548,7 @@ fn compiles_turkish_and_azeri_string_casing() {
 /// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
 /// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
 /// the stack trace, which a native binary has no equivalent of, so it is omitted.
-/// A statically typed error value still prints as its bare message (the first line).
+/// A statically typed error value prints as its "Name: message" first line.
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -8576,7 +8576,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
+        "AggregateError\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
     );
 }
 
@@ -9117,7 +9117,7 @@ fn caught_quickjs_error_console_propagates_message_getter_failure_without_partia
     "#;
     assert_eq!(
         compile_and_run(source, "caught_quickjs_error_console_getter_failure"),
-        "message getter failed\n1\n"
+        "Error: message getter failed\n1\n"
     );
 }
 
@@ -9156,7 +9156,7 @@ fn caught_quickjs_proxy_prototype_trap_propagates_without_partial_output() {
     "#;
     assert_eq!(
         compile_and_run(source, "caught_quickjs_error_prototype_trap"),
-        "prototype trap failed\n"
+        "Error: prototype trap failed\n"
     );
 }
 
@@ -10408,7 +10408,7 @@ fn compiles_promise_keyed_combinators() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_keyed_combinators"),
-        "1 two\nboom\nfulfilled rejected\n1\nboom\n"
+        "1 two\nboom\nfulfilled rejected\n1\nError: boom\n"
     );
 }
 

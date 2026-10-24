@@ -568,7 +568,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "42\nnative addon failed\nasync 42 status 0\n42\n42\n"
+        "42\nError: native addon failed\nasync 42 status 0\n42\n42\n"
     );
     // The scheduled addon invokes the generated callback after main has
     // already thrown. Its successful callback must not consume or reframe

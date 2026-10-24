@@ -568,7 +568,7 @@ fn frame_split_empty_promise_any_rejects() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_any_empty_rejection"),
-        "All promises were rejected\nAll promises were rejected\n"
+        "AggregateError: All promises were rejected\nAggregateError: All promises were rejected\n"
     );
 }
 
@@ -645,7 +645,7 @@ fn frame_split_promise_any_all_rejected_enters_nearest_catch() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_any_all_rejected"),
-        "All promises were rejected\n"
+        "AggregateError: All promises were rejected\n"
     );
 }
 
@@ -1205,7 +1205,7 @@ fn promise_try_wraps_values_promises_and_throws() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_try"),
-        "42\n42\n7\nboom\n"
+        "42\n42\n7\nError: boom\n"
     );
 }
 

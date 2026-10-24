@@ -315,7 +315,7 @@ fn compiles_throw_new_error_constructors() {
     "#;
     assert_eq!(
         compile_and_run(source, "throw_new_error"),
-        "boom\nwrong type\n[]\n"
+        "Error: boom\nTypeError: wrong type\n[]\n"
     );
 }
 
@@ -558,7 +558,7 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
         // The old "`label` threw:" / "`label`'s promise rejected:" prefixes were Thaw-only
         // decorations; a caught error prints its bare message (Node prints a stack trace
         // here, which a native binary has no equivalent of, so only the message remains).
-        "kaboom\ncleanup\nnope\nbad then\n"
+        "Error: kaboom\ncleanup\nError: nope\nError: bad then\n"
     );
 }
 
