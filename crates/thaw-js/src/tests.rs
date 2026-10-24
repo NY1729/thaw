@@ -135,10 +135,8 @@ fn strings_and_math_builtins() {
 
 #[test]
 fn unsupported_constructs_name_the_feature() {
-    assert_eq!(one("async function f(){}"), "unsupported: async");
     assert_eq!(one("function* g(){}"), "unsupported: generator");
     assert_eq!(one("var r = 10n"), "unsupported: bigint");
-    assert_eq!(one("var t = tag`x`"), "unsupported: tagged-template");
     assert_eq!(
         one("function f(){ return new.target }  f()"),
         "unsupported: new.target"
@@ -304,10 +302,10 @@ fn package_host_reports_unsupported_constructs_by_name() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(
         "exports.VERSION = '1.0';",
-        "exports.VERSION = (async function () {});",
+        "exports.VERSION = (function* () {});",
     );
     match Package::load(&bundle) {
-        Err(HostError::Unsupported(f)) => assert_eq!(f, "async"),
+        Err(HostError::Unsupported(f)) => assert_eq!(f, "generator"),
         other => panic!("{:?}", other.err()),
     }
 }
@@ -336,9 +334,190 @@ fn scan_reports_reachable_blockers_only() {
     let clean = crate::scan::scan_bundle(MINI).ok().unwrap();
     assert!(clean.is_clean(), "{:?}", clean.blockers);
     assert_eq!((clean.factories_total, clean.factories_reachable), (3, 2)); // the unused generator is unreachable
-    let blocked = MINI.replace("exports.VERSION = '1.0';", "exports.V = async () => await Buffer.from('x'); var fs = require('fs'); label: for (;;) { break label; } if (typeof process !== 'undefined') {}");
+    let blocked = MINI.replace("exports.VERSION = '1.0';", "exports.V = async () => await File.from('x'); var fs = require('fs'); label: for (;;) { break label; } if (typeof process !== 'undefined') {}");
     let r = crate::scan::scan_bundle(&blocked).ok().unwrap();
     let names: Vec<&str> = r.blockers.keys().map(String::as_str).collect();
-    assert_eq!(names, ["async", "await", "global:Buffer", "require:fs"]); // typeof-probed `process` and labels are not reported
+    assert_eq!(names, ["global:File", "require:fs"]); // typeof-probed `process` and labels are not reported
     assert!(crate::scan::scan_bundle("var x = 1;").is_err());
+}
+
+/// Run `src` as a program (event loop included); console lines plus the exit code.
+fn main_run(src: &str) -> (Vec<String>, i32) {
+    let mut it = Box::new(Interp::new());
+    let r = it.run_main(src);
+    it.flush_partial();
+    match r {
+        Ok(code) => (it.out.clone(), code),
+        Err(Ctl::Throw(v)) => {
+            let mut out = it.out.clone();
+            out.push(format!("Uncaught {}", it.to_str(&v)));
+            (out, 1)
+        }
+        Err(_) => (it.out.clone(), -1),
+    }
+}
+
+#[test]
+fn nexttick_runs_before_promise_jobs_and_timers_last() {
+    let (out, code) = main_run(
+        "setTimeout(() => console.log('timer'), 0);
+         setImmediate(() => console.log('immediate'));
+         Promise.resolve().then(() => console.log('promise'));
+         process.nextTick(() => console.log('tick'));
+         queueMicrotask(() => console.log('microtask'));
+         (async () => { console.log('async-sync'); await 0; console.log('async-resumed'); })();
+         console.log('main');",
+    );
+    assert_eq!(
+        out.join("|"),
+        "async-sync|main|tick|promise|microtask|async-resumed|timer|immediate"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn await_unwraps_values_and_throws_rejections() {
+    let (out, _) = main_run(
+        "async function f(x) { if (x) throw new RangeError('r'); return await Promise.resolve(7); }
+         (async () => {
+           console.log(await f(false));
+           try { await f(true); } catch (e) { console.log(e.name); }
+           try { await Promise.reject(3); } catch (e) { console.log('rejected', e); }
+         })();",
+    );
+    assert_eq!(out.join("|"), "7|RangeError|rejected 3");
+}
+
+#[test]
+fn many_concurrent_async_calls_and_never_settled_ones() {
+    let (out, _) = main_run(
+        "var n = 0; var gate = new Promise(function () {});
+         for (var i = 0; i < 300; i++) (async () => { await 0; await null; n++; })();
+         (async () => { await gate; console.log('unreachable'); })();
+         setTimeout(() => console.log(n), 1);",
+    );
+    assert_eq!(out.join("|"), "300");
+}
+
+#[test]
+fn exit_codes_and_unhandled_rejections() {
+    assert_eq!(main_run("process.exit(4); console.log('no')"), (vec![], 4));
+    assert_eq!(
+        main_run("process.exitCode = 2; setTimeout(() => {}, 1)").1,
+        2
+    );
+    let (out, code) = main_run("Promise.reject(new Error('boom'))");
+    assert_eq!(
+        (out.join("|"), code),
+        ("Uncaught Error: boom".to_string(), 1)
+    );
+    // handled later in the same tick: not reported
+    assert_eq!(
+        main_run("var p = Promise.reject(1); p.catch(() => {})").1,
+        0
+    );
+}
+
+#[test]
+fn timers_fire_in_expiry_order_and_intervals_repeat() {
+    let (out, _) = main_run(
+        "var n = 0; var h = setInterval(() => { console.log('i' + ++n); if (n == 2) clearInterval(h); }, 5);
+         setTimeout(() => console.log('late'), 400);
+         setTimeout(() => console.log('early'), 1);
+         clearTimeout(setTimeout(() => console.log('never'), 2));",
+    );
+    assert_eq!(out.join("|"), "early|i1|i2|late");
+}
+
+#[test]
+fn async_package_exports_are_awaited_by_the_host() {
+    use crate::host::{HostError, Native, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.slow = async function (x) { await new Promise(function (r) { setTimeout(r, 2); }); return x + 1; };
+         exports.bad = async function () { throw new TypeError('nope'); };",
+    );
+    let mut p = Package::load(&bundle).unwrap();
+    match p.call("slow", &[Native::Number(41.0)]) {
+        Ok(Native::Number(n)) => assert_eq!(n, 42.0),
+        other => panic!("{:?}", other.err()),
+    }
+    assert!(matches!(p.call("bad", &[]), Err(HostError::Thrown(m)) if m.contains("nope")));
+}
+
+#[test]
+fn user_iterables_work_in_for_of_spread_destructuring_and_array_from() {
+    let src = "var it = { [Symbol.iterator]() { var i = 0; return { next() { return i < 3 ? { value: i++, done: false } : { value: undefined, done: true }; } }; } };
+               var out = []; for (var x of it) out.push(x);
+               var [a, b] = it;
+               console.log(out.join(), [...it].join(), a + b, Array.from(it).join(), new Set(it).size, Math.max(...it));";
+    assert_eq!(one(src), "0,1,2 0,1,2 1 0,1,2 3 2");
+}
+
+#[test]
+fn objects_convert_through_to_primitive() {
+    assert_eq!(
+        one("var o = { valueOf() { return 42; }, toString() { return 's'; } };
+             var p = { [Symbol.toPrimitive](h) { return h; } };
+             var d = new Date(1000);
+             console.log(o + 1, `${o}`, o > 41, o == 42, +p, `${p}`, p + '', d < new Date(2000), typeof (d + 1), d - 1)"),
+        "43 s true true NaN string default true string 999"
+    );
+}
+
+#[test]
+fn typed_arrays_wrap_values_and_share_their_buffer() {
+    assert_eq!(
+        one("var b = new ArrayBuffer(4), u8 = new Uint8Array(b), u32 = new Uint32Array(b);
+             u32[0] = 0x01020304; var c = new Uint8ClampedArray([300, -1, 1.5]);
+             console.log(u8.join(), c.join(), new Int8Array([200])[0], u8.subarray(1, 3).length, u8.buffer === b, Buffer.from('hi').toString('hex'), new TextDecoder().decode(new TextEncoder().encode('é')))"),
+        "4,3,2,1 255,0,2 -56 2 true 6869 é"
+    );
+}
+
+#[test]
+fn url_parses_and_resolves_relative_references() {
+    assert_eq!(
+        one(
+            "var u = new URL('../x?a=1#h', 'http://User@Example.com:80/p/q/r');
+             u.searchParams.append('b', 'c d');
+             console.log(u.href, u.host, new URL('http://a.b:8080').port, URL.canParse('nope'))"
+        ),
+        "http://User@example.com/p/x?a=1&b=c+d#h example.com 8080 false"
+    );
+}
+
+#[test]
+fn methods_do_not_bind_their_own_name_but_named_function_expressions_do() {
+    assert_eq!(
+        one("function clone(x) { return 'outer' + x; }
+             class A { clone(x) { return clone(x); } }
+             var o = { clone(x) { return clone(x); } };
+             var f = function self(n) { return n ? self(n - 1) + 1 : 0; };
+             console.log(new A().clone(1), o.clone(2), f(3))"),
+        "outer1 outer2 3"
+    );
+}
+
+#[test]
+fn native_base_classes_can_be_extended() {
+    assert_eq!(
+        one("class S extends Set { total() { var t = 0; this.forEach(function (v) { t += v; }); return t; } }
+             var s = new S([1, 2, 3]); s.add(4);
+             class E extends Error { constructor(m) { super(m); this.name = 'E'; } }
+             class P extends Promise {}
+             console.log(s.size, s.total(), s instanceof Set, s instanceof S, new E('x').message, new E('x') instanceof Error)"),
+        "4 10 true true x true"
+    );
+}
+
+#[test]
+fn date_local_time_follows_the_process_zone_and_normalises_overflow() {
+    // the zone is process-wide, so only zone-independent identities are asserted here
+    assert_eq!(
+        one("var d = new Date(2020, 0, 31, 12); d.setMonth(1);
+             console.log(d.getMonth(), d.getDate(), new Date(2020, 11, 31, 23, 59).getFullYear(), new Date(d.getTime()).getTime() === d.getTime(),
+               Date.UTC(2020, 0, 1), Date.parse('2020-01-02T03:04:05Z'), isNaN(Date.parse('2020-13-01')), new Date(2020, 0, 1).getTimezoneOffset() === -new Date(2020, 0, 1).getTimezoneOffset() * -1)"),
+        "2 2 2020 true 1577836800000 1577934245000 true true"
+    );
 }

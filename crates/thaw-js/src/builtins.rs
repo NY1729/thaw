@@ -84,7 +84,7 @@ pub(crate) const PRELUDE: &str = r#"
 })();
 "#;
 
-fn now_ms() -> f64 {
+pub(crate) fn now_ms() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -92,7 +92,7 @@ fn now_ms() -> f64 {
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -101,7 +101,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -114,7 +114,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// `Date.UTC`-style arguments: year, month (0-based), day, hours, minutes, seconds, ms.
-fn civil_to_ms(n: &[f64]) -> f64 {
+pub(crate) fn civil_to_ms(n: &[f64]) -> f64 {
     if n.iter().any(|x| x.is_nan()) || n.is_empty() {
         return f64::NAN;
     }
@@ -129,50 +129,6 @@ fn civil_to_ms(n: &[f64]) -> f64 {
         + get(4, 0.0) * 60_000.0
         + get(5, 0.0) * 1000.0
         + get(6, 0.0)
-}
-
-/// ISO-8601 `YYYY-MM-DD[THH:mm[:ss[.sss]]][Z]` (date-only and `Z` forms are UTC; others NaN here).
-fn parse_iso(s: &str) -> f64 {
-    let b = s.as_bytes();
-    let num = |a: usize, z: usize| {
-        s.get(a..z)
-            .filter(|t| t.bytes().all(|c| c.is_ascii_digit()))
-            .and_then(|t| t.parse::<f64>().ok())
-    };
-    let (Some(y), Some(m), Some(d)) = (num(0, 4), num(5, 7), num(8, 10)) else {
-        return f64::NAN;
-    };
-    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
-        return f64::NAN;
-    }
-    if b.len() == 10 {
-        return civil_to_ms(&[y, m - 1.0, d]);
-    }
-    if b[10] != b'T' {
-        return f64::NAN;
-    }
-    let (Some(h), Some(mi)) = (num(11, 13), num(14, 16)) else {
-        return f64::NAN;
-    };
-    let mut sec = 0.0;
-    let mut ms = 0.0;
-    let mut rest = 16;
-    if b.get(16) == Some(&b':') {
-        let Some(sv) = num(17, 19) else {
-            return f64::NAN;
-        };
-        sec = sv;
-        rest = 19;
-        if b.get(19) == Some(&b'.') {
-            let frac: String = s[20..].chars().take_while(char::is_ascii_digit).collect();
-            ms = format!("0.{frac}").parse::<f64>().unwrap_or(0.0) * 1000.0;
-            rest = 20 + frac.len();
-        }
-    }
-    if &s[rest..] != "Z" {
-        return f64::NAN; // ponytail: local-time / offset forms need time zone support
-    }
-    civil_to_ms(&[y, m - 1.0, d, h, mi, sec, ms.floor()])
 }
 
 fn char_to_byte(s: &str, ci: usize) -> usize {
@@ -223,11 +179,11 @@ impl Interp {
         Ok(Value::Object(o))
     }
 
-    fn date_target(&self, v: &Value) -> bool {
+    pub(crate) fn date_target(&self, v: &Value) -> bool {
         matches!(v, Value::Object(o) if find_own(o, "__time").is_some())
     }
 
-    fn date_time(&mut self, v: &Value) -> R<f64> {
+    pub(crate) fn date_time(&mut self, v: &Value) -> R<f64> {
         match v {
             Value::Object(o) => match find_own(o, "__time") {
                 Some((Slot::Data(Value::Number(t)), _)) => Ok(t),
@@ -579,7 +535,7 @@ impl Interp {
                 .map(|v| it.inspect(v, true))
                 .collect::<Vec<_>>()
                 .join(" ");
-            it.out.push(line);
+            it.emit_out(&line, true);
             Ok(Value::Undefined)
         });
         for name in ["error", "warn"] {
@@ -589,7 +545,7 @@ impl Interp {
                     .map(|v| it.inspect(v, true))
                     .collect::<Vec<_>>()
                     .join(" ");
-                it.err.push(line);
+                it.emit_err(&line);
                 Ok(Value::Undefined)
             });
         }
@@ -771,7 +727,7 @@ impl Interp {
                         o.props
                             .borrow()
                             .iter()
-                            .filter(|p| !p.enumerable)
+                            .filter(|p| !p.enumerable && !p.key.starts_with("@@sym:"))
                             .map(|p| Value::Str(p.key.clone())),
                     );
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) {
@@ -779,6 +735,19 @@ impl Interp {
                     }
                 }
                 Ok(it.array(names))
+            });
+            self.set_native(o, "getOwnPropertySymbols", |it, _, args| {
+                let Value::Object(o) = arg(args, 0) else {
+                    return Ok(it.array(vec![]));
+                };
+                let found: Vec<Value> = o
+                    .props
+                    .borrow()
+                    .iter()
+                    .filter_map(|p| p.key.strip_prefix("@@sym:")?.parse::<u64>().ok())
+                    .filter_map(|id| it.rt.symbols.get(&id).cloned().map(Value::Object))
+                    .collect();
+                Ok(it.array(found))
             });
             self.set_native(o, "getOwnPropertyDescriptor", |it, _, args| {
                 let key = it.to_str(&arg(args, 1));
@@ -873,6 +842,10 @@ impl Interp {
                     Kind::Map(_) => "[object Map]",
                     Kind::Set(_) => "[object Set]",
                     Kind::Symbol { .. } => "[object Symbol]",
+                    Kind::Promise(_) => "[object Promise]",
+                    Kind::ArrayBuffer(_) => "[object ArrayBuffer]",
+                    Kind::Typed(t) => t.ty.tag(),
+                    Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
                     Kind::Plain | Kind::Global => "[object Object]",
                 },
             }))
@@ -956,15 +929,18 @@ impl Interp {
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
                         it.array_items(&src)
                     }
-                    Value::Object(_) => {
-                        let n = it.get(&src, "length")?;
-                        let n = it.num(&n);
-                        let mut v = Vec::new();
-                        for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
-                            v.push(it.get(&src, &i.to_string())?);
+                    Value::Object(_) => match it.iter_protocol(&src)? {
+                        Some(items) => items,
+                        None => {
+                            let n = it.get(&src, "length")?;
+                            let n = it.num(&n);
+                            let mut v = Vec::new();
+                            for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
+                                v.push(it.get(&src, &i.to_string())?);
+                            }
+                            v
                         }
-                        v
-                    }
+                    },
                     _ => Vec::new(),
                 };
                 if arg(args, 1).is_callable() {
@@ -1623,10 +1599,18 @@ impl Interp {
         let date = self.native({
             let dp = dp.clone();
             move |it, this, args| {
+                // `Date()` without `new` is the current time as a string
+                if !std::mem::take(&mut it.rt.constructing) && matches!(this, Value::Undefined) {
+                    let o = new_obj(Some(dp.clone()), Kind::Plain);
+                    put_hidden(&o, "__time", Value::Number(now_ms()));
+                    let f = it.get(&Value::Object(o.clone()), "toString")?;
+                    return it.call(&f, &Value::Object(o), &[]);
+                }
                 let t = match args {
                     [] => now_ms(),
-                    [Value::Str(s)] => parse_iso(s),
-                    [Value::Number(n)] => *n,
+                    [Value::Str(s)] => crate::date::parse_date(s),
+                    [Value::Null] => 0.0,
+                    [Value::Number(n)] => crate::date::clip(*n),
                     [Value::Object(_)] => match it.get(&args[0], "getTime")? {
                         f if f.is_callable() => {
                             let v = it.call(&f, &args[0], &[])?;
@@ -1636,7 +1620,7 @@ impl Interp {
                     },
                     parts => {
                         let n: Vec<f64> = parts.iter().map(|v| it.num(v)).collect();
-                        civil_to_ms(&n)
+                        crate::date::local_from_parts(&n)
                     }
                 };
                 if matches!(this, Value::Object(_)) && it.date_target(this) {
@@ -1659,9 +1643,14 @@ impl Interp {
             put_hidden(d, "prototype", Value::Object(dp.clone()));
             put_hidden(&dp, "constructor", date.clone());
             self.set_native(d, "now", |_, _, _| Ok(Value::Number(now_ms())));
+            self.set_native(d, "parse", |it, _, args| {
+                Ok(Value::Number(crate::date::parse_date(
+                    &it.to_str(&arg(args, 0)),
+                )))
+            });
             self.set_native(d, "UTC", |it, _, args| {
                 let n: Vec<f64> = args.iter().map(|v| it.num(v)).collect();
-                Ok(Value::Number(civil_to_ms(&n)))
+                Ok(Value::Number(crate::date::utc_from_parts(&n)))
             });
         }
         g.declare("Date", date, true);
@@ -1717,6 +1706,7 @@ impl Interp {
                 .into(),
             ))
         });
+        self.install_date_extras(&dp);
         self.set_native(&dp, "toJSON", |it, this, _| {
             let f = it.get(this, "toISOString")?;
             it.call(&f, this, &[])

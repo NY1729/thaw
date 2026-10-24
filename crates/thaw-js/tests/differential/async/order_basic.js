@@ -1,0 +1,10 @@
+console.log('sync1');
+setTimeout(() => console.log('timeout0'), 0);
+setImmediate(() => console.log('immediate'));
+process.nextTick(() => console.log('tick1'));
+Promise.resolve().then(() => console.log('then1'));
+queueMicrotask(() => console.log('micro1'));
+process.nextTick(() => console.log('tick2'));
+Promise.resolve().then(() => { console.log('then2'); process.nextTick(() => console.log('tick-in-then')); }).then(() => console.log('then3'));
+(async () => { console.log('async-start'); await null; console.log('async-after-await'); })();
+console.log('sync2');
