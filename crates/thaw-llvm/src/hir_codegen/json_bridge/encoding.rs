@@ -260,9 +260,18 @@ impl<'ctx> HirCompiler<'ctx> {
             };
             let key = self.builder.build_global_string_ptr(name, "dynamic_object_key")
                 .map_err(|error| error.to_string())?;
-            self.compile_json_object_set_native_with_undefined(
+            // A class instance prints its absent optional fields as `undefined` (Node's
+            // define semantics); plain objects and error-family instances omit them.
+            let class_instance = fields.first().is_some_and(|(n, t)| {
+                *t == HirType::Bool && n.strip_prefix("__thaw_class_identity_\u{1e}")
+                    .is_some_and(|chain| !chain.split('\u{1f}').any(thaw_hir::is_error_family_name))
+            });
+            let before = std::mem::replace(&mut self.encoding_class_instance_fields, class_instance);
+            let set = self.compile_json_object_set_native_with_undefined(
                 json, key.as_pointer_value(), value, &value_type, preserve_undefined, false,
-            )?;
+            );
+            self.encoding_class_instance_fields = before;
+            set?;
         }
         self.builder.build_unconditional_branch(visibility_done)
             .map_err(|error| error.to_string())?;
@@ -949,6 +958,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                     "thaw_json_object_set_json"
                 }
+                HirType::Bytes => {
+                    value = self.compile_native_bytes_to_json(value.into_pointer_value())?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::Array(element) => {
                     value = self.compile_native_array_to_json_with_undefined(
                         value.into_pointer_value(),
@@ -1313,7 +1326,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 preserve_undefined,
                 true,
             )?;
-        } else if preserve_undefined && !self.console_omit_absent_fields {
+        } else if preserve_undefined
+            && (!self.console_omit_absent_fields || self.encoding_class_instance_fields)
+        {
             let undefined = self.compile_napi_undefined_json()?;
             self.compile_json_object_set_native_with_undefined(
                 json,
@@ -1350,6 +1365,59 @@ impl<'ctx> HirCompiler<'ctx> {
         element_type: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.compile_native_array_to_json_with_undefined(array, element_type, false)
+    }
+
+    /// A native byte buffer as its `Buffer.toJSON()` shape, `{ "type": "Buffer", "data": [..] }`.
+    fn compile_native_bytes_to_json(
+        &mut self,
+        value: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let object = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_object_new").unwrap(),
+                &[],
+                "bytes_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let ty_key = self
+            .builder
+            .build_global_string_ptr("type", "bytes_type_key")
+            .map_err(|error| error.to_string())?;
+        let ty_value = self
+            .builder
+            .build_global_string_ptr("Buffer", "bytes_type_value")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_object_set_string").unwrap(),
+                &[object.into(), ty_key.as_pointer_value().into(), ty_value.as_pointer_value().into()],
+                "set_bytes_type",
+            )
+            .map_err(|error| error.to_string())?;
+        let data = self.compile_native_array_to_json_with_undefined(value, &HirType::F64, true)?;
+        let data_key = self
+            .builder
+            .build_global_string_ptr("data", "bytes_data_key")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_object_set_json").unwrap(),
+                &[object.into(), data_key.as_pointer_value().into(), data.into()],
+                "set_bytes_data",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[data.into()],
+                "destroy_bytes_data",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(object)
     }
 
     fn compile_native_array_to_json_with_undefined(
@@ -1746,6 +1814,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 if value.is_int_value() {
                     value = self.compile_dynamic_value_placeholder_unchecked(value)?;
                 }
+                "thaw_json_array_push_json"
+            }
+            HirType::Bytes => {
+                value = self.compile_native_bytes_to_json(value.into_pointer_value())?;
                 "thaw_json_array_push_json"
             }
             HirType::Array(nested) => {

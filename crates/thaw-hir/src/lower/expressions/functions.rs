@@ -130,6 +130,22 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let value = self.lower_expr(&assertion.expr)?;
         match self.infer_expr_type(&value)? {
+            // An absent `number | undefined` asserted non-null reads as NaN (`undefined`
+            // coerced to a number), not the zero payload. Evaluate the operand once.
+            HirType::Optional(payload) if *payload == HirType::F64 => {
+                let name = format!("__thaw_nonnull_value_{}", self.next_binding);
+                self.next_binding += 1;
+                let value_type = HirType::Optional(payload.clone());
+                self.scope.insert(name.clone(), value_type.clone());
+                let var = HirExpr::Var(name.clone());
+                let result = HirExpr::Conditional(
+                    Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::F64)),
+                    Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+                    Box::new(HirExpr::OptionalValue(Box::new(var), HirType::F64)),
+                    HirType::F64,
+                );
+                self.wrap_call_argument_bindings(result, &[(name, value_type, value)])
+            }
             HirType::Optional(payload) => Ok(HirExpr::OptionalValue(
                 Box::new(value),
                 payload.as_ref().clone(),
