@@ -2149,6 +2149,11 @@
       "name": "assert strictEqual and deepStrictEqual append the diff to a custom message",
       "expect": "matched",
       "source": "import assert from 'node:assert'; function main(): void {   const t = (n: string, f: () => void): void => { try { f(); console.log(n, 'nothrow'); } catch (e) { console.log(n, JSON.stringify((e as Error).message)); } };   t('se', () => assert.strictEqual(1, 2, 'different'));   t('ses', () => assert.strictEqual('a', 'b', 'different'));   t('nse', () => assert.notStrictEqual(1, 1, 'different'));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }, 'different'));   t('de', () => assert.deepEqual({ a: 1 }, { a: 2 }, 'different'));   t('eq', () => assert.equal(1, 2, 'different'));   t('ok', () => assert.ok(false, 'different')); }"
+    },
+    {
+      "name": "date parse legacy formats",
+      "expect": "matched",
+      "source": "function main(): void {\n  const inputs: string[] = [\"2030-01-01 10:20\", \"2030-01-01 10:20:30\", \"Tue, 01 Jan 2030 00:00:00 GMT\", \"Jan 1, 2030\", \"January 1, 2030 10:00:00\", \"1 Jan 2030\", \"2030/01/02\", \"Jan 1, 2030 3:04 PM\", \"Tue Jan 01 2030 00:00:00 GMT+0100\", \"2030-01-01T00:00:00.5Z\", \"garbage\", \"Foo 1, 2030\"];\n  for (const s of inputs) { console.log(s, Date.parse(s)); }\n  console.log(new Date(\"Tue, 01 Jan 2030 00:00:00 GMT\").toISOString());\n}\n"
     }
   ]
 }
