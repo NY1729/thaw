@@ -4976,13 +4976,21 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .zip(values.iter())
                 .map(|(key, value)| (inspect_node(key, stack), inspect_node(value, stack)))
                 .collect();
-            Node::Map { id: 0, entries }
+            Node::Map {
+                id: 0,
+                ctor: None,
+                entries,
+            }
         } else {
             let items = host_enumerate_values(lease, 5)
                 .iter()
                 .map(|item| inspect_node(item, stack))
                 .collect();
-            Node::Set { id: 0, items }
+            Node::Set {
+                id: 0,
+                ctor: None,
+                items,
+            }
         };
         HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
         return node;
@@ -5183,13 +5191,18 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                         Some((inspect_node(key, stack), inspect_node(value, stack)))
                     })
                     .collect();
-                Node::Map { id, entries }
+                Node::Map {
+                    id,
+                    ctor: subclass_name(fields),
+                    entries,
+                }
             } else if let Some(values) = fields
                 .get(b"__thaw_set_values__".as_slice())
                 .and_then(Value::as_array)
             {
                 Node::Set {
                     id,
+                    ctor: subclass_name(fields),
                     items: values
                         .iter()
                         .map(|item| inspect_node(item, stack))
@@ -5256,6 +5269,18 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         stack.pop();
     }
     node
+}
+
+/// The class name console.log tags a `Map`/`Set` subclass wrapper with
+/// (module-scoped classes are mangled `__thawmod<N>_Name`).
+fn subclass_name(fields: &indexmap::IndexMap<Vec<u8>, Value>) -> Option<String> {
+    let name = fields.get(b"__thaw_class__".as_slice())?.as_str()?;
+    let plain = match name.strip_prefix("__thawmod") {
+        Some(rest) => rest.split_once('_').map_or(name, |(_, plain)| plain),
+        None => name,
+    };
+    // A monomorphised generic class is named `Q__thaw_f64`.
+    Some(plain.split("__thaw_").next().unwrap_or(plain).to_string())
 }
 
 /// Node's rendering of an error with no stack frames: `[Name: message]` (`[Name]` when empty).
