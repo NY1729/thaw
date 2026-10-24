@@ -740,8 +740,11 @@ impl<'a> FnLowerer<'a> {
                     Box::new(self.coerce_primitive_to_number(current)?),
                     Box::new(one),
                 );
+                let write = self.lower_assignment_target_write(
+                    Target::Index(array_var, Box::new(index_var)), value,
+                )?;
                 return self.wrap_call_argument_bindings(
-                    build_assign(Target::Index(array_var, Box::new(index_var)), value),
+                    write,
                     &[(array_name, array_type, array), (index_name, HirType::F64, *index)],
                 );
             }
