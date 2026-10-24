@@ -5600,8 +5600,9 @@ impl<'a> FnLowerer<'a> {
 
             Expr::MetaProp(meta) if meta.kind == swc_ecma_ast::MetaPropKind::NewTarget => Err(
                 "SyntaxError: `new.target` is only supported inside a top-level, non-async, non-generator \
-                 function declaration; it is not supported at the top level, in class constructors, \
-                 methods, nested functions or exported functions"
+                 function declaration or class constructor (only as `new.target === C`, `new.target.name` or \
+                 `Object.setPrototypeOf(this, new.target.prototype)` there); it is not supported at \
+                 the top level, in methods, nested functions or exported functions"
                     .into(),
             ),
 
