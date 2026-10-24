@@ -2103,6 +2103,26 @@
       "name": "util.inspect of an Error",
       "expect": "matched",
       "source": "import { inspect } from 'node:util'; function main(): void {   const e = new Error('boom');   const s = inspect(e);   console.log(s.split('\\n')[0]);   console.log(s.split('\\n').slice(1).every((l: string) => l.startsWith('    at ')));   console.log(String(e.stack).split('\\n')[0]);   console.log(inspect(new TypeError('t')).split('\\n')[0]); }"
+    },
+    {
+      "name": "typinggaps string index undefined",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s = \"abc\";\n  console.log(s[1]);\n  console.log(s[10]);\n  console.log(s[10] === undefined, s[0] !== undefined, s[-1], s[1.5]);\n  const i = 2;\n  console.log(s[i] ?? \"dflt\", s[i + 5] ?? \"dflt\");\n  let n = 0;\n  for (let k = 0; k < s.length; k++) { if (s[k] === \"b\") n++; }\n  console.log(n, s[0] + s[2]);\n}\n"
+    },
+    {
+      "name": "typinggaps number of numeric union comparator",
+      "expect": "matched",
+      "source": "function main(): void {\n  const xs: (number | string)[] = [3, \"1\", 2];\n  xs.sort((a, b) => Number(a) - Number(b));\n  console.log(xs);\n  const ys: (number | undefined)[] = [3, 1, 2];\n  ys.sort((a, b) => a! - b!);\n  console.log(ys, Number(xs[0]) + 1);\n}\n"
+    },
+    {
+      "name": "typinggaps catch any property assign",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { throw new TypeError(\"boom\"); } catch (e: any) { e.k = 2; e.code = \"E1\"; console.log(e.k, e.code, e.message, e.name); }\n  try { throw { a: 1 }; } catch (e: any) { e.k = 2; console.log(e.k, e.a); }\n  try { throw new Error(\"rethrow\"); } catch (e: any) { e.k = 1; try { throw e; } catch (e2: any) { console.log(e2.k, e2.message); } }\n}\n"
+    },
+    {
+      "name": "typinggaps any alias of async call",
+      "expect": "matched",
+      "source": "async function g(): Promise<number> { return 5; }\nasync function main(): Promise<void> {\n  const p: any = g();\n  console.log(await p);\n  const q: any = g();\n  q.then((v: number) => console.log(\"then\", v));\n  const r = await q;\n  console.log(r + 1);\n}\n"
     }
   ]
 }
