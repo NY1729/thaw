@@ -1354,7 +1354,10 @@ impl<'a> FnLowerer<'a> {
             // check just never let a `let`/`const` declaration reach it.
             let destructurable_array = matches!(&decl.name, Pat::Array(_))
                 && matches!(&ty, HirType::Array(_) | HirType::Json);
+            let destructurable_string = ty == HirType::Str
+                && matches!(&decl.name, Pat::Array(_) | Pat::Object(_));
             if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
+                && !destructurable_string
                 && !destructurable_union
                 && !destructurable_dictionary
                 && !destructurable_json_object
