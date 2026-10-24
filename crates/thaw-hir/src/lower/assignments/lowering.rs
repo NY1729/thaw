@@ -843,7 +843,7 @@ impl<'a> FnLowerer<'a> {
                     return self.call_class_static_setter(symbol, rhs);
                 }
                 return self.call_class_instance_setter(
-                    &owner, symbol, HirExpr::Var(self.resolve_binding("this")), rhs,
+                    &owner, None, symbol, HirExpr::Var(self.resolve_binding("this")), rhs,
                 );
             }
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
@@ -865,7 +865,7 @@ impl<'a> FnLowerer<'a> {
                         {
                             let rhs = self.lower_expr(&assign.right)?;
                             return self.call_class_instance_setter(
-                                &owner, symbol, HirExpr::Var(binding), rhs,
+                                &owner, Some(&property), symbol, HirExpr::Var(binding), rhs,
                             );
                         }
                         return Err(format!("cannot assign to readonly instance accessor `{owner}.{property}`"));
@@ -895,7 +895,7 @@ impl<'a> FnLowerer<'a> {
                         {
                             let rhs = self.lower_expr(&assign.right)?;
                             return self.call_class_instance_setter(
-                                &owner, symbol, HirExpr::Var(binding), rhs,
+                                &owner, Some(&property), symbol, HirExpr::Var(binding), rhs,
                             );
                         }
                         return Err(format!("cannot assign to readonly instance accessor `{owner}.{property}`"));
