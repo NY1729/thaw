@@ -1,0 +1,13 @@
+ok {"name":"Al","age":30,"email":"a@b.co","tags":["x"]}
+ValidationError name must be at least 2 characters | age must be a positive number | age must be an integer | email must be a valid email | tags field must have less than or equal to 3 items
+ValidationError name is a required field | age is a required field
+ok {"age":42,"name":"Bob"}
+true false
+{"age":7,"name":"Q"}
+hello dflt abc
+false true
+true false
+custom msg  required
+12.5 true
+true false
+true false

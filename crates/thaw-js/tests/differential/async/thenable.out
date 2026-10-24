@@ -1,0 +1,7 @@
+then called
+then called
+tick1
+resolved 42
+await 42
+tick2
+tick3

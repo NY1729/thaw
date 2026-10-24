@@ -164,6 +164,33 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())
     }
 
+    /// `loadThawJs(package, bundleSource): boolean`, via thaw-js's `thaw_tjs_register`.
+    fn compile_load_thaw_js(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_thaw_js = true;
+        let [name, source] = args else {
+            return Err("loadThawJs expects a package name and a bundle source".to_string());
+        };
+        let name = self.compile_expr(name)?;
+        let source = self.compile_expr(source)?;
+        let loaded = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_tjs_register").unwrap(),
+                &[name.into(), source.into()],
+                "load_thaw_js_u8",
+            )
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_tjs_register did not return a value")?
+            .into_int_value();
+        let zero = self.context.i8_type().const_int(0, false);
+        self.builder
+            .build_int_compare(inkwell::IntPredicate::NE, loaded, zero, "load_thaw_js_ok")
+            .map(Into::into)
+            .map_err(|e| e.to_string())
+    }
+
     fn compile_load_native_addon(
         &mut self,
         args: &[HirExpr],

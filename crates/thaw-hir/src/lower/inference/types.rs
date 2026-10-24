@@ -2887,7 +2887,7 @@ impl<'a> FnLowerer<'a> {
                     // the global engine context; `callDynamic` calls a
                     // top-level function it defined, by name, with `Json`
                     // args in and a `Json` result out.
-                    "loadScript" => return Ok(HirType::Bool),
+                    "loadScript" | "loadThawJs" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
                     "newDynamicFunction" | "__thaw_eval_class_token" => return Ok(HirType::JsValue),
                     "getDynamicValue" => return Ok(HirType::JsValue),
