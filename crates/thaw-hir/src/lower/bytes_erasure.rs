@@ -303,6 +303,16 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_tys(types);
         }
 
+        // `console.log([buf])` needs the `Bytes` marker to print `<Buffer ..>` for nested buffers.
+        HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_console_typed")
+                && matches!(args.as_slice(), [HirExpr::TypedClosure(..)]) =>
+        {
+            if let [HirExpr::TypedClosure(ty, inner)] = args.as_mut_slice() {
+                erase_dynamic_ty(ty);
+                erase_expr(inner);
+            }
+        }
         HirExpr::Call(callee, args) => {
             erase_expr(callee);
             erase_exprs(args);

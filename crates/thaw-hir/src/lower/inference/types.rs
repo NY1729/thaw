@@ -265,6 +265,36 @@ mod callable_compatibility_tests {
     }
 }
 
+/// True when a `Bytes` appears anywhere inside `ty`.
+fn type_contains_bytes(ty: &HirType) -> bool {
+    match ty {
+        HirType::Bytes => true,
+        HirType::Array(t)
+        | HirType::Optional(t)
+        | HirType::Nullable(t)
+        | HirType::Nullish(t)
+        | HirType::Set(t)
+        | HirType::Promise(t)
+        | HirType::Dictionary(t) => type_contains_bytes(t),
+        HirType::Map(k, v) => type_contains_bytes(k) || type_contains_bytes(v),
+        HirType::Tuple(ts) | HirType::Union(ts) => ts.iter().any(type_contains_bytes),
+        HirType::Object(fs) => fs.iter().any(|(_, t)| type_contains_bytes(t)),
+        _ => false,
+    }
+}
+
+/// `Bytes` and `Array(F64)` share one physical layout (the separate identity is only for
+/// method dispatch); types are layout-equal when equal after erasing `Bytes`.
+fn bytes_layout_eq(a: &HirType, b: &HirType) -> bool {
+    a == b
+        || ((type_contains_bytes(a) || type_contains_bytes(b)) && {
+            let (mut x, mut y) = (a.clone(), b.clone());
+            erase_ty(&mut x);
+            erase_ty(&mut y);
+            x == y
+        })
+}
+
 impl<'a> FnLowerer<'a> {
     fn expect_type(
         &self,
@@ -274,20 +304,10 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<(), String> {
         let actual = self.infer_expr_type(value)?;
         let callable_compatible = callable_value_compatible(expected, &actual);
-        // `Bytes` and `Array(F64)` are one physical layout; the separate
-        // identity is only for method dispatch, so they assign either
-        // way (a `Buffer` into a `number[]` slot and back).
-        let bytes_array_compatible = |a: &HirType, b: &HirType| {
-            matches!(
-                (a, b),
-                (HirType::Bytes, HirType::Array(elem)) | (HirType::Array(elem), HirType::Bytes)
-                    if **elem == HirType::F64
-            )
-        };
         if actual == HirType::Dynamic
             || *expected == HirType::Dynamic
             || actual == *expected
-            || bytes_array_compatible(expected, &actual)
+            || bytes_layout_eq(expected, &actual)
             || callable_compatible
             || class_identity_subtype(expected, &actual)
             // A function whose return type is still the unresolved `Dynamic` placeholder (an
@@ -3040,11 +3060,8 @@ impl<'a> FnLowerer<'a> {
                 if values.is_empty() {
                     return Ok(HirType::Array(Box::new(HirType::F64)));
                 }
-                let has_holes = values
-                    .iter()
-                    .any(|value| matches!(value, HirExpr::Lit(HirLit::ArrayHole)));
                 let array_element_type =
-                    |value: &HirExpr| -> Result<HirType, String> { self.infer_expr_type(value) };
+                    |value: &HirExpr| -> Result<HirType, String> { self.infer_expr_type_inner(value) };
                 let elements = values
                     .iter()
                     .filter(|value| !matches!(value, HirExpr::Lit(HirLit::ArrayHole)))
@@ -3053,14 +3070,19 @@ impl<'a> FnLowerer<'a> {
                 if elements.is_empty() {
                     return Ok(HirType::Array(Box::new(HirType::F64)));
                 }
-                if has_holes {
-                    let first = &elements[0];
-                    if elements.iter().all(|element| element == first) {
-                        return Ok(HirType::Array(Box::new(first.clone())));
-                    }
-                }
-                if elements.iter().all(|element| element == &elements[0]) {
-                    Ok(HirType::Array(Box::new(elements[0].clone())))
+                // Equal members keep their type (so `[b1, b2]` is `Buffer[]`); members equal
+                // only up to the Bytes/number[] layout (`[b, [4, 5]]`) fall back to the erased
+                // type, exactly as before.
+                let first = &elements[0];
+                if elements.iter().all(|element| element == first) {
+                    Ok(HirType::Array(Box::new(first.clone())))
+                } else if elements
+                    .iter()
+                    .all(|element| bytes_layout_eq(element, first))
+                {
+                    let mut erased = first.clone();
+                    erase_ty(&mut erased);
+                    Ok(HirType::Array(Box::new(erased)))
                 } else {
                     // A heterogeneous literal keeps its physical indices.
                     // Filtering holes above is only valid for deciding
@@ -3098,7 +3120,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::ObjectLit(fields) => {
                 let fields = fields
                     .iter()
-                    .map(|(name, value)| Ok((name.clone(), self.infer_expr_type(value)?)))
+                    .map(|(name, value)| Ok((name.clone(), self.infer_expr_type_inner(value)?)))
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(HirType::Object(fields))
             }

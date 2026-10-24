@@ -2570,42 +2570,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_json_array_push_owned(array, json)
             }
             HirType::Bytes => {
-                let object = self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_json_object_new").unwrap(),
-                        &[],
-                        "dynamic_bytes",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
-                let ty_key = self.builder.build_global_string_ptr("type", "bytes_type_key").map_err(|error| error.to_string())?;
-                let ty_value = self.builder.build_global_string_ptr("Buffer", "bytes_type_value").map_err(|error| error.to_string())?;
-                self.builder.build_call(
-                    self.module.get_function("thaw_json_object_set_string").unwrap(),
-                    &[object.into(), ty_key.as_pointer_value().into(), ty_value.as_pointer_value().into()],
-                    "set_bytes_type",
-                ).map_err(|error| error.to_string())?;
-                let data = self.compile_native_array_to_json_with_undefined(
-                    value.into_pointer_value(),
-                    &HirType::F64,
-                    true,
-                )?;
-                let data_key = self.builder.build_global_string_ptr("data", "bytes_data_key").map_err(|error| error.to_string())?;
-                self.builder.build_call(
-                    self.module.get_function("thaw_json_object_set_json").unwrap(),
-                    &[object.into(), data_key.as_pointer_value().into(), data.into()],
-                    "set_bytes_data",
-                ).map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("thaw_json_destroy").unwrap(),
-                        &[data.into()],
-                        "destroy_dynamic_bytes_data",
-                    )
-                    .map_err(|error| error.to_string())?;
+                let object = self.compile_native_bytes_to_json(value.into_pointer_value())?;
                 self.compile_json_array_push_owned(array, object)
             }
             HirType::Tuple(elements) => {
