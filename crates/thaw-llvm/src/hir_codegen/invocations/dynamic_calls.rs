@@ -104,6 +104,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
         Some(match name {
             "loadScript" => self.compile_load_script(args),
+            "loadThawJs" => self.compile_load_thaw_js(args),
             "__thaw_to_iterator_exact" => self.compile_to_iterator_exact(args, false),
             "__thaw_to_async_iterator_exact" => self.compile_to_iterator_exact(args, true),
             "__thaw_dynamic_iterator_step_exact" => self.compile_dynamic_iterator_step_exact(args),

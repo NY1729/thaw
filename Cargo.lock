@@ -3189,6 +3189,7 @@ dependencies = [
  "jiff",
  "regress",
  "swc_ecma_visit",
+ "thaw-arena",
  "thaw-parser",
 ]
 
