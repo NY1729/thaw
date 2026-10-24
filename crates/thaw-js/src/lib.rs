@@ -23,11 +23,17 @@ use classes::ClassInfo;
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
+mod buffer;
 mod builtins;
 mod classes;
 mod collections;
+mod date;
+mod eventloop;
+mod extras;
 pub mod host;
 pub mod scan;
+mod typed;
+mod url;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
 pub const SUPPORTED_FEATURES: &[&str] = &[
@@ -39,6 +45,9 @@ pub const SUPPORTED_FEATURES: &[&str] = &[
     "class",
     "super",
     "optional-chaining",
+    "async",
+    "await",
+    "tagged-template",
 ];
 
 const MAX_DEPTH: usize = 100;
@@ -96,6 +105,9 @@ enum Kind {
         id: u64,
         desc: Option<Rc<str>>,
     },
+    Promise(eventloop::PromiseData),
+    ArrayBuffer(typed::Bytes),
+    Typed(typed::TypedArr),
 }
 
 type NativeFn = Rc<dyn Fn(&mut Interp, &Value, &[Value]) -> R<Value>>;
@@ -105,6 +117,9 @@ struct FuncDef {
     params: Vec<a::Pat>,
     body: Body,
     arrow: bool,
+    is_async: bool,
+    /// Named function expressions see their own name; methods do not.
+    bind_self: bool,
     uses_arguments: bool,
     strict: bool,
     class: Option<ClassInfo>,
@@ -123,6 +138,8 @@ pub enum Ctl {
     Continue(Option<Rc<str>>),
     /// Construct outside the supported subset (feature name for the routing scan).
     Unsupported(String),
+    /// `process.exit(code)`: unwinds everything.
+    Exit(i32),
 }
 
 impl std::fmt::Debug for Ctl {
@@ -133,6 +150,7 @@ impl std::fmt::Debug for Ctl {
             Ctl::Break(l) => write!(f, "Break({l:?})"),
             Ctl::Continue(l) => write!(f, "Continue({l:?})"),
             Ctl::Unsupported(x) => write!(f, "Unsupported({x})"),
+            Ctl::Exit(c) => write!(f, "Exit({c})"),
         }
     }
 }
@@ -301,10 +319,15 @@ pub struct Interp {
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
     depth: usize,
+    /// Call-depth cap; replaced by the stack-address check once `configure_stack` was called.
+    max_depth: usize,
+    /// Lowest stack address JS calls may reach (0 = not configured).
+    pub(crate) stack_limit: usize,
     /// Lines written by `console.log` (kept for tests and embedders).
     pub out: Vec<String>,
     /// Lines written by `console.error` / `console.warn`.
     pub err: Vec<String>,
+    pub(crate) rt: eventloop::Rt,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -353,14 +376,42 @@ impl Interp {
             fn_cache: HashMap::new(),
             run_id: 0,
             depth: 0,
+            max_depth: MAX_DEPTH,
+            stack_limit: 0,
             out: Vec::new(),
             err: Vec::new(),
+            rt: Default::default(),
         };
         it.install_builtins();
         it.install_collections();
+        it.install_eventloop();
         it.run(builtins::PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js prelude must evaluate"));
+        it.run_promise_prelude();
+        it.run(extras::EXTRAS)
+            .unwrap_or_else(|_| panic!("thaw-js extras prelude must evaluate"));
+        it.install_typed();
+        it.install_buffer();
+        it.install_url();
+        it.name_builtins();
         it
+    }
+
+    /// The embedder promises that roughly `bytes` of stack are available from here: recursion is
+    /// then limited by actual stack use (a `RangeError`) instead of a fixed call depth.
+    pub fn configure_stack(&mut self, bytes: usize) {
+        let marker = 0u8;
+        let here = &marker as *const u8 as usize;
+        self.stack_limit = here.saturating_sub(bytes.saturating_sub(bytes / 8 + (4 << 20)));
+        self.max_depth = 200_000;
+    }
+
+    pub(crate) fn too_deep(&self) -> bool {
+        if self.depth >= self.max_depth {
+            return true;
+        }
+        let marker = 0u8;
+        self.stack_limit != 0 && (&marker as *const u8 as usize) < self.stack_limit
     }
 
     pub(crate) fn native(
@@ -394,12 +445,21 @@ impl Interp {
     // ----- introspection for the feature scan -----
 
     pub fn global_names(&self) -> Vec<String> {
-        self.global
+        let mut names: Vec<String> = self
+            .global
             .vars
             .borrow()
             .keys()
             .map(|k| k.to_string())
-            .collect()
+            .collect();
+        names.extend(
+            self.object_proto
+                .props
+                .borrow()
+                .iter()
+                .map(|p| p.key.to_string()),
+        );
+        names
     }
 
     /// True for a global holding an object/function whose members the scan can check.
@@ -432,6 +492,7 @@ impl Interp {
             self.string_proto.clone(),
             self.regexp_proto.clone(),
         ];
+        names.extend(self.global.vars.borrow().keys().map(|k| k.to_string()));
         for v in self.global.vars.borrow().values() {
             if let Value::Object(o) = &v.value {
                 objs.push(o.clone());
@@ -443,7 +504,7 @@ impl Interp {
         for o in objs {
             names.extend(o.props.borrow().iter().map(|p| p.key.to_string()));
         }
-        names.push("next".into()); // per-instance on iterator arrays
+        names.extend(["next", "return", "throw", "require"].map(String::from)); // iterator protocol / `module.require` (user-defined)
         names
     }
 
@@ -460,12 +521,8 @@ impl Interp {
                 if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                     return self.join(v, ",");
                 }
-                if let Ok(f @ Value::Object(_)) = self.get(v, "toString") {
-                    if f.is_callable() {
-                        if let Ok(Value::Str(s)) = self.call(&f, v, &[]) {
-                            return s;
-                        }
-                    }
+                if let Ok(p) = self.primitive_of(v, extras::Hint::String) {
+                    return self.to_str(&p);
                 }
                 if v.is_callable() {
                     "function".into()
@@ -483,10 +540,10 @@ impl Interp {
             Value::Bool(b) => *b as u8 as f64,
             Value::Number(n) => *n,
             Value::Str(s) => string_to_number(s),
-            Value::Object(_) => {
-                let s = self.to_str(v);
-                string_to_number(&s)
-            }
+            Value::Object(_) => match self.primitive_of(v, extras::Hint::Number) {
+                Ok(p) => self.num(&p),
+                Err(_) => f64::NAN,
+            },
         }
     }
 
@@ -522,6 +579,8 @@ impl Interp {
                     Arr(Vec<Value>),
                     Fun,
                     Re,
+                    Prom,
+                    Bytes(String),
                     Plain,
                 }
                 let kind = match &*o.kind.borrow() {
@@ -533,6 +592,60 @@ impl Interp {
                     | Kind::Map(_)
                     | Kind::Set(_)
                     | Kind::Symbol { .. } => K::Plain,
+                    Kind::Promise(_) => K::Prom,
+                    Kind::ArrayBuffer(b) => {
+                        let b = b.borrow();
+                        let shown: Vec<String> =
+                            b.iter().take(50).map(|x| format!("{x:02x}")).collect();
+                        let more = if b.len() > 50 {
+                            format!(
+                                " ... {} more byte{}",
+                                b.len() - 50,
+                                if b.len() - 50 == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            String::new()
+                        };
+                        K::Bytes(format!(
+                            "ArrayBuffer {{ [Uint8Contents]: <{}{more}>, [byteLength]: {} }}",
+                            shown.join(" "),
+                            b.len()
+                        ))
+                    }
+                    Kind::Typed(t) => {
+                        let is_buffer = find_in_chain(o, "__isBuffer").is_some();
+                        if is_buffer {
+                            let vals = t.to_vec();
+                            let shown: Vec<String> = vals
+                                .iter()
+                                .take(50)
+                                .map(|x| format!("{:02x}", *x as u8))
+                                .collect();
+                            let more = if vals.len() > 50 {
+                                format!(
+                                    " ... {} more byte{}",
+                                    vals.len() - 50,
+                                    if vals.len() - 50 == 1 { "" } else { "s" }
+                                )
+                            } else {
+                                String::new()
+                            };
+                            K::Bytes(format!(
+                                "<Buffer{}{}{more}>",
+                                if shown.is_empty() { "" } else { " " },
+                                shown.join(" ")
+                            ))
+                        } else {
+                            let items: Vec<String> =
+                                t.to_vec().into_iter().map(number_to_string).collect();
+                            let name = t.ty.name();
+                            K::Bytes(if items.is_empty() {
+                                format!("{name}(0) []")
+                            } else {
+                                format!("{name}({}) [ {} ]", items.len(), items.join(", "))
+                            })
+                        }
+                    }
                 };
                 match kind {
                     K::Arr(items) if items.is_empty() => "[]".into(),
@@ -549,6 +662,14 @@ impl Interp {
                         _ => "[Function (anonymous)]".into(),
                     },
                     K::Re => self.to_str(v).to_string(),
+                    K::Bytes(text) => text,
+                    K::Prom => match self.promise_state(v) {
+                        None => "Promise { <pending> }".into(),
+                        Some(Ok(x)) => format!("Promise {{ {} }}", self.inspect(&x, false)),
+                        Some(Err(x)) => {
+                            format!("Promise {{ <rejected> {} }}", self.inspect(&x, false))
+                        }
+                    },
                     K::Plain => {
                         let props: Vec<Prop> = o
                             .props
@@ -586,6 +707,9 @@ impl Interp {
                 let mut keys: Vec<Rc<str>> = Vec::new();
                 if let Kind::Array(items) = &*o.kind.borrow() {
                     keys.extend((0..items.len()).map(|i| Rc::from(i.to_string())));
+                }
+                if let Kind::Typed(t) = &*o.kind.borrow() {
+                    keys.extend((0..t.len).map(|i| Rc::from(i.to_string())));
                 }
                 keys.extend(
                     o.props
@@ -660,6 +784,24 @@ impl Interp {
                         return Ok(items.get(i).cloned().unwrap_or(Value::Undefined));
                     }
                 }
+                if let Kind::Typed(t) = &*o.kind.borrow() {
+                    match key {
+                        "length" => return Ok(Value::Number(t.len as f64)),
+                        "byteLength" => return Ok(Value::Number((t.len * t.ty.size()) as f64)),
+                        "byteOffset" => return Ok(Value::Number(t.off as f64)),
+                        "buffer" => return Ok(Value::Object(t.abuf.clone())),
+                        _ => {
+                            if let Ok(i) = key.parse::<usize>() {
+                                return Ok(t.get(i).map_or(Value::Undefined, Value::Number));
+                            }
+                        }
+                    }
+                }
+                if key == "byteLength" {
+                    if let Kind::ArrayBuffer(b) = &*o.kind.borrow() {
+                        return Ok(Value::Number(b.borrow().len() as f64));
+                    }
+                }
                 if key == "name" || key == "length" {
                     if let Kind::Closure { def, .. } = &*o.kind.borrow() {
                         if find_own(o, key).is_none() {
@@ -727,6 +869,14 @@ impl Interp {
                 return Ok(());
             }
         }
+        if let Kind::Typed(t) = &*o.kind.borrow() {
+            if let Ok(i) = key.parse::<usize>() {
+                let t = t.clone();
+                let n = self.num(&value);
+                t.set(i, n);
+                return Ok(());
+            }
+        }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
                 if let Some(s) = set {
@@ -772,7 +922,7 @@ impl Interp {
             Kind::Closure { def, scope } => Callee::Closure(def.clone(), scope.clone()),
             _ => return self.throw_error("TypeError", "value is not a function"),
         };
-        if self.depth >= MAX_DEPTH {
+        if self.too_deep() {
             return self.throw_error("RangeError", "Maximum call stack size exceeded");
         }
         self.depth += 1;
@@ -796,6 +946,20 @@ impl Interp {
         this: &Value,
         args: &[Value],
     ) -> R<Value> {
+        if def.is_async {
+            return self.call_async(f, def, scope, this, args);
+        }
+        self.call_closure_sync(f, def, scope, this, args)
+    }
+
+    pub(crate) fn call_closure_sync(
+        &mut self,
+        f: &Value,
+        def: &Rc<FuncDef>,
+        scope: &Rc<Scope>,
+        this: &Value,
+        args: &[Value],
+    ) -> R<Value> {
         let frame = Scope::new(Some(scope.clone()));
         if def.strict {
             frame.strict.set(true);
@@ -807,7 +971,7 @@ impl Interp {
                 this.clone()
             };
             frame.declare("this", this, false);
-            if let Some(name) = &def.name {
+            if let Some(name) = def.name.as_ref().filter(|_| def.bind_self) {
                 frame.declare(name, f.clone(), true);
             }
             if def.uses_arguments {
@@ -859,7 +1023,10 @@ impl Interp {
         };
         if is_native {
             // natives that act as constructors (Array, RegExp, Object, ...) return their own object
-            let r = self.call(f, &Value::Undefined, args)?;
+            self.rt.constructing = true;
+            let r = self.call(f, &Value::Undefined, args);
+            self.rt.constructing = false;
+            let r = r?;
             return Ok(r);
         }
         let this = Value::Object(new_obj(Some(proto), Kind::Plain));
@@ -874,12 +1041,15 @@ impl Interp {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_function(
         &mut self,
         name: Option<Rc<str>>,
         params: Vec<a::Pat>,
         body: Body,
         arrow: bool,
+        is_async: bool,
+        bind_self: bool,
         lo: u32,
         scope: &Rc<Scope>,
     ) -> Value {
@@ -894,7 +1064,7 @@ impl Interp {
                 }
                 params.visit_with(&mut finder);
                 let strict = matches!(&body, Body::Block(s) if matches!(s.first(), Some(a::Stmt::Expr(e)) if matches!(&*e.expr, a::Expr::Lit(a::Lit::Str(x)) if x.value.as_str() == Some("use strict"))));
-                Rc::new(FuncDef { name, params, body, arrow, uses_arguments: finder.found && !arrow, strict, class: None })
+                Rc::new(FuncDef { name, params, body, arrow, is_async, bind_self, uses_arguments: finder.found && !arrow, strict, class: None })
             })
             .clone();
         let f = new_obj(
@@ -977,7 +1147,7 @@ impl Interp {
                 if !matches!(value, Value::Object(_) | Value::Str(_)) {
                     return self.throw_error("TypeError", "value is not iterable");
                 }
-                let Some(items) = self.iter_items(&value) else {
+                let Some(items) = self.iter_protocol(&value)? else {
                     return unsupported("iterator-protocol");
                 };
                 for (i, el) in ap.elems.iter().enumerate() {
@@ -1083,6 +1253,18 @@ impl Interp {
         self.get(&module, "exports")
     }
 
+    /// Define a global `require(name)` serving preloaded module exports (for standalone runs).
+    pub fn install_require(&mut self, modules: Vec<(String, Value)>) {
+        let f = self.native(move |it, _, args| {
+            let name = it.to_str(&args.first().cloned().unwrap_or(Value::Undefined));
+            match modules.iter().find(|(n, _)| **n == *name) {
+                Some((_, v)) => Ok(v.clone()),
+                None => it.throw_error("Error", &format!("Cannot find module '{name}'")),
+            }
+        });
+        self.global.declare("require", f, true);
+    }
+
     /// Call `exports[name](...args)`.
     pub fn call_export(&mut self, exports: &Value, name: &str, args: &[Value]) -> R<Value> {
         let f = self.get(exports, name)?;
@@ -1100,11 +1282,40 @@ impl Interp {
         f: &a::Function,
         scope: &Rc<Scope>,
     ) -> R<Value> {
-        if f.is_async || f.is_generator {
-            return unsupported(if f.is_async { "async" } else { "generator" });
+        self.function_value_ex(name, f, scope, true)
+    }
+
+    /// A method / accessor: named, but its name is not a binding inside its own body.
+    pub(crate) fn method_value(
+        &mut self,
+        name: Option<Rc<str>>,
+        f: &a::Function,
+        scope: &Rc<Scope>,
+    ) -> R<Value> {
+        self.function_value_ex(name, f, scope, false)
+    }
+
+    fn function_value_ex(
+        &mut self,
+        name: Option<Rc<str>>,
+        f: &a::Function,
+        scope: &Rc<Scope>,
+        bind_self: bool,
+    ) -> R<Value> {
+        if f.is_generator {
+            return unsupported("generator");
         }
         let body = Body::Block(f.body.as_ref().map(|b| b.stmts.clone()).unwrap_or_default());
-        Ok(self.make_function(name, fn_pats(&f.params), body, false, f.span.lo.0, scope))
+        Ok(self.make_function(
+            name,
+            fn_pats(&f.params),
+            body,
+            false,
+            f.is_async,
+            bind_self,
+            f.span.lo.0,
+            scope,
+        ))
     }
 
     fn hoist_functions(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<()> {
@@ -1303,10 +1514,15 @@ impl Interp {
             }
             a::Stmt::ForOf(f) => {
                 let iterable = self.eval(&f.right, scope)?;
-                let Some(items) = self.iter_items(&iterable) else {
+                let Some(items) = self.iter_protocol(&iterable)? else {
                     return unsupported("iterator-protocol");
                 };
                 for item in items {
+                    let item = if f.is_await {
+                        self.await_value(item)?
+                    } else {
+                        item
+                    };
                     let iter = Scope::new(Some(scope.clone()));
                     self.bind_for_head(&f.left, item, &iter)?;
                     if step(self.exec(&f.body, &iter))? {
@@ -1364,7 +1580,7 @@ impl Interp {
         for arg in args {
             let v = self.eval(&arg.expr, scope)?;
             if arg.spread.is_some() {
-                match self.iter_items(&v) {
+                match self.iter_protocol(&v)? {
                     Some(items) => out.extend(items),
                     None => return unsupported("iterator-protocol"),
                 }
@@ -1398,6 +1614,17 @@ impl Interp {
             }),
             a::Expr::Ident(i) => match self.lookup(scope, &i.sym) {
                 Some(v) => Ok(v),
+                // the global object inherits from Object.prototype (`toString`, `hasOwnProperty`, ...)
+                None if matches!(
+                    find_in_chain(&self.object_proto, &i.sym),
+                    Some(Slot::Data(_))
+                ) =>
+                {
+                    match find_in_chain(&self.object_proto, &i.sym) {
+                        Some(Slot::Data(v)) => Ok(v),
+                        _ => unreachable!(),
+                    }
+                }
                 None => self.throw_error("ReferenceError", &format!("{} is not defined", &*i.sym)),
             },
             a::Expr::This(_) => Ok(self.lookup(scope, "this").unwrap_or(Value::Undefined)),
@@ -1453,17 +1680,17 @@ impl Interp {
                             }
                             a::Prop::Method(m) => {
                                 let k = self.prop_name(&m.key, scope)?;
-                                let f = self.function_value(Some(k.clone()), &m.function, scope)?;
+                                let f = self.method_value(Some(k.clone()), &m.function, scope)?;
                                 put(&obj, &k, f);
                             }
                             a::Prop::Getter(g) => {
                                 let k = self.prop_name(&g.key, scope)?;
-                                let f = self.function_value(Some(k.clone()), &g.function, scope)?;
+                                let f = self.method_value(Some(k.clone()), &g.function, scope)?;
                                 define_accessor(&obj, &k, Some(f), None, true);
                             }
                             a::Prop::Setter(s) => {
                                 let k = self.prop_name(&s.key, scope)?;
-                                let f = self.function_value(Some(k.clone()), &s.function, scope)?;
+                                let f = self.method_value(Some(k.clone()), &s.function, scope)?;
                                 define_accessor(&obj, &k, None, Some(f), true);
                             }
                             a::Prop::Assign(_) => return unsupported("shorthand default"),
@@ -1477,14 +1704,23 @@ impl Interp {
                 self.function_value(name, &f.function, scope)
             }
             a::Expr::Arrow(f) => {
-                if f.is_async || f.is_generator {
-                    return unsupported(if f.is_async { "async" } else { "generator" });
+                if f.is_generator {
+                    return unsupported("generator");
                 }
                 let body = match &*f.body {
                     a::ArrowFunctionBody::FunctionBody(b) => Body::Block(b.stmts.clone()),
                     a::ArrowFunctionBody::Expr(e) => Body::Expr(e.clone()),
                 };
-                Ok(self.make_function(None, f.params.clone(), body, true, f.span.lo.0, scope))
+                Ok(self.make_function(
+                    None,
+                    f.params.clone(),
+                    body,
+                    true,
+                    f.is_async,
+                    false,
+                    f.span.lo.0,
+                    scope,
+                ))
             }
             a::Expr::Member(m) => {
                 let obj = self.eval(&m.obj, scope)?;
@@ -1607,10 +1843,48 @@ impl Interp {
                     _ => Ok(Value::Undefined),
                 }
             }
-            a::Expr::TaggedTpl(_) => unsupported("tagged-template"),
+            a::Expr::TaggedTpl(t) => {
+                let (f, this) = match &*t.tag {
+                    a::Expr::Member(m) => {
+                        let obj = self.eval(&m.obj, scope)?;
+                        let key = self.member_key(&m.prop, scope)?;
+                        (self.get(&obj, &key)?, obj)
+                    }
+                    other => (self.eval(other, scope)?, Value::Undefined),
+                };
+                let cooked = t
+                    .tpl
+                    .quasis
+                    .iter()
+                    .map(|q| match q.cooked.as_ref().and_then(|c| c.as_str()) {
+                        Some(c) => Value::str(c),
+                        None => Value::Undefined,
+                    })
+                    .collect();
+                let raw = t.tpl.quasis.iter().map(|q| Value::str(&q.raw)).collect();
+                let strings = self.array(cooked);
+                if let Value::Object(o) = &strings {
+                    let raw = self.array(raw);
+                    put_hidden(o, "raw", raw);
+                }
+                let mut args = vec![strings];
+                for e in &t.tpl.exprs {
+                    args.push(self.eval(e, scope)?);
+                }
+                if !f.is_callable() {
+                    return self.throw_error(
+                        "TypeError",
+                        &format!("{} is not a function", expr_text(&t.tag)),
+                    );
+                }
+                self.call(&f, &this, &args)
+            }
             a::Expr::MetaProp(_) => unsupported("new.target"),
             a::Expr::Yield(_) => unsupported("yield"),
-            a::Expr::Await(_) => unsupported("await"),
+            a::Expr::Await(e) => {
+                let v = self.eval(&e.arg, scope)?;
+                self.await_value(v)
+            }
             _ => unsupported("expression"),
         }
     }
@@ -1750,17 +2024,46 @@ impl Interp {
 
     fn binary(&mut self, op: a::BinaryOp, l: &Value, r: &Value) -> R<Value> {
         use a::BinaryOp as B;
+        // objects take part in arithmetic / comparison through ToPrimitive
+        let (lp0, rp0);
+        let (l, r) = if matches!(l, Value::Object(_)) || matches!(r, Value::Object(_)) {
+            let hint = if matches!(op, B::Add) {
+                extras::Hint::Default
+            } else {
+                extras::Hint::Number
+            };
+            if matches!(
+                op,
+                B::Add
+                    | B::Sub
+                    | B::Mul
+                    | B::Div
+                    | B::Mod
+                    | B::Exp
+                    | B::Lt
+                    | B::LtEq
+                    | B::Gt
+                    | B::GtEq
+                    | B::BitAnd
+                    | B::BitOr
+                    | B::BitXor
+                    | B::LShift
+                    | B::RShift
+                    | B::ZeroFillRShift
+            ) {
+                lp0 = self.primitive_of(l, hint)?;
+                rp0 = self.primitive_of(r, hint)?;
+                (&lp0, &rp0)
+            } else {
+                (l, r)
+            }
+        } else {
+            (l, r)
+        };
         let num = |it: &mut Interp| (it.num(l), it.num(r));
         Ok(match op {
             B::Add => {
-                let prim = |it: &mut Interp, v: &Value| {
-                    if matches!(v, Value::Object(_)) {
-                        Value::Str(it.to_str(v))
-                    } else {
-                        v.clone()
-                    }
-                };
-                let (lp, rp) = (prim(self, l), prim(self, r));
+                let (lp, rp) = (l.clone(), r.clone());
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
                     let mut s = self.to_str(&lp).to_string();
                     s.push_str(&self.to_str(&rp));
@@ -1869,6 +2172,16 @@ impl Interp {
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
             (Value::Object(_), Value::Object(_)) => strict_equals(l, r),
             (Value::Str(_), Value::Str(_)) => strict_equals(l, r),
+            (Value::Object(_), _) | (_, Value::Object(_)) => {
+                let (lp, rp) = match (
+                    self.primitive_of(l, extras::Hint::Default),
+                    self.primitive_of(r, extras::Hint::Default),
+                ) {
+                    (Ok(x), Ok(y)) => (x, y),
+                    _ => return false,
+                };
+                self.loose_equals(&lp, &rp)
+            }
             _ => {
                 let (x, y) = (self.num(l), self.num(r));
                 x == y

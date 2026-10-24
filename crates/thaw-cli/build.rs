@@ -27,6 +27,8 @@ fn main() {
         "crates/thaw-runtime",
         "crates/thaw-std",
         "crates/thaw-jit",
+        "crates/thaw-js",
+        "crates/thaw-parser",
         "crates/thaw-quickjs",
         "crates/thaw-napi",
         "vendor/rquickjs-sys",
