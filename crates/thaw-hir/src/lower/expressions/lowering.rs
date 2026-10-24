@@ -2558,7 +2558,20 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 let left_versions = self.narrowing_write_versions.clone();
-                let mut lhs = self.lower_expr(&bin.left)?;
+                let observes_undefined = bin.op == BinaryOp::NullishCoalescing
+                    || (matches!(
+                        bin.op,
+                        BinaryOp::EqEq | BinaryOp::EqEqEq | BinaryOp::NotEq | BinaryOp::NotEqEq
+                    ) && matches!(bin.right.as_ref(), Expr::Ident(id) if id.sym == *"undefined"));
+                let string_index = if observes_undefined {
+                    self.lower_string_index_optional(&bin.left)?
+                } else {
+                    None
+                };
+                let mut lhs = match string_index {
+                    Some(read) => read,
+                    None => self.lower_expr(&bin.left)?,
+                };
                 let rhs_narrowing = self
                     .optional_undefined_narrowing(&bin.left)
                     .filter(|(name, _, _, _)| {
