@@ -2234,6 +2234,16 @@
       "name": "new.target in derived constructor chain with arrow",
       "expect": "matched",
       "source": "class Base {\n  tag: string;\n  isBase: boolean;\n  constructor() {\n    this.isBase = new.target === Base;\n    const read = () => new.target.name;\n    this.tag = read();\n    if (new.target === undefined) throw new Error(\"never\");\n  }\n}\nclass Mid extends Base {}\nclass Leaf extends Mid {\n  constructor() {\n    super();\n    Object.setPrototypeOf(this, Leaf.prototype);\n  }\n}\nfunction show(o: Base): void {\n  console.log(o.tag, o.isBase, o instanceof Base, o instanceof Mid, o instanceof Leaf);\n}\nfunction main(): void {\n  show(new Base()); show(new Mid()); show(new Leaf());\n}\n"
+    },
+    {
+      "name": "class optional fields print as undefined",
+      "expect": "matched",
+      "source": "class P { o?: number; s?: string; n: number = 1; }\nclass D extends P { x?: boolean; }\ninterface I { o?: number }\nfunction main(): void {\n  console.log(new P());\n  console.log(new D());\n  const lit: I = {};\n  console.log(lit);\n  console.log({ p: new P() });\n  console.log(JSON.stringify(new P()));\n}\n"
+    },
+    {
+      "name": "non-null assertion on absent optional number is NaN",
+      "expect": "matched",
+      "source": "class P { o?: number }\nfunction main(): void {\n  console.log(new P().o! + 1);\n  const q = new P();\n  q.o = 2;\n  console.log(q.o! + 1);\n}\n"
     }
   ]
 }
