@@ -669,7 +669,11 @@ impl<'a> FnLowerer<'a> {
             {
                 return self.coerce_primitive_to_number(value);
             }
+            // A union of plain primitives is converted member by member below.
+            let primitive_union = matches!(&ty, HirType::Union(members)
+                if members.iter().all(|m| matches!(m, HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str)));
             if callee_name == "Number"
+                && !primitive_union
                 && matches!(
                     ty,
                     HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Union(_)
