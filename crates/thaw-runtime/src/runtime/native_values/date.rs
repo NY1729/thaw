@@ -351,6 +351,13 @@ fn parse_legacy_date(text: &str) -> f64 {
             match word.as_str() {
                 "am" | "pm" => meridiem = Some(word == "pm"),
                 "z" | "gmt" | "utc" | "ut" => zone = Some(0),
+                "est" | "edt" | "cst" | "cdt" | "mst" | "mdt" | "pst" | "pdt" => {
+                    let hours = [5, 4, 6, 5, 7, 6, 8, 7][["est", "edt", "cst", "cdt", "mst", "mdt", "pst", "pdt"]
+                        .iter()
+                        .position(|z| *z == word)
+                        .unwrap()];
+                    zone = Some(-hours * 60);
+                }
                 _ if word.len() >= 3 && MONTHS.iter().any(|m| word.starts_with(m)) => {
                     month_name = MONTHS.iter().position(|m| word.starts_with(m)).map(|i| i as u32 + 1);
                 }
@@ -415,13 +422,15 @@ fn parse_legacy_date(text: &str) -> f64 {
             if *alen >= 3 || *a > 31 { (*a, month, *b) } else { (*b, month, *a) }
         }
         (Some(month), [(year, _)]) if *year > 31 => (*year, month, 1),
+        (Some(month), [(day, _)]) => (2001, month, *day),
         (None, [(a, alen), (b, _), (c, _)]) => {
-            // `MM/DD/YYYY` stays unsupported (`rejects_unrecognized_formats`).
-            if *alen < 3 {
-                return f64::NAN;
-            }
-            (*a, *b as u32, *c)
+            // `YYYY/MM/DD`, otherwise `MM/DD/YYYY`.
+            if *alen >= 3 || *a > 31 { (*a, *b as u32, *c) } else { (*c, *a as u32, *b) }
         }
+        (None, [(a, _), (b, _)]) => (2001, *a as u32, *b),
+        (None, [(0, _)]) => (2000, 1, 1),
+        (None, [(a, _)]) if *a > 31 => (*a, 1, 1),
+        (None, [(a, _)]) => (2001, *a as u32, 1),
         _ => return f64::NAN,
     };
     // Two-digit years follow the usual pivot (0-49 -> 20xx, 50-99 -> 19xx).
@@ -492,7 +501,7 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"^([0-9]{4}|[+-][0-9]{6})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]+))?)?(Z|[+-][0-9]{2}:[0-9]{2})?)?$",
+            r"^([0-9]{4}|[+-][0-9]{6})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]+))?)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?$",
         )
         .unwrap()
     });
@@ -517,7 +526,7 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
             .unwrap_or(0)
     });
     if !(1..=12).contains(&month)
-        || !(1..=days_in_month(year, month) as i64).contains(&(day as i64))
+        || !(1..=31).contains(&day) // V8 rolls `2024-02-30` over into March.
         || !(0..=24).contains(&hours)
         || (hours == 24 && (minutes != 0 || seconds != 0 || milliseconds != 0))
         || !(0..=59).contains(&minutes)
@@ -526,10 +535,10 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
         return f64::NAN;
     }
     if let Some(offset) = captures.get(8) {
-        let offset = offset.as_str();
+        let offset = offset.as_str().replace(':', "");
         if offset != "Z" {
             let offset_hours: i64 = offset[1..3].parse().unwrap();
-            let offset_minutes: i64 = offset[4..6].parse().unwrap();
+            let offset_minutes: i64 = offset[3..5].parse().unwrap();
             if offset_hours > 23 || offset_minutes > 59 {
                 return f64::NAN;
             }
@@ -553,11 +562,11 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
         + seconds as f64 * 1_000.0
         + milliseconds as f64;
     if let Some(offset) = captures.get(8) {
-        let offset = offset.as_str();
+        let offset = offset.as_str().replace(':', "");
         if offset != "Z" {
             let sign = if offset.starts_with('-') { -1.0 } else { 1.0 };
             let offset_hours: f64 = offset[1..3].parse().unwrap();
-            let offset_minutes: f64 = offset[4..6].parse().unwrap();
+            let offset_minutes: f64 = offset[3..5].parse().unwrap();
             timestamp -= sign * (offset_hours * 3_600_000.0 + offset_minutes * 60_000.0);
         }
     }
@@ -1295,16 +1304,30 @@ mod date_native_tests {
 
     #[test]
     fn rejects_invalid_calendar_fields_without_rolling_over() {
-        assert!(parse("2024-02-30").is_nan()); // 2024 is a leap year; Feb has 29 days.
-        assert!(parse("2023-02-29").is_nan()); // 2023 is not a leap year.
+        // V8 accepts day 1-31 in any month and rolls it over.
+        assert_eq!(parse("2024-02-30"), parse("2024-03-01"));
+        assert_eq!(parse("2023-02-29"), parse("2023-03-01"));
+        assert!(parse("2024-02-32").is_nan());
+        assert!(parse("2024-01-00").is_nan());
         assert!(parse("2024-13-01").is_nan());
         assert!(parse("2024-01-01T24:00:01").is_nan());
     }
 
     #[test]
+    fn parses_legacy_formats_like_v8() {
+        assert_eq!(parse("01/01/2024"), parse("2024-01-01T00:00:00"));
+        assert_eq!(parse("Jan 1, 2024 10:00 PM"), parse("2024-01-01T22:00:00"));
+        assert_eq!(parse("12/25/2024 10:30 +0530"), parse("2024-12-25T05:00:00Z"));
+        assert_eq!(parse("Jan 1 2024 10:00 PST"), parse("2024-01-01T18:00:00Z"));
+        assert_eq!(parse("2024-01-01T10:00:00+0530"), parse("2024-01-01T04:30:00Z"));
+        assert!(parse("13/01/2024").is_nan());
+    }
+
+    #[test]
     fn rejects_unrecognized_formats() {
         assert!(parse("not a date").is_nan());
-        assert!(parse("01/01/2024").is_nan());
         assert!(parse("").is_nan());
+        assert!(parse("12:00").is_nan());
+        assert!(parse("Foo 1 2024").is_nan());
     }
 }
