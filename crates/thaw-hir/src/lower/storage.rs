@@ -842,7 +842,7 @@ impl Visit for StorageGraph {
                 self.native_results.insert(storage_key(declaration.ident.span), class);
             }
         }
-        if declaration.function.body.is_none() && dynamic_symbol(declaration.ident.sym.as_ref()).is_some_and(|(backend, _)| backend != DynamicBackend::Jit) {
+        if declaration.function.body.is_none() && dynamic_symbol(declaration.ident.sym.as_ref()).is_some_and(|(backend, _)| !matches!(backend, DynamicBackend::Jit | DynamicBackend::ThawJs)) {
             self.expose(declaration.ident.span);
         }
         declaration.visit_children_with(self);
@@ -993,7 +993,8 @@ impl Visit for StorageGraph {
                         arguments: call.args.iter().map(|arg| (arg.expr.span(), arg.spread.is_some())).collect(), result: span,
                         source_function: self.source_callable(callee) });
                     if let Expr::Ident(name) = callee.as_ref() {
-                        if dynamic_symbol(name.sym.as_ref()).is_some_and(|(backend, _)| backend != DynamicBackend::Jit) {
+                        // (thaw-js copies plain data at the call, so its arguments need no live dynamic storage.)
+                        if dynamic_symbol(name.sym.as_ref()).is_some_and(|(backend, _)| !matches!(backend, DynamicBackend::Jit | DynamicBackend::ThawJs)) {
                             for argument in &call.args { self.expose(argument.expr.span()); }
                         }
                     }

@@ -108,6 +108,7 @@ include!("tests/registry_jit_primitives.rs");
 include!("tests/registry_runtime.rs");
 include!("tests/bytes_fs_crypto_process.rs");
 include!("tests/registry_fallback.rs");
+include!("tests/thaw_js_routing.rs");
 
 include!("tests/ffi_metadata.rs");
 

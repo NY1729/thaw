@@ -1,0 +1,60 @@
+"https://user:pa%20ss@Example.COM:8080/a/./b/../c d?x=1&y=2#frag ment" https://user:pa%20ss@example.com:8080/a/c%20d?x=1&y=2#frag%20ment | https://example.com:8080 https: user pa%20ss example.com:8080 example.com 8080 /a/c%20d ?x=1&y=2 #frag%20ment
+"http://example.com" http://example.com/ | http://example.com http:   example.com example.com  /  
+"http://example.com:80/" http://example.com/ | http://example.com http:   example.com example.com  /  
+"https://example.com:443" https://example.com/ | https://example.com https:   example.com example.com  /  
+"http://EXAMPLE.com:81/%7Efoo/bar%2e/.." http://example.com:81/%7Efoo/ | http://example.com:81 http:   example.com:81 example.com 81 /%7Efoo/  
+"/path/only" http://base.org/path/only | http://base.org http:   base.org base.org  /path/only  
+"../up?x" http://base.org/a/up?x | http://base.org http:   base.org base.org  /a/up ?x 
+"?only=query" http://base.org/a/b?only=query | http://base.org http:   base.org base.org  /a/b ?only=query 
+"#frag" http://base.org/a/b?q#frag | http://base.org http:   base.org base.org  /a/b ?q #frag
+"//other.org/x" https://other.org/x | https://other.org https:   other.org other.org  /x  
+"rel/path" http://base.org/dir/rel/path | http://base.org http:   base.org base.org  /dir/rel/path  
+"" http://base.org/a?b | http://base.org http:   base.org base.org  /a ?b 
+"./x/../y" http://b.org/p/q/y | http://b.org http:   b.org b.org  /p/q/y  
+"mailto:someone@example.com?subject=Hi" mailto:someone@example.com?subject=Hi | null mailto:      someone@example.com ?subject=Hi 
+"data:text/plain;base64,aGk=" data:text/plain;base64,aGk= | null data:      text/plain;base64,aGk=  
+"javascript:alert(1)" javascript:alert(1) | null javascript:      alert(1)  
+"urn:isbn:0451450523" urn:isbn:0451450523 | null urn:      isbn:0451450523  
+"ftp://ftp.example.org/pub/file.txt" ftp://ftp.example.org/pub/file.txt | ftp://ftp.example.org ftp:   ftp.example.org ftp.example.org  /pub/file.txt  
+"ws://example.com/chat" ws://example.com/chat | ws://example.com ws:   example.com example.com  /chat  
+"wss://example.com:8443/" wss://example.com:8443/ | wss://example.com:8443 wss:   example.com:8443 example.com 8443 /  
+"file:///usr/local/bin/x" file:///usr/local/bin/x | null file:      /usr/local/bin/x  
+"file://localhost/etc/hosts" file:///etc/hosts | null file:      /etc/hosts  
+"http://192.168.0.1:3000/" http://192.168.0.1:3000/ | http://192.168.0.1:3000 http:   192.168.0.1:3000 192.168.0.1 3000 /  
+"http://0x7f.1/" http://127.0.0.1/ | http://127.0.0.1 http:   127.0.0.1 127.0.0.1  /  
+"http://[::1]:8080/p" http://[::1]:8080/p | http://[::1]:8080 http:   [::1]:8080 [::1] 8080 /p  
+"http://[2001:DB8::1]/" http://[2001:db8::1]/ | http://[2001:db8::1] http:   [2001:db8::1] [2001:db8::1]  /  
+"http://münchen.de/ü?ä=ö#ß" http://xn--mnchen-3ya.de/%C3%BC?%C3%A4=%C3%B6#%C3%9F | http://xn--mnchen-3ya.de http:   xn--mnchen-3ya.de xn--mnchen-3ya.de  /%C3%BC ?%C3%A4=%C3%B6 #%C3%9F
+"http://xn--mnchen-3ya.de/" http://xn--mnchen-3ya.de/ | http://xn--mnchen-3ya.de http:   xn--mnchen-3ya.de xn--mnchen-3ya.de  /  
+"http://a.b/path with spaces/ü" http://a.b/path%20with%20spaces/%C3%BC | http://a.b http:   a.b a.b  /path%20with%20spaces/%C3%BC  
+"http://a.b/?q=a b&r=ü#h h" http://a.b/?q=a%20b&r=%C3%BC#h%20h | http://a.b http:   a.b a.b  / ?q=a%20b&r=%C3%BC #h%20h
+"custom://host/path?q#f" custom://host/path?q#f | null custom:   host host  /path ?q #f
+"custom:/just/path" custom:/just/path | null custom:      /just/path  
+"custom:opaque path?q" custom:opaque path?q | null custom:      opaque path ?q 
+"http://a.b\\c\\d" http://a.b/c/d | http://a.b http:   a.b a.b  /c/d  
+"HTTP://A.B/" http://a.b/ | http://a.b http:   a.b a.b  /  
+"  http://trim.me/  " http://trim.me/ | http://trim.me http:   trim.me trim.me  /  
+"http://a.b/\t\nx" http://a.b/x | http://a.b http:   a.b a.b  /x  
+"http://user@host/" http://user@host/ | http://host http: user  host host  /  
+"http://:pw@host/" http://:pw@host/ | http://host http:  pw host host  /  
+"not a url" TypeError ERR_INVALID_URL Invalid URL
+"http://" TypeError ERR_INVALID_URL Invalid URL
+"http://a b/" TypeError ERR_INVALID_URL Invalid URL
+"http://a.b:99999/" TypeError ERR_INVALID_URL Invalid URL
+"http://a.b:xx/" TypeError ERR_INVALID_URL Invalid URL
+"//no.scheme" TypeError ERR_INVALID_URL Invalid URL
+"/rel" TypeError ERR_INVALID_URL Invalid URL
+1 [ '1', '3' ] true false a,b,a a=1&b=2&a=3 3
+https://example.com/p?a=new&c=x+y%26z#h ?a=new&c=x+y%26z
+1 null https://example.com/p?q=1#h
+http://me:pw@other.org:8080/new%20path?q=1#x true {"u":"http://me:pw@other.org:8080/new%20path?q=1#x"} http://me:pw@other.org:8080/new%20path?q=1#x
+http://me:pw@other.org/new%20path?q=1#x
+https://reset.org/ true
+a=1&b=+x+y&a=2&c= a,1|b, x y|a,2|c,  x y  x=1&y=%C3%BC k=v&k=w 9
+a=1&a=2&b=+x+y&c=
+a 1
+a 2
+b  x y
+c 
+true false true true function /%41
+a%20b%26%C3%BC b c %zz
