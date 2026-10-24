@@ -40,3 +40,20 @@ fn conlog_contract_null_prototype() {
         "[Object: null prototype] {}\n"
     );
 }
+
+// Node prints an Error's stack, whose first line is "Name: message" (Thaw has no frames).
+#[test]
+fn conlog_contract_caught_error_prints_name_and_message() {
+    let source = r#"function main(): void {
+  try {
+    throw new Error('boom');
+  } catch (e) {
+    console.log(e);
+  }
+  console.log(new Error('boom'));
+}
+"#;
+    let output = compile_and_run(source, "conlog_contract_caught_error");
+    assert!(output.starts_with("Error: boom"), "{output:?}");
+    assert_eq!(output.lines().filter(|line| *line == "Error: boom").count(), 2, "{output:?}");
+}
