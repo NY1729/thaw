@@ -2124,6 +2124,31 @@
       "name": "assert strictEqual and deepStrictEqual append the diff to a custom message",
       "expect": "matched",
       "source": "import assert from 'node:assert'; function main(): void {   const t = (n: string, f: () => void): void => { try { f(); console.log(n, 'nothrow'); } catch (e) { console.log(n, JSON.stringify((e as Error).message)); } };   t('se', () => assert.strictEqual(1, 2, 'different'));   t('ses', () => assert.strictEqual('a', 'b', 'different'));   t('nse', () => assert.notStrictEqual(1, 1, 'different'));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }, 'different'));   t('de', () => assert.deepEqual({ a: 1 }, { a: 2 }, 'different'));   t('eq', () => assert.equal(1, 2, 'different'));   t('ok', () => assert.ok(false, 'different')); }"
+    },
+    {
+      "name": "declgaps uninitialized scalar lets",
+      "expect": "matched",
+      "source": "let gs: string;\nlet gn: number;\nfunction setup(): void { gs = 'g'; gn = 2; }\nfunction main(): void { setup(); let p: string; let n: number; p = 'hi'; n = 4; console.log(p, n + 1, gs, gn); }"
+    },
+    {
+      "name": "declgaps loop bindings vs top-level consts",
+      "expect": "matched",
+      "source": "const o: any = { a: 1, b: 2 };\nfor (const k in o) { console.log(k); }\nconst k = 5;\nconsole.log(k);\nconst xs = [1, 2];\nfor (const s of xs) { const d = s * 2; console.log(d); }\nconst d = 9;\nconsole.log(d);\nfunction main(): void {}"
+    },
+    {
+      "name": "declgaps any then callback beside typed",
+      "expect": "matched",
+      "source": "async function g(): Promise<number> { return 7; }\nconst p = g();\np.then((v: number) => console.log('a', v));\np.then((v: any) => console.log('b', v));\nfunction main(): void {}"
+    },
+    {
+      "name": "declgaps mutually recursive local arrows",
+      "expect": "matched",
+      "source": "function main(): void { const even = (n: number): boolean => n === 0 ? true : odd(n - 1); const odd = (n: number): boolean => n === 0 ? false : even(n - 1); console.log(even(10), odd(7), even(3)); }"
+    },
+    {
+      "name": "declgaps number bigint union conversion",
+      "expect": "matched",
+      "source": "function add(x: number | bigint): number { return Number(x) + 1; }\nfunction main(): void { const a: number | bigint = 5n; console.log(Number(a) + 3, add(5n), add(2)); }"
     }
   ]
 }

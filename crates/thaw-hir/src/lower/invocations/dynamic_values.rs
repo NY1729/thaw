@@ -747,6 +747,43 @@ impl<'a> FnLowerer<'a> {
                     other => Err(format!("`BigInt` cannot convert a value of type {other:?}")),
                 };
             }
+            // `number | bigint`, `string | number`, ...: convert the active member.
+            if let HirType::Union(members) = &ty {
+                if members.iter().all(|m| matches!(m, HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str)) {
+                    let name = format!("__thaw_union_convert_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    let mut statements = Vec::new();
+                    for index in 0..members.len() {
+                        let active = HirExpr::UnionValue(
+                            Box::new(HirExpr::Var(name.clone())),
+                            index,
+                            members.clone(),
+                        );
+                        let converted = self.lower_primitive_conversion_value(callee_name, active)?;
+                        if index + 1 == members.len() {
+                            statements.push(HirStmt::Return(Some(converted)));
+                        } else {
+                            statements.push(HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        members.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                ),
+                                vec![HirStmt::Return(Some(converted))],
+                                Vec::new(),
+                            ));
+                        }
+                    }
+                    return self.wrap_call_argument_bindings(
+                        HirExpr::Block(statements),
+                        &[(name, ty, value)],
+                    );
+                }
+            }
             if ty != HirType::Json {
                 return Err(format!(
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"

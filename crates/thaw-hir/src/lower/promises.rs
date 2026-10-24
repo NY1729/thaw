@@ -381,7 +381,23 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let callback = match expr {
             Expr::Arrow(arrow) => {
-                return self.lower_contextual_arrow(arrow, parameter_types, expected_return)
+                let lowered = self.lower_contextual_arrow(arrow, parameter_types, expected_return)?;
+                // Storage promotion can hand the callback a `Json` payload while
+                // the arrow annotates a native type (`(v: number) => ..` next
+                // to an `(v: any) => ..` on the same promise): unbox it.
+                let mismatched = matches!(
+                    self.infer_expr_type(&lowered)?,
+                    HirType::Function(fixed, _) if fixed.len() == parameter_types.len()
+                        && fixed.iter().zip(parameter_types).any(|(physical, supplied)| {
+                            supplied == &HirType::Json
+                                && matches!(physical, HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str)
+                        })
+                );
+                return if mismatched {
+                    self.normalize_promise_callback(lowered, parameter_types)
+                } else {
+                    Ok(lowered)
+                };
             }
             Expr::Fn(function) => {
                 return self.lower_function_expression(function, Some((parameter_types, expected_return)));
