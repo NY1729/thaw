@@ -3502,6 +3502,19 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
                     )),
+                    // `{ 0: x } = "str"` reads the one-character string at that
+                    // index (out of range reads "", like a plain `s[i]`).
+                    HirType::Str if prop.sym.parse::<u32>().is_ok_and(|n| n.to_string() == *prop.sym) => {
+                        let index = prop.sym.parse::<f64>().unwrap_or(0.0);
+                        Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_slice".to_string())),
+                            vec![
+                                obj,
+                                HirExpr::Lit(HirLit::F64(index)),
+                                HirExpr::Lit(HirLit::F64(index + 1.0)),
+                            ],
+                        ))
+                    }
                     // `Symbol("x").description` -- the description part of
                     // the symbol's own runtime representation.
                     HirType::Symbol if prop.sym == *"description" => {
