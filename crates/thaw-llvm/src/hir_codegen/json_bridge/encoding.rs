@@ -260,9 +260,18 @@ impl<'ctx> HirCompiler<'ctx> {
             };
             let key = self.builder.build_global_string_ptr(name, "dynamic_object_key")
                 .map_err(|error| error.to_string())?;
-            self.compile_json_object_set_native_with_undefined(
+            // A class instance prints its absent optional fields as `undefined` (Node's
+            // define semantics); plain objects and error-family instances omit them.
+            let class_instance = fields.first().is_some_and(|(n, t)| {
+                *t == HirType::Bool && n.strip_prefix("__thaw_class_identity_\u{1e}")
+                    .is_some_and(|chain| !chain.split('\u{1f}').any(thaw_hir::is_error_family_name))
+            });
+            let before = std::mem::replace(&mut self.encoding_class_instance_fields, class_instance);
+            let set = self.compile_json_object_set_native_with_undefined(
                 json, key.as_pointer_value(), value, &value_type, preserve_undefined, false,
-            )?;
+            );
+            self.encoding_class_instance_fields = before;
+            set?;
         }
         self.builder.build_unconditional_branch(visibility_done)
             .map_err(|error| error.to_string())?;
@@ -1313,7 +1322,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 preserve_undefined,
                 true,
             )?;
-        } else if preserve_undefined && !self.console_omit_absent_fields {
+        } else if preserve_undefined
+            && (!self.console_omit_absent_fields || self.encoding_class_instance_fields)
+        {
             let undefined = self.compile_napi_undefined_json()?;
             self.compile_json_object_set_native_with_undefined(
                 json,
