@@ -276,6 +276,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = normalize_private_class_members(&normalized);
     let normalized = normalize_constructor_functions(&normalized)?;
     let normalized = specialize_new_target_functions(&normalized);
+    let normalized = specialize_new_target_constructors(&normalized);
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
@@ -395,6 +396,250 @@ fn specialize_new_target_functions(module: &Module) -> Module {
         body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Fn(construct))));
     }
     Module { body, ..routed }
+}
+
+/// `new.target` inside a class constructor. The instance's nominal identity is registered before
+/// any constructor code runs, so `new.target` is the most-derived class of `this`; with the whole
+/// hierarchy known at compile time that is expressible with `instanceof` alone:
+/// `new.target === C` -> `this instanceof C` and not an instance of any subclass of `C`;
+/// `new.target.name` -> a conditional chain over `C` and its descendants (most derived first);
+/// `new.target === undefined` -> `false`; and the `Object.setPrototypeOf(this, new.target.prototype)`
+/// idiom -> nothing (the native layout already has the right identity). Other uses of
+/// `new.target` (passing it on, `.prototype` elsewhere) keep the lowering error.
+fn specialize_new_target_constructors(module: &Module) -> Module {
+    use swc_ecma_ast::{
+        BinExpr, Bool, CondExpr, EmptyStmt, Ident, MetaPropKind, Str, ThisExpr, UnaryExpr,
+        UnaryOp,
+    };
+    fn class_of(item: &ModuleItem) -> Option<&ClassDecl> {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => Some(class),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl {
+                decl: Decl::Class(class),
+                ..
+            })) => Some(class),
+            _ => None,
+        }
+    }
+    fn class_of_mut(item: &mut ModuleItem) -> Option<&mut ClassDecl> {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => Some(class),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl {
+                decl: Decl::Class(class),
+                ..
+            })) => Some(class),
+            _ => None,
+        }
+    }
+    let mut parents: HashMap<String, Option<String>> = HashMap::new();
+    for item in &module.body {
+        if let Some(class) = class_of(item) {
+            let parent = match class.class.super_class.as_deref() {
+                Some(Expr::Ident(parent)) => Some(parent.sym.to_string()),
+                _ => None,
+            };
+            parents.insert(class.ident.sym.to_string(), parent);
+        }
+    }
+    let depth = |name: &str| {
+        let mut depth = 0;
+        let mut at = parents.get(name).cloned().flatten();
+        while let Some(parent) = at {
+            depth += 1;
+            at = parents.get(&parent).cloned().flatten();
+            if depth > parents.len() {
+                break;
+            }
+        }
+        depth
+    };
+    let descends_from = |name: &str, ancestor: &str| {
+        let mut at = parents.get(name).cloned().flatten();
+        let mut steps = 0;
+        while let Some(parent) = at {
+            if parent == ancestor {
+                return true;
+            }
+            at = parents.get(&parent).cloned().flatten();
+            steps += 1;
+            if steps > parents.len() {
+                break;
+            }
+        }
+        false
+    };
+    struct Rewrite<'a> {
+        owner: String,
+        parents: &'a HashMap<String, Option<String>>,
+        descendants: Vec<String>,
+        direct: &'a dyn Fn(&str) -> Vec<String>,
+    }
+    fn ident(name: &str, span: swc_common::Span) -> Box<Expr> {
+        Box::new(Expr::Ident(Ident::new_no_ctxt(name.into(), span)))
+    }
+    impl Rewrite<'_> {
+        fn instance_of(&self, name: &str, span: swc_common::Span) -> Box<Expr> {
+            Box::new(Expr::Bin(BinExpr {
+                span,
+                op: BinaryOp::InstanceOf,
+                left: Box::new(Expr::This(ThisExpr { span })),
+                right: ident(name, span),
+            }))
+        }
+        fn exact(&self, name: &str, span: swc_common::Span) -> Box<Expr> {
+            let mut test = self.instance_of(name, span);
+            for sub in (self.direct)(name) {
+                test = Box::new(Expr::Bin(BinExpr {
+                    span,
+                    op: BinaryOp::LogicalAnd,
+                    left: test,
+                    right: Box::new(Expr::Unary(UnaryExpr {
+                        span,
+                        op: UnaryOp::Bang,
+                        arg: self.instance_of(&sub, span),
+                    })),
+                }));
+            }
+            test
+        }
+        fn head_name(&self, span: swc_common::Span) -> Box<Expr> {
+            let text = |name: &str| {
+                Box::new(Expr::Lit(Lit::Str(Str {
+                    span,
+                    value: display_class_name(name).into(),
+                    raw: None,
+                })))
+            };
+            let mut chain = text(&self.owner);
+            for name in self.descendants.iter().rev() {
+                chain = Box::new(Expr::Cond(CondExpr {
+                    span,
+                    test: self.instance_of(name, span),
+                    cons: text(name),
+                    alt: chain,
+                }));
+            }
+            // Parenthesize so `new.target.name + "x"` keeps its grouping.
+            Box::new(Expr::Paren(swc_ecma_ast::ParenExpr { span, expr: chain }))
+        }
+        fn is_nt(e: &Expr) -> bool {
+            matches!(e, Expr::MetaProp(m) if m.kind == MetaPropKind::NewTarget)
+        }
+        fn known(&self, e: &Expr) -> Option<String> {
+            match e {
+                Expr::Ident(i) if self.parents.contains_key(i.sym.as_ref()) => {
+                    Some(i.sym.to_string())
+                }
+                _ => None,
+            }
+        }
+        fn is_undefined(e: &Expr) -> bool {
+            matches!(e, Expr::Ident(i) if i.sym.as_ref() == "undefined")
+        }
+    }
+    impl VisitMut for Rewrite<'_> {
+        fn visit_mut_stmt(&mut self, statement: &mut Stmt) {
+            if let Stmt::Expr(expression) = statement {
+                if let Expr::Call(call) = expression.expr.as_ref() {
+                    let is_set = matches!(&call.callee, Callee::Expr(c) if matches!(c.as_ref(),
+                        Expr::Member(m) if matches!(m.obj.as_ref(), Expr::Ident(o) if o.sym.as_ref() == "Object")
+                            && matches!(&m.prop, MemberProp::Ident(p) if p.sym.as_ref() == "setPrototypeOf")));
+                    if let (true, [target, prototype]) = (is_set, call.args.as_slice()) {
+                        let prototype_of = match prototype.expr.as_ref() {
+                            Expr::Member(m)
+                                if prototype.spread.is_none()
+                                    && matches!(&m.prop, MemberProp::Ident(p) if p.sym.as_ref() == "prototype") =>
+                            {
+                                Some(m.obj.as_ref())
+                            }
+                            _ => None,
+                        };
+                        if matches!(target.expr.as_ref(), Expr::This(_))
+                            && prototype_of
+                                .is_some_and(|o| Self::is_nt(o) || self.known(o).as_deref() == Some(&self.owner))
+                        {
+                            *statement = Stmt::Empty(EmptyStmt { span: expression.span });
+                            return;
+                        }
+                    }
+                }
+            }
+            statement.visit_mut_children_with(self);
+        }
+        fn visit_mut_expr(&mut self, expression: &mut Expr) {
+            expression.visit_mut_children_with(self);
+            match expression {
+                Expr::Member(m)
+                    if Self::is_nt(&m.obj)
+                        && matches!(&m.prop, MemberProp::Ident(p) if p.sym.as_ref() == "name") =>
+                {
+                    *expression = *self.head_name(m.span);
+                }
+                Expr::Bin(b)
+                    if matches!(
+                        b.op,
+                        BinaryOp::EqEq | BinaryOp::EqEqEq | BinaryOp::NotEq | BinaryOp::NotEqEq
+                    ) =>
+                {
+                    let negate = matches!(b.op, BinaryOp::NotEq | BinaryOp::NotEqEq);
+                    let other = if Self::is_nt(&b.left) {
+                        &b.right
+                    } else if Self::is_nt(&b.right) {
+                        &b.left
+                    } else {
+                        return;
+                    };
+                    let span = b.span;
+                    let test = if Self::is_undefined(other) {
+                        Box::new(Expr::Lit(Lit::Bool(Bool { span, value: false })))
+                    } else if let Some(name) = self.known(other) {
+                        self.exact(&name, span)
+                    } else {
+                        return;
+                    };
+                    *expression = if negate {
+                        Expr::Unary(UnaryExpr { span, op: UnaryOp::Bang, arg: Box::new(Expr::Paren(swc_ecma_ast::ParenExpr { span, expr: test })) })
+                    } else {
+                        Expr::Paren(swc_ecma_ast::ParenExpr { span, expr: test })
+                    };
+                }
+                _ => {}
+            }
+        }
+        // A nested function or class has its own `new.target`; arrows inherit ours.
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+    }
+    let direct = |name: &str| -> Vec<String> {
+        let mut subs: Vec<String> = parents
+            .iter()
+            .filter(|(_, parent)| parent.as_deref() == Some(name))
+            .map(|(child, _)| child.clone())
+            .collect();
+        subs.sort();
+        subs
+    };
+    let mut module = module.clone();
+    for item in &mut module.body {
+        let Some(class) = class_of_mut(item) else {
+            continue;
+        };
+        let owner = class.ident.sym.to_string();
+        let mut descendants: Vec<String> = parents
+            .keys()
+            .filter(|name| descends_from(name, &owner))
+            .cloned()
+            .collect();
+        descendants.sort_by_key(|name| (std::cmp::Reverse(depth(name)), name.clone()));
+        let mut rewrite = Rewrite { owner, parents: &parents, descendants, direct: &direct };
+        for member in &mut class.class.body {
+            if let ClassMember::Constructor(constructor) = member {
+                constructor.params.visit_mut_with(&mut rewrite);
+                constructor.body.visit_mut_with(&mut rewrite);
+            }
+        }
+    }
+    module
 }
 
 const PROMISE_REJECTION_CALLBACK_SUFFIX: &str = "__thaw_promise_rejection";

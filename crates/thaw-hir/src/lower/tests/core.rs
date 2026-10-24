@@ -1885,6 +1885,22 @@ fn new_target_outside_a_supported_function_is_a_clear_error() {
 }
 
 #[test]
+fn new_target_in_class_constructors_lowers_via_instanceof() {
+    for source in [
+        "abstract class S { constructor() { if (new.target === S) throw new Error('a'); } } class T extends S {} function main(): void { new T(); }",
+        "class E extends Error { constructor(m: string) { super(m); Object.setPrototypeOf(this, new.target.prototype); this.name = new.target.name; } } function main(): void { new E('x'); }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        lower_module(&module).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    let module = thaw_parser::parse_typescript(
+        "class C { m(): void { console.log(new.target); } } function main(): void { new C(); }",
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
 fn top_level_new_target_is_rejected_by_the_parser() {
     assert!(thaw_parser::parse_typescript("console.log(new.target); function main(): void {}").is_err());
 }
