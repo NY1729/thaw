@@ -2241,6 +2241,16 @@
       "source": "import { createHash } from \"node:crypto\";\nfunction main(): void {\n  const h = createHash(\"sha1\");\n  const parts = [Buffer.from(\"a\"), Buffer.from(\"b\")];\n  for (const p of parts) h.update(p);\n  console.log(h.digest(\"hex\"));\n}\n"
     },
     {
+      "name": "typeof out-of-range string index",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s = \"abc\";\n  console.log(typeof s[5], typeof s[1], typeof s[0]);\n  const i = 7;\n  console.log(typeof s[i]);\n}\n"
+    },
+    {
+      "name": "string index destructuring",
+      "expect": "matched",
+      "source": "function main(): void {\n  const { 0: x, 2: z } = \"xyz\";\n  console.log(x, z);\n  const { 1: y, length } = \"pqr\";\n  console.log(y, length);\n}\n"
+    },
+    {
       "name": "new.target in class constructors and Error subclasses",
       "expect": "matched",
       "source": "abstract class Shape {\n  kind: string;\n  constructor() {\n    if (new.target === Shape) throw new TypeError(\"abstract\");\n    this.kind = new.target.name;\n  }\n}\nclass Sq extends Shape {}\nclass Big extends Sq { constructor() { super(); console.log(\"big\", new.target === Big, new.target === Sq, new.target !== Sq, new.target.name); } }\nclass MyErr extends Error {\n  constructor(m: string) {\n    super(m);\n    Object.setPrototypeOf(this, new.target.prototype);\n    this.name = new.target.name;\n  }\n}\nclass SubErr extends MyErr {}\nfunction plain() { return new.target === undefined; }\nfunction main(): void {\n  console.log(new Sq() instanceof Shape, new Sq().kind, new Big().kind);\n  try { throw new MyErr(\"a\"); } catch (e: any) { console.log(e instanceof MyErr, e instanceof Error, e.name, e.message); }\n  try { throw new SubErr(\"b\"); } catch (e: any) { console.log(e instanceof SubErr, e instanceof MyErr, e.name, e.message); }\n  console.log(plain());\n  const f = () => 1;\n  console.log(f());\n}\n"
