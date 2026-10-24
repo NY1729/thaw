@@ -128,6 +128,7 @@ impl<'a> FnLowerer<'a> {
             source_continue_depths: Vec::new(),
             labels: Vec::new(),
             super_initializer: None,
+            native_base_type_args: None,
             class_static_context: false,
             class_context: None,
             unbound_this_context: false,

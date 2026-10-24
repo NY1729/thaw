@@ -2750,6 +2750,24 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
+        // `counter.size` on a class extending `Map`/`Set`: read the wrapped
+        // collection unless the class declares that property itself.
+        if let MemberProp::Ident(property) = &member.prop {
+            if property.sym.as_ref() != NATIVE_BASE_FIELD {
+                if let Some(receiver_type) = self.infer_member_receiver_type(&member.obj) {
+                    if native_base_type(&receiver_type).is_some()
+                        && !Self::class_receiver_has_own_field(&receiver_type, property.sym.as_ref())
+                        && self
+                            .class_instance_accessor_owner(&receiver_type, property.sym.as_ref())
+                            .is_none()
+                    {
+                        let mut forwarded = member.clone();
+                        *forwarded.obj = native_base_member((*member.obj).clone());
+                        return self.lower_member_read(&forwarded);
+                    }
+                }
+            }
+        }
         if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
             let property = member_property_name(&member.prop)
                 .ok_or("unbound `this` member access requires a statically known property")?;
