@@ -2151,6 +2151,41 @@
       "source": "import assert from 'node:assert'; function main(): void {   const t = (n: string, f: () => void): void => { try { f(); console.log(n, 'nothrow'); } catch (e) { console.log(n, JSON.stringify((e as Error).message)); } };   t('se', () => assert.strictEqual(1, 2, 'different'));   t('ses', () => assert.strictEqual('a', 'b', 'different'));   t('nse', () => assert.notStrictEqual(1, 1, 'different'));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }, 'different'));   t('de', () => assert.deepEqual({ a: 1 }, { a: 2 }, 'different'));   t('eq', () => assert.equal(1, 2, 'different'));   t('ok', () => assert.ok(false, 'different')); }"
     },
     {
+      "name": "syntaxgaps iterator explicit call",
+      "expect": "matched",
+      "source": "class R { n = 0; [Symbol.iterator]() { const self = this; return { next() { self.n++; return { done: self.n > 2, value: self.n }; } }; } }\nfunction main(): void {\n  const a = [10, 20];\n  const it = a[Symbol.iterator]();\n  console.log(JSON.stringify(it.next()), JSON.stringify(it.next()), JSON.stringify(it.next()));\n  const s = \"hé\";\n  const si = s[Symbol.iterator]();\n  console.log(si.next().value, si.next().value, si.next().done);\n  const m = new Map<string, number>([[\"a\", 1], [\"b\", 2]]);\n  const mi = m[Symbol.iterator]();\n  console.log(JSON.stringify(mi.next().value), mi.next().done, mi.next().done);\n  const st = new Set<number>([5, 6]);\n  const sti = st[Symbol.iterator]();\n  console.log(sti.next().value, sti.next().value, sti.next().done);\n  const ri = new R()[Symbol.iterator]();\n  console.log(JSON.stringify(ri.next()), JSON.stringify(ri.next()), JSON.stringify(ri.next()));\n}\n"
+    },
+    {
+      "name": "syntaxgaps optional chain call forms",
+      "expect": "matched",
+      "source": "function main(): void {\n  second();\n  const o: any = { a: { b() { return 1; }, c() { return 2; } }, f() { return 3; } };\n  console.log(o?.a?.[\"c\"](), o?.a?.b(), o.f?.());\n  const n: any = null;\n  console.log(n?.a?.[\"c\"](), n?.a?.b(), n?.f?.(), o.g?.());\n  const t: { a?: { b(): number }, f?: () => number } = { a: { b: () => 7 } };\n  console.log(t?.a?.b(), t.f?.(), t.a?.b?.());\n}\nfunction second(): void {\n  const o: any = { a: { c() { return 2; } }, f() { return 3; } };\n  console.log(o[\"f\"](), o.a[\"c\"](), o?.a[\"c\"](), o.a?.[\"c\"]());\n}\n"
+    },
+    {
+      "name": "syntaxgaps delete optional chain",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: any = { a: { b: 1, c: 2 }, k: 5 };\n  console.log(delete o?.a.b, JSON.stringify(o));\n  console.log(delete o?.[\"k\"], JSON.stringify(o));\n  const n: any = null;\n  console.log(delete n?.a.b, delete n?.[\"k\"]);\n}\n"
+    },
+    {
+      "name": "syntaxgaps forward const closure",
+      "expect": "matched",
+      "source": "function main(): void {\n  let c = 0;\n  const f = () => g() + 1;\n  function h() { return k(2); }\n  const g = () => 10;\n  const k = (x: number) => x * 3;\n  console.log(f(), h());\n  const inc = () => { c++; return twice(); };\n  const twice = () => c * 2;\n  console.log(inc(), inc());\n}\n"
+    },
+    {
+      "name": "syntaxgaps local classes capture free",
+      "expect": "matched",
+      "source": "function make(): string {\n  class Counter {\n    static made = 0;\n    n: number;\n    constructor() { this.n = 1; Counter.made++; }\n    inc() { this.n += 2; return this.n; }\n    static twice() { return Counter.made * 2; }\n  }\n  class Sub extends Counter { inc() { return super.inc() + 1; } }\n  const c = new Sub(); new Counter();\n  return [c.inc(), Counter.twice(), c instanceof Counter].join(\",\");\n}\nfunction main(): void {\n  console.log(make());\n  {\n    class B { v = 3; get d() { return this.v * 2; } }\n    console.log(new B().d);\n  }\n  for (let i = 0; i < 2; i++) { class L { x = 7; } console.log(new L().x + i); }\n}\n"
+    },
+    {
+      "name": "syntaxgaps string destructuring",
+      "expect": "matched",
+      "source": "function main(): void {\n  const [a, b] = \"hi\";\n  const { length } = \"abc\";\n  console.log(a, b, length);\n  const [x, ...rest] = \"xyz\";\n  console.log(x, rest.join(\"-\"));\n  let p = \"\", q = \"\";\n  [p, q] = \"uv\";\n  console.log(p, q);\n}\n"
+    },
+    {
+      "name": "syntaxgaps this alias in method",
+      "expect": "matched",
+      "source": "class R {\n  n = 0;\n  mk() { const self = this; const o = { next() { self.n++; return { done: self.n > 2, value: self.n }; } }; return o; }\n}\nfunction main(): void {\n  const it = new R().mk();\n  console.log(JSON.stringify(it.next()), JSON.stringify(it.next()), JSON.stringify(it.next()));\n}\n"
+    },
+    {
       "name": "date parse legacy formats",
       "expect": "matched",
       "source": "function main(): void {\n  const inputs: string[] = [\"2030-01-01 10:20\", \"2030-01-01 10:20:30\", \"Tue, 01 Jan 2030 00:00:00 GMT\", \"Jan 1, 2030\", \"January 1, 2030 10:00:00\", \"1 Jan 2030\", \"2030/01/02\", \"Jan 1, 2030 3:04 PM\", \"Tue Jan 01 2030 00:00:00 GMT+0100\", \"2030-01-01T00:00:00.5Z\", \"garbage\", \"Foo 1, 2030\"];\n  for (const s of inputs) { console.log(s, Date.parse(s)); }\n  console.log(new Date(\"Tue, 01 Jan 2030 00:00:00 GMT\").toISOString());\n}\n"

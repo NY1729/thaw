@@ -129,6 +129,72 @@ impl<'a> FnLowerer<'a> {
                     statements, immutable);
             }
         }
+        if ty == &HirType::Str {
+            match pattern {
+                // `const [a, b] = "hi"`: iterate the string's code points.
+                Pat::Array(_) => {
+                    let chars = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
+                        vec![value],
+                    );
+                    let array_type = HirType::Array(Box::new(HirType::Str));
+                    return self.lower_binding_pattern_impl(
+                        pattern, chars, &array_type, statements, immutable);
+                }
+                // `const { length } = "abc"`: each property is an ordinary
+                // member read on the (once-bound) string.
+                Pat::Object(object) => {
+                    let HirExpr::Var(source) = &value else {
+                        return Err("string destructuring source must be bound".into());
+                    };
+                    let source = source.clone();
+                    for property in &object.props {
+                        let (key, target, default) = match property {
+                            ObjectPatProp::Assign(property) => (
+                                property.key.id.sym.to_string(),
+                                Pat::Ident(property.key.clone()),
+                                property.value.as_deref().cloned(),
+                            ),
+                            ObjectPatProp::KeyValue(property) => {
+                                let key = self
+                                    .static_object_property_name(&property.key)
+                                    .ok_or_else(|| "unsupported object destructuring key".to_string())?;
+                                match property.value.as_ref() {
+                                    Pat::Assign(with_default) => (
+                                        key,
+                                        with_default.left.as_ref().clone(),
+                                        Some(with_default.right.as_ref().clone()),
+                                    ),
+                                    other => (key, other.clone(), None),
+                                }
+                            }
+                            ObjectPatProp::Rest(_) => {
+                                return Err("object rest cannot destructure a string".into())
+                            }
+                        };
+                        if default.is_some() {
+                            return Err("defaults cannot destructure a string".into());
+                        }
+                        let read = self.lower_expr(&Expr::Member(MemberExpr {
+                            span: object.span,
+                            obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                source.clone().into(),
+                                object.span,
+                            ))),
+                            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                key.into(),
+                                object.span,
+                            )),
+                        }))?;
+                        let read_type = self.infer_expr_type(&read)?;
+                        self.lower_binding_pattern_impl(
+                            &target, read, &read_type, statements, immutable)?;
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         match pattern {
             Pat::Ident(binding) => {
                 let array_discriminants = self.hir_array_element_discriminants(&value);
