@@ -3149,6 +3149,44 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::Lit(HirLit::Undefined));
                 }
                 if unary.op == UnaryOp::Delete {
+                    // `delete o?.a` / `delete o?.["k"]`: `true` without
+                    // touching anything when the receiver is nullish.
+                    if let Expr::OptChain(chain) = unary.arg.as_ref() {
+                        if let OptChainBase::Member(member) = chain.base.as_ref() {
+                            let receiver = self.lower_expr(&member.obj)?;
+                            let receiver_type = self.infer_expr_type(&receiver)?;
+                            let name = format!("__thaw_delete_receiver_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), receiver_type.clone());
+                            let bound = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                name.clone().into(),
+                                member.span,
+                            )));
+                            let mut rebound = member.clone();
+                            rebound.obj = bound.clone();
+                            let mut deletion = unary.clone();
+                            *deletion.arg = Expr::Member(rebound);
+                            let deleted = self.lower_expr(&Expr::Unary(deletion))?;
+                            let is_nullish = self.lower_expr(&Expr::Bin(swc_ecma_ast::BinExpr {
+                                span: member.span,
+                                op: BinaryOp::EqEq,
+                                left: bound,
+                                right: Box::new(Expr::Lit(Lit::Null(swc_ecma_ast::Null {
+                                    span: member.span,
+                                }))),
+                            }))?;
+                            let result = HirExpr::Conditional(
+                                Box::new(is_nullish),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                Box::new(deleted),
+                                HirType::Bool,
+                            );
+                            return self.wrap_call_argument_bindings(
+                                result,
+                                &[(name, receiver_type, receiver)],
+                            );
+                        }
+                    }
                     let Expr::Member(member) = unary.arg.as_ref() else {
                         return Err("native `delete` requires a JSON or dictionary property".into());
                     };

@@ -224,8 +224,87 @@ impl<'a> FnLowerer<'a> {
         std::borrow::Cow::Owned(result)
     }
 
+    /// A closure that mentions a `const f = <arrow/function>` declared later in
+    /// the same block is fine in JS when called after the declaration runs.
+    /// Creating a closure has no side effects, so move such a declaration up
+    /// to just before its first mention, unless it captures a block binding
+    /// declared at or after that point (mutual recursion stays in order).
+    fn hoist_forward_closure_consts(stmts: &[Stmt]) -> std::borrow::Cow<'_, [Stmt]> {
+        use swc_ecma_visit::{Visit, VisitWith};
+        #[derive(Default)]
+        struct Names(HashSet<String>);
+        impl Visit for Names {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.0.insert(ident.sym.to_string());
+            }
+        }
+        let closure_name = |stmt: &Stmt| -> Option<String> {
+            let Stmt::Decl(Decl::Var(var)) = stmt else { return None };
+            let [declarator] = var.decls.as_slice() else { return None };
+            let (Pat::Ident(binding), Some(init)) = (&declarator.name, &declarator.init) else {
+                return None;
+            };
+            (var.kind == VarDeclKind::Const
+                && matches!(init.as_ref(), Expr::Arrow(_) | Expr::Fn(_)))
+            .then(|| binding.id.sym.to_string())
+        };
+        if !stmts.iter().any(|stmt| closure_name(stmt).is_some()) {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        let mut order: Vec<Stmt> = stmts.to_vec();
+        let mut moved = false;
+        for _ in 0..order.len() {
+            let mentions: Vec<HashSet<String>> = order
+                .iter()
+                .map(|stmt| {
+                    let mut names = Names::default();
+                    stmt.visit_with(&mut names);
+                    names.0
+                })
+                .collect();
+            let mut cells: HashMap<String, usize> = HashMap::new();
+            for (index, stmt) in order.iter().enumerate() {
+                let mut bound = Vec::new();
+                match stmt {
+                    Stmt::Decl(Decl::Var(var)) => {
+                        for declarator in &var.decls {
+                            Self::collect_pattern_bindings(&declarator.name, &mut bound);
+                        }
+                    }
+                    Stmt::Decl(Decl::Class(class)) => bound.push(class.ident.sym.to_string()),
+                    Stmt::Decl(Decl::Fn(function)) => bound.push(function.ident.sym.to_string()),
+                    _ => {}
+                }
+                for name in bound {
+                    cells.insert(name, index);
+                }
+            }
+            let step = (0..order.len()).find_map(|j| {
+                let name = closure_name(&order[j])?;
+                let i = (0..j).find(|&i| mentions[i].contains(&name))?;
+                mentions[j]
+                    .iter()
+                    .all(|mention| {
+                        *mention == name
+                            || cells.get(mention).is_none_or(|&declared| declared < i)
+                    })
+                    .then_some((i, j))
+            });
+            let Some((i, j)) = step else { break };
+            let stmt = order.remove(j);
+            order.insert(i, stmt);
+            moved = true;
+        }
+        if moved {
+            std::borrow::Cow::Owned(order)
+        } else {
+            std::borrow::Cow::Borrowed(stmts)
+        }
+    }
+
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
-        let hoisted = Self::hoist_function_declarations(stmts);
+        let forward = Self::hoist_forward_closure_consts(stmts);
+        let hoisted = Self::hoist_function_declarations(&forward);
         let stmts: &[Stmt] = &hoisted;
         #[derive(Default)]
         struct BindingConsumers {
