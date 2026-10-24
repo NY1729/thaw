@@ -2226,6 +2226,21 @@
       "source": "import assert from \"node:assert\";\n\nfunction attempt(label: string, run: () => void): void {\n  try {\n    run();\n    console.log(label, \"ok\");\n  } catch (e: any) {\n    console.log(label, e.name, e.code, e.operator, JSON.stringify(e.message));\n  }\n}\n\nfunction main(): void {\n  attempt(\"ifError null\", () => assert.ifError(null));\n  attempt(\"ifError undefined\", () => assert.ifError(undefined));\n  attempt(\"ifError error\", () => assert.ifError(new Error(\"boom\")));\n  attempt(\"ifError string\", () => assert.ifError(\"str\"));\n  attempt(\"ifError zero\", () => assert.ifError(0));\n  attempt(\"match ok\", () => assert.match(\"abc\", /b/));\n  attempt(\"match fail\", () => assert.match(\"abc\", /x/));\n  attempt(\"match custom\", () => assert.match(\"abc\", /x/, \"custom\"));\n  attempt(\"match number\", () => assert.match(5 as any, /x/));\n  attempt(\"doesNotMatch ok\", () => assert.doesNotMatch(\"abc\", /x/));\n  attempt(\"doesNotMatch fail\", () => assert.doesNotMatch(\"abc\", /b/));\n}\n"
     },
     {
+      "name": "buffer in array literal keeps Buffer type",
+      "expect": "matched",
+      "source": "function main(): void {\n  const b = Buffer.from(\"hello\");\n  const arr = [b, b];\n  arr[0][0] = 72;\n  console.log(arr[1].toString(), arr[0].toString(\"hex\"), arr.length);\n  const c = Buffer.from(\"xy\");\n  const mixed = [b, c];\n  console.log(Buffer.concat(mixed).toString());\n  console.log(Buffer.concat([b, c]).toString());\n  console.log(Buffer.isBuffer(mixed[1]), mixed[1].readUInt8(0));\n  const nums: number[][] = [b];\n  console.log(nums[0].length, nums[0][0]);\n}\n"
+    },
+    {
+      "name": "buffer nested in console.log containers",
+      "expect": "matched",
+      "source": "function main(): void {\n  const b = Buffer.from(\"hi\");\n  console.log({ b });\n  console.log({ b: Buffer.from(\"hi\") });\n  console.log([b, Buffer.from(\"yo\")]);\n  console.log({ list: [b], n: 1 });\n  const o = { b };\n  o.b[0] = 72;\n  console.log(b.toString(), o.b.length, Buffer.isBuffer(o.b));\n}\n"
+    },
+    {
+      "name": "buffer list through hash update loop",
+      "expect": "matched",
+      "source": "import { createHash } from \"node:crypto\";\nfunction main(): void {\n  const h = createHash(\"sha1\");\n  const parts = [Buffer.from(\"a\"), Buffer.from(\"b\")];\n  for (const p of parts) h.update(p);\n  console.log(h.digest(\"hex\"));\n}\n"
+    },
+    {
       "name": "new.target in class constructors and Error subclasses",
       "expect": "matched",
       "source": "abstract class Shape {\n  kind: string;\n  constructor() {\n    if (new.target === Shape) throw new TypeError(\"abstract\");\n    this.kind = new.target.name;\n  }\n}\nclass Sq extends Shape {}\nclass Big extends Sq { constructor() { super(); console.log(\"big\", new.target === Big, new.target === Sq, new.target !== Sq, new.target.name); } }\nclass MyErr extends Error {\n  constructor(m: string) {\n    super(m);\n    Object.setPrototypeOf(this, new.target.prototype);\n    this.name = new.target.name;\n  }\n}\nclass SubErr extends MyErr {}\nfunction plain() { return new.target === undefined; }\nfunction main(): void {\n  console.log(new Sq() instanceof Shape, new Sq().kind, new Big().kind);\n  try { throw new MyErr(\"a\"); } catch (e: any) { console.log(e instanceof MyErr, e instanceof Error, e.name, e.message); }\n  try { throw new SubErr(\"b\"); } catch (e: any) { console.log(e instanceof SubErr, e instanceof MyErr, e.name, e.message); }\n  console.log(plain());\n  const f = () => 1;\n  console.log(f());\n}\n"
