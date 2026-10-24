@@ -1,0 +1,15 @@
+ValidationError undefined undefined ["friends[0].id is a required field","id must be greater than or equal to 1","addr.street is a required field","bad zip","role must be one of the following values: admin, user","passwords differ"] friends[0].id,id,addr.street,addr.zip,role,pw2
+["friends[0].id is a required field","id must be greater than or equal to 1","addr.street is a required field","bad zip","role must be one of the following values: admin, user","passwords differ"]
+{"pw2":"secret","pw":"secret","born":"2020-02-03T00:00:00.000Z","role":"user","friends":[{"id":1}],"addr":{"street":"Main","zip":"12345"},"name":"Ann","id":5}
+true 1580688000000
+{"optional":true,"nullable":false,"default":"user","type":"string","oneOf":["admin","user"],"notOneOf":[],"tests":[]}
+{"optional":true,"nullable":false,"type":"string","oneOf":[],"notOneOf":[],"tests":[{"name":"min","params":{"min":2}},{"name":"max","params":{"max":5}}]}
+ValidationError  noUnknown ["this field has unspecified keys: b"] 
+this must be a `number` type, but the final value was: `"1"`.
+42
+["a",1] false
+false true true
+[ 1, 2 ] null true
+true ValidationError boom 1 f true
+false true false
+true {"a":"x"}

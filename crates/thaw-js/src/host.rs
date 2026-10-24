@@ -122,7 +122,8 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
 
 /// A loaded package: one interpreter, the bundle's modules, and its entry exports.
 pub struct Package {
-    interp: Interp,
+    /// Boxed: async functions hold its address while suspended.
+    interp: Box<Interp>,
     exports: Value,
 }
 
@@ -130,7 +131,7 @@ impl Package {
     /// Parse `bundle_js` (registry `bundle.js`) and evaluate its entry module.
     pub fn load(bundle_js: &str) -> Result<Package, HostError> {
         let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
-        let mut interp = Interp::new();
+        let mut interp = Box::new(Interp::new());
         interp.run_id += 1; // factory spans come from this one parse
         let entry = parts.entry.clone();
         let mut factories = HashMap::new();
@@ -172,11 +173,28 @@ impl Package {
         let r = match args {
             Some(args) => {
                 let args: Vec<Value> = args.iter().map(|a| to_value(it, a)).collect();
-                it.call(&f, &this, &args).map_err(|c| classify(it, c))?
+                let r = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
+                // an async export: run the event loop and unwrap the settled promise
+                if it.is_promise(&r) {
+                    it.mark_handled(&r);
+                    it.run_event_loop().map_err(|c| classify(it, c))?;
+                    match it.promise_state(&r) {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Err(classify(it, Ctl::Throw(e))),
+                        None => return Err(HostError::Thrown("promise never settled".into())),
+                    }
+                } else {
+                    r
+                }
             }
             None => f,
         };
         from_value(it, &r, 0)
+    }
+
+    /// The entry module's `module.exports`.
+    pub fn exports(&self) -> Value {
+        self.exports.clone()
     }
 
     pub fn interp(&mut self) -> &mut Interp {
@@ -195,6 +213,7 @@ fn classify(it: &mut Interp, c: Ctl) -> HostError {
                 _ => text.to_string(),
             })
         }
+        Ctl::Exit(code) => HostError::Thrown(format!("process.exit({code})")),
         Ctl::Return(_) | Ctl::Break(_) | Ctl::Continue(_) => {
             HostError::Thrown("stray completion".into())
         }

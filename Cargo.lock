@@ -3186,6 +3186,7 @@ dependencies = [
 name = "thaw-js"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "regress",
  "swc_ecma_visit",
  "thaw-parser",
