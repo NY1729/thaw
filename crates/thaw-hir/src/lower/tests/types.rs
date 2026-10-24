@@ -4364,6 +4364,19 @@ fn dynamic_symbol_rejects_nonascii_hex_without_slicing_codepoints() {
         Some((DynamicBackend::QuickJs, "foo".into())));
 }
 
+#[test]
+fn dynamic_symbol_decodes_the_thaw_js_backend_and_keeps_quickjs_untouched() {
+    assert_eq!(dynamic_symbol("__thaw_typed_tjs_6d733a3a6d73"),
+        Some((DynamicBackend::ThawJs, "ms::ms".into())));
+    assert_eq!(dynamic_symbol("__thaw_typed_tjs_6d733a3a6d73__arity_2"),
+        Some((DynamicBackend::ThawJs, "ms::ms".into())));
+    assert_eq!(dynamic_symbol("__thaw_typed_js_6d733a3a6d73"),
+        Some((DynamicBackend::QuickJs, "ms::ms".into())));
+    // thaw-js calls take plain data by value: they are not "ordinary QuickJS typed calls".
+    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_js_6d733a3a6d73").is_some());
+    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_none());
+}
+
 // Receiver-generic inference controls for the reviewed r1 prerequisite. These
 // tests deliberately stop at metadata and actual-call type inference; they do
 // not claim a receiver-aware specialization ABI or runtime function value.
