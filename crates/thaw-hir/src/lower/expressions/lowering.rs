@@ -2016,7 +2016,12 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if bin.op == BinaryOp::InstanceOf {
-                    if !matches!(bin.right.as_ref(), Expr::Ident(_)) {
+                    // A variable holding a constructor value (`const k: any = C`) is a
+                    // dynamic right operand, not a class name.
+                    let dynamic_class_variable = matches!(bin.right.as_ref(), Expr::Ident(name)
+                        if matches!(self.scope.get(name.sym.as_ref()), Some(HirType::JsValue | HirType::Dynamic))
+                            && !self.interfaces.contains_key(name.sym.as_ref()));
+                    if dynamic_class_variable || !matches!(bin.right.as_ref(), Expr::Ident(_)) {
                         // A property-valued constructor needs the realm's exact
                         // instanceof semantics, including custom @@hasInstance.
                         let left = self.lower_expr(&bin.left)?;
