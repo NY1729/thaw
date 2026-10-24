@@ -1610,6 +1610,54 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "error property name")?;
                         return Ok(HirType::Json);
                     }
+                    "__thaw_error_set_prop" => {
+                        let [error, key, value] = args.as_slice() else {
+                            return Err(format!("{name} expects an error, a key and a JSON text"));
+                        };
+                        for (operand, label) in [(error, "error"), (key, "property name"), (value, "property JSON")] {
+                            self.expect_type(&HirType::Str, operand, label)?;
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_error_has_prop" | "__thaw_error_delete_prop" => {
+                        let [error, key] = args.as_slice() else {
+                            return Err(format!("{name} expects an error and a property name"));
+                        };
+                        self.expect_type(&HirType::Str, error, "error")?;
+                        self.expect_type(&HirType::Str, key, "property name")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_error_get_prop" => {
+                        let [error, key] = args.as_slice() else {
+                            return Err(format!("{name} expects an error and a property name"));
+                        };
+                        self.expect_type(&HirType::Str, error, "error")?;
+                        self.expect_type(&HirType::Str, key, "property name")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_error_own_keys" => {
+                        let [error, hidden] = args.as_slice() else {
+                            return Err(format!("{name} expects an error and a hidden-keys flag"));
+                        };
+                        self.expect_type(&HirType::Str, error, "error")?;
+                        self.expect_type(&HirType::Bool, hidden, "hidden-keys flag")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_error_assign_json" => {
+                        let [error, source] = args.as_slice() else {
+                            return Err(format!("{name} expects an error and a JSON object text"));
+                        };
+                        self.expect_type(&HirType::Str, error, "error")?;
+                        self.expect_type(&HirType::Str, source, "JSON object text")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_error_json_stringify" => {
+                        let [error] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::Str, error, "JSON.stringify receiver")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_js_handle_to_string" => {
                         let [argument] = args.as_slice() else {
                             return Err("JsValue string conversion expects one operand".into());

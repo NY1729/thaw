@@ -59,6 +59,17 @@ impl<'a> FnLowerer<'a> {
                     )),
                 }
             }
+            // `err[key] = v` on an Error value (a framed string); a plain string rejects it at run time.
+            HirType::Str => {
+                let key = self.lower_expr(&computed.expr)?;
+                // A numeric key (`str[0] = x`) stays rejected: strings are immutable indexed values.
+                match self.infer_expr_type(&key)? {
+                    HirType::Str => Ok(Target::ErrorProp(object, Box::new(key))),
+                    other => Err(format!(
+                        "cannot assign through a computed key of type {other:?} on a value of type {object_type:?}"
+                    )),
+                }
+            }
             HirType::JsValue | HirType::Dynamic => {
                 let key = self.lower_expr(&computed.expr)?;
                 let key = match self.infer_expr_type(&key)? {
@@ -110,6 +121,12 @@ impl<'a> FnLowerer<'a> {
                     HirType::Json,
                 )),
                 HirType::JsValue | HirType::Dynamic => Ok(Target::DynamicProperty(
+                    object,
+                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                )),
+                // `err.code = x`: an Error is a framed string; its own properties live in the
+                // runtime side table (see thaw-runtime `thaw_error_set_prop`).
+                HirType::Str => Ok(Target::ErrorProp(
                     object,
                     Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                 )),

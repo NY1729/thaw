@@ -813,6 +813,9 @@ impl<'a> FnLowerer<'a> {
                 )
             }
             Target::DynamicProperty(_, _) => unreachable!(),
+            Target::ErrorProp(..) => {
+                return Err("`++`/`--` on an Error property is not supported yet".into())
+            }
         };
         let old_name = format!("__thaw_update_old_{}", self.next_binding);
         self.next_binding += 1;
