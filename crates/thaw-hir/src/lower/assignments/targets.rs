@@ -113,6 +113,65 @@ impl<'a> FnLowerer<'a> {
                     object,
                     Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                 )),
+                // `catch (e: any) { e.k = 1 }`: a native error is a framed string, so first
+                // rebind the catch slot to an Error-shaped Json object, then set on that.
+                HirType::Union(_)
+                    if object_type == crate::caught_exception_carrier_type()
+                        && matches!(&object, HirExpr::Var(_)) =>
+                {
+                    let HirExpr::Var(name) = &object else { unreachable!() };
+                    let HirType::Union(members) = &object_type else { unreachable!() };
+                    let call = |function: &str, args: Vec<HirExpr>| {
+                        HirExpr::Call(Box::new(HirExpr::Var(function.into())), args)
+                    };
+                    let text = || HirExpr::UnionValue(Box::new(object.clone()), 3, members.clone());
+                    let property = |helper: &str| {
+                        call(
+                            "__thaw_json_receiver_string",
+                            vec![call(helper, vec![text()])],
+                        )
+                    };
+                    let error_object = HirExpr::JsonObjectLit(
+                        vec![
+                            ("name".into(), property("__thaw_error_name")),
+                            ("message".into(), property("__thaw_error_message")),
+                            ("stack".into(), property("__thaw_error_stack")),
+                        ],
+                        HirType::Json,
+                    );
+                    let is_error_text = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(object.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                    );
+                    let is_native_object = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(object.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(6.0))),
+                    );
+                    let snapshot = self.caught_carrier_as_json(object.clone())?;
+                    let rebind = |value: HirExpr| {
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            name.clone(),
+                            Box::new(HirExpr::UnionInject(Box::new(value), 7, members.clone())),
+                        ))]
+                    };
+                    let promote = HirStmt::If(
+                        is_error_text,
+                        vec![HirStmt::If(
+                            call("__thaw_error_is_error", vec![text()]),
+                            rebind(error_object),
+                            Vec::new(),
+                        )],
+                        vec![HirStmt::If(is_native_object, rebind(snapshot), Vec::new())],
+                    );
+                    let json = self.caught_carrier_as_json(object.clone())?;
+                    Ok(Target::Dictionary(
+                        HirExpr::Block(vec![promote, HirStmt::Return(Some(json))]),
+                        Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                        HirType::Json,
+                    ))
+                }
                 other => Err(format!(
                     "cannot assign to `.{}` on a value of type {other:?}",
                     prop.sym,
