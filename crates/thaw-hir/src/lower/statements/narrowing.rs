@@ -224,6 +224,115 @@ impl<'a> FnLowerer<'a> {
         std::borrow::Cow::Owned(result)
     }
 
+    /// `const even = (n: number): boolean => .. odd(n - 1); const odd = ..`:
+    /// a fully annotated const arrow that is referenced by itself or by an
+    /// earlier arrow gets a `let name = <throwing stub>` placed before the
+    /// first referencing declaration, and its declaration becomes `name = arrow`.
+    fn forward_declare_arrows(stmts: &[Stmt]) -> std::borrow::Cow<'_, [Stmt]> {
+        use swc_ecma_ast::{ArrowExpr, ArrowFunctionBody, FunctionBody, ThrowStmt};
+        // (statement index, name, arrow) for annotated single const arrows.
+        let mut arrows: Vec<(usize, Symbol, &ArrowExpr)> = Vec::new();
+        for (index, stmt) in stmts.iter().enumerate() {
+            let Stmt::Decl(Decl::Var(decl)) = stmt else { continue };
+            let [declarator] = decl.decls.as_slice() else { continue };
+            let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref()) else { continue };
+            let Expr::Arrow(arrow) = init else { continue };
+            if decl.kind == VarDeclKind::Const
+                && binding.type_ann.is_none()
+                && arrow.type_params.is_none()
+                && !arrow.is_generator
+                && arrow.return_type.is_some()
+                && arrow.params.iter().all(|p| matches!(p, Pat::Ident(b) if b.type_ann.is_some() && !b.id.optional))
+            {
+                arrows.push((index, binding.id.sym.to_string(), arrow));
+            }
+        }
+        struct Refs(HashSet<Symbol>);
+        impl Visit for Refs {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.0.insert(ident.sym.to_string());
+            }
+        }
+        // name -> earliest arrow position (in `arrows`) that needs it declared.
+        let mut needed: Vec<(Symbol, usize)> = Vec::new();
+        for (position, (_, _, arrow)) in arrows.iter().enumerate() {
+            let mut refs = Refs(HashSet::new());
+            arrow.body.visit_with(&mut refs);
+            for (other, (_, name, _)) in arrows.iter().enumerate() {
+                if other >= position
+                    && refs.0.contains(name)
+                    && !needed.iter().any(|(n, _)| n == name)
+                {
+                    needed.push((name.clone(), position));
+                }
+            }
+        }
+        if needed.is_empty() {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        let sp = swc_common::DUMMY_SP;
+        let stub = |arrow: &ArrowExpr| {
+            let mut stub = arrow.clone();
+            stub.is_async = false;
+            stub.body = Box::new(ArrowFunctionBody::FunctionBody(FunctionBody {
+                span: sp,
+                stmts: vec![Stmt::Throw(ThrowStmt {
+                    span: sp,
+                    arg: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number { span: sp, value: 0.0, raw: None }))),
+                })],
+            }));
+            // An async arrow keeps its annotated `Promise<T>` return type.
+            stub
+        };
+        let mut result = Vec::with_capacity(stmts.len() + needed.len());
+        for (index, stmt) in stmts.iter().enumerate() {
+            let Some(position) = arrows.iter().position(|(i, _, _)| *i == index) else {
+                result.push(stmt.clone());
+                continue;
+            };
+            let (_, name, arrow) = &arrows[position];
+            for (n, first) in &needed {
+                if *first == position {
+                    let (_, _, a) = arrows.iter().find(|(_, an, _)| an == n).unwrap();
+                    result.push(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                        span: sp,
+                        ctxt: swc_common::SyntaxContext::empty(),
+                        kind: VarDeclKind::Let,
+                        declare: false,
+                        decls: vec![swc_ecma_ast::VarDeclarator {
+                            span: sp,
+                            name: Pat::Ident(swc_ecma_ast::BindingIdent {
+                                id: swc_ecma_ast::Ident::new_no_ctxt(n.as_str().into(), sp),
+                                type_ann: None,
+                            }),
+                            init: Some(Box::new(Expr::Arrow(stub(a)))),
+                            definite: false,
+                        }],
+                    }))));
+                }
+            }
+            if needed.iter().any(|(n, _)| n == name) {
+                result.push(Stmt::Expr(swc_ecma_ast::ExprStmt {
+                    span: sp,
+                    expr: Box::new(Expr::Assign(swc_ecma_ast::AssignExpr {
+                        span: sp,
+                        op: swc_ecma_ast::AssignOp::Assign,
+                        left: swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Ident(
+                            swc_ecma_ast::BindingIdent {
+                                id: swc_ecma_ast::Ident::new_no_ctxt(name.as_str().into(), sp),
+                                type_ann: None,
+                            },
+                        )),
+                        right: Box::new(Expr::Arrow((*arrow).clone())),
+                    })),
+                }));
+            } else {
+                result.push(stmt.clone());
+            }
+        }
+        std::borrow::Cow::Owned(result)
+    }
+
     /// A closure that mentions a `const f = <arrow/function>` declared later in
     /// the same block is fine in JS when called after the declaration runs.
     /// Creating a closure has no side effects, so move such a declaration up
@@ -303,7 +412,8 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
-        let forward = Self::hoist_forward_closure_consts(stmts);
+        let hoisted_closures = Self::hoist_forward_closure_consts(stmts);
+        let forward = Self::forward_declare_arrows(&hoisted_closures);
         let hoisted = Self::hoist_function_declarations(&forward);
         let stmts: &[Stmt] = &hoisted;
         #[derive(Default)]
@@ -338,7 +448,41 @@ impl<'a> FnLowerer<'a> {
         let mut using_flags = Vec::new();
         // `out` index from which each resource is live.
         let mut using_starts: Vec<usize> = Vec::new();
-        for stmt in stmts {
+        for (index, stmt) in stmts.iter().enumerate() {
+            if let Stmt::Decl(Decl::Var(var_decl)) = stmt {
+                let uninit: Vec<Symbol> = var_decl
+                    .decls
+                    .iter()
+                    .filter(|d| d.init.is_none())
+                    .filter_map(|d| match &d.name {
+                        Pat::Ident(b) => Some(b.id.sym.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                if !uninit.is_empty() {
+                    struct Writes(HashSet<Symbol>);
+                    impl Visit for Writes {
+                        fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+                            if let Some(id) = assign.left.as_ident() {
+                                self.0.insert(id.sym.to_string());
+                            }
+                            assign.visit_children_with(self);
+                        }
+                        fn visit_update_expr(&mut self, update: &swc_ecma_ast::UpdateExpr) {
+                            if let Expr::Ident(id) = update.arg.as_ref() {
+                                self.0.insert(id.sym.to_string());
+                            }
+                            update.visit_children_with(self);
+                        }
+                    }
+                    let mut writes = Writes(HashSet::new());
+                    for later in &stmts[index + 1..] {
+                        later.visit_with(&mut writes);
+                    }
+                    self.assigned_later
+                        .extend(uninit.into_iter().filter(|n| writes.0.contains(n)));
+                }
+            }
             if let Stmt::Decl(Decl::Using(using_decl)) = stmt {
                 // Register each successful acquisition before the next initializer.
                 for declarator in &using_decl.decls {

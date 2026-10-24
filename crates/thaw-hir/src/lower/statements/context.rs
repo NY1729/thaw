@@ -118,6 +118,7 @@ impl<'a> FnLowerer<'a> {
             native_method_values: HashMap::new(),
             native_class_aliases: HashMap::new(),
             member_receiver_bindings: HashSet::new(),
+            assigned_later: HashSet::new(),
             awaited_bindings: HashSet::new(),
             catch_bindings: HashSet::new(),
             promise_catch_bindings: HashSet::new(),
