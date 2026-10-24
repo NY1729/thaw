@@ -55,6 +55,10 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
                 .map(|hex| (DynamicBackend::QuickJs, hex))
         })
         .or_else(|| {
+            name.strip_prefix("__thaw_typed_tjs_")
+                .map(|hex| (DynamicBackend::ThawJs, hex))
+        })
+        .or_else(|| {
             name.strip_prefix("__thaw_typed_napi_")
                 .map(|hex| (DynamicBackend::Napi, hex))
         })?;
@@ -93,6 +97,8 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
 }
 
 fn is_ordinary_quickjs_symbol(backend: DynamicBackend, symbol: &str) -> bool {
+    // (thaw-js calls are deliberately not "ordinary QuickJS typed calls": they take plain data by
+    // value, so none of the live-handle/dynamic-storage handling applies.)
     backend == DynamicBackend::QuickJs
         && ![
             "$getter$",

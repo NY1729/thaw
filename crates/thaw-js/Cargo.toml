@@ -6,10 +6,11 @@ license.workspace = true
 description = "EXPERIMENTAL Thaw-native JavaScript runtime (prototype of milestone M1; see designs/js-runtime)"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 thaw-parser = { path = "../thaw-parser" }
+thaw-arena = { path = "../thaw-arena" }
 swc_ecma_visit = "29.0.0"
 regress = "0.11.1"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }

@@ -521,3 +521,81 @@ fn date_local_time_follows_the_process_zone_and_normalises_overflow() {
         "2 2 2020 true 1577836800000 1577934245000 true true"
     );
 }
+
+/// A bundle whose `module.exports` is itself the function, like `ms` or `minimist`.
+const CALLABLE_EXPORTS: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  module.exports = function pkg(x) { return x + 1; };
+  module.exports.named = function (o) { return { n: o.n * 2 }; };
+},
+};
+var __thaw_bundle_require_maps = { "p/index.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+fn typed_call(symbol: &str, args: &str) -> Result<String, String> {
+    use crate::host::{thaw_tjs_call_typed_result, ThawResult};
+    use std::ffi::{CStr, CString};
+    let (symbol, args) = (CString::new(symbol).unwrap(), CString::new(args).unwrap());
+    let ThawResult { value, error } = thaw_tjs_call_typed_result(symbol.as_ptr(), args.as_ptr());
+    let take = |p: *mut std::ffi::c_char| {
+        // SAFETY: `thaw_arena::owned_string` returns a NUL-terminated string we own.
+        let text = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        unsafe { thaw_arena::destroy_string(p) };
+        text
+    };
+    if error.is_null() {
+        Ok(take(value))
+    } else {
+        Err(take(error))
+    }
+}
+
+#[test]
+fn typed_abi_registers_packages_and_calls_exports_by_symbol() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let (mini, callable) = (
+        CString::new(MINI).unwrap(),
+        CString::new(CALLABLE_EXPORTS).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(c"mini".as_ptr(), mini.as_ptr()), 1);
+    assert_eq!(
+        thaw_tjs_register(c"callable".as_ptr(), callable.as_ptr()),
+        1
+    );
+    assert_eq!(typed_call("mini::twice", "[21]"), Ok("42".into()));
+    assert_eq!(
+        typed_call("mini::greet", r#"[{"name":"bo","tags":["a"]}]"#),
+        Ok(r#"{"msg":"hi bo","tags":["A"]}"#.into())
+    );
+    // `module.exports` is the function itself: the export name does not exist as a property
+    assert_eq!(typed_call("callable::pkg", "[1]"), Ok("2".into()));
+    assert_eq!(
+        typed_call("callable::named", r#"[{"n":4}]"#),
+        Ok(r#"{"n":8}"#.into())
+    );
+}
+
+#[test]
+fn typed_abi_reports_js_exceptions_and_unroutable_calls_as_errors() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let mini = CString::new(MINI).unwrap();
+    assert_eq!(thaw_tjs_register(c"mini-errors".as_ptr(), mini.as_ptr()), 1);
+    assert_eq!(
+        typed_call("mini-errors::boom", "[]"),
+        Err("RangeError: nope".into())
+    );
+    assert!(typed_call("never-loaded::f", "[]")
+        .unwrap_err()
+        .contains("not loaded"));
+    assert!(typed_call("mini-errors::twice", "{}")
+        .unwrap_err()
+        .contains("array"));
+    assert_eq!(
+        typed_call("\u{1}thaw-js: `x` cannot cross", "[]"),
+        Err("thaw-js: `x` cannot cross".into())
+    );
+}
