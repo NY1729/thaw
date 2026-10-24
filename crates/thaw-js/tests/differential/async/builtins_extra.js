@@ -1,0 +1,22 @@
+function tag(s, ...v) { return s.raw.join('|') + '#' + s.length + '#' + v.join(','); }
+console.log(tag`a${1}b\n${2}c`);
+console.log(String.raw`x\ny${3}`);
+const o = { t(s, a) { return this === o ? s[0] + a : 'bad this'; } };
+console.log(o.t`pre${5}`);
+console.log([1, 2, 3].flatMap((x) => [x, x * 2]).join());
+console.log(Object.is(NaN, NaN), Object.is(0, -0), Object.is(1, 1));
+const sym = Symbol('k');
+const w = { a: 1, [sym]: 2 };
+console.log(Object.getOwnPropertySymbols(w).length, Object.getOwnPropertySymbols(w)[0] === sym, Object.getOwnPropertyNames(w).join());
+console.log(Object.keys(Object.getOwnPropertyDescriptors({ x: 1, get y() { return 2; } })).join());
+console.log(Date.parse('2020-01-02T03:04:05Z'), isNaN(Date.parse('nope')));
+console.log(String.fromCodePoint(65, 0x1f600).length, '😀'.codePointAt(0), 'a'.codePointAt(0));
+console.log(btoa('hello'), atob('aGVsbG8='), btoa(''), atob(btoa('xy')));
+console.log(Reflect.ownKeys({ a: 1, b: 2 }).join(), Reflect.has({ q: 1 }, 'q'), Reflect.getPrototypeOf([]) === Array.prototype);
+console.log(Reflect.apply(Math.max, null, [1, 5, 2]), Reflect.construct(Date, [0]).getTime());
+console.log([[1, [2, [3]]], 4].flat().length, [[1, [2, [3]]], 4].flat(Infinity).join(), [1, 2, 3].at(-1), 'abc'.at(-2), [3, 1, 2].toSorted().join(), [1, 2].with(0, 9).join());
+console.log(Array.from([5, 6].entries()).map((p) => p.join(':')).join(), Array.from([5, 6].keys()).join(), [1, 2, 3, 4].findLast((x) => x % 2), [1, 2, 3, 4].findLastIndex((x) => x > 9));
+console.log(Object.hasOwn({ a: 1 }, 'a'), Object.hasOwn({}, 'toString'), JSON.stringify(Object.groupBy([1, 2, 3, 4], (x) => (x % 2 ? 'odd' : 'even'))));
+console.log(Math.hypot(3, 4), Math.clz32(1), Math.sinh(0), Math.cosh(0), Math.LN2 > 0.69 && Math.LN2 < 0.7, Math.log1p(0), Math.expm1(0));
+const A = new Set([1, 2, 3]), B = new Set([2, 3, 4]);
+console.log([...A.union(B)].join(), [...A.intersection(B)].join(), [...A.difference(B)].join(), [...A.symmetricDifference(B)].join(), A.isSubsetOf(B), new Set([2]).isSubsetOf(A), A.isDisjointFrom(new Set([9])));
