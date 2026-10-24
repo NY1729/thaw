@@ -276,23 +276,21 @@ impl<'ctx> HirCompiler<'ctx> {
                     // both were already printed as a plain C string before
                     // this call existed. A string thrown via
                     // `new Error(...)`/`new TypeError(...)`/etc. carries its
-                    // class name ahead of the message behind a marker byte
-                    // (see `thaw_hir::lower::expressions::lowering`); this
-                    // strips that back off before printing, so
-                    // `console.log(e)` shows just the message, exactly as
-                    // it did before that tagging existed. An ordinary
-                    // string without the marker passes through unchanged.
+                    // class name ahead of the message behind a marker
+                    // byte; `thaw_error_to_string` renders it as "Name: message"
+                    // (the first line of Node's stack print; Thaw has no
+                    // frames) and passes an ordinary untagged string unchanged.
                     let message = self
                         .builder
                         .build_call(
-                            self.module.get_function("thaw_error_message").unwrap(),
+                            self.module.get_function("thaw_error_to_string").unwrap(),
                             &[ptr.into()],
                             "console_error_message",
                         )
                         .map_err(|error| error.to_string())?
                         .try_as_basic_value()
                         .basic()
-                        .ok_or("thaw_error_message returned no value")?;
+                        .ok_or("thaw_error_to_string returned no value")?;
                     self.compile_console_text(
                         message.into_pointer_value(),
                         newline,
@@ -680,14 +678,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 let message = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_error_message").unwrap(),
+                        self.module.get_function("thaw_error_to_string").unwrap(),
                         &[value.into_pointer_value().into()],
                         "console_union_error_message",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_error_message returned no value")?;
+                    .ok_or("thaw_error_to_string returned no value")?;
                 self.compile_console_text(
                     message.into_pointer_value(),
                     newline,
