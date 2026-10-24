@@ -613,36 +613,40 @@ fn lower_class_methods(
                 }
                 Ok::<_, String>(())
             })();
-            if let Err(error) = prologue {
-                if tolerant {
-                    continue;
-                }
-                return Err(error);
-            }
-            // Same tolerance as the bound variant above, and for the
-            // identical reason.
-            if let Err(error) = lower_function_statements(
-                &mut unbound,
-                &body.stmts,
-                &unbound_signature.ret,
-                method.function.is_generator,
-                &mut unbound_body,
-            ) {
-                if tolerant {
-                    continue;
-                }
-                return Err(error);
-            }
-            // Same `Dynamic`-deferral resolution as the bound variant
-            // above -- the unbound signature is the same underlying
-            // table entry (`signatures.get(&unbound_symbol).unwrap_or(
-            // signature)`), so an unannotated method using `this` needs
-            // its detached form's `ret` resolved here too, or it's left
-            // as an unresolved `Dynamic` forever.
-            let unbound_ret = if unbound_signature.ret == HirType::Dynamic {
-                unbound.infer_return_type(&unbound_body)?
+            // The bound variant above already lowered this body; a failure
+            // here only means the detached form is unsupported (e.g. bare
+            // `this` as a value), which in JS throws when called: emit a
+            // throwing stub instead of failing the whole class.
+            let lowered = if prologue.is_ok() {
+                lower_function_statements(
+                    &mut unbound,
+                    &body.stmts,
+                    &unbound_signature.ret,
+                    method.function.is_generator,
+                    &mut unbound_body,
+                )
+                .and_then(|()| {
+                    if unbound_signature.ret == HirType::Dynamic {
+                        unbound.infer_return_type(&unbound_body)
+                    } else {
+                        Ok(unbound_signature.ret.clone())
+                    }
+                })
             } else {
-                unbound_signature.ret.clone()
+                Err(String::new())
+            };
+            let unbound_ret = match lowered {
+                Ok(ret) => ret,
+                Err(_) => {
+                    unbound_body = vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "TypeError: cannot call a detached method that reads `this`".into(),
+                    )))];
+                    if unbound_signature.ret == HirType::Dynamic {
+                        method_ret.clone()
+                    } else {
+                        unbound_signature.ret.clone()
+                    }
+                }
             };
             functions.push(HirFunction {
                 name: unbound_symbol,

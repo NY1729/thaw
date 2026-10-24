@@ -360,6 +360,35 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        // `o["name"](...)` is `o.name(...)`: canonicalize identifier-like
+        // string keys so every member-call path (dynamic receivers, nested
+        // receivers, optional chains) handles them.
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(member) = callee.as_ref() {
+                if let MemberProp::Computed(computed) = &member.prop {
+                    if let Expr::Lit(swc_ecma_ast::Lit::Str(key)) = computed.expr.as_ref() {
+                        let key = key.value.to_string_lossy();
+                        let mut chars = key.chars();
+                        let identifier_like = chars
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+                        if identifier_like {
+                            let mut canonical = call.clone();
+                            if let Callee::Expr(callee) = &mut canonical.callee {
+                                if let Expr::Member(member) = callee.as_mut() {
+                                    member.prop = MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                        key.as_ref().into(),
+                                        computed.span,
+                                    ));
+                                }
+                            }
+                            return self.lower_call(&canonical);
+                        }
+                    }
+                }
+            }
+        }
         if let Callee::Expr(callee) = &call.callee {
             if matches!(callee.as_ref(), Expr::Ident(class) if class.sym == *"Array")
                 && !self.scope.contains_key("Array")
@@ -3944,6 +3973,27 @@ impl<'a> FnLowerer<'a> {
                             array_type.clone(),
                             element.as_ref().clone(),
                         );
+                    }
+                }
+                // A class instance keeps `[Symbol.iterator]` as the method
+                // `__thaw_symbol_iterator`: call it directly.
+                if class_name_from_type(&receiver_type).is_some() {
+                    let method = CallExpr {
+                        span: call.span,
+                        ctxt: call.ctxt,
+                        callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                            span: call.span,
+                            obj: member.obj.clone(),
+                            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                "__thaw_symbol_iterator".into(),
+                                call.span,
+                            )),
+                        }))),
+                        args: Vec::new(),
+                        type_args: None,
+                    };
+                    if let Ok(lowered) = self.lower_call(&method) {
+                        return Ok(lowered);
                     }
                 }
                 // `obj[Symbol.iterator]()` reuses `Iterator.from(obj)`,
