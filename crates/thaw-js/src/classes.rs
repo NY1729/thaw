@@ -28,16 +28,10 @@ impl Interp {
         let proto_parent = match &parent {
             None => Some(self.object_proto.clone()),
             Some(Value::Null) => None,
-            Some(p) if p.is_callable() => {
-                if matches!(p, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Native(_)) && !self.is_plain_ctor(p))
-                {
-                    return unsupported("extends-native");
-                }
-                match self.get(p, "prototype")? {
-                    Value::Object(pp) => Some(pp),
-                    _ => None,
-                }
-            }
+            Some(p) if p.is_callable() => match self.get(p, "prototype")? {
+                Value::Object(pp) => Some(pp),
+                _ => None,
+            },
             Some(_) => {
                 return self.throw_error(
                     "TypeError",
@@ -91,6 +85,8 @@ impl Interp {
             params,
             body: Body::Block(body),
             arrow: false,
+            is_async: false,
+            bind_self: false,
             uses_arguments: false,
             strict: true,
             class: Some(info),
@@ -129,7 +125,7 @@ impl Interp {
                         proto_scope.clone()
                     };
                     let key = self.prop_name(&cm.key, &mscope)?;
-                    let f = self.function_value(Some(key.clone()), &cm.function, &mscope)?;
+                    let f = self.method_value(Some(key.clone()), &cm.function, &mscope)?;
                     match cm.kind {
                         a::MethodKind::Method => put_hidden(target, &key, f),
                         a::MethodKind::Getter => {
@@ -160,10 +156,6 @@ impl Interp {
     }
 
     /// `Object`-like natives that behave as plain base constructors (safe to extend).
-    fn is_plain_ctor(&self, v: &Value) -> bool {
-        matches!(self.lookup(&self.global, "Object"), Some(o) if strict_equals(&o, v))
-    }
-
     pub(crate) fn run_fields(&mut self, class: &Value, this: &Value) -> R<()> {
         let Value::Object(co) = class else {
             return Ok(());
@@ -212,10 +204,24 @@ impl Interp {
             _ => None,
         };
         let Some((def, scope)) = class_parts else {
-            return self.call(ctor, this, args);
+            let r = self.call(ctor, this, args)?;
+            // a native base constructor (Set, Map, Array, Promise, ...) builds its own object:
+            // move its internal state into the pre-allocated `this`, keeping `this` identity and prototype
+            if let (Value::Object(t), Value::Object(n)) = (this, &r) {
+                if !Rc::ptr_eq(t, n)
+                    && matches!(&*co.kind.borrow(), Kind::Native(_))
+                    && matches!(&*t.kind.borrow(), Kind::Plain)
+                    && !matches!(&*n.kind.borrow(), Kind::Plain | Kind::Global)
+                {
+                    let k = std::mem::replace(&mut *n.kind.borrow_mut(), Kind::Plain);
+                    *t.kind.borrow_mut() = k;
+                    return Ok(this.clone());
+                }
+            }
+            return Ok(r);
         };
         let info = def.class.as_ref().unwrap();
-        if self.depth >= MAX_DEPTH {
+        if self.too_deep() {
             return self.throw_error("RangeError", "Maximum call stack size exceeded");
         }
         self.depth += 1;
@@ -293,6 +299,22 @@ impl Interp {
                             self.get(&obj, &key)?
                         };
                         (f, obj)
+                    }
+                    // `a.b?.c(...)`: the callee is itself an optional member access; keep `a.b` as `this`
+                    a::Expr::OptChain(inner)
+                        if matches!(&*inner.base, a::OptChainBase::Member(_)) =>
+                    {
+                        let a::OptChainBase::Member(m) = &*inner.base else {
+                            unreachable!()
+                        };
+                        let Some(obj) = self.eval_chain_part(&m.obj, scope)? else {
+                            return Ok(None);
+                        };
+                        if inner.optional && matches!(obj, Value::Undefined | Value::Null) {
+                            return Ok(None);
+                        }
+                        let key = self.member_key(&m.prop, scope)?;
+                        (self.get(&obj, &key)?, obj)
                     }
                     other => {
                         let Some(f) = self.eval_chain_part(other, scope)? else {

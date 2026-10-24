@@ -261,6 +261,18 @@ impl Visit for Walker {
         match n {
             a::Lit::Regex(_) => self.feature("regexp"),
             a::Lit::BigInt(_) => self.feature("bigint"),
+            // method names listed in string tables (`['year', 'month'].forEach(k => proto[k] = ...)`)
+            a::Lit::Str(l) => {
+                if let Some(v) = l.value.as_str() {
+                    if !v.is_empty()
+                        && v.len() <= 40
+                        && v.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                    {
+                        self.defined.insert(v.to_string());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -408,7 +420,11 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
             add(&mut report, f.clone(), *n, key);
         }
         for r in &w.refs {
+            // UMD wrappers fall back to `self` only when `globalThis` is missing
+            let umd_self =
+                r == "self" && (w.refs.contains("globalThis") || w.probed.contains("globalThis"));
             if !w.declared.contains(r)
+                && !umd_self
                 && !globals.contains(r)
                 && !params.contains(&r.as_str())
                 && !w.probed.contains(r)

@@ -1,0 +1,19 @@
+true 
+false [["/name","minLength","must NOT have fewer than 2 characters","#/properties/name/minLength"],["/age","minimum","must be >= 0","#/properties/age/minimum"]]
+false [["","additionalProperties","must NOT have additional properties","#/additionalProperties"],["/age","type","must be integer","#/properties/age/type"]]
+false [["","required","must have required property 'name'","#/required"]]
+true 
+false [["/email","pattern","must match pattern \"^[^@]+@[^@]+$\"","#/properties/email/pattern"],["/tags","maxItems","must NOT have more than 3 items","#/properties/tags/maxItems"],["/tags","uniqueItems","must NOT have duplicate items (items ## 1 and 0 are identical)","#/properties/tags/uniqueItems"],["/role","enum","must be equal to one of the allowed values","#/properties/role/enum"],["/addr","additionalProperties","must NOT have additional properties","#/properties/addr/additionalProperties"],["/addr/zip","pattern","must match pattern \"^\\d{5}$\"","#/properties/addr/properties/zip/pattern"],["/score","exclusiveMaximum","must be < 100","#/properties/score/exclusiveMaximum"],["/score","multipleOf","must be multiple of 0.5","#/properties/score/multipleOf"],["/nested","type","must be string","#/properties/nested/anyOf/0/type"],["/nested","minimum","must be >= 10","#/properties/nested/anyOf/1/minimum"],["/nested","anyOf","must match a schema in anyOf","#/properties/nested/anyOf"],["/flag","const","must be equal to constant","#/properties/flag/const"]]
+false [["","type","must be object","#/type"]]
+false [["","type","must be object","#/type"]]
+false [["","type","must be object","#/type"]]
+false [["","type","must be object","#/type"]]
+true No errors
+false data must NOT have fewer than 3 characters
+true {"n":42,"b":true,"d":"dflt"}
+true false false
+true false
+Error schema is invalid: data/type must be equal to one of the all
+Ajv function function
+ok
+Error 1
