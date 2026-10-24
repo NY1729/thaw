@@ -1,0 +1,1432 @@
+[
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "2 days"
+  ],
+  "expect": "172800000"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "1d"
+  ],
+  "expect": "86400000"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "10h"
+  ],
+  "expect": "36000000"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "-3 min"
+  ],
+  "expect": "-180000"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "100"
+  ],
+  "expect": "100"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "1.5 hours"
+  ],
+  "expect": "5400000"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   "nonsense"
+  ],
+  "expect": "null"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   60000
+  ],
+  "expect": "\"1m\""
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   2,
+   {}
+  ],
+  "expect": "\"2ms\""
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   3600000,
+   {
+    "long": true
+   }
+  ],
+  "expect": "\"1 hour\""
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   172800000,
+   {
+    "long": true
+   }
+  ],
+  "expect": "\"2 days\""
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   500
+  ],
+  "expect": "\"500ms\""
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   ""
+  ],
+  "expect": "ERROR"
+ },
+ {
+  "pkg": "ms",
+  "path": "",
+  "args": [
+   [
+    1
+   ]
+  ],
+  "expect": "ERROR"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   [
+    "-a",
+    "1",
+    "--b=2",
+    "x"
+   ]
+  ],
+  "expect": "{\"_\":[\"x\"],\"a\":1,\"b\":2}"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   [
+    "--foo",
+    "bar",
+    "-xyz",
+    "--no-color",
+    "--n=5",
+    "rest",
+    "--",
+    "--tail"
+   ]
+  ],
+  "expect": "{\"_\":[\"rest\",\"--tail\"],\"foo\":\"bar\",\"x\":true,\"y\":true,\"z\":true,\"color\":false,\"n\":5}"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   [
+    "-n",
+    "5",
+    "-v"
+   ],
+   {
+    "boolean": [
+     "v"
+    ],
+    "alias": {
+     "n": "num"
+    }
+   }
+  ],
+  "expect": "{\"_\":[],\"v\":true,\"n\":5,\"num\":5}"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   [
+    "--a.b.c",
+    "1",
+    "--a.b.d",
+    "2"
+   ]
+  ],
+  "expect": "{\"_\":[],\"a\":{\"b\":{\"c\":1,\"d\":2}}}"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   [
+    "x",
+    "--y",
+    "3",
+    "--y",
+    "4"
+   ],
+   {
+    "string": [
+     "y"
+    ]
+   }
+  ],
+  "expect": "{\"_\":[\"x\"],\"y\":[\"3\",\"4\"]}"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   [
+    "--flag"
+   ],
+   {
+    "default": {
+     "flag": false,
+     "other": "d"
+    }
+   }
+  ],
+  "expect": "{\"_\":[],\"flag\":true,\"other\":\"d\"}"
+ },
+ {
+  "pkg": "minimist",
+  "path": "",
+  "args": [
+   []
+  ],
+  "expect": "{\"_\":[]}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "chunk",
+  "args": [
+   [
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   2
+  ],
+  "expect": "[[1,2],[3,4],[5]]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "sum",
+  "args": [
+   [
+    1,
+    2,
+    3,
+    4
+   ]
+  ],
+  "expect": "10"
+ },
+ {
+  "pkg": "lodash",
+  "path": "uniq",
+  "args": [
+   [
+    1,
+    1,
+    2,
+    3,
+    3
+   ]
+  ],
+  "expect": "[1,2,3]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "camelCase",
+  "args": [
+   "foo bar-baz_qux"
+  ],
+  "expect": "\"fooBarBazQux\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "kebabCase",
+  "args": [
+   "fooBar baz"
+  ],
+  "expect": "\"foo-bar-baz\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "snakeCase",
+  "args": [
+   "Foo Bar"
+  ],
+  "expect": "\"foo_bar\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "startCase",
+  "args": [
+   "fooBar_baz"
+  ],
+  "expect": "\"Foo Bar Baz\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "capitalize",
+  "args": [
+   "fRED"
+  ],
+  "expect": "\"Fred\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "get",
+  "args": [
+   {
+    "a": {
+     "b": [
+      {
+       "c": 3
+      }
+     ]
+    }
+   },
+   "a.b[0].c"
+  ],
+  "expect": "3"
+ },
+ {
+  "pkg": "lodash",
+  "path": "get",
+  "args": [
+   {
+    "a": 1
+   },
+   "x.y",
+   "dflt"
+  ],
+  "expect": "\"dflt\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "set",
+  "args": [
+   {},
+   "a.b.c",
+   5
+  ],
+  "expect": "{\"a\":{\"b\":{\"c\":5}}}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "merge",
+  "args": [
+   {
+    "a": {
+     "x": 1
+    },
+    "b": 2
+   },
+   {
+    "a": {
+     "y": 2
+    },
+    "c": 3
+   }
+  ],
+  "expect": "{\"a\":{\"x\":1,\"y\":2},\"b\":2,\"c\":3}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "pick",
+  "args": [
+   {
+    "a": 1,
+    "b": 2,
+    "c": 3
+   },
+   [
+    "a",
+    "c"
+   ]
+  ],
+  "expect": "{\"a\":1,\"c\":3}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "omit",
+  "args": [
+   {
+    "a": 1,
+    "b": 2,
+    "c": 3
+   },
+   [
+    "b"
+   ]
+  ],
+  "expect": "{\"a\":1,\"c\":3}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "groupBy",
+  "args": [
+   [
+    6.1,
+    4.2,
+    6.3
+   ],
+   "floor"
+  ],
+  "expect": "{\"undefined\":[6.1,4.2,6.3]}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "flatten",
+  "args": [
+   [
+    1,
+    [
+     2,
+     [
+      3,
+      [
+       4
+      ]
+     ],
+     5
+    ]
+   ]
+  ],
+  "expect": "[1,2,[3,[4]],5]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "flattenDeep",
+  "args": [
+   [
+    1,
+    [
+     2,
+     [
+      3,
+      [
+       4
+      ]
+     ],
+     5
+    ]
+   ]
+  ],
+  "expect": "[1,2,3,4,5]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "compact",
+  "args": [
+   [
+    0,
+    1,
+    false,
+    2,
+    "",
+    3,
+    null
+   ]
+  ],
+  "expect": "[1,2,3]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "difference",
+  "args": [
+   [
+    2,
+    1,
+    5
+   ],
+   [
+    2,
+    3
+   ]
+  ],
+  "expect": "[1,5]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "intersection",
+  "args": [
+   [
+    2,
+    1
+   ],
+   [
+    2,
+    3
+   ]
+  ],
+  "expect": "[2]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "union",
+  "args": [
+   [
+    2
+   ],
+   [
+    1,
+    2
+   ]
+  ],
+  "expect": "[2,1]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "range",
+  "args": [
+   0,
+   10,
+   3
+  ],
+  "expect": "[0,3,6,9]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "reverse",
+  "args": [
+   [
+    1,
+    2,
+    3
+   ]
+  ],
+  "expect": "[3,2,1]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "isEqual",
+  "args": [
+   {
+    "a": [
+     1,
+     2,
+     {
+      "b": 3
+     }
+    ]
+   },
+   {
+    "a": [
+     1,
+     2,
+     {
+      "b": 3
+     }
+    ]
+   }
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "isEqual",
+  "args": [
+   {
+    "a": 1
+   },
+   {
+    "a": 2
+   }
+  ],
+  "expect": "false"
+ },
+ {
+  "pkg": "lodash",
+  "path": "isEmpty",
+  "args": [
+   {}
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "isString",
+  "args": [
+   "x"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "isNumber",
+  "args": [
+   3
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "isArray",
+  "args": [
+   []
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "cloneDeep",
+  "args": [
+   {
+    "a": [
+     1,
+     {
+      "b": 2
+     }
+    ]
+   }
+  ],
+  "expect": "{\"a\":[1,{\"b\":2}]}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "keys",
+  "args": [
+   {
+    "a": 1,
+    "b": 2
+   }
+  ],
+  "expect": "[\"a\",\"b\"]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "values",
+  "args": [
+   {
+    "a": 1,
+    "b": 2
+   }
+  ],
+  "expect": "[1,2]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "toPairs",
+  "args": [
+   {
+    "a": 1,
+    "b": 2
+   }
+  ],
+  "expect": "[[\"a\",1],[\"b\",2]]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "fromPairs",
+  "args": [
+   [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ]
+   ]
+  ],
+  "expect": "{\"a\":1,\"b\":2}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "sortBy",
+  "args": [
+   [
+    {
+     "n": "b",
+     "a": 2
+    },
+    {
+     "n": "a",
+     "a": 1
+    },
+    {
+     "n": "c",
+     "a": 3
+    }
+   ],
+   "n"
+  ],
+  "expect": "[{\"n\":\"a\",\"a\":1},{\"n\":\"b\",\"a\":2},{\"n\":\"c\",\"a\":3}]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "orderBy",
+  "args": [
+   [
+    {
+     "n": "b",
+     "a": 2
+    },
+    {
+     "n": "a",
+     "a": 1
+    }
+   ],
+   [
+    "a"
+   ],
+   [
+    "desc"
+   ]
+  ],
+  "expect": "[{\"n\":\"b\",\"a\":2},{\"n\":\"a\",\"a\":1}]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "pad",
+  "args": [
+   "abc",
+   8,
+   "_-"
+  ],
+  "expect": "\"_-abc_-_\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "padStart",
+  "args": [
+   "abc",
+   6,
+   "12"
+  ],
+  "expect": "\"121abc\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "repeat",
+  "args": [
+   "ab",
+   3
+  ],
+  "expect": "\"ababab\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "truncate",
+  "args": [
+   "hi-diddly-ho there, neighborino",
+   {
+    "length": 24,
+    "separator": " "
+   }
+  ],
+  "expect": "\"hi-diddly-ho there,...\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "escape",
+  "args": [
+   "fred, barney, & pebbles <b>"
+  ],
+  "expect": "\"fred, barney, &amp; pebbles &lt;b&gt;\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "unescape",
+  "args": [
+   "fred, barney, &amp; pebbles"
+  ],
+  "expect": "\"fred, barney, & pebbles\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "trim",
+  "args": [
+   "  abc  "
+  ],
+  "expect": "\"abc\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "words",
+  "args": [
+   "fred, barney, & pebbles"
+  ],
+  "expect": "[\"fred\",\"barney\",\"pebbles\"]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "max",
+  "args": [
+   [
+    4,
+    2,
+    8,
+    6
+   ]
+  ],
+  "expect": "8"
+ },
+ {
+  "pkg": "lodash",
+  "path": "min",
+  "args": [
+   [
+    4,
+    2,
+    8,
+    6
+   ]
+  ],
+  "expect": "2"
+ },
+ {
+  "pkg": "lodash",
+  "path": "mean",
+  "args": [
+   [
+    4,
+    2,
+    8,
+    6
+   ]
+  ],
+  "expect": "5"
+ },
+ {
+  "pkg": "lodash",
+  "path": "clamp",
+  "args": [
+   -10,
+   -5,
+   5
+  ],
+  "expect": "-5"
+ },
+ {
+  "pkg": "lodash",
+  "path": "inRange",
+  "args": [
+   3,
+   2,
+   4
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "zip",
+  "args": [
+   [
+    "a",
+    "b"
+   ],
+   [
+    1,
+    2
+   ],
+   [
+    true,
+    false
+   ]
+  ],
+  "expect": "[[\"a\",1,true],[\"b\",2,false]]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "zipObject",
+  "args": [
+   [
+    "a",
+    "b"
+   ],
+   [
+    1,
+    2
+   ]
+  ],
+  "expect": "{\"a\":1,\"b\":2}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "countBy",
+  "args": [
+   [
+    6.1,
+    4.2,
+    6.3
+   ],
+   "floor"
+  ],
+  "expect": "{\"undefined\":3}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "partition",
+  "args": [
+   [
+    1,
+    2,
+    3,
+    4
+   ],
+   "isInteger"
+  ],
+  "expect": "[[],[1,2,3,4]]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "size",
+  "args": [
+   {
+    "a": 1,
+    "b": 2
+   }
+  ],
+  "expect": "2"
+ },
+ {
+  "pkg": "lodash",
+  "path": "take",
+  "args": [
+   [
+    1,
+    2,
+    3
+   ],
+   2
+  ],
+  "expect": "[1,2]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "drop",
+  "args": [
+   [
+    1,
+    2,
+    3
+   ],
+   2
+  ],
+  "expect": "[3]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "head",
+  "args": [
+   [
+    9,
+    8
+   ]
+  ],
+  "expect": "9"
+ },
+ {
+  "pkg": "lodash",
+  "path": "last",
+  "args": [
+   [
+    9,
+    8
+   ]
+  ],
+  "expect": "8"
+ },
+ {
+  "pkg": "lodash",
+  "path": "toNumber",
+  "args": [
+   "3.2"
+  ],
+  "expect": "3.2"
+ },
+ {
+  "pkg": "lodash",
+  "path": "toString",
+  "args": [
+   [
+    1,
+    2
+   ]
+  ],
+  "expect": "\"1,2\""
+ },
+ {
+  "pkg": "lodash",
+  "path": "defaults",
+  "args": [
+   {
+    "a": 1
+   },
+   {
+    "b": 2
+   },
+   {
+    "a": 3
+   }
+  ],
+  "expect": "{\"a\":1,\"b\":2}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "invert",
+  "args": [
+   {
+    "a": "1",
+    "b": "2"
+   }
+  ],
+  "expect": "{\"1\":\"a\",\"2\":\"b\"}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "has",
+  "args": [
+   {
+    "a": {
+     "b": 2
+    }
+   },
+   "a.b"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "lodash",
+  "path": "mapValues",
+  "args": [
+   {
+    "a": 1,
+    "b": 2
+   },
+   "toString"
+  ],
+  "expect": "{}"
+ },
+ {
+  "pkg": "lodash",
+  "path": "uniqBy",
+  "args": [
+   [
+    2.1,
+    1.2,
+    2.3
+   ],
+   "floor"
+  ],
+  "expect": "[2.1]"
+ },
+ {
+  "pkg": "lodash",
+  "path": "random",
+  "args": [
+   5,
+   5
+  ],
+  "expect": "5"
+ },
+ {
+  "pkg": "lodash",
+  "path": "VERSION",
+  "args": null,
+  "expect": "\"4.18.1\""
+ },
+ {
+  "pkg": "tj",
+  "path": "fib",
+  "args": [
+   20
+  ],
+  "expect": "6765"
+ },
+ {
+  "pkg": "tj",
+  "path": "fibq",
+  "args": [
+   15
+  ],
+  "expect": "610"
+ },
+ {
+  "pkg": "tj",
+  "path": "wc",
+  "args": [
+   "a b c a b d e f g a"
+  ],
+  "expect": "7"
+ },
+ {
+  "pkg": "semver",
+  "path": "valid",
+  "args": [
+   "1.2.3"
+  ],
+  "expect": "\"1.2.3\""
+ },
+ {
+  "pkg": "semver",
+  "path": "valid",
+  "args": [
+   "1.2"
+  ],
+  "expect": "null"
+ },
+ {
+  "pkg": "semver",
+  "path": "valid",
+  "args": [
+   "v1.2.3-beta.1+build"
+  ],
+  "expect": "\"1.2.3-beta.1\""
+ },
+ {
+  "pkg": "semver",
+  "path": "clean",
+  "args": [
+   "  =v1.2.3  "
+  ],
+  "expect": "\"1.2.3\""
+ },
+ {
+  "pkg": "semver",
+  "path": "gt",
+  "args": [
+   "1.2.3",
+   "1.2.0"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "lt",
+  "args": [
+   "1.2.3",
+   "1.10.0"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "eq",
+  "args": [
+   "1.2.3",
+   "1.2.3+b"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "compare",
+  "args": [
+   "1.0.0",
+   "2.0.0"
+  ],
+  "expect": "-1"
+ },
+ {
+  "pkg": "semver",
+  "path": "satisfies",
+  "args": [
+   "1.2.3",
+   "^1.0.0"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "satisfies",
+  "args": [
+   "2.0.0",
+   "^1.0.0"
+  ],
+  "expect": "false"
+ },
+ {
+  "pkg": "semver",
+  "path": "satisfies",
+  "args": [
+   "1.2.3",
+   ">=1.2.0 <1.3.0"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "satisfies",
+  "args": [
+   "1.2.3-beta.1",
+   "^1.0.0"
+  ],
+  "expect": "false"
+ },
+ {
+  "pkg": "semver",
+  "path": "inc",
+  "args": [
+   "1.2.3",
+   "minor"
+  ],
+  "expect": "\"1.3.0\""
+ },
+ {
+  "pkg": "semver",
+  "path": "inc",
+  "args": [
+   "1.2.3",
+   "major"
+  ],
+  "expect": "\"2.0.0\""
+ },
+ {
+  "pkg": "semver",
+  "path": "inc",
+  "args": [
+   "1.2.3",
+   "prerelease",
+   "beta"
+  ],
+  "expect": "\"1.2.4-beta.0\""
+ },
+ {
+  "pkg": "semver",
+  "path": "inc",
+  "args": [
+   "1.2.3-beta.1",
+   "prerelease"
+  ],
+  "expect": "\"1.2.3-beta.2\""
+ },
+ {
+  "pkg": "semver",
+  "path": "major",
+  "args": [
+   "3.4.5"
+  ],
+  "expect": "3"
+ },
+ {
+  "pkg": "semver",
+  "path": "minor",
+  "args": [
+   "3.4.5"
+  ],
+  "expect": "4"
+ },
+ {
+  "pkg": "semver",
+  "path": "patch",
+  "args": [
+   "3.4.5"
+  ],
+  "expect": "5"
+ },
+ {
+  "pkg": "semver",
+  "path": "prerelease",
+  "args": [
+   "1.2.3-alpha.1"
+  ],
+  "expect": "[\"alpha\",1]"
+ },
+ {
+  "pkg": "semver",
+  "path": "sort",
+  "args": [
+   [
+    "1.10.0",
+    "1.2.0",
+    "1.2.0-beta",
+    "0.9.9"
+   ]
+  ],
+  "expect": "[\"0.9.9\",\"1.2.0-beta\",\"1.2.0\",\"1.10.0\"]"
+ },
+ {
+  "pkg": "semver",
+  "path": "rsort",
+  "args": [
+   [
+    "1.10.0",
+    "1.2.0",
+    "0.9.9"
+   ]
+  ],
+  "expect": "[\"1.10.0\",\"1.2.0\",\"0.9.9\"]"
+ },
+ {
+  "pkg": "semver",
+  "path": "maxSatisfying",
+  "args": [
+   [
+    "1.2.3",
+    "1.3.0",
+    "2.0.0"
+   ],
+   "^1.0.0"
+  ],
+  "expect": "\"1.3.0\""
+ },
+ {
+  "pkg": "semver",
+  "path": "minSatisfying",
+  "args": [
+   [
+    "1.2.3",
+    "1.3.0",
+    "2.0.0"
+   ],
+   "^1.2.4"
+  ],
+  "expect": "\"1.3.0\""
+ },
+ {
+  "pkg": "semver",
+  "path": "validRange",
+  "args": [
+   "^1.2.x"
+  ],
+  "expect": "\">=1.2.0 <2.0.0-0\""
+ },
+ {
+  "pkg": "semver",
+  "path": "validRange",
+  "args": [
+   "not a range"
+  ],
+  "expect": "null"
+ },
+ {
+  "pkg": "semver",
+  "path": "diff",
+  "args": [
+   "1.2.3",
+   "1.3.0"
+  ],
+  "expect": "\"minor\""
+ },
+ {
+  "pkg": "semver",
+  "path": "diff",
+  "args": [
+   "1.2.3",
+   "2.0.0"
+  ],
+  "expect": "\"major\""
+ },
+ {
+  "pkg": "semver",
+  "path": "coerce",
+  "args": [
+   "v2.3 beta"
+  ],
+  "expect": "{\"options\":{},\"loose\":false,\"includePrerelease\":false,\"raw\":\"2.3.0\",\"major\":2,\"minor\":3,\"patch\":0,\"prerelease\":[],\"build\":[],\"version\":\"2.3.0\"}"
+ },
+ {
+  "pkg": "semver",
+  "path": "gte",
+  "args": [
+   "1.2.3",
+   "1.2.3"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "neq",
+  "args": [
+   "1.2.3",
+   "1.2.4"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "intersects",
+  "args": [
+   "^1.0.0",
+   "1.2.x"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "toComparators",
+  "args": [
+   "^1.2.3"
+  ],
+  "expect": "[[\">=1.2.3\",\"<2.0.0-0\"]]"
+ },
+ {
+  "pkg": "semver",
+  "path": "simplifyRange",
+  "args": [
+   [
+    "1.0.0",
+    "1.1.0",
+    "1.2.0"
+   ],
+   "1.x"
+  ],
+  "expect": "\"*\""
+ },
+ {
+  "pkg": "semver",
+  "path": "gtr",
+  "args": [
+   "2.0.0",
+   "^1.0.0"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "ltr",
+  "args": [
+   "0.1.0",
+   "^1.0.0"
+  ],
+  "expect": "true"
+ },
+ {
+  "pkg": "semver",
+  "path": "subset",
+  "args": [
+   "^1.2.3",
+   "^1.0.0"
+  ],
+  "expect": "true"
+ }
+]

@@ -3132,6 +3132,7 @@ dependencies = [
  "swc_ecma_visit",
  "thaw-bridge",
  "thaw-hir",
+ "thaw-js",
  "thaw-llvm",
  "thaw-parser",
  "thaw-registry",
@@ -3185,6 +3186,8 @@ dependencies = [
 name = "thaw-js"
 version = "0.1.0"
 dependencies = [
+ "regress",
+ "swc_ecma_visit",
  "thaw-parser",
 ]
 
