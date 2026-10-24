@@ -140,6 +140,57 @@ impl<'a> FnLowerer<'a> {
         let Some(base) = self.signatures.get(&base_symbol) else {
             return Vec::new();
         };
+        self.native_subclasses(class_name)
+            .into_iter()
+            .filter(|(name, _)| {
+                self.signatures
+                    .get(&class_method_symbol(name, method))
+                    .is_some_and(|own| {
+                        // A derived override may append (optional) parameters.
+                        own.accessor_owner.as_deref() == Some(name.as_str())
+                            && own.params.len() >= base.params.len()
+                            && own.params[1..base.params.len()] == base.params[1..]
+                            && own.ret == base.ret
+                            && own.is_async == base.is_async
+                            && own.native_rest == base.native_rest
+                    })
+            })
+            .collect()
+    }
+
+    /// Native subclasses of `class_name` that redefine the instance accessor
+    /// `property` (`setter` picks which half) with the same value type,
+    /// shallowest first.
+    fn virtual_accessor_overrides(
+        &self,
+        class_name: &str,
+        property: &str,
+        setter: bool,
+    ) -> Vec<(Symbol, HirType)> {
+        let symbol = |class: &str| {
+            if setter {
+                class_setter_symbol(class, property, false)
+            } else {
+                class_getter_symbol(class, property, false)
+            }
+        };
+        let Some(base) = self.signatures.get(&symbol(class_name)) else {
+            return Vec::new();
+        };
+        self.native_subclasses(class_name)
+            .into_iter()
+            .filter(|(name, _)| {
+                self.signatures.get(&symbol(name)).is_some_and(|own| {
+                    own.accessor_owner.as_deref() == Some(name.as_str())
+                        && own.params.get(1..) == base.params.get(1..)
+                        && own.ret == base.ret
+                })
+            })
+            .collect()
+    }
+
+    /// Strict native subclasses of `class_name`, shallowest first.
+    fn native_subclasses(&self, class_name: &str) -> Vec<(Symbol, HirType)> {
         let mut found = Vec::new();
         for (name, ty) in self.interfaces {
             let HirType::Object(fields) = ty else { continue };
@@ -150,23 +201,43 @@ impl<'a> FnLowerer<'a> {
                 continue;
             };
             let chain: Vec<&str> = ancestry.split('\u{1f}').collect();
-            if chain.first() != Some(&name.as_str()) || !chain[1..].contains(&class_name) {
-                continue;
-            }
-            let Some(own) = self.signatures.get(&class_method_symbol(name, method)) else {
-                continue;
-            };
-            if own.accessor_owner.as_deref() == Some(name.as_str())
-                && own.params.get(1..) == base.params.get(1..)
-                && own.ret == base.ret
-                && own.is_async == base.is_async
-                && own.native_rest == base.native_rest
-            {
+            if chain.first() == Some(&name.as_str()) && chain[1..].contains(&class_name) {
                 found.push((chain.len(), name.clone(), ty.clone()));
             }
         }
         found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         found.into_iter().map(|(_, name, ty)| (name, ty)).collect()
+    }
+
+    /// Read of instance getter `owner.property` on `receiver` (a variable):
+    /// dispatches to the most derived override by runtime class identity.
+    fn call_class_instance_getter(
+        &self,
+        owner: &str,
+        property: &str,
+        receiver: HirExpr,
+    ) -> HirExpr {
+        let call = |class: &str, receiver: HirExpr| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(class_getter_symbol(class, property, false))),
+                vec![self.assert_class_accessor_receiver(receiver, class)],
+            )
+        };
+        let ret = self.signatures[&class_getter_symbol(owner, property, false)].ret.clone();
+        let mut result = call(owner, receiver.clone());
+        for (derived, derived_type) in self.virtual_accessor_overrides(owner, property, false) {
+            let cast = HirExpr::TypedClosure(derived_type, Box::new(receiver.clone()));
+            result = HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                    vec![receiver.clone(), HirExpr::Lit(HirLit::Str(derived.to_string()))],
+                )),
+                Box::new(call(&derived, cast)),
+                Box::new(result),
+                ret.clone(),
+            );
+        }
+        result
     }
 
     /// `recv.m(...)` where a subclass overrides `m`: test the runtime class
