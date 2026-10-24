@@ -728,3 +728,4 @@ include!("tests/langcore_contracts.rs");
 include!("tests/oobidx_contracts.rs");
 include!("tests/fatalexit_contracts.rs");
 include!("tests/rejects_contracts.rs");
+include!("tests/classgaps_contracts.rs");
