@@ -467,6 +467,7 @@ pub struct HirCompiler<'ctx> {
     async_return_frames: HashMap<PointerValue<'ctx>, (PointerValue<'ctx>, HirType)>,
     next_lambda: usize,
     uses_napi: bool,
+    uses_thaw_js: bool,
     uses_quickjs: bool,
     /// Entry is a CommonJS program: `process.nextTick` callbacks run before the promise jobs
     /// the main script queued (an ES module's body runs inside a microtask, so they run after).
@@ -819,6 +820,7 @@ impl<'ctx> HirCompiler<'ctx> {
             async_return_frames: HashMap::new(),
             next_lambda: 0,
             uses_napi: false,
+            uses_thaw_js: false,
             uses_quickjs: false,
             commonjs_entry: false,
             uses_quickjs_handles: false,
@@ -921,6 +923,11 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// Whether the generated module calls the N-API addon host.
+    /// Whether the program calls into the experimental thaw-js runtime (`DynamicBackend::ThawJs`).
+    pub fn uses_thaw_js(&self) -> bool {
+        self.uses_thaw_js
+    }
+
     pub fn uses_napi(&self) -> bool {
         self.uses_napi
     }

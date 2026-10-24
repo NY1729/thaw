@@ -229,6 +229,7 @@ fn generate_module_init_is_empty_for_no_bundles() {
 fn generates_load_script_call_per_bundle() {
     let bundles = [
         ModuleBundle {
+            thaw_js: false,
             package_name: "left-pad",
             js_source: "function pad(s) { return s; }",
             fallback_names: &[],
@@ -238,6 +239,7 @@ fn generates_load_script_call_per_bundle() {
             value_exports: &[],
         },
         ModuleBundle {
+            thaw_js: false,
             package_name: "is-odd",
             js_source: "function isOdd(n) { return n % 2 === 1; }",
             fallback_names: &[],
@@ -263,6 +265,7 @@ fn nested_namespace_capture_keeps_deep_path_and_receiver() {
     // object, not the package root or an unrelated same-bare function.
     let nested = vec![("Outer.Inner.make".to_string(), "pkg::Outer.Inner.make".to_string())];
     let init = generate_module_init(&[ModuleBundle {
+        thaw_js: false,
         package_name: "pkg",
         js_source: "module.exports.Outer = { Inner: { make: function() { return this.tag; }, tag: 'inner' } };",
         fallback_names: &[],
@@ -279,6 +282,7 @@ fn nested_namespace_capture_keeps_deep_path_and_receiver() {
 #[test]
 fn escapes_quotes_and_newlines_in_bundled_source() {
     let bundles = [ModuleBundle {
+        thaw_js: false,
         package_name: "pkg",
         js_source: "function f() {\n  return \"a\\b\";\n}",
         fallback_names: &[],
@@ -298,6 +302,7 @@ fn escapes_quotes_and_newlines_in_bundled_source() {
 fn large_module_init_compresses_embedded_javascript() {
     let source = "module.exports.value = 1;\n".repeat(200);
     let init = generate_module_init(&[ModuleBundle {
+        thaw_js: false,
         package_name: "large-package",
         js_source: &source,
         fallback_names: &[],
@@ -319,6 +324,7 @@ fn large_module_init_preserves_intl_requirements_as_metadata() {
         "module.exports.value = 1;\n".repeat(200)
     );
     let init = generate_module_init(&[ModuleBundle {
+        thaw_js: false,
         package_name: "large-intl-package",
         js_source: &source,
         fallback_names: &[],
@@ -776,6 +782,7 @@ fn unguarded_process_global_reference_does_not_throw() {
 fn generated_module_init_round_trips_through_real_lowering() {
     let fallback_names = vec!["greet".to_string()];
     let init = generate_module_init(&[ModuleBundle {
+        thaw_js: false,
         package_name: "greeter",
         js_source: "function greet(){return 'hi';}",
         fallback_names: &fallback_names,
@@ -815,6 +822,7 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
     let hoek_aliases = vec![("stringify".to_string(), "hoek::stringify".to_string())];
     let bundles = [
         ModuleBundle {
+            thaw_js: false,
             package_name: "qs",
             js_source: "module.exports = { stringify: function(x) { return 'qs:' + x; } };",
             fallback_names: &qs_fallback,
@@ -824,6 +832,7 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
             value_exports: &[],
         },
         ModuleBundle {
+            thaw_js: false,
             package_name: "@hapi/hoek",
             js_source: "module.exports = { stringify: function(x) { return 'hoek:' + x; } };",
             fallback_names: &hoek_fallback,
@@ -1155,4 +1164,20 @@ fn released_native_callback_references_drop_the_strong_global() {
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_call(c"releaseProbe".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
+}
+
+#[test]
+fn thaw_js_bundles_are_loaded_by_load_thaw_js_not_quickjs() {
+    let init = generate_module_init(&[ModuleBundle {
+        thaw_js: true,
+        package_name: "ms",
+        js_source: "module.exports = function ms() {};",
+        fallback_names: &["ms".to_string()],
+        class_names: &[],
+        qualified_aliases: &[],
+        nested_namespace_aliases: &[],
+        value_exports: &[],
+    }]);
+    assert!(init.contains("loadThawJs(\"ms\", \"module.exports = function ms() {};\")"), "{init}");
+    assert!(!init.contains("loadScript("), "{init}");
 }

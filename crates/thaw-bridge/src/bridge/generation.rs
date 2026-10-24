@@ -425,6 +425,10 @@ fn escape_ts_string_literal(source: &str) -> String {
 /// One registry package's bundled JS to auto-load, for
 /// `generate_module_init`.
 pub struct ModuleBundle<'a> {
+    /// Run this bundle on the experimental thaw-js runtime (`loadThawJs`) instead of QuickJS. Only
+    /// valid for a package whose generated calls all target `__thaw_typed_tjs_*` and that has no
+    /// value exports, qualified/nested aliases or classes in use.
+    pub thaw_js: bool,
     pub package_name: &'a str,
     pub js_source: &'a str,
     /// This package's Fallback function names (from its `.d.ts`,
@@ -845,6 +849,14 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     let mut out = String::from("function __thaw_module_init(): void {\n");
     for bundle in bundles {
         out.push_str(&format!("    // {}\n", bundle.package_name));
+        if bundle.thaw_js {
+            out.push_str(&format!(
+                "    if (!loadThawJs(\"{}\", \"{}\")) throw new Error(\"failed to load module script\");\n",
+                escape_ts_string_literal(bundle.package_name),
+                escape_ts_string_literal(bundle.js_source)
+            ));
+            continue;
+        }
         let wrapped = wrap_as_commonjs_module(
             bundle.js_source,
             bundle.fallback_names,

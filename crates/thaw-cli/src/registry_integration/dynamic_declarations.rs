@@ -1185,7 +1185,43 @@ fn contains_callable_type(ty: &thaw_hir::HirType) -> bool {
     }
 }
 
+/// Prefix a package name with this to have its typed declarations target the experimental thaw-js
+/// runtime (`__thaw_typed_tjs_*`, `DynamicBackend::ThawJs`) instead of QuickJS. Stripped before the
+/// package name is used as the runtime key.
+const THAW_JS_PACKAGE_MARK: &str = "tjs!";
+
+/// Retargets a QuickJS typed declaration to thaw-js: symbols get the `tjs` prefix and an opaque
+/// `JsValue` result (an `any`-typed return, never a class instance: the routing scan rules those
+/// out) becomes plain `Json`, since thaw-js returns plain data by value.
+fn thaw_js_retarget(symbol: String, declaration: String) -> (String, String) {
+    (
+        // (Generated wrapper names keep `__thaw_typed_wrapper_js_`: thaw-hir recognizes them by it.)
+        symbol.replace("__thaw_typed_js_", "__thaw_typed_tjs_"),
+        declaration
+            .replace("__thaw_typed_js_", "__thaw_typed_tjs_")
+            .replace("JsValue", "Json"),
+    )
+}
+
 fn typed_dynamic_declaration(
+    package: &str,
+    function: &thaw_bridge::DtsFunction,
+    napi: bool,
+    observed_call_arities: &std::collections::BTreeSet<usize>,
+    overload_suffix: Option<usize>,
+) -> Option<(String, String)> {
+    match package.strip_prefix(THAW_JS_PACKAGE_MARK) {
+        Some(real) => typed_dynamic_declaration_for_quickjs(
+            real, function, napi, observed_call_arities, overload_suffix,
+        )
+        .map(|(symbol, declaration)| thaw_js_retarget(symbol, declaration)),
+        None => typed_dynamic_declaration_for_quickjs(
+            package, function, napi, observed_call_arities, overload_suffix,
+        ),
+    }
+}
+
+fn typed_dynamic_declaration_for_quickjs(
     package: &str,
     function: &thaw_bridge::DtsFunction,
     napi: bool,
