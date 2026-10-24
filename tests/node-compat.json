@@ -2081,6 +2081,7 @@
     {
       "name": "sync throw in main skips registered timers and exit sees code 1",
       "expect": "matched",
+      "exitCode": 1,
       "source": "function main(): void { process.on('exit', (code: number) => console.log('exit', code)); setTimeout(() => console.log('timer'), 5); console.log('a'); throw new Error('boom'); }"
     }
   ]
