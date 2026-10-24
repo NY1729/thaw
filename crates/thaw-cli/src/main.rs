@@ -641,6 +641,19 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
             println!("quickjs-reason: {kind}{package}{operation}{location}{detail}");
         }
     }
+    if let Some(routed) = manifest["thaw_js_routed"]
+        .as_array()
+        .filter(|routed| !routed.is_empty())
+    {
+        println!(
+            "thaw-js-routed: {}",
+            routed
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if let Some(entries) = manifest["thaw_js"].as_array() {
         for entry in entries {
             let package = entry["package"].as_str().unwrap_or("?");
@@ -1216,6 +1229,7 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
 include!("registry_integration/shims.rs");
 include!("registry_integration/jit_validation.rs");
 include!("registry_integration/dynamic_declarations.rs");
+include!("registry_integration/thaw_js_routing.rs");
 include!("registry_integration/shim_support.rs");
 include!("registry_integration/shim_generation.rs");
 include!("registry_integration/class_methods.rs");

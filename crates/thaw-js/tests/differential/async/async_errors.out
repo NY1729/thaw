@@ -1,0 +1,9 @@
+caught TypeError bad
+finally
+fin-cb
+in executor
+first wins 1
+recovered
+ret
+after finally x
+value kept 5

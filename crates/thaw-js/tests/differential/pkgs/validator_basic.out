@@ -1,0 +1,39 @@
+isEmail true,false,true,true,true,false
+isURL true,false,false,false,true,false,true
+isInt true,true,false,false,true,false
+isFloat true,true,false,true
+isAlpha true,false,false
+isAlphanumeric true,false
+isNumeric true,true,false
+isUUID true,false
+isIP true,true,false,true
+isHexColor true,false,true
+isJSON true,false,true
+isBase64 true,false
+isLength true
+isLowercase true,false
+isUppercase true,false
+isEmpty true,false
+isMACAddress true,false
+isPort true,false
+isCreditCard true,false
+isISBN true,false
+isMobilePhone true,false
+isPostalCode E:Invalid locale 'undefined'
+isSlug true,false
+isDate true,false,false
+isISO8601 true,true,false,true
+isRFC3339 true,false
+isTaxID true
+isIdentityCard E:Invalid locale 'undefined'
+isStrongPassword true,false
+isMailtoURI true,false
+isLuhnNumber true
+isSemVer true,false
+isMD5 true,false
+isDataURI true,false
+isFQDN true,false
+true false true true true true
+&lt;a href=&quot;x&quot;&gt;&amp;&#x27;&lt;&#x2F;a&gt; <b>& x abc abc ab abc 123
+foobar@gmail.com a@example.com 42 NaN true false true true true true
+2020-01-02T03:04:05.000Z null false false 13.15.35

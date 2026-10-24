@@ -1,0 +1,13 @@
+sync1
+async-start
+sync2
+tick1
+tick2
+then1
+micro1
+then2
+async-after-await
+then3
+tick-in-then
+timeout0
+immediate

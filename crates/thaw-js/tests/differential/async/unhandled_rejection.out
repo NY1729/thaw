@@ -1,0 +1,4 @@
+late catch
+unhandled boom true
+unhandled str true
+exit 0

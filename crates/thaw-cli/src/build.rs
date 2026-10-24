@@ -302,8 +302,65 @@ fn build_with_assets(
     )
 }
 
+/// Marker error: a thaw-js-routed program also needs QuickJS (a callback or live JavaScript value
+/// crossed into thaw-js), so it is rebuilt with routing off.
+const THAW_JS_MIXED: &str = "thaw-js routing needs QuickJS";
+
 #[allow(clippy::too_many_arguments)]
 fn build_with_native_mode(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
+    embed_native_addons: bool,
+    install_missing: bool,
+    icu4c: bool,
+) -> Result<(), String> {
+    build_with_thaw_js_routing(
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c,
+        thaw_js_routing_enabled(),
+    )
+}
+
+/// `build_with_native_mode_routed`, retried without routing when the routed build turns out to need
+/// QuickJS as well.
+#[allow(clippy::too_many_arguments)]
+fn build_with_thaw_js_routing(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
+    embed_native_addons: bool,
+    install_missing: bool,
+    icu4c: bool,
+    routing: bool,
+) -> Result<(), String> {
+    let result = build_with_native_mode_routed(
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c, routing,
+    );
+    match result {
+        Err(error) if routing && error == THAW_JS_MIXED => build_with_native_mode_routed(
+            input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+            static_link, assets, embed_native_addons, install_missing, icu4c, false,
+        ),
+        result => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_native_mode_routed(
     input: &Path,
     output: &Path,
     extra_links: &[PathBuf],
@@ -324,6 +381,7 @@ fn build_with_native_mode(
     // resolved at runtime via `dlopen`, so this only selects the feature
     // (no linker changes, and a program still runs without ICU4C).
     icu4c: bool,
+    thaw_js_routing: bool,
 ) -> Result<(), String> {
     if static_link && !embed_native_addons {
         return Err("--static and --external-native cannot be used together".into());
@@ -473,6 +531,7 @@ fn build_with_native_mode(
             output,
             external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
             &forced_jit_fallbacks,
+            thaw_js_routing,
         )?;
         let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
         // `qs.stringify(x)`-style calls, for a name that collided across two
@@ -524,11 +583,12 @@ fn build_with_native_mode(
                 || created_require_live_result
                 || shim_source.contains("__thaw_typed_js_"),
             "quickjs_reasons": quickjs_reasons,
+            // Packages whose bundles run on the experimental thaw-js runtime instead of QuickJS.
+            "thaw_js_routed": thaw_js_routed_packages(&shim_source),
             "napi": shim_source.contains("loadNativeAddonEmbedded(")
                 || shim_source.contains("loadNativeAddon(")
                 || shim_source.contains("embedExecutable("),
         });
-        #[cfg(feature = "thaw-js-diagnostics")]
         if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         }
@@ -676,6 +736,9 @@ fn build_with_native_mode(
     compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
+    if thaw_js_routing && compiler.uses_thaw_js() && uses_quickjs {
+        return Err(THAW_JS_MIXED.to_string());
+    }
 
     let obj_path = scratch.path.join("input.o");
     compiler.write_object_file(&obj_path)?;
@@ -701,6 +764,10 @@ fn build_with_native_mode(
             let features = runtime_features.iter().copied().collect::<Vec<_>>();
             build_staticlib_with_features("thaw-quickjs", &features)
         })
+        .transpose()?;
+    let thaw_js_lib = compiler
+        .uses_thaw_js()
+        .then(|| build_staticlib("thaw-js"))
         .transpose()?;
     let napi_lib = uses_napi
         .then(|| {
@@ -747,6 +814,9 @@ fn build_with_native_mode(
         .arg(&std_lib)
         .arg(&runtime_lib)
         .arg(&jit_lib);
+    if let Some(thaw_js_lib) = thaw_js_lib {
+        linker.arg(thaw_js_lib);
+    }
     if let Some(quickjs_lib) = quickjs_lib {
         linker.arg(quickjs_lib);
     }
@@ -1155,9 +1225,22 @@ fn source_uses_quickjs(source: &str) -> bool {
     .any(|marker| source.contains(marker))
 }
 
-/// Experimental, opt-in (`--features thaw-js-diagnostics` and `THAW_JS_RUNTIME=1`): for every resolved
+/// Experimental, opt-in (`THAW_JS_RUNTIME=1`): for every resolved
 /// package with a JavaScript bundle, which constructs would keep the thaw-js evaluator from running it.
-#[cfg(feature = "thaw-js-diagnostics")]
+/// Package names loaded through `loadThawJs("<name>", ...)` in the generated shim.
+fn thaw_js_routed_packages(shim_source: &str) -> Vec<String> {
+    let mut names = shim_source
+        .match_indices("loadThawJs(\"")
+        .filter_map(|(index, marker)| {
+            let rest = &shim_source[index + marker.len()..];
+            rest.find('"').map(|end| rest[..end].to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn thaw_js_eligibility(registry_dir: &Path, packages: &[String]) -> serde_json::Value {
     let entries = packages.iter().filter_map(|package| {
         let bundle = thaw_registry::resolve(registry_dir, package).ok()?.bundle_js?;
@@ -1454,7 +1537,7 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
         println!("prepared runtime archives are current (cache hit)");
         return Ok(());
     }
-    for package in ["thaw-arena", "thaw-runtime", "thaw-std", "thaw-jit"] {
+    for package in ["thaw-arena", "thaw-runtime", "thaw-std", "thaw-jit", "thaw-js"] {
         store_prepared_staticlib(package, false, &[])?;
     }
     store_prepared_staticlib("thaw-quickjs", true, &[])?;
@@ -1533,6 +1616,7 @@ fn prepared_runtime_is_current() -> bool {
         prepared_staticlib_path("thaw-runtime", false, &[]),
         prepared_staticlib_path("thaw-std", false, &[]),
         prepared_staticlib_path("thaw-jit", false, &[]),
+        prepared_staticlib_path("thaw-js", false, &[]),
         prepared_staticlib_path("thaw-quickjs", true, &[]),
         prepared_staticlib_path("thaw-napi", true, &[]),
         prepared_staticlib_path("thaw-napi", true, &["quickjs"]),
