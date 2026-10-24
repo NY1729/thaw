@@ -197,7 +197,9 @@ fn ecmascript_field_order<T>(fields: &[(Symbol, T)]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, (name, _))| {
-            (!is_hidden_accessor_field(name) && !name.starts_with(PRIVATE_SLOT_PREFIX))
+            (!is_hidden_accessor_field(name)
+                && !name.starts_with(PRIVATE_SLOT_PREFIX)
+                && name != NATIVE_BASE_FIELD)
                 .then_some((index, array_index_key(name)))
         })
         .collect::<Vec<_>>();
@@ -556,6 +558,74 @@ fn class_name_from_type(ty: &HirType) -> Option<&str> {
             .flatten()
             .and_then(|identities| identities.split('\u{1f}').next())
     })
+}
+
+/// Name of the hidden field (always index 1, right after the identity marker)
+/// holding the native collection of a class that `extends Map`/`Set`.
+const NATIVE_BASE_FIELD: &str = "__thaw_base";
+
+/// The native `Map`/`Set` type a class extending one of them wraps.
+fn native_base_type(ty: &HirType) -> Option<&HirType> {
+    let HirType::Object(fields) = ty else {
+        return None;
+    };
+    fields
+        .get(1)
+        .filter(|(name, _)| name == NATIVE_BASE_FIELD)
+        .map(|(_, ty)| ty)
+}
+
+/// `receiver.__thaw_base`: the native collection behind a `Map`/`Set` subclass.
+fn native_base_member(receiver: Expr) -> Expr {
+    Expr::Member(MemberExpr {
+        span: swc_common::DUMMY_SP,
+        obj: Box::new(receiver),
+        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+            NATIVE_BASE_FIELD.into(),
+            swc_common::DUMMY_SP,
+        )),
+    })
+}
+
+/// Layout of `extends Map<K, V>` / `extends Set<T>`: the wrapped collection type.
+fn native_collection_base_type(
+    class: &str,
+    base_name: &str,
+    declaration: &ClassDecl,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Option<HirType>, String> {
+    let arity = match base_name {
+        "Map" => 2,
+        "Set" => 1,
+        _ => return Ok(None),
+    };
+    let params = declaration
+        .class
+        .super_type_params
+        .as_ref()
+        .map(|params| params.params.as_slice())
+        .unwrap_or_default();
+    if params.len() != arity {
+        return Err(format!(
+            "class `{class}` needs explicit type arguments: `extends {base_name}<{}>`",
+            if arity == 2 { "K, V" } else { "T" }
+        ));
+    }
+    let mut lowered = Vec::with_capacity(arity);
+    for param in params {
+        lowered.push(Box::new(lower_ts_type(param, interfaces, generic_interfaces)?));
+    }
+    let mut lowered = lowered.into_iter();
+    let first = lowered.next().expect("arity checked");
+    let ty = match lowered.next() {
+        Some(value) => HirType::Map(first, value),
+        None => HirType::Set(first),
+    };
+    if let HirType::Map(key, _) | HirType::Set(key) = &ty {
+        map_key_intrinsic_suffix(key)?;
+    }
+    Ok(Some(ty))
 }
 
 fn class_type_has_identity(ty: &HirType, expected: &str) -> bool {

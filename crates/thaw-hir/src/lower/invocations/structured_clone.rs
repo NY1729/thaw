@@ -7,6 +7,11 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         value_type: HirType,
     ) -> Result<HirExpr, String> {
+        // Cloning a `Map`/`Set` subclass instance yields a plain collection.
+        if let Some(base) = native_base_type(&value_type).cloned() {
+            let value = self.project_native_base(value)?;
+            return self.structured_clone_expr(value, base);
+        }
         match &value_type {
             // Scalars are already copied by value; no cloning needed.
             HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined => {

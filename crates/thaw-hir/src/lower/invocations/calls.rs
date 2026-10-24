@@ -408,6 +408,72 @@ impl<'a> FnLowerer<'a> {
         self.lower_call_with_class_guard_and_target(call, None, None)
     }
 
+    /// `super(...)` of a class extending `Map`/`Set`: build the wrapped native
+    /// collection exactly as `new Map<K, V>(...)` would and store it in the
+    /// hidden base field.
+    fn lower_native_collection_super(
+        &mut self,
+        base_name: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<HirExpr, String> {
+        let construct = Expr::New(swc_ecma_ast::NewExpr {
+            span: swc_common::DUMMY_SP,
+            ctxt: Default::default(),
+            callee: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                base_name.into(),
+                swc_common::DUMMY_SP,
+            ))),
+            type_args: self.native_base_type_args.clone(),
+            args: Some(args.to_vec()),
+        });
+        let value = self.lower_expr(&construct)?;
+        let this_name = self.resolve_binding("this");
+        let this_type = self
+            .scope
+            .get(&this_name)
+            .cloned()
+            .ok_or("`super(...)` used outside a constructor")?;
+        Ok(HirExpr::PropAssign(
+            Box::new(HirExpr::Var(this_name)),
+            this_type,
+            NATIVE_BASE_FIELD.to_string(),
+            Box::new(value),
+        ))
+    }
+
+    /// A `Map`/`Set` subclass instance used where the native collection is
+    /// consumed (spread, `for...of`, conversions): its wrapped collection.
+    fn project_native_base(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        if native_base_type(&ty).is_none() {
+            return Ok(value);
+        }
+        Ok(HirExpr::PropAccess(
+            Box::new(value),
+            ty,
+            NATIVE_BASE_FIELD.to_string(),
+        ))
+    }
+
+    /// Lowers a call forwarded to the wrapped collection. Chainable `set`/`add`
+    /// return the subclass instance itself, as in JavaScript.
+    fn lower_native_base_forward(
+        &mut self,
+        forwarded: &CallExpr,
+        method: &str,
+        receiver: &Expr,
+    ) -> Result<HirExpr, String> {
+        let result = self.lower_call(forwarded)?;
+        if matches!(method, "set" | "add") && matches!(receiver, Expr::Ident(_) | Expr::This(_)) {
+            let wrapped = self.infer_member_receiver_type(receiver);
+            if wrapped.as_ref().and_then(native_base_type) == Some(&self.infer_expr_type(&result)?) {
+                let this = self.lower_expr(receiver)?;
+                return Ok(HirExpr::EvalThen(Box::new(result), Box::new(this)));
+            }
+        }
+        Ok(result)
+    }
+
     fn lower_generic_named_call(
         &mut self,
         call: &CallExpr,
@@ -509,6 +575,9 @@ impl<'a> FnLowerer<'a> {
             // (its own generated initializer function already runs this
             // assignment as part of its body), so only a *direct* `extends
             // Error`-family base needs this.
+            if matches!(base_name.as_str(), "Map" | "Set") && !self.signatures.contains_key(&symbol) {
+                return self.lower_native_collection_super(&base_name, &call.args);
+            }
             if matches!(
                 base_name.as_str(),
                 "Error"
@@ -637,6 +706,29 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     class_method_symbol(&base_name, &method_name)
                 };
+                // `super.set(...)` in a class extending `Map`/`Set`: call the
+                // method on the wrapped native collection.
+                if !self.class_static_context
+                    && matches!(base_name.as_str(), "Map" | "Set")
+                    && !self.signatures.contains_key(&symbol)
+                {
+                    let this = self.resolve_binding("this");
+                    if self.scope.get(&this).and_then(native_base_type).is_some() {
+                        let mut forwarded = call.clone();
+                        forwarded.callee = Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                            span: member.span,
+                            obj: Box::new(native_base_member(Expr::This(swc_ecma_ast::ThisExpr {
+                                span: member.span,
+                            }))),
+                            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                method_name.as_str().into(),
+                                member.span,
+                            )),
+                        })));
+                        let this = Expr::This(swc_ecma_ast::ThisExpr { span: member.span });
+                        return self.lower_native_base_forward(&forwarded, &method_name, &this);
+                    }
+                }
                 let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
                     format!("base class `{base_name}` has no method `{method_name}`")
                 })?;
@@ -975,6 +1067,18 @@ impl<'a> FnLowerer<'a> {
                             },
                             Some(class_name),
                         );
+                    }
+                    // A class extending `Map`/`Set` forwards every method it does
+                    // not define itself to the wrapped native collection.
+                    if native_base_type(&class_receiver_type).is_some() {
+                        let mut forwarded = call.clone();
+                        let receiver = (*member.obj).clone();
+                        if let Callee::Expr(callee) = &mut forwarded.callee {
+                            if let Expr::Member(forwarded_member) = callee.as_mut() {
+                                *forwarded_member.obj = native_base_member(receiver.clone());
+                            }
+                        }
+                        return self.lower_native_base_forward(&forwarded, &property, &receiver);
                     }
                     // Date/Object builtins (`getTime`, `hasOwnProperty`, ...) are not
                     // class methods; they reach the native builtin dispatch below.

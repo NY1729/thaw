@@ -2269,6 +2269,51 @@
       "name": "non-null assertion on absent optional number is NaN",
       "expect": "matched",
       "source": "class P { o?: number }\nfunction main(): void {\n  console.log(new P().o! + 1);\n  const q = new P();\n  q.o = 2;\n  console.log(q.o! + 1);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass basic",
+      "expect": "matched",
+      "source": "class Counter extends Map<string, number> {\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); }\n}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\"); c.inc(\"b\");\n  console.log(c.get(\"a\"), c.size, c instanceof Map, c instanceof Counter);\n  console.log(c);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass override super",
+      "expect": "matched",
+      "source": "class LoggedMap extends Map<string, number> {\n  log: string[] = [];\n  set(k: string, v: number): this { this.log.push(\"set:\" + k); return super.set(k, v * 2); }\n  get(k: string): number | undefined { this.log.push(\"get:\" + k); return super.get(k); }\n}\nfunction main(): void {\n  const m = new LoggedMap(); m.set(\"y\", 5);\n  console.log(m.get(\"y\"), m.size, m.log.join(\",\"));\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass iteration spread coercion",
+      "expect": "matched",
+      "source": "class Reg extends Map<string, number> {}\nfunction total(m: Map<string, number>): number { let t = 0; for (const [, v] of m) t += v; m.set(\"z\", 100); return t; }\nfunction main(): void {\n  const r = new Reg(); r.set(\"a\", 1); r.set(\"b\", 2);\n  for (const [k, v] of r) console.log(k, v);\n  console.log([...r], [...r.keys()], Array.from(r.values()));\n  console.log(total(r), r.size, r.has(\"z\"));\n  console.log(new Map([...r]).size, structuredClone(r) instanceof Reg);\n  console.log(JSON.stringify(r), Object.keys(r).length);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: set subclass",
+      "expect": "matched",
+      "source": "class Tags extends Set<string> {\n  addAll(xs: string[]): this { for (const x of xs) this.add(x); return this; }\n}\nfunction main(): void {\n  const t = new Tags(); t.addAll([\"a\", \"b\", \"a\"]);\n  console.log(t.size, t.has(\"a\"), t instanceof Set, Array.isArray(t), [...t].join(\"|\"));\n  console.log(t);\n  console.log(t.union(new Set([\"c\"])).size);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass chain generic",
+      "expect": "matched",
+      "source": "class Base<K, V> extends Map<K, V> { count(): number { return this.size; } }\nclass Leaf extends Base<string, number> {}\nclass Q<T> extends Set<T> { first(): T | undefined { for (const x of this) return x; return undefined; } }\nfunction main(): void {\n  const l = new Leaf(); l.set(\"a\", 1);\n  const q = new Q<number>(); q.add(7);\n  console.log(l.count(), l instanceof Map, l instanceof Leaf, q.first(), q instanceof Set);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass ctor chain and instanceof",
+      "expect": "matched",
+      "source": "class Reg extends Map<string, number> {\n  constructor(entries: [string, number][]) { super(entries); }\n  total(): number { let t = 0; for (const [, v] of this) t += v; return t; }\n}\nclass Sub extends Reg {\n  constructor() { super([[\"q\", 5]]); }\n  doubled(): number { return this.total() * 2; }\n}\nclass Tags extends Set<string> {\n  add(v: string): this { return super.add(v.toUpperCase()); }\n}\nfunction kind(x: Reg | number): string { return x instanceof Map ? \"map\" : \"num\"; }\nfunction main(): void {\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r.size, r.total(), r.get(\"a\"), r.has(\"b\"));\n  const s = new Sub();\n  console.log(s.size, s.doubled(), s instanceof Reg, s instanceof Map, s instanceof Sub);\n  console.log(new Reg([[\"z\", 9]]).set(\"y\", 1).size);\n  const t = new Tags(); t.add(\"x\").add(\"y\");\n  console.log(t.size, t.has(\"X\"), t.has(\"x\"), [...t].join(\"\"));\n  console.log(kind(r), kind(3));\n  const plain = new Map<string, number>();\n  console.log(plain instanceof Reg, plain instanceof Map);\n  r.delete(\"a\"); r.clear();\n  console.log(r.size);\n  const keys: string[] = [];\n  r.set(\"k\", 1);\n  r.forEach((v, k) => keys.push(k + v));\n  console.log(keys.join(\",\"));\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass console",
+      "expect": "matched",
+      "source": "class Counter extends Map<string, number> {}\nclass Sub extends Counter {}\nclass Q<T> extends Set<T> {}\nfunction main(): void {\n  const e = new Counter();\n  console.log(e);\n  const s = new Sub(); s.set(\"k\", 1);\n  console.log(s, [s], { s });\n  const q = new Q<number>(); q.add(7);\n  console.log(q);\n  console.log({ a: { b: { c: { d: s } } } });\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass own field",
+      "expect": "matched",
+      "source": "class Cache extends Map<string, number> {\n  hits: number = 0;\n  lookup(k: string): number {\n    const v = this.get(k);\n    if (v === undefined) { return -1; }\n    this.hits++;\n    return v;\n  }\n}\nfunction main(): void {\n  const c = new Cache();\n  c.set(\"a\", 1);\n  console.log(c.lookup(\"a\"), c.lookup(\"b\"), c.hits, c.size);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: map subclass conversions and aliasing",
+      "expect": "matched",
+      "source": "class Reg extends Map<string, number> {}\nclass Tags extends Set<string> {}\nfunction size(m: Map<string, number> | undefined): number { return m === undefined ? -1 : m.size; }\nfunction main(): void {\n  const r = new Reg(); r.set(\"a\", 1); r.set(\"b\", 2);\n  const t = new Tags(); t.add(\"x\");\n  console.log(Array.from(r).length, Array.from(t).join(\",\"), size(r), size(undefined));\n  console.log(new Set([...t]).size, new Set<string>([...t, \"y\"]).size);\n  const alias: Map<string, number> = r;\n  alias.set(\"c\", 3);\n  console.log(r.size, [...r.entries()].length, r.get(\"c\"));\n  const list: Reg[] = [r, new Reg()];\n  console.log(list.map((m) => m.size).join(\",\"));\n  const holder = { m: r };\n  console.log(holder.m.size, holder.m.has(\"a\"));\n  console.log(Object.keys(r), JSON.stringify({ r }));\n}\n"
     }
   ]
 }

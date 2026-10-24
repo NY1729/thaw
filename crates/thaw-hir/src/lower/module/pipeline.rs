@@ -1696,6 +1696,8 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             let (base_params, base_native_rest) = match signatures.get(&base_symbol) {
                 Some(signature) => (signature.params.clone(), signature.native_rest.clone()),
                 None if is_error_family_name(base.sym.as_ref()) => (vec![HirType::Str], None),
+                // `extends Map`/`Set` without a constructor takes no arguments.
+                None if matches!(base.sym.as_ref(), "Map" | "Set") => (Vec::new(), None),
                 None => {
                     return Err(format!(
                         "derived class `{derived_name}` has no constructor signature for `{}`",

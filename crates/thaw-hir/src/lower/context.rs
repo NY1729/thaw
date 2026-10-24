@@ -117,6 +117,9 @@ struct FnLowerer<'a> {
     source_continue_depths: Vec<usize>,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
+    /// `<K, V>` / `<T>` of an `extends Map`/`Set` clause, replayed on the
+    /// synthetic `new Map<K, V>(...)` that `super(...)` lowers to.
+    native_base_type_args: Option<Box<swc_ecma_ast::TsTypeParamInstantiation>>,
     class_static_context: bool,
     class_context: Option<Symbol>,
     unbound_this_context: bool,
