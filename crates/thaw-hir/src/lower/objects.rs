@@ -2604,6 +2604,8 @@ impl<'a> FnLowerer<'a> {
     fn call_class_instance_setter(
         &mut self,
         owner: &str,
+        // `None` binds the owner's setter statically (`super.x = v`).
+        property: Option<&str>,
         symbol: Symbol,
         receiver: HirExpr,
         value: HirExpr,
@@ -2620,13 +2622,32 @@ impl<'a> FnLowerer<'a> {
             .and_then(|signature| signature.params.get(1)).cloned()
             .ok_or_else(|| format!("instance setter `{symbol}` has no value parameter"))?;
         let argument = self.coerce_to_declared(&parameter_type, HirExpr::Var(value_name.clone()))?;
-        let call = HirExpr::Call(
+        let mut call = HirExpr::Call(
             Box::new(HirExpr::Var(symbol)),
             vec![
                 self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), owner),
-                argument,
+                argument.clone(),
             ],
         );
+        for (derived, derived_type) in property
+            .map(|property| self.virtual_accessor_overrides(owner, property, true))
+            .unwrap_or_default()
+        {
+            let property = property.unwrap_or_default();
+            let cast = HirExpr::TypedClosure(derived_type, Box::new(HirExpr::Var(receiver_name.clone())));
+            call = HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                    vec![HirExpr::Var(receiver_name.clone()), HirExpr::Lit(HirLit::Str(derived.to_string()))],
+                )),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var(class_setter_symbol(&derived, property, false))),
+                    vec![self.assert_class_accessor_receiver(cast, &derived), argument.clone()],
+                )),
+                Box::new(call),
+                HirType::Void,
+            );
+        }
         let result = HirExpr::Block(vec![
             HirStmt::Expr(call),
             HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
@@ -2904,10 +2925,7 @@ impl<'a> FnLowerer<'a> {
                     if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property) {
                         let symbol = class_getter_symbol(&owner, &property, false);
                         if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
-                            return Ok(HirExpr::Call(
-                                Box::new(HirExpr::Var(symbol)),
-                                vec![self.assert_class_accessor_receiver(HirExpr::Var(binding), &owner)],
-                            ));
+                            return Ok(self.call_class_instance_getter(&owner, &property, HirExpr::Var(binding)));
                         }
                     }
                 }
@@ -2918,10 +2936,7 @@ impl<'a> FnLowerer<'a> {
                     if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property) {
                         let symbol = class_getter_symbol(&owner, &property, false);
                         if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
-                            return Ok(HirExpr::Call(
-                                Box::new(HirExpr::Var(symbol)),
-                                vec![self.assert_class_accessor_receiver(HirExpr::Var(binding), &owner)],
-                            ));
+                            return Ok(self.call_class_instance_getter(&owner, &property, HirExpr::Var(binding)));
                         }
                     }
                 }
