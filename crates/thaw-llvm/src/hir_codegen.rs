@@ -429,6 +429,8 @@ pub struct HirCompiler<'ctx> {
     /// Set while `console.log` converts a typed value for inspection: an `Optional` field with no
     /// value is a property that was never set, so it is omitted instead of printed as `undefined`.
     console_omit_absent_fields: bool,
+    /// Set while encoding the fields of a class instance for console output.
+    encoding_class_instance_fields: bool,
     arena_variables: HashSet<String>,
     /// Only prepromoted JsValue cells have a pending first-capture retain.
     /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
@@ -797,6 +799,7 @@ impl<'ctx> HirCompiler<'ctx> {
             planning_var_types: std::cell::RefCell::new(HashMap::new()),
             variable_hir_types: HashMap::new(),
             console_omit_absent_fields: false,
+            encoding_class_instance_fields: false,
             arena_variables: HashSet::new(),
             pending_js_capture_claims: HashMap::new(),
             async_frame_cells: HashSet::new(),
