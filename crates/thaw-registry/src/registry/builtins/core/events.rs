@@ -1,57 +1,6 @@
 macro_rules! assert_source {
     ($tail:literal) => {
-        concat!(
-            "function AssertionError(options) {\n\
-             \x20\x20options = options || {}; this.name = 'AssertionError'; this.code = 'ERR_ASSERTION';\n\
-             \x20\x20this.actual = options.actual; this.expected = options.expected; this.operator = options.operator;\n\
-             \x20\x20this.generatedMessage = options.message === undefined;\n\
-             \x20\x20this.message = options.message === undefined ? 'Expected values to satisfy ' + (options.operator || 'assertion') : String(options.message);\n\
-             \x20\x20if (Error.captureStackTrace) Error.captureStackTrace(this, options.stackStartFn || AssertionError);\n\
-             }\n\
-             AssertionError.prototype = Object.create(Error.prototype); AssertionError.prototype.constructor = AssertionError;\n\
-             function failure(actual, expected, message, operator, start) { throw new AssertionError({ actual: actual, expected: expected, message: message, operator: operator, stackStartFn: start }); }\n\
-             function deep(actual, expected, seen) {\n\
-             if (Object.is(actual, expected)) return true;\n\
-             if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return false;\n\
-             if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;\n\
-             seen = seen || new Map(); if (seen.get(actual) === expected) return true; seen.set(actual, expected);\n\
-             if (actual instanceof Date) return expected instanceof Date && actual.getTime() === expected.getTime();\n\
-             if (actual instanceof RegExp) return expected instanceof RegExp && actual.source === expected.source && actual.flags === expected.flags;\n\
-             if ((actual instanceof Number || actual instanceof String || actual instanceof Boolean) && !Object.is(actual.valueOf(), expected.valueOf())) return false;\n\
-             if (actual instanceof Error) { if (actual.name !== expected.name || actual.message !== expected.message || ('cause' in actual) !== ('cause' in expected) || !deep(actual.cause, expected.cause, seen) || !deep(actual.errors, expected.errors, seen)) return false; }\n\
-             if (Array.isArray(actual) && actual.length !== expected.length) return false;\n\
-             if (actual instanceof ArrayBuffer || actual instanceof DataView) { if (actual.byteLength !== expected.byteLength) return false; var left = actual instanceof DataView ? new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength) : new Uint8Array(actual), right = expected instanceof DataView ? new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength) : new Uint8Array(expected); for (var at = 0; at < left.length; at++) if (left[at] !== right[at]) return false; return true; }\n\
-             if (ArrayBuffer.isView(actual)) { if (!ArrayBuffer.isView(expected) || actual.length !== expected.length) return false; for (var i = 0; i < actual.length; i++) if (!Object.is(actual[i], expected[i])) return false; return true; }\n\
-             if (actual instanceof Map) { if (actual.size !== expected.size) return false; var usedKeys = new Set(); for (var entry of actual) { if (expected.has(entry[0]) && deep(entry[1], expected.get(entry[0]), seen)) { usedKeys.add(entry[0]); continue; } var found = false; for (var other of expected) { if (usedKeys.has(other[0])) continue; if (deep(entry[0], other[0], seen) && deep(entry[1], other[1], seen)) { usedKeys.add(other[0]); found = true; break; } } if (!found) return false; } }\n\
-             if (actual instanceof Set) { if (actual.size !== expected.size) return false; var usedValues = new Set(); for (var item of actual) { if (expected.has(item)) { usedValues.add(item); continue; } var matched = false; for (var candidate of expected) { if (usedValues.has(candidate)) continue; if (deep(item, candidate, seen)) { usedValues.add(candidate); matched = true; break; } } if (!matched) return false; } }\n\
-             var left = Object.keys(actual); var right = Object.keys(expected); if (left.length !== right.length) return false;\n\
-             for (var index = 0; index < left.length; index++) { var key = left[index]; if (!Object.prototype.hasOwnProperty.call(expected, key) || !deep(actual[key], expected[key], seen)) return false; }\n\
-             return true;\n\
-             }\n\
-             function ok(value, message) { if (!value) failure(value, true, message, '==', ok); }\n\
-             function equal(actual, expected, message) { if (actual != expected) failure(actual, expected, message, '==', equal); }\n\
-             function notEqual(actual, expected, message) { if (actual == expected) failure(actual, expected, message, '!=', notEqual); }\n\
-             function strictEqual(actual, expected, message) { if (!Object.is(actual, expected)) failure(actual, expected, message, 'strictEqual', strictEqual); }\n\
-             function notStrictEqual(actual, expected, message) { if (Object.is(actual, expected)) failure(actual, expected, message, 'notStrictEqual', notStrictEqual); }\n\
-             function deepStrictEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepStrictEqual', deepStrictEqual); }\n\
-             function notDeepStrictEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepStrictEqual', notDeepStrictEqual); }\n\
-             function fail(message) { failure(undefined, undefined, message || 'Failed', 'fail', fail); }\n\
-             function matches(error, expected) {\n\
-             if (expected === undefined) return true;\n\
-             if (expected instanceof RegExp) return expected.test(String(error && error.message || error));\n\
-             if (typeof expected === 'function') { if (expected.prototype !== undefined && error instanceof expected) return true; if (Error.isPrototypeOf(expected)) return false; return expected.call({}, error) === true; }\n\
-             if (expected !== null && typeof expected === 'object') { if (error === null || typeof error !== 'object') return false; var keys = Object.keys(expected); if (expected instanceof Error) keys.push('name', 'message'); return keys.every(function(key) { if (!(key in error)) return false; var want = expected[key]; if (want instanceof RegExp && typeof error[key] === 'string') return want.test(error[key]); return deep(error[key], want); }); }\n\
-             return true;\n\
-             }\n\
-             function throws(block, expected, message) { var caught; try { block(); } catch (error) { caught = error; } if (caught === undefined || !matches(caught, expected)) failure(caught, expected, message, 'throws', throws); return caught; }\n\
-             function doesNotThrow(block, expected, message) { try { block(); } catch (error) { if (matches(error, expected)) failure(error, undefined, message, 'doesNotThrow', doesNotThrow); throw error; } }\n\
-             ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = notEqual; ok.strictEqual = strictEqual; ok.notStrictEqual = notStrictEqual;\n\
-             ok.deepEqual = deepStrictEqual; ok.notDeepEqual = notDeepStrictEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;\n\
-             ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.default = ok; ok.__esModule = true;\n\
-             function strict(value, message) { if (!value) failure(value, true, message, '==', strict); }\n\
-             Object.assign(strict, ok, { equal: strictEqual, notEqual: notStrictEqual, deepEqual: deepStrictEqual, notDeepEqual: notDeepStrictEqual }); strict.strict = strict; strict.default = strict; ok.strict = strict;\n",
-            $tail
-        )
+        concat!(include_str!("assert.js"), $tail)
     };
 }
 
@@ -109,11 +58,13 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              EventEmitter.prototype.prependListener = function(event, listener) { return addEventListener(this, event, listener, true, false); };\n\
              EventEmitter.prototype.prependOnceListener = function(event, listener) { return addEventListener(this, event, listener, true, true); };\n\
              function removeEntry(emitter, name, entry) { var events = emitter._events; var list = events ? events[name] : undefined; var at = list ? list.indexOf(entry) : -1; if (at < 0) return; list.splice(at, 1); if (list.length === 0) delete events[name]; if (events.removeListener && events.removeListener.length) emitter.emit('removeListener', name, entry.listener); }\n\
+             // ponytail: tiny inspect for the ERR_UNHANDLED_ERROR message only (strings, plain arrays/objects); a static require of node:util would make the bundler pull it into every events consumer.
+             function inspectError(value, depth) { if (typeof value === 'string') return \"'\" + value + \"'\"; if (!value || typeof value !== 'object' || depth > 2) return String(value); if (Array.isArray(value)) return value.length ? '[ ' + value.map(function(item) { return inspectError(item, depth + 1); }).join(', ') + ' ]' : '[]'; if (Object.getPrototypeOf(value) !== Object.prototype) return String(value); var keys = Object.keys(value); return keys.length ? '{ ' + keys.map(function(key) { return key + ': ' + inspectError(value[key], depth + 1); }).join(', ') + ' }' : '{}'; }\n\
              EventEmitter.prototype.emit = function(event) {\n\
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); var events = this._events; var list = events ? events[name] : undefined;\n\
              \x20\x20if (name === 'error' && events && events[errorMonitor] && events[errorMonitor].length) this.emit.apply(this, [errorMonitor].concat(Array.prototype.slice.call(arguments, 1)));\n\
              \x20\x20if (!list || list.length === 0) {\n\
-             \x20\x20\x20\x20if (name === 'error') { var error = arguments[1]; throw error instanceof Error ? error : new Error('Unhandled error event'); }\n\
+             \x20\x20\x20\x20if (name === 'error') { var error = arguments[1]; if (error instanceof Error) throw error; var unhandled = new Error('Unhandled error. (' + inspectError(error, 0) + ')'); unhandled.code = 'ERR_UNHANDLED_ERROR'; unhandled.context = error; throw unhandled; }\n\
              \x20\x20\x20\x20return false;\n\
              \x20\x20}\n\
              \x20\x20var args = Array.prototype.slice.call(arguments, 1);\n\
