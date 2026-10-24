@@ -512,7 +512,8 @@ fn build_with_native_mode(
                 "source": input.display().to_string(),
             }));
         }
-        let manifest = serde_json::json!({
+        #[allow(unused_mut)]
+        let mut manifest = serde_json::json!({
             "packages": resolved_packages,
             // Registry fallback wrappers contain `callDynamic(...)` even when a
             // JIT declaration shadows them, so only count the generated shim's
@@ -527,6 +528,10 @@ fn build_with_native_mode(
                 || shim_source.contains("loadNativeAddon(")
                 || shim_source.contains("embedExecutable("),
         });
+        #[cfg(feature = "thaw-js-diagnostics")]
+        if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
+            manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
+        }
         let constructor_package_qualifiers =
             package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
         let transform = |source: &str, module_path: &Path, is_override: bool| {
@@ -1148,6 +1153,24 @@ fn source_uses_quickjs(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| source.contains(marker))
+}
+
+/// Experimental, opt-in (`--features thaw-js-diagnostics` and `THAW_JS_RUNTIME=1`): for every resolved
+/// package with a JavaScript bundle, which constructs would keep the thaw-js evaluator from running it.
+#[cfg(feature = "thaw-js-diagnostics")]
+fn thaw_js_eligibility(registry_dir: &Path, packages: &[String]) -> serde_json::Value {
+    let entries = packages.iter().filter_map(|package| {
+        let bundle = thaw_registry::resolve(registry_dir, package).ok()?.bundle_js?;
+        Some(match thaw_js::scan::scan_bundle(&bundle) {
+            Ok(report) => serde_json::json!({
+                "package": package,
+                "eligible": report.is_clean(),
+                "blockers": report.blockers.iter().map(|(feature, (count, _))| (feature.clone(), *count)).collect::<std::collections::BTreeMap<_, _>>(),
+            }),
+            Err(error) => serde_json::json!({ "package": package, "eligible": false, "error": error }),
+        })
+    });
+    serde_json::Value::Array(entries.collect())
 }
 
 fn quickjs_fallback_reasons(
