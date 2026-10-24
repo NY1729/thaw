@@ -679,6 +679,13 @@ pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
     )
 }
 
+/// An unhandled fatal error ends the process at once, as in Node: pending timers,
+/// continuations and fd waits must never fire after it.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_abort_pending_work() {
+    purge_pending_async_state();
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_runtime_shutdown_wait() {
     std::thread::sleep(Duration::from_millis(1));
