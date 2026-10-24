@@ -1443,6 +1443,48 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
     module
 }
 
+/// `const p: any = asyncFn()`: a native Promise has no Json form, so an immutable `any` alias of
+/// a direct call to a top-level async function drops the annotation and keeps the Promise type
+/// (`await p` / `p.then(...)` then work like any other Promise binding).
+pub fn normalize_any_async_call_aliases(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    struct Rewriter(HashSet<Symbol>);
+    impl swc_ecma_visit::VisitMut for Rewriter {
+        fn visit_mut_var_decl(&mut self, var: &mut VarDecl) {
+            var.visit_mut_children_with(self);
+            if var.kind != VarDeclKind::Const {
+                return;
+            }
+            for declarator in &mut var.decls {
+                let Pat::Ident(binding) = &mut declarator.name else { continue };
+                let is_any = matches!(binding.type_ann.as_deref(), Some(TsTypeAnn { type_ann, .. })
+                    if matches!(type_ann.as_ref(), TsType::TsKeywordType(keyword)
+                        if keyword.kind == TsKeywordTypeKind::TsAnyKeyword));
+                let calls_async = matches!(declarator.init.as_deref(), Some(Expr::Call(CallExpr {
+                    callee: Callee::Expr(callee), ..
+                })) if matches!(callee.as_ref(), Expr::Ident(id) if self.0.contains(&id.sym.to_string())));
+                if is_any && calls_async {
+                    binding.type_ann = None;
+                }
+            }
+        }
+    }
+    let asyncs = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function)))
+            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+                decl: Decl::Fn(function), ..
+            })) if function.function.is_async => Some(function.ident.sym.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rewriter(asyncs));
+    module
+}
+
 /// `(owner, object)` for a whole-prototype assignment `F.prototype = <expr>`.
 fn constructor_prototype_replacement(expr: &Expr) -> Option<(Symbol, &Expr)> {
     let Expr::Assign(assign) = expr else {

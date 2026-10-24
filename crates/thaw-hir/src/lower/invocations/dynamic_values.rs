@@ -672,7 +672,7 @@ impl<'a> FnLowerer<'a> {
             if callee_name == "Number"
                 && matches!(
                     ty,
-                    HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                    HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Union(_)
                 )
             {
                 return self.coerce_primitive_to_number(value);
