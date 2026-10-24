@@ -2680,6 +2680,31 @@ fn rejects_default_parameters_that_read_themselves_or_later_parameters() {
     lower_module(&module).unwrap();
 }
 
+const MUTATED_ANY_CALLBACK: &str = r#"class C { x = 1; }
+class D { z = 0; }
+const c = new C();
+function main(): void {
+    setTimeout((o: any) => { o.x = 5; console.log(o === c, c === o, o instanceof C, o instanceof D); }, 1, c);
+}"#;
+
+#[test]
+fn lowers_live_handle_identity_against_a_native_object_through_the_interned_view() {
+    // Both operand orders lower to dynamic strict comparisons instead of a constant `false`.
+    let count = |source: &str| format!("{:?}", lower(source)).matches("__thaw_strict_equal_dynamic").count();
+    let without = count(&MUTATED_ANY_CALLBACK.replace("o === c, c === o", "o.x, c.x"));
+    assert_eq!(without, 0);
+    assert!(count(MUTATED_ANY_CALLBACK) >= 2);
+}
+
+#[test]
+fn lowers_live_handle_instanceof_through_the_native_owner_with_a_realm_fallback() {
+    let program = lower(MUTATED_ANY_CALLBACK);
+    let body = format!("{program:?}");
+    assert_eq!(body.matches("__thaw_native_view_target").count(), 2, "{body}");
+    assert_eq!(body.matches("__thaw_object_has_class_identity").count(), 2, "{body}");
+    assert_eq!(body.matches("\"__thaw_instanceof_dynamic_value\"").count(), 2, "{body}");
+}
+
 #[test]
 fn non_null_assertion_of_optional_number_yields_nan_when_absent() {
     let program = lower(
