@@ -104,6 +104,7 @@ fn lower_class_constructor(
                 .unwrap_or(HirType::Void),
             base.sym.to_string(),
         ));
+        lowerer.native_base_type_args = declaration.class.super_type_params.clone();
     }
     lowerer
         .bindings
@@ -283,7 +284,14 @@ fn lower_class_constructor(
                 .super_initializer
                 .clone()
                 .expect("derived class has a base initializer");
-            if is_error_family_name(&base_name) {
+            if matches!(base_name.as_str(), "Map" | "Set")
+                && !signatures.contains_key(&base_initializer)
+            {
+                initializer_body.push(HirStmt::Expr(
+                    lowerer.lower_native_collection_super(&base_name, &[])?,
+                ));
+                initializer_body.append(&mut own_initializers);
+            } else if is_error_family_name(&base_name) {
                 let message = params
                     .first()
                     .ok_or("implicit Error constructor is missing its message parameter")?;

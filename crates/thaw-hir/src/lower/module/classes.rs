@@ -115,7 +115,24 @@ fn collect_native_classes<'a>(
                 ));
             };
             let base_name = base.sym.as_ref();
-            if !declarations.contains_key(base_name) {
+            let collection = if declarations.contains_key(base_name) {
+                None
+            } else {
+                native_collection_base_type(
+                    name,
+                    base_name,
+                    declaration,
+                    interfaces,
+                    generic_interfaces,
+                )?
+            };
+            if let Some(collection) = collection {
+                // `extends Map<K, V>` / `extends Set<T>`: the native collection
+                // lives in a hidden first inherited field and the identity chain
+                // names the collection so `instanceof Map` holds.
+                identities.push(base_name.to_string());
+                inherited_fields.push((NATIVE_BASE_FIELD.to_string(), collection));
+            } else if !declarations.contains_key(base_name) {
                 // `Error`/`TypeError`/etc. are not real declared classes --
                 // `new Error(message)` lowers straight to a tagged string
                 // (see `lower/expressions/lowering.rs`), not an object. A

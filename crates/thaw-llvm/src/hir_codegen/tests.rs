@@ -742,3 +742,4 @@ include!("tests/anyctor_contracts.rs");
 include!("tests/anyclasses_contracts.rs");
 include!("tests/clsfld_contracts.rs");
 include!("tests/errobj_contracts.rs");
+include!("tests/mapsub_contracts.rs");

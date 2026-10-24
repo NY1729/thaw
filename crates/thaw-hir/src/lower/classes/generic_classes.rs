@@ -1891,7 +1891,9 @@ fn specialize_generic_classes(
                 item,
                 ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
                     if declaration.class.type_params.is_some()
-                        || declaration.class.super_type_params.is_some()
+                        || (declaration.class.super_type_params.is_some()
+                            && !matches!(declaration.class.super_class.as_deref(),
+                                Some(Expr::Ident(base)) if matches!(base.sym.as_ref(), "Map" | "Set")))
                         || class_contains_unresolved_generic_type(&declaration.class, &names)
             )
         });

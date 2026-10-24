@@ -558,6 +558,24 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        // A `Map`/`Set` subclass instance passed where its native collection
+        // is declared: hand over the wrapped collection (shared, so mutation
+        // through the callee stays visible on the instance).
+        let mut value = value;
+        if let HirType::Map(..) | HirType::Set(_) = match declared {
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => inner.as_ref(),
+            other => other,
+        } {
+            let target = match declared {
+                HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => inner.as_ref(),
+                other => other,
+            };
+            if let Ok(actual) = self.infer_expr_type(&value) {
+                if native_base_type(&actual) == Some(target) {
+                    value = self.project_native_base(value)?;
+                }
+            }
+        }
         if matches!(declared, HirType::Function(..)
             | HirType::CallableFunction(_, _, None, _))
         {

@@ -326,6 +326,8 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Field order for encoding; console output hides `#private` slots like Node does.
     fn visible_object_field_order(&self, fields: &[(String, HirType)]) -> Vec<usize> {
         let mut order = ecmascript_object_field_order(fields);
+        // The native collection behind a `Map`/`Set` subclass is not an own property.
+        order.retain(|&index| fields[index].0 != "__thaw_base");
         if self.console_omit_absent_fields {
             order.retain(|&index| !fields[index].0.starts_with("__thaw_private_"));
         }
@@ -341,6 +343,27 @@ impl<'ctx> HirCompiler<'ctx> {
         let HirType::Object(fields) = ty else {
             return Err("dynamic object marshaling requires an object type".to_string());
         };
+        // console.log of a `Map`/`Set` subclass instance: the collection wrapper
+        // the inspector knows, named after the most-derived class.
+        if self.console_omit_absent_fields && fields.get(1).is_some_and(|(name, _)| name == "__thaw_base") {
+            let base = self.compile_accessor_aware_field_read(object, ty, fields, 1)?;
+            let wrapper = self.compile_native_collection_to_json(
+                base.into_pointer_value(), &fields[1].1, preserve_undefined,
+            )?;
+            let class = fields[0].0.strip_prefix("__thaw_class_identity_\u{1e}")
+                .and_then(|ancestry| ancestry.split('\u{1f}').next())
+                .ok_or("native collection subclass has no identity marker")?;
+            let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
+                .map_err(|error| error.to_string())?;
+            let name = self.builder.build_global_string_ptr(class, "console_class_name")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_json_object_set_string").unwrap(),
+                &[wrapper.into(), key.as_pointer_value().into(), name.as_pointer_value().into()],
+                "set_console_class",
+            ).map_err(|error| error.to_string())?;
+            return Ok(wrapper);
+        }
         let json = self
             .builder
             .build_call(
