@@ -641,11 +641,7 @@ impl<'a> FnLowerer<'a> {
             }
             // `Bytes` and `Array(F64)` share a layout -- pass either
             // straight through as the other.
-            if matches!(
-                (declared, &actual),
-                (HirType::Bytes, HirType::Array(elem)) | (HirType::Array(elem), HirType::Bytes)
-                    if **elem == HirType::F64
-            ) {
+            if bytes_layout_eq(declared, &actual) {
                 return Ok(value);
             }
             if matches!(actual, HirType::Json | HirType::JsValue) {

@@ -3492,6 +3492,51 @@ fn buffer_is_a_distinct_type_that_erases_to_a_number_array() {
 }
 
 #[test]
+fn array_of_buffers_keeps_byte_dispatch() {
+    let program = lower(
+        r#"
+        declare function raw(): Buffer;
+        function main(): void {
+            const a = raw(); const b = raw();
+            const pair = [a, b];
+            console.log(pair[1].readUInt8(0), Buffer.isBuffer(pair[0]), pair[0].toString("hex"));
+        }
+        "#,
+    );
+    assert!(!format!("{program:?}").contains("Bytes"));
+}
+
+#[test]
+fn object_literal_buffer_field_keeps_byte_dispatch() {
+    let program = lower(
+        r#"
+        declare function raw(): Buffer;
+        function main(): void { const o = { b: raw(), n: 1 }; console.log(o.b.readUInt8(0), Buffer.isBuffer(o.b)); }
+        "#,
+    );
+    assert!(!format!("{program:?}").contains("Bytes"));
+}
+
+#[test]
+fn buffer_array_is_layout_compatible_with_number_arrays_both_ways() {
+    let program = lower(
+        r#"
+        declare function raw(): Buffer;
+        function take(xs: number[][]): number { return xs.length; }
+        function takeBuf(xs: Buffer[]): number { return xs.length; }
+        function main(): void {
+            const pair = [raw(), raw()];
+            const nums: number[][] = pair;
+            const bufs: Buffer[] = nums;
+            const mixed = [raw(), [1, 2]];
+            console.log(take(pair), takeBuf(nums), bufs.length, mixed.length);
+        }
+        "#,
+    );
+    assert!(!format!("{program:?}").contains("Bytes"));
+}
+
+#[test]
 fn unannotated_buffer_binding_still_dispatches_byte_specific_methods() {
     // Storing a `let`/`const` binding's *declared* type from the erasing
     // `infer_expr_type` (instead of `infer_expr_type_inner`) used to

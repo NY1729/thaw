@@ -721,6 +721,7 @@ include!("tests/privfield_contracts.rs");
 include!("tests/hirdiv_contracts.rs");
 include!("tests/conlog_contracts.rs");
 include!("tests/bytes_range_contracts.rs");
+include!("tests/bufferlit_contracts.rs");
 include!("tests/newtarget_contracts.rs");
 
 include!("tests/fnlen_contracts.rs");

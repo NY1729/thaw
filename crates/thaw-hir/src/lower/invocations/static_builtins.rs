@@ -2387,8 +2387,9 @@ impl<'a> FnLowerer<'a> {
                             };
                             let list_type = self.infer_expr_type(list)?;
                             if !matches!(&list_type, HirType::Array(element)
-                                if matches!(element.as_ref(),
-                                    HirType::Array(inner) if **inner == HirType::F64))
+                                if matches!(element.as_ref(), HirType::Bytes)
+                                    || matches!(element.as_ref(),
+                                        HirType::Array(inner) if **inner == HirType::F64))
                             {
                                 return Err(format!(
                                     "`Buffer.concat` expects an array of byte buffers, got {list_type:?}"

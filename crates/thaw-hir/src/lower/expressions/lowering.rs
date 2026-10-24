@@ -3938,7 +3938,10 @@ impl<'a> FnLowerer<'a> {
                                 if matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
                                     return Ok(value);
                                 }
-                                let ty = self.infer_expr_type(&value)?;
+                                let ty = match self.infer_expr_type_inner(&value) {
+                                    Ok(HirType::Bytes) => HirType::Bytes,
+                                    _ => self.infer_expr_type(&value)?,
+                                };
                                 let name = format!(
                                     "__thaw_array_element_{}_{}",
                                     position, self.next_binding
