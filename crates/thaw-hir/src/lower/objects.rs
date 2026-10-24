@@ -2945,6 +2945,10 @@ impl<'a> FnLowerer<'a> {
                         // An enum value that travelled through `any` is a dynamic number.
                         index = self.coerce_primitive_to_number(index)?;
                     }
+                    if self.infer_expr_type(&index)? == HirType::Str {
+                        let object = enum_dynamic_index(enum_name.sym.as_str(), &computed.expr, self.enum_values, self.enum_reverse_values);
+                        return self.lower_expr(&object);
+                    }
                     self.expect_type(&HirType::F64, &index, "numeric enum reverse lookup")?;
                     return Ok(HirExpr::EnumReverseLookup(Box::new(index), entries.clone()));
                 }
@@ -2953,6 +2957,11 @@ impl<'a> FnLowerer<'a> {
                     .keys()
                     .any(|(candidate, _)| candidate == enum_name.sym.as_str())
                 {
+                    let index = self.lower_expr(&computed.expr)?;
+                    if self.infer_expr_type(&index)? == HirType::Str {
+                        let object = enum_dynamic_index(enum_name.sym.as_str(), &computed.expr, self.enum_values, self.enum_reverse_values);
+                        return self.lower_expr(&object);
+                    }
                     return Err(format!(
                         "string enum `{}` does not support numeric reverse lookup",
                         enum_name.sym

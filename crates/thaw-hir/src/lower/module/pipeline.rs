@@ -268,6 +268,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     reject_forward_parameter_references(module)?;
     let merged = normalize_interface_merges(module)?;
     let merged = flatten_namespaces(&merged);
+    let merged = enums_as_values(&merged);
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = lift_local_classes(&normalized);
     let normalized = normalize_top_level_class_expressions(&normalized)?;
