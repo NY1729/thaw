@@ -738,6 +738,7 @@ include!("tests/enumvals_contracts.rs");
 include!("tests/builtingaps_contracts.rs");
 include!("tests/typinggaps_contracts.rs");
 include!("tests/classgaps_contracts.rs");
+include!("tests/anyctor_contracts.rs");
 include!("tests/anyclasses_contracts.rs");
 include!("tests/clsfld_contracts.rs");
 include!("tests/errobj_contracts.rs");

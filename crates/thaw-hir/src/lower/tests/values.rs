@@ -3839,3 +3839,65 @@ fn error_side_table_intrinsics_are_typed() {
     );
     assert_eq!(program.functions.len(), 1);
 }
+
+#[test]
+fn closure_call_keeps_a_class_value_argument_live_for_an_any_parameter() {
+    let program = lower(
+        r#"
+        class C { x = 1; }
+        const show = (K: any) => typeof K;
+        function main(): void { console.log(show(C)); }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(!format!("{:?}", main.body).contains("readDynamicValue"));
+    assert!(format!("{:?}", main.body).contains("JsValueAsJson"));
+}
+
+#[test]
+fn class_value_registers_a_native_constructor_bridge_only_when_eligible() {
+    let eligible = format!("{:?}", lower(
+        r#"
+        class C { x = 1; dbl(): number { return this.x * 2; } }
+        function main(): void { const k: any = C; const o = new k(); console.log(o.dbl()); }
+        "#,
+    ));
+    assert!(eligible.contains("__thaw_ctor_bridge_C"));
+    assert!(eligible.contains("constructDynamicValue"));
+    let defaulted = format!("{:?}", lower(
+        r#"
+        class P { n: number; constructor(n: number = 1) { this.n = n; } }
+        function main(): void { const k: any = P; const o = new k(); console.log(o.n); }
+        "#,
+    ));
+    assert!(!defaulted.contains("__thaw_ctor_bridge_P"));
+    let decorated = format!("{:?}", lower(
+        r#"
+        function tag(target: any): void {}
+        @tag class D { x = 1; }
+        function main(): void { const k: any = D; const o = new k(); console.log(o.x); }
+        "#,
+    ));
+    assert!(!decorated.contains("__thaw_ctor_bridge_D"));
+    let with_static = format!("{:?}", lower(
+        r#"
+        class S { static count = 0; id: number; constructor() { S.count += 1; this.id = S.count; } }
+        class T extends S { }
+        function main(): void { const k: any = T; const o = new k(); console.log(o.id); }
+        "#,
+    ));
+    assert!(!with_static.contains("__thaw_ctor_bridge_S"));
+    assert!(!with_static.contains("__thaw_ctor_bridge_T"));
+}
+
+#[test]
+fn instanceof_against_an_any_variable_uses_the_host_instanceof() {
+    let program = lower(
+        r#"
+        class C { x = 1; }
+        function main(): void { const k: any = C; const o = new k(); console.log(o instanceof k); }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("__thaw_json_host_instanceof"));
+}

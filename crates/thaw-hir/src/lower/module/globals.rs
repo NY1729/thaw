@@ -33,6 +33,21 @@ fn lower_top_level_initializers(
             }
         }
     }
+    // Classes declaring static fields: a JavaScript class value cannot see
+    // native updates to them, so they (and their subclasses) keep the
+    // JavaScript-copy constructor.
+    let static_field_classes: HashSet<Symbol> = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+                if declaration.class.body.iter().any(|member| matches!(member, ClassMember::ClassProp(property) if property.is_static)) =>
+            {
+                Some(declaration.ident.sym.to_string())
+            }
+            _ => None,
+        })
+        .collect();
     let mut steps = Vec::new();
     for item in &module.body {
         if let ModuleItem::Stmt(Stmt::Expr(statement)) = item {
@@ -180,8 +195,25 @@ fn lower_top_level_initializers(
                     // leave the token's storage permanently zero (an
                     // invalid `JsValue` handle) the moment anything reads
                     // it.
-                    let token_value = match class_value_js_script(declaration, value_referenced_classes) {
+                    let ctor_bridge = class_constructor_bridgeable(&mut lowerer, declaration, value_referenced_classes, &static_field_classes);
+                    let token_value = match class_value_js_script(declaration, value_referenced_classes, ctor_bridge) {
                         Some((global, script)) => {
+                            // `new k()` through the class value builds a
+                            // real native instance via this bridge.
+                            if ctor_bridge {
+                                let bridge = class_constructor_bridge_expr(&mut lowerer, class_name)?;
+                                steps.push(HirInitStep::Statement(HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("setDynamicProperty".to_string())),
+                                    vec![
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                            vec![HirExpr::Lit(HirLit::Str("globalThis".into()))],
+                                        ),
+                                        HirExpr::Lit(HirLit::Str(class_constructor_bridge_name(class_name))),
+                                        bridge,
+                                    ],
+                                ))));
+                            }
                             // Register one native bridge per instance method
                             // before evaluating the class, so the generated
                             // JavaScript method bodies (which delegate to
@@ -810,6 +842,204 @@ fn rewrite_instance_methods_to_bridges(class: &mut swc_ecma_ast::Class, class_na
     }
 }
 
+/// The realm global the thin JavaScript class value calls to construct a
+/// real native instance (see `class_constructor_bridge_expr`).
+fn class_constructor_bridge_name(class_name: &str) -> String {
+    format!("__thaw_ctor_bridge_{class_name}")
+}
+
+/// Whether `new k()` through the class value can delegate to a native
+/// constructor bridge. Anything outside the supported shape (generic,
+/// decorated, abstract, private members, a non-class base, a layout that
+/// cannot be projected as a live view) keeps the JavaScript-copy class.
+fn class_constructor_bridgeable(
+    lowerer: &mut FnLowerer<'_>,
+    declaration: &swc_ecma_ast::ClassDecl,
+    class_tokens: &HashSet<Symbol>,
+    static_field_classes: &HashSet<Symbol>,
+) -> bool {
+    let class = &declaration.class;
+    if class_has_decorators(class)
+        || class.is_abstract
+        || class.type_params.is_some()
+        || class.body.iter().any(|member| matches!(
+            member,
+            ClassMember::PrivateProp(_) | ClassMember::PrivateMethod(_) | ClassMember::AutoAccessor(_)
+        ))
+    {
+        return false;
+    }
+    if let Some(base) = class.super_class.as_deref() {
+        if !matches!(base, Expr::Ident(base) if class_tokens.contains(base.sym.as_ref())) {
+            return false;
+        }
+    }
+    let Some(signature) = lowerer.signatures.get(&class_constructor_symbol(declaration.ident.sym.as_ref())) else {
+        return false;
+    };
+    // Omittable or tagged-absence parameters do not round-trip through the
+    // callback argument decoder yet; those classes keep the JavaScript copy.
+    if signature.abstract_class_constructor
+        || signature.native_rest.is_some()
+        || !signature.source_omittable.is_empty()
+        || signature.params.iter().any(|ty| matches!(
+            ty,
+            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_)
+        ))
+    {
+        return false;
+    }
+    let instance = signature.ret.clone();
+    if let HirType::Object(fields) = &instance {
+        let inherits_statics = fields.first().is_some_and(|(marker, _)| {
+            marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|ancestry|
+                ancestry.split('\u{1f}').any(|name| static_field_classes.contains(name)))
+        });
+        if inherits_statics || static_field_classes.contains(declaration.ident.sym.as_ref()) {
+            return false;
+        }
+    }
+    let nested = std::mem::replace(&mut lowerer.alias_native_arrays, true);
+    let supported = lowerer.class_instance_supports_live_methods(&instance);
+    lowerer.alias_native_arrays = nested;
+    supported
+}
+
+/// Builds the native bridge for a class constructor: it runs the real
+/// native constructor and returns the interned live view of the new
+/// instance, so `new k()` through a class value yields the native object
+/// itself rather than a JavaScript-realm copy.
+fn class_constructor_bridge_expr(lowerer: &mut FnLowerer<'_>, class_name: &str) -> Result<HirExpr, String> {
+    let symbol = class_constructor_symbol(class_name);
+    let signature = lowerer
+        .signatures
+        .get(&symbol)
+        .cloned()
+        .ok_or_else(|| format!("constructor bridge target `{symbol}` is not declared"))?;
+    let params: Vec<HirParam> = signature
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| HirParam { name: format!("__thaw_ctor_arg_{index}"), ty: ty.clone() })
+        .collect();
+    for param in &params {
+        lowerer.scope.insert(param.name.clone(), param.ty.clone());
+    }
+    let instance = HirExpr::Call(
+        Box::new(HirExpr::Var(symbol)),
+        params.iter().map(|param| HirExpr::Var(param.name.clone())).collect(),
+    );
+    let view = lowerer.coerce_live_view_operand(instance)?;
+    let view = lowerer.coerce_to_declared(&HirType::JsValue, view)?;
+    let lambda = HirExpr::Lambda(
+        Vec::new(),
+        params.clone(),
+        HirType::JsValue,
+        Box::new(HirExpr::Block(vec![HirStmt::Return(Some(view))])),
+    );
+    let callback_type = HirType::Function(
+        params.iter().map(|param| param.ty.clone()).collect(),
+        Box::new(HirType::JsValue),
+    );
+    Ok(HirExpr::Call(
+        Box::new(HirExpr::Var("registerNativeCallbackGraph".to_string())),
+        vec![HirExpr::TypedClosure(callback_type, Box::new(lambda))],
+    ))
+}
+
+/// Replaces the class's JavaScript constructor and instance field
+/// initialisers with `constructor(...a) { const w = <bridge>(...a);
+/// Object.setPrototypeOf(w, new.target.prototype); return w; }`. Returning
+/// an object from a derived constructor without `super()` is legal, so
+/// subclasses of the token keep working.
+fn rewrite_constructor_to_bridge(class: &mut swc_ecma_ast::Class, class_name: &str) {
+    use swc_common::DUMMY_SP;
+    use swc_ecma_ast as ast;
+    let ident = |name: &str| ast::Ident::new_no_ctxt(name.into(), DUMMY_SP);
+    let ident_expr = |name: &str| Box::new(Expr::Ident(ident(name)));
+    let arg = |expr: Box<Expr>| ast::ExprOrSpread { spread: None, expr };
+    let bridge = Expr::Member(ast::MemberExpr {
+        span: DUMMY_SP,
+        obj: ident_expr("globalThis"),
+        prop: MemberProp::Computed(ast::ComputedPropName {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Lit(Lit::Str(ast::Str {
+                span: DUMMY_SP,
+                value: class_constructor_bridge_name(class_name).into(),
+                raw: None,
+            }))),
+        }),
+    });
+    let construct = Expr::Call(ast::CallExpr {
+        span: DUMMY_SP,
+        ctxt: Default::default(),
+        callee: ast::Callee::Expr(Box::new(bridge)),
+        args: vec![ast::ExprOrSpread { spread: Some(DUMMY_SP), expr: ident_expr("a") }],
+        type_args: None,
+    });
+    let instance_decl = ast::Stmt::Decl(ast::Decl::Var(Box::new(ast::VarDecl {
+        span: DUMMY_SP,
+        ctxt: Default::default(),
+        kind: ast::VarDeclKind::Const,
+        declare: false,
+        decls: vec![ast::VarDeclarator {
+            span: DUMMY_SP,
+            name: ast::Pat::Ident(ast::BindingIdent { id: ident("w"), type_ann: None }),
+            init: Some(Box::new(construct)),
+            definite: false,
+        }],
+    })));
+    let set_prototype = ast::Stmt::Expr(ast::ExprStmt {
+        span: DUMMY_SP,
+        expr: Box::new(Expr::Call(ast::CallExpr {
+            span: DUMMY_SP,
+            ctxt: Default::default(),
+            callee: ast::Callee::Expr(Box::new(Expr::Member(ast::MemberExpr {
+                span: DUMMY_SP,
+                obj: ident_expr("Object"),
+                prop: MemberProp::Ident(ast::IdentName::new("setPrototypeOf".into(), DUMMY_SP)),
+            }))),
+            args: vec![
+                arg(ident_expr("w")),
+                arg(Box::new(Expr::Member(ast::MemberExpr {
+                    span: DUMMY_SP,
+                    obj: Box::new(Expr::MetaProp(ast::MetaPropExpr {
+                        span: DUMMY_SP,
+                        kind: ast::MetaPropKind::NewTarget,
+                    })),
+                    prop: MemberProp::Ident(ast::IdentName::new("prototype".into(), DUMMY_SP)),
+                }))),
+            ],
+            type_args: None,
+        })),
+    });
+    let ret = ast::Stmt::Return(ast::ReturnStmt { span: DUMMY_SP, arg: Some(ident_expr("w")) });
+    let constructor = ast::Constructor {
+        span: DUMMY_SP,
+        ctxt: Default::default(),
+        key: ast::PropName::Ident(ast::IdentName::new("constructor".into(), DUMMY_SP)),
+        params: vec![ast::ParamOrTsParamProp::Param(ast::Param {
+            span: DUMMY_SP,
+            decorators: Vec::new(),
+            pat: ast::Pat::Rest(ast::RestPat {
+                span: DUMMY_SP,
+                dot3_token: DUMMY_SP,
+                arg: Box::new(ast::Pat::Ident(ast::BindingIdent { id: ident("a"), type_ann: None })),
+                type_ann: None,
+            }),
+        })],
+        body: Some(ast::FunctionBody { span: DUMMY_SP, stmts: vec![instance_decl, set_prototype, ret] }),
+        accessibility: None,
+        is_optional: false,
+    };
+    class.body.retain(|member| match member {
+        ClassMember::Constructor(_) => false,
+        ClassMember::ClassProp(property) => property.is_static,
+        _ => true,
+    });
+    class.body.insert(0, ClassMember::Constructor(constructor));
+}
+
 /// Emits a bare ECMAScript module (`class C { ... }`) as JavaScript source.
 fn emit_module_js(module: &swc_ecma_ast::Module) -> Option<String> {
     use swc_common::sync::Lrc;
@@ -852,7 +1082,7 @@ fn display_class_name(class_name: &str) -> &str {
 /// stripped, for evaluation by QuickJS. Decorators are dropped (applied
 /// natively instead). Returns `None` if the class can't be codegen'd, in
 /// which case the caller falls back to a `new Function()` token.
-fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>) -> Option<String> {
+fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>, ctor_bridge: bool) -> Option<String> {
     let mut class = declaration.class.clone();
     strip_class_decorators(&mut class);
     if let Some(Expr::Ident(base)) = class.super_class.as_deref().filter(|base|
@@ -874,6 +1104,9 @@ fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &H
     // Static blocks run once, natively, at module initialization; the JS copy must not repeat them.
     class.body.retain(|member| !matches!(member, ClassMember::StaticBlock(_)));
     rewrite_instance_methods_to_bridges(&mut class, declaration.ident.sym.as_ref());
+    if ctor_bridge {
+        rewrite_constructor_to_bridge(&mut class, declaration.ident.sym.as_ref());
+    }
     let mut class_ident = declaration.ident.clone();
     class_ident.sym = display_class_name(declaration.ident.sym.as_ref()).into();
     let class_decl = swc_ecma_ast::ClassDecl {
@@ -919,8 +1152,8 @@ fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &H
 /// that calls a native-only function (an import, another compiled function)
 /// will fail when invoked dynamically -- only `this`/built-in logic works.
 /// Static `instance.method()` still uses the native method, unaffected.
-fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>) -> Option<(String, String)> {
-    let source = class_value_js_source(declaration, class_tokens)?;
+fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>, ctor_bridge: bool) -> Option<(String, String)> {
+    let source = class_value_js_source(declaration, class_tokens, ctor_bridge)?;
     let class_name = declaration.ident.sym.as_ref();
     let display = display_class_name(class_name);
     let global = format!("__thaw_class_value_{class_name}");

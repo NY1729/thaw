@@ -3330,17 +3330,6 @@ impl<'a> FnLowerer<'a> {
                             && class_name_from_type(declared).is_none();
                         let is_generated_wrapper =
                             callee_name.starts_with("__thaw_typed_wrapper_js_");
-                        let value = if local_function.is_some()
-                            && *declared == HirType::Json
-                            && self.infer_expr_type(&value)? == HirType::JsValue
-                        {
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("readDynamicValue".to_string())),
-                                vec![value],
-                            )
-                        } else {
-                            value
-                        };
                         let user_function = !(is_generated_wrapper
                             || direct_quickjs_typed_call
                             || napi_constructor_typed_call)
