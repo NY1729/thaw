@@ -2793,7 +2793,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     _ => {
                         let console_read = if callee_name.starts_with("console.") {
-                            self.lower_console_dictionary_read(&argument.expr)?
+                            match self.lower_console_dictionary_read(&argument.expr)? {
+                                Some(read) => Some(read),
+                                None => self.lower_string_index_optional(&argument.expr)?,
+                            }
                         } else {
                             None
                         };
