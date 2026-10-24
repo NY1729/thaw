@@ -2744,6 +2744,13 @@ impl<'a> FnLowerer<'a> {
                                     (right_name, right_type, rhs),
                                 ],
                             )?
+                        } else if right_type == HirType::Str {
+                            // `"code" in err`: own properties of an Error value (runtime side table).
+                            let lhs = self.coerce_primitive_to_string(lhs)?;
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_has_prop".into())),
+                                vec![rhs, lhs],
+                            )
                         } else if matches!(&right_type, HirType::Array(_)) {
                             let mut key_type = self.infer_expr_type(&lhs)?;
                             if matches!(key_type, HirType::Bool | HirType::I64) {
@@ -3249,6 +3256,27 @@ impl<'a> FnLowerer<'a> {
                         };
                         return Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_array_delete_strict".into())),
+                            vec![object, key],
+                        ));
+                    }
+                    if object_type == HirType::Str {
+                        // `delete err.code`: own properties of an Error value (runtime side table).
+                        let key = match &member.prop {
+                            MemberProp::Ident(property) => {
+                                HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                            }
+                            MemberProp::Computed(computed) => {
+                                let key = self.lower_expr(&computed.expr)?;
+                                self.coerce_primitive_to_string(key)?
+                            }
+                            MemberProp::PrivateName(_) => {
+                                return Err(
+                                    "native `delete` does not support private properties".into()
+                                );
+                            }
+                        };
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_delete_prop".into())),
                             vec![object, key],
                         ));
                     }

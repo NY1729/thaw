@@ -2316,6 +2316,81 @@
       "source": "class P { o?: number }\nfunction main(): void {\n  console.log(new P().o! + 1);\n  const q = new P();\n  q.o = 2;\n  console.log(q.o! + 1);\n}\n"
     },
     {
+      "name": "error assigned properties are enumerable own keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e: Error = new Error(\"boom\");\n  (e as any).code = \"E_X\";\n  console.log(Object.keys(e), (e as any).code, e.message, String(e));\n  const plain = new Error(\"p\");\n  console.log(Object.keys(plain), Object.getOwnPropertyNames(plain));\n}\n"
+    },
+    {
+      "name": "error message assignment is observable",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"x\");\n  e.message = \"changed\";\n  console.log(e.message, String(e), e.stack!.split(\"\\n\")[0]);\n}\n"
+    },
+    {
+      "name": "Object.assign onto an Error",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log((Object.assign(new Error(\"c\"), { extra: 1 }) as any).extra);\n}\n"
+    },
+    {
+      "name": "error props survive throw and catch",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { const x: any = new Error(\"x\"); x.foo = {a:1}; throw x; } catch (c: any) { console.log(c.foo, c.message); }\n}\n"
+    },
+    {
+      "name": "JSON.stringify of an Error",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"m\") as any; e.code = \"C\";\n  console.log(JSON.stringify(e), JSON.stringify(new Error(\"z\")));\n}\n"
+    },
+    {
+      "name": "error property read, in and delete",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"boom\") as any;\n  e.code = \"E_X\";\n  e.status = 404;\n  e.meta = { a: [1, 2], ok: true };\n  console.log(Object.keys(e), e.code, e.status, e.meta, e.message, String(e));\n  console.log(\"code\" in e, \"nope\" in e, \"message\" in e);\n  delete e.code;\n  console.log(Object.keys(e), \"code\" in e, e.code);\n}\n"
+    },
+    {
+      "name": "distinct errors with equal text keep separate properties",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = new Error(\"x\") as any;\n  const b = new Error(\"x\") as any;\n  a.tag = \"A\";\n  b.tag = \"B\";\n  console.log(a.tag, b.tag, Object.keys(a), Object.keys(b));\n}\n"
+    },
+    {
+      "name": "error name assignment is an enumerable own key",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new TypeError(\"t\") as any;\n  e.name = \"Custom\";\n  console.log(e.name, String(e), e.message, Object.keys(e));\n  e.message = \"m2\";\n  console.log(e.message, String(e), e.stack.split(\"\\n\")[0]);\n}\n"
+    },
+    {
+      "name": "error stack header is fixed on first read",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"s\") as any;\n  console.log(e.stack.split(\"\\n\")[0]);\n  e.message = \"late\";\n  console.log(e.stack.split(\"\\n\")[0], String(e));\n  e.stack = \"custom stack\";\n  console.log(e.stack, Object.keys(e));\n}\n"
+    },
+    {
+      "name": "Object.assign sources onto an Error",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = Object.assign(new Error(\"m\"), { a: 1, b: \"two\" }, { c: true }) as any;\n  console.log(Object.keys(e), e.a, e.b, e.c);\n  const j: any = { d: [1, 2] };\n  Object.assign(e, j);\n  console.log(Object.keys(e), e.d);\n  console.log(Object.getOwnPropertyNames(e));\n}\n"
+    },
+    {
+      "name": "typed error props survive throw",
+      "expect": "matched",
+      "source": "function main(): void {\n  try {\n    const x = new RangeError(\"r\") as any;\n    x.code = \"ERANGE\";\n    x.n = 3;\n    throw x;\n  } catch (c: any) {\n    console.log(c.code, c.n, c.message, c.name, c instanceof RangeError);\n  }\n}\n"
+    },
+    {
+      "name": "computed error property keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"p\") as any;\n  e[`k${1}`] = \"v\";\n  const key = \"dyn\";\n  e[key] = 2;\n  console.log(Object.keys(e), e.k1, e.dyn);\n  console.log(JSON.stringify(e), JSON.stringify({ err: 1 }), JSON.stringify(\"s\"));\n}\n"
+    },
+    {
+      "name": "assigning a property on a plain string throws",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s: any = \"plain\";\n  try {\n    (s as any).x = 1;\n    console.log(\"no throw\");\n  } catch (e: any) {\n    console.log(e.name, e.message);\n  }\n}\n"
+    },
+    {
+      "name": "Object.keys of caught values",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { throw { a: 1, b: 2 }; } catch (e: any) { console.log(Object.keys(e)); }\n  try { throw \"ab\"; } catch (e: any) { console.log(Object.keys(e)); }\n  try { throw new Error(\"x\"); } catch (e: any) { console.log(Object.keys(e)); }\n}\n"
+    },
+    {
+      "name": "Error.captureStackTrace on an Error",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"a\");\n  Error.captureStackTrace(e);\n  console.log(typeof e.stack, e.stack!.split(\"\\n\")[0]);\n}\n"
+    },
+    {
       "name": "class extends Map/Set: map subclass basic",
       "expect": "matched",
       "source": "class Counter extends Map<string, number> {\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); }\n}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\"); c.inc(\"b\");\n  console.log(c.get(\"a\"), c.size, c instanceof Map, c instanceof Counter);\n  console.log(c);\n}\n"

@@ -7,6 +7,8 @@ enum Target {
     Dictionary(HirExpr, Box<HirExpr>, HirType),
     JsonIndex(HirExpr, Box<HirExpr>),
     DynamicProperty(HirExpr, Box<HirExpr>),
+    /// `err.key = value` on an Error (framed `Str`) receiver: stored in the runtime side table.
+    ErrorProp(HirExpr, Box<HirExpr>),
 }
 
 #[derive(Clone, Copy)]
@@ -55,6 +57,10 @@ fn target_to_read_expr(target: &Target) -> Result<HirExpr, String> {
             Box::new(HirExpr::Var("getDynamicProperty".into())),
             vec![object.clone(), key.as_ref().clone()],
         ),
+        Target::ErrorProp(object, key) => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_get_prop".into())),
+            vec![object.clone(), key.as_ref().clone()],
+        ),
     })
 }
 
@@ -78,6 +84,11 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
         }
         Target::DynamicProperty(object, key) => HirExpr::Call(
             Box::new(HirExpr::Var("setDynamicProperty".into())),
+            vec![object, *key, value],
+        ),
+        // `lower_assign` lowers plain `=` itself (the value needs JSON-text coercion first).
+        Target::ErrorProp(object, key) => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
             vec![object, *key, value],
         ),
     }

@@ -677,6 +677,73 @@ impl<'a> FnLowerer<'a> {
         self.merge_union_array_method_branches(array_name, members, branches)
     }
 
+    /// `err.key = value` on an Error value: bind the receiver, key and value once, store the
+    /// value's JSON text in the runtime side table, and throw the TypeError a plain string would.
+    fn lower_error_prop_assign(
+        &mut self,
+        object: HirExpr,
+        key: HirExpr,
+        value: HirExpr,
+        value_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let object_name = format!("__thaw_error_assign_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_name = format!("__thaw_error_assign_key_{}", self.next_binding);
+        self.next_binding += 1;
+        let value_name = format!("__thaw_error_assign_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(object_name.clone(), HirType::Str);
+        self.scope.insert(key_name.clone(), HirType::Str);
+        self.scope.insert(value_name.clone(), value_type.clone());
+        let encoded = self.coerce_to_declared(&HirType::Json, HirExpr::Var(value_name.clone()))?;
+        let json_text = HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".into())), vec![encoded]);
+        let stored = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
+            vec![
+                HirExpr::Var(object_name.clone()),
+                HirExpr::Var(key_name.clone()),
+                json_text,
+            ],
+        );
+        let refused = HirStmt::If(
+            stored,
+            Vec::new(),
+            vec![HirStmt::Throw(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                vec![
+                    HirExpr::Lit(HirLit::Str("\u{1}TypeError\u{1}Cannot create property '".into())),
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                        vec![
+                            HirExpr::Var(key_name.clone()),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                                vec![
+                                    HirExpr::Lit(HirLit::Str("' on string '".into())),
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                                        vec![
+                                            HirExpr::Var(object_name.clone()),
+                                            HirExpr::Lit(HirLit::Str("'".into())),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ))],
+        );
+        self.wrap_call_argument_bindings(
+            HirExpr::Block(vec![refused, HirStmt::Return(Some(HirExpr::Var(value_name.clone())))]),
+            &[
+                (object_name, HirType::Str, object),
+                (key_name, HirType::Str, key),
+                (value_name, value_type, value),
+            ],
+        )
+    }
+
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
         let assigned_function_property = if assign.op == AssignOp::Assign {
             match &assign.left {
@@ -1247,6 +1314,13 @@ impl<'a> FnLowerer<'a> {
             _ => self.lower_expr(&assign.right)?,
         };
         let rhs_type = self.infer_expr_type(&rhs)?;
+        if let Target::ErrorProp(object, key) = &target {
+            if assign.op != AssignOp::Assign {
+                return Err("compound assignment on an Error property is not supported yet".into());
+            }
+            let result = self.lower_error_prop_assign(object.clone(), key.as_ref().clone(), rhs, rhs_type)?;
+            return self.wrap_call_argument_bindings(result, &target_bindings);
+        }
         if let Target::DynamicProperty(object, key) = &target {
             if assign.op != AssignOp::Assign {
                 let result = self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone())?;
@@ -1416,7 +1490,7 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var(index_name)),
                     )
                 }
-                Target::DynamicProperty(_, _) => unreachable!(),
+                Target::DynamicProperty(_, _) | Target::ErrorProp(..) => unreachable!(),
             };
         }
 
@@ -1825,7 +1899,7 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&HirType::F64, index, "JSON array index")?;
                 self.coerce_to_declared_aliasing(&HirType::Json, value)?
             }
-            Target::DynamicProperty(_, _) => unreachable!(),
+            Target::DynamicProperty(_, _) | Target::ErrorProp(..) => unreachable!(),
             Target::Prop(_, other, field) => {
                 return Err(format!(
                     "cannot assign to field `{field}` on value of type {other:?}"
