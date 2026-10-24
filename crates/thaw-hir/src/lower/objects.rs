@@ -2212,6 +2212,82 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `s[i]` on a string identifier, where `undefined` is observable (a console
+    /// argument or an `undefined` comparison): `string | undefined`, out of range
+    /// (or a fractional/negative index) reads `undefined`. Other `s[i]` reads stay
+    /// plain `charAt` (out of range reads "") so they keep the bare `string` type.
+    pub(super) fn lower_string_index_optional(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
+        let Expr::Member(member) = expr else { return Ok(None) };
+        let (Expr::Ident(object), MemberProp::Computed(computed)) = (member.obj.as_ref(), &member.prop) else {
+            return Ok(None);
+        };
+        if matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_)))
+            || !matches!(
+                self.scope.get(&self.resolve_binding(object.sym.as_ref())),
+                Some(HirType::Str | HirType::StrLiteral(_))
+            )
+        {
+            return Ok(None);
+        }
+        let index = self.lower_expr(&computed.expr)?;
+        if self.infer_expr_type(&index)? != HirType::F64 {
+            return Ok(None);
+        }
+        let receiver = self.lower_expr(&member.obj)?;
+        let name = format!("__thaw_str_index_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::F64);
+        let index_var = || HirExpr::Var(name.clone());
+        let at = self.lower_call(&CallExpr {
+            span: member.span,
+            ctxt: Default::default(),
+            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                span: member.span,
+                obj: member.obj.clone(),
+                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("charAt".into(), member.span)),
+            }))),
+            args: vec![swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    name.clone().into(),
+                    member.span,
+                ))),
+            }],
+            type_args: None,
+        })?;
+        let lower_bound = HirExpr::BinOp(
+            BinOp::GtEq,
+            Box::new(index_var()),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        );
+        let upper_bound = HirExpr::BinOp(
+            BinOp::Lt,
+            Box::new(index_var()),
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_length".into())),
+                vec![receiver],
+            )),
+        );
+        let integral = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(index_var()),
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                vec![index_var()],
+            )),
+        );
+        let in_range = self.lower_logical_expr(lower_bound, upper_bound, true)?;
+        let test = self.lower_logical_expr(in_range, integral, true)?;
+        let optional = HirType::Optional(Box::new(HirType::Str));
+        let result = HirExpr::Conditional(
+            Box::new(test),
+            Box::new(HirExpr::OptionalSome(Box::new(at), HirType::Str)),
+            Box::new(HirExpr::OptionalNone(HirType::Str)),
+            optional,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, HirType::F64, index)]).map(Some)
+    }
+
     /// `console.log(record.missing)` must print `undefined` like Node, but a
     /// `Record<string, number|string|boolean>` read is statically the bare
     /// payload (a missing key would decode as NaN/""/false). For a console
