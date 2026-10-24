@@ -729,6 +729,7 @@ include!("tests/exitfix_contracts.rs");
 include!("tests/oobidx_contracts.rs");
 include!("tests/fatalexit_contracts.rs");
 include!("tests/rejects_contracts.rs");
+include!("tests/enumvals_contracts.rs");
 include!("tests/builtingaps_contracts.rs");
 include!("tests/typinggaps_contracts.rs");
 include!("tests/classgaps_contracts.rs");
