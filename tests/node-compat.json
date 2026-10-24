@@ -2103,6 +2103,16 @@
       "name": "util.inspect of an Error",
       "expect": "matched",
       "source": "import { inspect } from 'node:util'; function main(): void {   const e = new Error('boom');   const s = inspect(e);   console.log(s.split('\\n')[0]);   console.log(s.split('\\n').slice(1).every((l: string) => l.startsWith('    at ')));   console.log(String(e.stack).split('\\n')[0]);   console.log(inspect(new TypeError('t')).split('\\n')[0]); }"
+    },
+    {
+      "name": "console.log of a caught Error starts with name and message",
+      "expect": "matched",
+      "source": "import { inspect } from 'node:util'; function main(): void {   try { throw new TypeError('msg'); } catch (e) { console.log(inspect(e).split('\\n')[0]); console.log(String((e as Error).stack).split('\\n')[0]); }   try { throw new Error('boom'); } catch (err) { console.log(String((err as Error).stack).split('\\n')[0]); } }"
+    },
+    {
+      "name": "assert strictEqual and deepStrictEqual append the diff to a custom message",
+      "expect": "matched",
+      "source": "import assert from 'node:assert'; function main(): void {   const t = (n: string, f: () => void): void => { try { f(); console.log(n, 'nothrow'); } catch (e) { console.log(n, JSON.stringify((e as Error).message)); } };   t('se', () => assert.strictEqual(1, 2, 'different'));   t('ses', () => assert.strictEqual('a', 'b', 'different'));   t('nse', () => assert.notStrictEqual(1, 1, 'different'));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }, 'different'));   t('de', () => assert.deepEqual({ a: 1 }, { a: 2 }, 'different'));   t('eq', () => assert.equal(1, 2, 'different'));   t('ok', () => assert.ok(false, 'different')); }"
     }
   ]
 }
