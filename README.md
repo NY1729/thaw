@@ -251,6 +251,25 @@ Known gaps against Node semantics:
   sloppy-mode scripts (CommonJS without `'use strict'`). Thaw code is always strict.
 - Class instances passed to npm or ambient functions are snapshots: later changes made in
   Thaw are not visible to npm code, and the reverse. Node passes live objects.
+- `new.target` is supported only inside a top-level, non-async, non-generator function
+  declaration; class constructors, methods, nested and exported functions are a compile error.
+- `f.length` is supported only on directly named, declared functions. Aliases, arrow functions
+  and methods are a compile error.
+- A constructor that returns an object is ignored: `new` still yields the constructed instance
+  of the class.
+- `Error` values are tagged strings, so extra own properties, `cause` and subclass naming in
+  `util.inspect` differ from Node.
+- `class X extends Array` and `class X extends Map` are compile errors.
+- A class passed through an `any` parameter is a JavaScript copy: it has no shared static state
+  with the original, and an instance does not satisfy `instanceof` of a parent class.
+- An uninitialised `number` or `boolean` class field reads as `0` or `false` and is included in
+  `Object.keys` and `JSON.stringify`; Node reads `undefined`.
+- `localeCompare` compares by code point unless built with `--icu4c`.
+- `Buffer`/`Uint8Array` `slice` and `subarray` copy; writes through the result are not visible
+  in the original. Node shares the underlying memory.
+- `BigInt` is 64-bit: values outside the signed 64-bit range wrap instead of growing.
+- `Date.prototype.toLocale*String` and `Number.prototype.toLocaleString` on native values ignore
+  the locale and options (`Intl.DateTimeFormat`/`Intl.NumberFormat` do honor them).
 
 ## Examples
 

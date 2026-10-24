@@ -318,6 +318,154 @@ fn days_in_month(year: i64, month: u32) -> u32 {
     }
 }
 
+/// The implementation-defined fallback behind `Date.parse` for the common
+/// non-ISO spellings V8 also accepts: `2030-01-01 10:20[:30]`,
+/// `2030/01/02`, `01/02/2030`, `Jan 1, 2030`, `1 Jan 2030`, and RFC 2822
+/// (`Tue, 01 Jan 2030 00:00:00 GMT`), with an optional time, `AM`/`PM`,
+/// `GMT`/`UTC`/`Z` and `+hhmm` offset. Without a zone the fields are
+/// host-local. Anything else (including an unknown word) is `NaN`.
+fn parse_legacy_date(text: &str) -> f64 {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    const WEEKDAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+    let chars: Vec<char> = text.trim().chars().collect();
+    let (mut month_name, mut meridiem, mut zone): (Option<u32>, Option<bool>, Option<i64>) =
+        (None, None, None);
+    let mut numbers: Vec<(i64, usize)> = Vec::new();
+    let mut time: Option<[i64; 4]> = None;
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        if c == '(' {
+            while index < chars.len() && chars[index] != ')' {
+                index += 1;
+            }
+            index += 1;
+        } else if c.is_ascii_alphabetic() {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_alphabetic() {
+                index += 1;
+            }
+            let word: String = chars[start..index].iter().collect::<String>().to_lowercase();
+            match word.as_str() {
+                "am" | "pm" => meridiem = Some(word == "pm"),
+                "z" | "gmt" | "utc" | "ut" => zone = Some(0),
+                _ if word.len() >= 3 && MONTHS.iter().any(|m| word.starts_with(m)) => {
+                    month_name = MONTHS.iter().position(|m| word.starts_with(m)).map(|i| i as u32 + 1);
+                }
+                _ if word.len() >= 3 && WEEKDAYS.iter().any(|d| word.starts_with(d)) => {}
+                _ => return f64::NAN,
+            }
+        } else if c.is_ascii_digit() {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            let digits: String = chars[start..index].iter().collect();
+            let Ok(value) = digits.parse::<i64>() else { return f64::NAN };
+            if index < chars.len() && chars[index] == ':' && time.is_none() {
+                let mut parts = vec![value];
+                while index < chars.len() && chars[index] == ':' && parts.len() < 3 {
+                    index += 1;
+                    let start = index;
+                    while index < chars.len() && chars[index].is_ascii_digit() {
+                        index += 1;
+                    }
+                    let Ok(part) = chars[start..index].iter().collect::<String>().parse() else {
+                        return f64::NAN;
+                    };
+                    parts.push(part);
+                }
+                let mut milliseconds = 0;
+                if index < chars.len() && chars[index] == '.' {
+                    index += 1;
+                    let start = index;
+                    while index < chars.len() && chars[index].is_ascii_digit() {
+                        index += 1;
+                    }
+                    let fraction: String = chars[start..index].iter().take(3).collect();
+                    milliseconds = format!("{fraction:0<3}").parse().unwrap_or(0);
+                }
+                parts.resize(3, 0);
+                time = Some([parts[0], parts[1], parts[2], milliseconds]);
+            } else {
+                numbers.push((value, digits.len()));
+            }
+        } else if (c == '+' || c == '-') && (time.is_some() || zone.is_some()) {
+            // A numeric zone offset: `+hhmm` or `+hh:mm`.
+            let sign = if c == '-' { -1 } else { 1 };
+            index += 1;
+            let start = index;
+            while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == ':') {
+                index += 1;
+            }
+            let digits: String = chars[start..index].iter().filter(|c| **c != ':').collect();
+            let Ok(value) = digits.parse::<i64>() else { return f64::NAN };
+            let minutes = if digits.len() <= 2 { value * 60 } else { value / 100 * 60 + value % 100 };
+            zone = Some(sign * minutes);
+        } else if matches!(c, ' ' | ',' | '/' | '-' | '.') {
+            index += 1;
+        } else {
+            return f64::NAN;
+        }
+    }
+    let (year, month, day) = match (month_name, numbers.as_slice()) {
+        (Some(month), [(a, alen), (b, _)]) => {
+            if *alen >= 3 || *a > 31 { (*a, month, *b) } else { (*b, month, *a) }
+        }
+        (Some(month), [(year, _)]) if *year > 31 => (*year, month, 1),
+        (None, [(a, alen), (b, _), (c, _)]) => {
+            // `MM/DD/YYYY` stays unsupported (`rejects_unrecognized_formats`).
+            if *alen < 3 {
+                return f64::NAN;
+            }
+            (*a, *b as u32, *c)
+        }
+        _ => return f64::NAN,
+    };
+    // Two-digit years follow the usual pivot (0-49 -> 20xx, 50-99 -> 19xx).
+    let year = match year {
+        0..=49 if numbers.iter().any(|(v, l)| *v == year && *l <= 2) => 2000 + year,
+        50..=99 => 1900 + year,
+        _ => year,
+    };
+    let [mut hours, minutes, seconds, milliseconds] = time.unwrap_or([0; 4]);
+    if let Some(pm) = meridiem {
+        if !(1..=12).contains(&hours) {
+            return f64::NAN;
+        }
+        hours = hours % 12 + if pm { 12 } else { 0 };
+    }
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=24).contains(&hours)
+        || !(0..=59).contains(&minutes)
+        || !(0..=59).contains(&seconds)
+    {
+        return f64::NAN;
+    }
+    match zone {
+        Some(offset) => time_clip(
+            (days_from_civil(year, month, 1) + day - 1) as f64 * 86_400_000.0
+                + hours as f64 * 3_600_000.0
+                + minutes as f64 * 60_000.0
+                + seconds as f64 * 1_000.0
+                + milliseconds as f64
+                - offset as f64 * 60_000.0,
+        ),
+        None => timestamp_from_local_fields(
+            year as f64,
+            month as f64 - 1.0,
+            day as f64,
+            hours as f64,
+            minutes as f64,
+            seconds as f64,
+            milliseconds as f64,
+        ),
+    }
+}
+
 #[no_mangle]
 /// Parses `text` against the ECMA-262 "Date Time String Format" (a
 /// restricted ISO 8601 profile: `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`,
@@ -344,12 +492,12 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"^([0-9]{4}|[+-][0-9]{6})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]{3}))?)?(Z|[+-][0-9]{2}:[0-9]{2})?)?$",
+            r"^([0-9]{4}|[+-][0-9]{6})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]+))?)?(Z|[+-][0-9]{2}:[0-9]{2})?)?$",
         )
         .unwrap()
     });
     let Some(captures) = pattern.captures(&text) else {
-        return f64::NAN;
+        return parse_legacy_date(&text);
     };
     let field = |index: usize| -> Option<i64> { captures.get(index)?.as_str().parse().ok() };
     let year_text = captures.get(1).unwrap().as_str();
@@ -362,7 +510,12 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     let hours = field(4).unwrap_or(0);
     let minutes = field(5).unwrap_or(0);
     let seconds = field(6).unwrap_or(0);
-    let milliseconds = field(7).unwrap_or(0);
+    let milliseconds = captures.get(7).map_or(0, |fraction| {
+        // Only the first three fractional digits are significant.
+        format!("{:0<3}", &fraction.as_str()[..fraction.as_str().len().min(3)])
+            .parse()
+            .unwrap_or(0)
+    });
     if !(1..=12).contains(&month)
         || !(1..=days_in_month(year, month) as i64).contains(&(day as i64))
         || !(0..=24).contains(&hours)
