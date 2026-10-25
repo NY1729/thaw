@@ -2232,7 +2232,7 @@ pub unsafe extern "C" fn thaw_tagged_array_index_of(
                 let value = unsafe { payload.cast::<*const c_char>().read_unaligned() };
                 let expected = unsafe { needle.cast::<*const c_char>().read_unaligned() };
                 !value.is_null() && !expected.is_null()
-                    && unsafe { thaw_string_compare(value, expected) == 0 }
+                    && unsafe { thaw_string_strict_equal(value, expected) == 0 }
             }
             2 => (unsafe { payload.read() } != 0) == (unsafe { needle.read() } != 0),
             3 => (unsafe { payload.cast::<*const u8>().read_unaligned() })
@@ -2346,7 +2346,7 @@ unsafe fn string_array_search(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { thaw_string_compare(slot, needle) == 0 } {
+        if !slot.is_null() && unsafe { thaw_string_strict_equal(slot, needle) == 0 } {
             return index as f64;
         }
     }
@@ -2410,7 +2410,7 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { thaw_string_compare(slot, needle) == 0 } {
+        if !slot.is_null() && unsafe { thaw_string_strict_equal(slot, needle) == 0 } {
             return index as f64;
         }
     }

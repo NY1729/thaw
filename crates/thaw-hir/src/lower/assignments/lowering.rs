@@ -62,6 +62,7 @@ impl<'a> FnLowerer<'a> {
         assign: &swc_ecma_ast::AssignExpr,
         object: HirExpr,
         key: HirExpr,
+        object_type: HirType,
     ) -> Result<HirExpr, String> {
         use swc_ecma_ast::{AssignExpr, BinExpr, BinaryOp, ComputedPropName, Ident, MemberExpr, MemberProp};
         let private_jsvalue = matches!(
@@ -74,7 +75,7 @@ impl<'a> FnLowerer<'a> {
         let key_name = format!("__thaw_dynamic_compound_key_{}", self.next_binding);
         self.next_binding += 1;
         let key_type = self.infer_expr_type(&key)?;
-        self.scope.insert(object_name.clone(), HirType::JsValue);
+        self.scope.insert(object_name.clone(), object_type.clone());
         self.scope.insert(key_name.clone(), key_type.clone());
         let member = MemberExpr {
             span,
@@ -136,7 +137,7 @@ impl<'a> FnLowerer<'a> {
         } else {
             self.wrap_call_argument_bindings(
                 result,
-                &[(object_name, HirType::JsValue, object), (key_name, key_type, key)],
+                &[(object_name, object_type, object), (key_name, key_type, key)],
             )
         }
     }
@@ -251,6 +252,10 @@ impl<'a> FnLowerer<'a> {
                 if self.infer_expr_type_inner(&array)? == HirType::Bytes =>
             {
                 self.lower_bytes_index_write(array, *index, value)?
+            }
+            Target::ErrorProp(object, key) => {
+                let value_type = self.infer_expr_type(&value)?;
+                self.lower_error_prop_assign(object, *key, value, value_type)?
             }
             target => build_assign(target, value),
         };
@@ -675,6 +680,18 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.merge_union_array_method_branches(array_name, members, branches)
+    }
+
+    /// `__thaw_error_set_prop(error, "key", JSON.stringify(encoded))` for an already-bound error name.
+    fn error_set_prop_call(&self, error: &str, key: &str, encoded: HirExpr) -> HirExpr {
+        HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
+            vec![
+                HirExpr::Var(error.to_string()),
+                HirExpr::Lit(HirLit::Str(key.to_string())),
+                HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".into())), vec![encoded]),
+            ],
+        )
     }
 
     /// `err.key = value` on an Error value: bind the receiver, key and value once, store the
@@ -1316,14 +1333,15 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         if let Target::ErrorProp(object, key) = &target {
             if assign.op != AssignOp::Assign {
-                return Err("compound assignment on an Error property is not supported yet".into());
+                let result = self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone(), HirType::Str)?;
+                return self.wrap_call_argument_bindings(result, &target_bindings);
             }
             let result = self.lower_error_prop_assign(object.clone(), key.as_ref().clone(), rhs, rhs_type)?;
             return self.wrap_call_argument_bindings(result, &target_bindings);
         }
         if let Target::DynamicProperty(object, key) = &target {
             if assign.op != AssignOp::Assign {
-                let result = self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone())?;
+                let result = self.lower_dynamic_compound_assign(assign, object.clone(), key.as_ref().clone(), HirType::JsValue)?;
                 return self.wrap_call_argument_bindings(result, &target_bindings);
             }
             let object_name = format!("__thaw_dynamic_assign_object_{}", self.next_binding);

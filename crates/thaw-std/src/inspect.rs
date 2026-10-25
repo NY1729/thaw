@@ -111,6 +111,8 @@ pub(crate) enum Node {
     },
     /// Text that something else already formatted (a live host value).
     Raw(String),
+    /// An Error's stack text; continuation lines indent with the nesting level like Node's `formatError`.
+    ErrorStack(String),
     Circular(usize),
 }
 
@@ -385,6 +387,9 @@ impl Ctx<'_> {
             | Node::BigInt(_)
             | Node::Str(_) => self.format_primitive(node),
             Node::Raw(text) => text.clone(),
+            Node::ErrorStack(text) => {
+                text.replace('\n', &format!("\n{}", " ".repeat(self.indentation_lvl)))
+            }
             Node::Date(iso) => iso.clone().unwrap_or_else(|| "Invalid Date".into()),
             Node::RegExp(text) => text.clone(),
             Node::Buffer(bytes) => format_buffer(bytes),
@@ -543,6 +548,12 @@ impl Ctx<'_> {
             } => {
                 let prefix = match ctor {
                     Ctor::Plain => String::new(),
+                    // An Error's multi-line stack is the entries' `base`, which forces the multi-line layout.
+                    Ctor::Named(name) if name.contains('\n') => {
+                        base =
+                            name.replace('\n', &format!("\n{}", " ".repeat(self.indentation_lvl)));
+                        String::new()
+                    }
                     Ctor::Named(name) => format!("{name} "),
                     Ctor::NullProto => {
                         null_proto = true;

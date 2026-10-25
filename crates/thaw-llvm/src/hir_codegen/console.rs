@@ -283,14 +283,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     let message = self
                         .builder
                         .build_call(
-                            self.module.get_function("thaw_error_to_string").unwrap(),
+                            self.module.get_function("thaw_error_inspect").unwrap(),
                             &[ptr.into()],
                             "console_error_message",
                         )
                         .map_err(|error| error.to_string())?
                         .try_as_basic_value()
                         .basic()
-                        .ok_or("thaw_error_to_string returned no value")?;
+                        .ok_or("thaw_error_inspect returned no value")?;
                     self.compile_console_text(
                         message.into_pointer_value(),
                         newline,
@@ -678,14 +678,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 let message = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_error_to_string").unwrap(),
+                        self.module.get_function("thaw_error_inspect").unwrap(),
                         &[value.into_pointer_value().into()],
                         "console_union_error_message",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_error_to_string returned no value")?;
+                    .ok_or("thaw_error_inspect returned no value")?;
                 self.compile_console_text(
                     message.into_pointer_value(),
                     newline,

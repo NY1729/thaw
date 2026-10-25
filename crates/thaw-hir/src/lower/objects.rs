@@ -3324,6 +3324,16 @@ impl<'a> FnLowerer<'a> {
                     HirType::Str | HirType::StrLiteral(_)
                         if !matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_))) =>
                     {
+                        // `err[key]` with a string key reads an own property of an Error value.
+                        let key = self.lower_expr(&computed.expr)?;
+                        if matches!(self.infer_expr_type(&key)?, HirType::Str | HirType::StrLiteral(_)) {
+                            let key = self.coerce_to_declared(&HirType::Str, key)?;
+                            let receiver = self.lower_expr(&member.obj)?;
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_get_prop".into())),
+                                vec![receiver, key],
+                            ));
+                        }
                         let span = member.span;
                         self.lower_call(&CallExpr {
                             span,

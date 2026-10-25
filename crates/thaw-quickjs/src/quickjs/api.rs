@@ -276,6 +276,8 @@ fn install_native_exception_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 
 unsafe extern "C" {
     fn thaw_json_borrowed_tracked_handle_id(value: *const c_void) -> u64;
+    /// thaw-runtime: the framed Error text with its side-table props baked into a `\u{5}` bag.
+    fn thaw_error_with_props(value: *const c_char) -> *const c_char;
 }
 
 fn reconstitute_exception_packet<'js>(
@@ -2329,7 +2331,9 @@ pub extern "C" fn thaw_js_error_from_tagged_handle(value: *const c_char) -> Thaw
     let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         let factory: Function = ctx.globals().get("__thaw_error_from_tagged")
             .map_err(|_| "QuickJS framed Error factory is unavailable")?;
-        let bytes = unsafe { thaw_arena::NativeStr::from_ptr(value) }.to_bytes();
+        // The JS Error is created with the native Error's own props (`err.code = ...`) as properties.
+        let with_props = unsafe { thaw_error_with_props(value) };
+        let bytes = unsafe { thaw_arena::NativeStr::from_ptr(with_props) }.to_bytes();
         let units_json = serde_json::to_string(&thaw_arena::wtf8_decode_utf16(bytes))
             .map_err(|error| error.to_string())?;
         let make_text: Function = ctx.globals().get("__thaw_json_host_utf16_string")
