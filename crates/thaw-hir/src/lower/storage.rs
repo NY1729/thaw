@@ -12,6 +12,12 @@ struct StoragePlan {
     /// Spans of member reads in `undefined`-observing positions (see
     /// `ObservedMembers`); they keep the raw `Optional` of an uninit field.
     observed_members: HashSet<(u32, u32)>,
+    /// Property names read in an observing position, and whether the module
+    /// prints or serialises whole objects at all (`console.*`, `JSON.*`,
+    /// `Object.*`); constructor-less classes with a bare `x: T;` only widen
+    /// `x` when one of these could expose its `undefined`.
+    observed_names: HashSet<String>,
+    observes_objects: bool,
     argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     callable_parameters: HashMap<u32, Vec<(u32, u32)>>,
     quickjs_function_value_nodes: HashSet<(u32, u32)>,
@@ -66,17 +72,17 @@ impl StoragePlan {
                 (start, callable.params.iter().copied().map(storage_key).collect())
             })
             .collect();
+        let mut observed = ObservedMembers::default();
+        module.visit_with(&mut observed);
         Ok(Self {
             dynamic,
             source_types: HashMap::new(),
             source_conflicts: HashSet::new(),
             class_fields: HashMap::new(),
             uninit_fields: HashSet::new(),
-            observed_members: {
-                let mut observed = ObservedMembers::default();
-                module.visit_with(&mut observed);
-                observed.0
-            },
+            observed_members: observed.members,
+            observed_names: observed.names,
+            observes_objects: observed.objects,
             argument_parameters: graph.argument_parameters,
             callable_parameters,
             quickjs_function_value_nodes,
@@ -1236,17 +1242,46 @@ fn storage_source_type(span: Span) -> Option<HirType> {
 /// consumed as a number/string: `console.log` arguments, template
 /// substitutions, `typeof`/`!`/`if`/`?:` tests, `+`/equality/`??` operands, `?.` receivers.
 #[derive(Default)]
-struct ObservedMembers(HashSet<(u32, u32)>);
+struct ObservedMembers {
+    members: HashSet<(u32, u32)>,
+    names: HashSet<String>,
+    objects: bool,
+}
 
 impl ObservedMembers {
     fn observe(&mut self, expr: &Expr) {
         match expr {
             Expr::Paren(paren) => self.observe(&paren.expr),
             Expr::Member(member) => {
-                self.0.insert(storage_key(member.span));
+                self.members.insert(storage_key(member.span));
+                if let swc_ecma_ast::MemberProp::Ident(name) = &member.prop {
+                    self.names.insert(name.sym.to_string());
+                }
             }
             _ => {}
         }
+    }
+
+    /// `console.log(items.map(x => x.n))` / `console.log([x.n])`: the member value
+    /// flows straight into the printed array, so an uninitialised field keeps its
+    /// `undefined` (other `.map` results stay on the lenient number path).
+    fn observe_mapped_members(&mut self, expr: &Expr) {
+        if let Expr::Array(array) = expr {
+            for element in array.elems.iter().flatten().filter(|element| element.spread.is_none()) {
+                self.observe(&element.expr);
+            }
+        }
+        let Expr::Call(call) = expr else { return };
+        let swc_ecma_ast::Callee::Expr(callee) = &call.callee else { return };
+        let Expr::Member(member) = callee.as_ref() else { return };
+        if matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(name) if name.sym == *"map") {
+            if let Some(Expr::Arrow(arrow)) = call.args.first().map(|argument| argument.expr.as_ref()) {
+                if let swc_ecma_ast::ArrowFunctionBody::Expr(body) = arrow.body.as_ref() {
+                    self.observe(body);
+                }
+            }
+        }
+        self.observe_mapped_members(&member.obj);
     }
 }
 
@@ -1254,8 +1289,28 @@ impl Visit for ObservedMembers {
     fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
         if let swc_ecma_ast::Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = callee.as_ref() {
+                if matches!(member.obj.as_ref(), Expr::Ident(ident)
+                    if matches!(ident.sym.as_ref(), "console" | "JSON" | "Object"))
+                {
+                    self.objects = true;
+                }
                 if matches!(member.obj.as_ref(), Expr::Ident(ident) if ident.sym == *"console") {
                     for argument in &call.args {
+                        self.observe(&argument.expr);
+                        self.observe_mapped_members(&argument.expr);
+                    }
+                }
+            }
+            // Arguments of a plain-identifier call keep `undefined` (`id(p.n)`,
+            // `String(p.n)`); a typed `number` parameter unwraps leniently at the
+            // coercion. Member calls (`arr.push(p.n)`) go to builtin lowerings that
+            // only accept the bare payload, so they stay lenient.
+            if matches!(callee.as_ref(), Expr::Ident(ident) if !matches!(ident.sym.as_ref(),
+                "Number" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "BigInt" | "Boolean"
+                | "Symbol" | "Array" | "Object" | "setTimeout" | "setInterval" | "require"))
+            {
+                for argument in &call.args {
+                    if argument.spread.is_none() {
                         self.observe(&argument.expr);
                     }
                 }
@@ -1292,6 +1347,17 @@ impl Visit for ObservedMembers {
         }
         binary.visit_children_with(self);
     }
+    fn visit_ts_as_expr(&mut self, cast: &swc_ecma_ast::TsAsExpr) {
+        self.observe(&cast.expr);
+        cast.visit_children_with(self);
+    }
+    fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
+        let annotated = matches!(&declarator.name, swc_ecma_ast::Pat::Ident(ident) if ident.type_ann.is_some());
+        if let (true, Some(init)) = (annotated, &declarator.init) {
+            self.observe(init);
+        }
+        declarator.visit_children_with(self);
+    }
     fn visit_opt_chain_expr(&mut self, chain: &swc_ecma_ast::OptChainExpr) {
         if let swc_ecma_ast::OptChainBase::Member(member) = chain.base.as_ref() {
             self.observe(&member.obj);
@@ -1300,6 +1366,14 @@ impl Visit for ObservedMembers {
     }
 }
 
+/// Whether a constructor-less class's bare `x: T;` must be widened: the module
+/// could print/serialise the instance or read `x` in an observing position.
+fn bare_field_observed(field: &str) -> bool {
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        let active = active.borrow();
+        active.observes_objects || active.observed_names.contains(field)
+    })
+}
 fn is_observed_member(span: Span) -> bool {
     ACTIVE_STORAGE_PLAN.with(|active| active.borrow().observed_members.contains(&storage_key(span)))
 }

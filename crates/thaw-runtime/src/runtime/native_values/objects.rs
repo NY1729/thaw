@@ -207,12 +207,12 @@ pub extern "C" fn thaw_object_class_name(object: *const u8) -> *const c_char {
             .and_then(|metadata| metadata.ancestry.as_deref())
             .and_then(|identities| identities.split('\u{1f}').next())
             .unwrap_or("Object");
-        match leaf.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
-            Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => {
-                original.to_owned()
-            }
-            _ => leaf.to_owned(),
-        }
+        let plain = match leaf.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
+            Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => original,
+            _ => leaf,
+        };
+        // A monomorphised generic class is named `Box__thaw_f64`.
+        plain.split("__thaw_").next().unwrap_or(plain).to_owned()
     });
     arena_c_string(&name).map_or(std::ptr::null(), |value| value.cast())
 }

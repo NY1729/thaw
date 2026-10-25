@@ -2074,7 +2074,16 @@ impl<'a> FnLowerer<'a> {
         let instance = self.interfaces.get(class)?;
         if let HirType::Object(fields) = instance {
             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == property) {
-                return Some(ty.clone());
+                // A widened maybe-uninitialised field is read leniently.
+                return Some(match ty {
+                    HirType::Optional(payload) if is_uninit_class_field(fields, property) => {
+                        payload.as_ref().clone()
+                    }
+                    HirType::Nullish(payload) if is_uninit_class_field(fields, property) => {
+                        HirType::Nullable(payload.clone())
+                    }
+                    other => other.clone(),
+                });
             }
         }
         let getter = class_getter_symbol(class, property, false);
@@ -3398,6 +3407,15 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Error")
+                    && prop.sym == *"stackTraceLimit"
+                    && !self.scope.contains_key("Error")
+                {
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_stack_trace_limit".to_string())),
+                        Vec::new(),
+                    ));
+                }
                 if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Math") {
                     let value = match prop.sym.as_ref() {
                         "E" => std::f64::consts::E,
@@ -3633,7 +3651,7 @@ impl<'a> FnLowerer<'a> {
                     // for why this can't just reuse `.toString()`'s
                     // intrinsic despite the similar rendering.
                     HirType::Str if prop.sym == *"stack" => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+                        Box::new(HirExpr::Var("__thaw_error_stack_with_frames".to_string())),
                         vec![obj],
                     )),
                     // Any other own property of an Error value (`err.status = 404` earlier): the
@@ -3701,7 +3719,11 @@ impl<'a> FnLowerer<'a> {
                         // directly.
                         let read =
                             self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())?;
-                        if is_observed_member(member.span) {
+                        // An `any` payload already holds `undefined`: it never needs the raw `Optional`.
+                        let json_payload = matches!(&read, HirExpr::PropAccess(_, HirType::Object(fields), field)
+                            if fields.iter().any(|(name, ty)| name == field
+                                && matches!(ty, HirType::Optional(payload) if payload.as_ref() == &HirType::Json)));
+                        if is_observed_member(member.span) && !json_payload {
                             Ok(read)
                         } else {
                             self.lenient_uninit_read(read)
@@ -4050,6 +4072,18 @@ impl<'a> FnLowerer<'a> {
         fields: &[(Symbol, HirType)],
         property: &str,
     ) -> Result<HirExpr, String> {
+        // An Error subclass instance has no `stack` slot: it reads as `name: message` plus the
+        // generated frame line, like a native Error's.
+        if property == "stack"
+            && !fields.iter().any(|(name, _)| name == property)
+            && object_type_is_error_family(&HirType::Object(fields.to_vec()))
+        {
+            let framed = self.coerce_primitive_to_string(object)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_stack_with_frames".to_string())),
+                vec![framed],
+            ));
+        }
         if !fields.iter().any(|(name, _)| name == property) {
             return Err(format!("object has no field `{property}`"));
         }
@@ -4133,11 +4167,48 @@ impl<'a> FnLowerer<'a> {
         if !is_uninit_class_field(fields, field) {
             return Ok(read);
         }
-        let Some((_, HirType::Optional(payload))) = fields.iter().find(|(name, _)| name == field)
-        else {
+        let Some((_, widened)) = fields.iter().find(|(name, _)| name == field) else {
+            return Ok(read);
+        };
+        if let HirType::Nullish(payload) = widened {
+            // Widened from `T | null`: the lenient view is the declared
+            // `T | null` with `undefined` folded into `null`.
+            let payload = payload.as_ref().clone();
+            let name = format!("__thaw_uninit_read_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), widened.clone());
+            let var = HirExpr::Var(name.clone());
+            let nullable = HirType::Nullable(Box::new(payload.clone()));
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::NullishIsNone(Box::new(var.clone()), payload.clone())),
+                Box::new(HirExpr::NullableNone(payload.clone())),
+                Box::new(HirExpr::NullableSome(
+                    Box::new(HirExpr::NullishValue(Box::new(var), payload.clone())),
+                    payload,
+                )),
+                nullable,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, widened.clone(), read)]);
+        }
+        let HirType::Optional(payload) = widened else {
             return Ok(read);
         };
         let payload = payload.as_ref().clone();
+        if payload == HirType::Json {
+            // An absent `any` field reads `undefined`, not a null handle.
+            let name = format!("__thaw_uninit_read_{}", self.next_binding);
+            self.next_binding += 1;
+            let optional = HirType::Optional(Box::new(HirType::Json));
+            self.scope.insert(name.clone(), optional.clone());
+            let var = HirExpr::Var(name.clone());
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::Json)),
+                Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+                Box::new(HirExpr::OptionalValue(Box::new(var), HirType::Json)),
+                HirType::Json,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, optional, read)]);
+        }
         if payload != HirType::F64 {
             return Ok(HirExpr::OptionalValue(Box::new(read), payload));
         }

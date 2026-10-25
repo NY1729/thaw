@@ -1523,12 +1523,107 @@ fn string_value(value: *const c_char) -> Value {
         // serializer; a valid-UTF-8 string stays the common `Value::String`.
         // A framed Error carries its side-table props with it (the copy has no pointer identity).
         let value = if unsafe { *value } == 1 {
-            unsafe { thaw_error_with_props(value) }
+            unsafe { thaw_error_json_text(value) }
         } else {
             value
         };
         let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
         utf8_or_wtf8(bytes.to_vec())
+    }
+}
+
+/// Identity pointer recorded in a Json string copy of a framed Error (`thaw_error_json_text`'s
+/// `"\u0000id"` bag entry), without checking that the Error is still live.
+fn error_id(bytes: &[u8]) -> Option<usize> {
+    const NEEDLE: &[u8] = b"\"\\u0000id\":";
+    if bytes.first() != Some(&1) {
+        return None;
+    }
+    let at = bytes
+        .windows(NEEDLE.len())
+        .rposition(|window| window == NEEDLE)?
+        + NEEDLE.len();
+    let digits = bytes[at..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    std::str::from_utf8(&bytes[at..at + digits])
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|id| *id != 0)
+}
+
+/// The live framed Error a Json string value refers to: its own props, `===` identity and
+/// edits all go through the Error side table keyed by this pointer.
+fn error_ref_bytes(bytes: &[u8]) -> Option<*const c_char> {
+    let id = error_id(bytes)?;
+    if thaw_arena::was_reclaimed(id) {
+        return None;
+    }
+    let pointer = id as *const c_char;
+    (unsafe { *pointer } == 1).then_some(pointer)
+}
+
+fn error_ref(value: &Value) -> Option<*const c_char> {
+    match value {
+        Value::String(text) => error_ref_bytes(text.as_bytes()),
+        _ => None,
+    }
+}
+
+/// Bytes of a framed Error string with the live side-table state of the Error it refers to.
+fn live_error_bytes(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    match error_ref_bytes(bytes) {
+        Some(error) => std::borrow::Cow::Owned(
+            unsafe { CStr::from_ptr(thaw_error_with_props(error)) }
+                .to_bytes()
+                .to_vec(),
+        ),
+        None => std::borrow::Cow::Borrowed(bytes),
+    }
+}
+
+/// Own property `key` of the Error a Json string refers to (`undefined` when absent).
+fn error_prop_value(error: *const c_char, key: &[u8]) -> Value {
+    let Ok(key) = CString::new(key) else {
+        return napi_undefined_value();
+    };
+    let json = unsafe { thaw_error_get_prop_json(error, key.as_ptr()) };
+    if !json.is_null() {
+        if let Some(value) = JsonParser::new(unsafe { CStr::from_ptr(json) }.to_bytes()).parse() {
+            return value;
+        }
+    }
+    let text = |pointer: *const c_char| {
+        (!pointer.is_null() && unsafe { *pointer } != 0).then(|| string_value(pointer))
+    };
+    match key.as_bytes() {
+        b"cause" => text(unsafe { thaw_error_cause(error) }),
+        b"code" => text(unsafe { thaw_error_code(error) })
+            .filter(|code| code.as_str() != Some("undefined")),
+        _ => None,
+    }
+    .unwrap_or_else(napi_undefined_value)
+}
+
+fn set_error_prop(error: *const c_char, key: &[u8], value: &Value) {
+    let (Ok(key), Ok(json)) = (CString::new(key), CString::new(value.to_string())) else {
+        return;
+    };
+    unsafe { thaw_error_set_prop(error, key.as_ptr(), json.as_ptr()) };
+}
+
+fn error_has_prop(error: *const c_char, key: &[u8]) -> bool {
+    CString::new(key).is_ok_and(|key| unsafe { thaw_error_has_prop(error, key.as_ptr()) })
+}
+
+/// Two Json strings that are copies of framed Errors are the same Error exactly when they carry
+/// the same identity; every other pair compares by text.
+fn json_strings_same(left: &[u8], right: &[u8]) -> bool {
+    match (error_id(left), error_id(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -2487,6 +2582,16 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
                 })
                 .collect(),
         ),
+        // A Json copy of an Error stringifies as its live own enumerable props, like the Error.
+        Value::String(_) if error_ref(value).is_some() && !ERROR_REFS_AS_TEXT.with(Cell::get) => {
+            Value::shared_object(
+                enumerable_entries(value)
+                    .into_iter()
+                    .filter(|(_, value)| !is_napi_undefined(value))
+                    .map(|(key, value)| (key, ordered_json_omitting_undefined(&value)))
+                    .collect(),
+            )
+        }
         other => other.clone(),
     }
 }
@@ -4243,6 +4348,21 @@ fn top_level_undefined_string() -> *const c_char {
     CString::new("undefined").unwrap_or_default().into_raw()
 }
 
+thread_local! {
+    /// Set while a Json value is encoded as side-table text: a Json copy of an Error then stays its
+    /// string instead of serializing as the Error's props.
+    static ERROR_REFS_AS_TEXT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `thaw_json_stringify_public` for storing a value (`err.key = value`): keeps Error copies as text.
+#[no_mangle]
+pub extern "C" fn thaw_json_encode_public(value: *mut Value) -> *const c_char {
+    ERROR_REFS_AS_TEXT.with(|flag| flag.set(true));
+    let text = thaw_json_stringify_public(value);
+    ERROR_REFS_AS_TEXT.with(|flag| flag.set(false));
+    text
+}
+
 /// The user-facing `JSON.stringify(value)` (no replacer/space) entry
 /// point -- distinct from `thaw_json_stringify` precisely because that
 /// one is *also* used internally for argument/result marshaling and
@@ -5161,7 +5281,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         Value::Bool(value) => Node::Bool(*value),
         Value::Number(number) => Node::Number(number.as_f64().unwrap_or(f64::NAN)),
         Value::BigInt(text) => Node::BigInt(text.clone()),
-        Value::String(text) => tagged_error_node(text.as_bytes(), stack)
+        Value::String(text) => tagged_error_node(&live_error_bytes(text.as_bytes()), stack)
             .unwrap_or_else(|| Node::Str(text.encode_utf16().collect())),
         Value::Wtf8(bytes) => {
             tagged_error_node(bytes, stack).unwrap_or_else(|| Node::Str(wtf8_decode_utf16(bytes)))
@@ -5273,12 +5393,14 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                 let ctor = match class {
                     // module-scoped classes are mangled `__thawmod<N>_Name`
                     Some(name) if name != "Object" => {
-                        Ctor::Named(match name.strip_prefix("__thawmod") {
+                        let plain = match name.strip_prefix("__thawmod") {
                             Some(rest) => rest
                                 .split_once('_')
                                 .map_or(name.clone(), |(_, plain)| plain.to_string()),
                             None => name,
-                        })
+                        };
+                        // A monomorphised generic class is named `Box__thaw_f64`.
+                        Ctor::Named(plain.split("__thaw_").next().unwrap_or(&plain).to_string())
                     }
                     _ => Ctor::Plain,
                 };
@@ -5418,6 +5540,8 @@ pub unsafe extern "C" fn thaw_error_inspect(value: *const c_char) -> *const c_ch
     if value.is_null() {
         return value;
     }
+    // A Json copy of an Error prints the live Error it refers to.
+    let value = error_ref_bytes(unsafe { CStr::from_ptr(value) }.to_bytes()).unwrap_or(value);
     let merged = unsafe { thaw_error_with_props(value) };
     let bytes = unsafe { CStr::from_ptr(merged) }.to_bytes();
     // A bag holding only `errors`/`name` (an AggregateError) keeps the existing plain rendering.
@@ -5527,6 +5651,10 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
     let text = match value {
         // A bare top-level string prints unquoted; everything else (including a nested
         // string) goes through `util.inspect`.
+        Value::String(text) if text.as_bytes().first() == Some(&1) => CString::new(text.as_bytes())
+            .ok()
+            .map(|owned| to_str(unsafe { thaw_error_inspect(owned.as_ptr()) }))
+            .unwrap_or_else(|| text.clone()),
         Value::String(value) => value.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
@@ -5991,6 +6119,9 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     if let Value::Host(lease) = value {
         return track_typed_decode_child(leak(host_get_property(lease, &key)));
     }
+    if let Some(error) = error_ref(value) {
+        return track_typed_decode_child(leak(error_prop_value(error, &key)));
+    }
     if let Some(result) = regexp_wrapper_property(value, &wtf8_to_string(&key)) {
         return track_typed_decode_child(leak(result));
     }
@@ -6083,6 +6214,9 @@ pub extern "C" fn thaw_json_has(value: *mut Value, key: *const c_char) -> u8 {
     let value = unsafe { &*value };
     if let Value::Host(lease) = value {
         return u8::from(host_property_predicate(lease, &key, 0));
+    }
+    if let Some(error) = error_ref(value) {
+        return u8::from(error_has_prop(error, &key) || key.as_slice() == b"name");
     }
     let mut current = value.clone();
     let mut seen = HashSet::new();
@@ -6414,6 +6548,18 @@ unsafe extern "C" {
     fn thaw_error_message(message: *const c_char) -> *const c_char;
     /// The error text with its side-table props baked in as a `\u{5}` bag (the text itself when none).
     fn thaw_error_with_props(message: *const c_char) -> *const c_char;
+    /// `thaw_error_with_props` plus the Error's identity pointer, for a text copy that becomes a
+    /// Json string value (see `error_ref`).
+    fn thaw_error_json_text(message: *const c_char) -> *const c_char;
+    fn thaw_error_get_prop_json(error: *const c_char, key: *const c_char) -> *const c_char;
+    fn thaw_error_set_prop(error: *const c_char, key: *const c_char, json: *const c_char) -> bool;
+    fn thaw_error_has_prop(error: *const c_char, key: *const c_char) -> bool;
+    fn thaw_error_delete_prop(error: *const c_char, key: *const c_char) -> bool;
+    fn thaw_error_entries_json(error: *const c_char) -> *const c_char;
+    fn thaw_error_is_instance(message: *const c_char, class_name: *const c_char) -> bool;
+    fn thaw_error_stack_frames() -> *const c_char;
+    fn thaw_error_cause(message: *const c_char) -> *const c_char;
+    fn thaw_error_code(message: *const c_char) -> *const c_char;
     fn thaw_error_to_string(message: *const c_char) -> *const c_char;
 }
 
@@ -6591,7 +6737,16 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
             let bytes = unsafe { CStr::from_ptr(formatted) }.to_bytes();
             return thaw_arena::owned_string(bytes);
         }
-        Value::String(s) => s.clone(),
+        Value::String(s) => {
+            let copy = thaw_arena::owned_string(s.as_bytes());
+            // The copy of an Error is that Error again (props, `===`).
+            if let Some(id) = error_id(s.as_bytes()) {
+                thaw_arena::register_reset_hook(reset_native_error_text_identity);
+                NATIVE_ERROR_TEXT_IDENTITY
+                    .with(|table| table.borrow_mut().insert(copy as usize, id));
+            }
+            return copy;
+        }
         Value::BigInt(decimal) => decimal.clone(),
         // A lone-surrogate string keeps its raw WTF-8 bytes (a `String`
         // couldn't hold them).
@@ -6638,6 +6793,8 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
     }
     match value {
         Value::Null | Value::Array(_) | Value::Object(_) => c"object".as_ptr(),
+        // A Json copy of an Error is an object.
+        Value::String(_) if error_ref(value).is_some() => c"object".as_ptr(),
         Value::Host(lease) => match host_query(lease, 0).as_deref() {
             Some("undefined") => c"undefined".as_ptr(),
             Some("boolean") => c"boolean".as_ptr(),
@@ -6728,6 +6885,46 @@ fn is_thaw_internal_wrapper(value: &Value) -> bool {
 /// wrapper` already do for property reads and `JSON.stringify`, just
 /// generalized to take the key as a runtime argument instead of a
 /// fixed set.
+/// `Error.captureStackTrace(target)` on a plain object: an own `stack` of `name: message` (V8's
+/// `Error.prototype.toString` defaults) plus the generated frame line.
+// ponytail: the property is enumerable (Json objects have no hidden keys), V8's is not.
+#[no_mangle]
+pub extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+    if value.is_null() || error_ref(unsafe { &*value }).is_some() {
+        return 0.0;
+    }
+    let text = |key: *const c_char, default: &str| match unsafe { &*thaw_json_get(value, key) } {
+        Value::String(text) => text.clone(),
+        _ => default.to_string(),
+    };
+    let (name, message) = (
+        text(c"name".as_ptr(), "Error"),
+        text(c"message".as_ptr(), ""),
+    );
+    let header = match (name.is_empty(), message.is_empty()) {
+        (true, _) => message,
+        (_, true) => name,
+        _ => format!("{name}: {message}"),
+    };
+    let frames = unsafe { thaw_error_stack_frames() };
+    let frames = if frames.is_null() {
+        String::new()
+    } else {
+        to_str(frames)
+    };
+    object_insert(value, c"stack".as_ptr(), Value::String(header + &frames));
+    0.0
+}
+
+/// `value instanceof <ErrorClass>` for a Json copy of an Error (0 for every other value).
+#[no_mangle]
+pub extern "C" fn thaw_json_is_error_instance(value: *const Value, class: *const c_char) -> u8 {
+    let Some(error) = unsafe { value.as_ref() }.and_then(error_ref) else {
+        return 0;
+    };
+    u8::from(unsafe { thaw_error_is_instance(error, class) })
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_has_wrapper_key(value: *const Value, key: *const c_char) -> u8 {
     let Some(value) = (unsafe { value.as_ref() }) else {
@@ -6851,6 +7048,8 @@ pub unsafe extern "C" fn thaw_json_is_primitive_operand(value: *const Value) -> 
         return 1;
     }
     match unsafe { value.as_ref() } {
+        // A Json copy of an Error is an object.
+        Some(value) if error_ref(value).is_some() => 0,
         None
         | Some(
             Value::Null
@@ -7584,6 +7783,19 @@ fn enumerable_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
             .map(|(index, value)| (index.to_string().into_bytes(), value.clone()))
             .collect(),
         // A framed Error's own enumerable props live in its `\u{5}` bag, not in its characters.
+        Value::String(text) if error_ref(value).is_some() => {
+            let json = unsafe { thaw_error_entries_json(error_ref(value).unwrap()) };
+            let live = JsonParser::new(unsafe { CStr::from_ptr(json) }.to_bytes()).parse();
+            live.as_ref()
+                .and_then(Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
         Value::String(text)
             if text.as_bytes().first() == Some(&1)
                 && thaw_arena::error_wire::parse_tagged(text.as_bytes()).is_some() =>
@@ -8071,6 +8283,9 @@ pub unsafe extern "C" fn thaw_json_has_own(value: *const Value, key: *const c_ch
     let key = to_key(key);
     match unsafe { value.as_ref() } {
         Some(Value::Host(lease)) => u8::from(host_property_predicate(lease, &key, 1)),
+        Some(value) if error_ref(value).is_some() => {
+            u8::from(error_has_prop(error_ref(value).unwrap(), &key))
+        }
         Some(value) => json_has_own_value(value, &key).into(),
         None => 0,
     }
@@ -8115,7 +8330,7 @@ fn string_bytes(value: &Value) -> Option<&[u8]> {
 }
 
 fn same_string(left: &Value, right: &Value) -> Option<bool> {
-    Some(string_bytes(left)? == string_bytes(right)?)
+    Some(json_strings_same(string_bytes(left)?, string_bytes(right)?))
 }
 
 #[no_mangle]
@@ -8200,7 +8415,7 @@ pub unsafe extern "C" fn thaw_json_strict_equal(a: *const Value, b: *const Value
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
-        (Value::String(x), Value::String(y)) => x == y,
+        (Value::String(x), Value::String(y)) => json_strings_same(x.as_bytes(), y.as_bytes()),
         (Value::Wtf8(_), Value::Wtf8(_))
         | (Value::String(_), Value::Wtf8(_))
         | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
@@ -8242,7 +8457,7 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
-        (Value::String(x), Value::String(y)) => x == y,
+        (Value::String(x), Value::String(y)) => json_strings_same(x.as_bytes(), y.as_bytes()),
         (Value::Wtf8(_), Value::Wtf8(_))
         | (Value::String(_), Value::Wtf8(_))
         | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
@@ -8602,7 +8817,8 @@ fn add_error_suffix_properties(
             5 => {
                 if let Some(bag) = JsonParser::new(segment).parse() {
                     if let Some(object) = bag.as_object() {
-                        for (key, value) in object {
+                        for (key, value) in object.iter().filter(|(key, _)| !key.starts_with(b"\0"))
+                        {
                             let value = if revive {
                                 revive_framed_errors(value.clone())
                             } else {
@@ -9355,6 +9571,10 @@ fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
         host_set_property(lease, &key, &value);
         return;
     }
+    if let Some(error) = unsafe { object.as_ref() }.and_then(error_ref) {
+        set_error_prop(error, &key, &value);
+        return;
+    }
     if !object_writable(object, &key) {
         return;
     }
@@ -9440,6 +9660,12 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
         return 0;
     }
     let key = to_key(key);
+    if let Some(error) = error_ref(value) {
+        return u8::from(
+            CString::new(key)
+                .is_ok_and(|key| unsafe { thaw_error_delete_prop(error, key.as_ptr()) }),
+        );
+    }
     if json_has_own_value(value, &key)
         && unsafe { thaw_object_state(thaw_json_state_key(object), 1) }
     {
@@ -9559,6 +9785,19 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn json_copies_of_errors_compare_by_identity_not_text() {
+        let copy = |id: usize| format!("\u{1}Error\u{1}\u{1e}E1:1:-:a\u{5}{{\"\\u0000id\":{id}}}");
+        let (first, same, other) = (copy(4096), copy(4096), copy(8192));
+        assert_eq!(error_id(first.as_bytes()), Some(4096));
+        assert!(json_strings_same(first.as_bytes(), same.as_bytes()));
+        assert!(!json_strings_same(first.as_bytes(), other.as_bytes()));
+        // Without an identity the text decides, like any string.
+        assert!(json_strings_same(b"plain", b"plain"));
+        assert!(!json_strings_same(first.as_bytes(), b"plain"));
+        assert_eq!(error_id(b"\x01Error\x01\x1eE1:1:-:a"), None);
     }
 
     #[test]

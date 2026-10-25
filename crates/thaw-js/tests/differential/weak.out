@@ -1,0 +1,8 @@
+1 f true false true false
+TypeError: Invalid value used as weak map key
+TypeError: Constructor WeakMap requires 'new'
+true false true false true
+TypeError: Invalid value used in weak set
+true [object WeakRef] [object WeakMap]
+undefined false
+5 n/a true function WeakMap 1
