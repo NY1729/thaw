@@ -3,7 +3,6 @@
 //!
 //!     THAW_JS_INFER_THAW_BIN=/path/to/thaw cargo test -p thaw-js-infer --test e2e_registry -- --nocapture
 
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -26,8 +25,7 @@ fn run(cmd: &mut Command) -> (bool, String, f64) {
 
 fn case(thaw: &str, c: &Case) {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let dir = Path::new(&std::env::var("TMPDIR").unwrap_or_else(|_| ".".into()))
-        .join(format!("thaw-js-infer-e2e-{}", c.name));
+    let dir = std::env::temp_dir().join(format!("thaw-js-infer-e2e-{}", c.name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let program =
