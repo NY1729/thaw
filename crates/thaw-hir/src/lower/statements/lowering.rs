@@ -299,6 +299,49 @@ impl<'a> FnLowerer<'a> {
         Ok(statements)
     }
 
+    /// `__thaw_error_register_owner_props(error, JSON)` for a thrown Error-family record: its own
+    /// enumerable props (`message` is never one, `name` only when it differs from the inherited
+    /// name), so a catch can enumerate them without the record's fixed layout.
+    fn error_owner_props_call(
+        &mut self,
+        value: &HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<Option<HirExpr>, String> {
+        let Some(default_name) = Self::error_family_default_name(fields) else {
+            return Ok(None);
+        };
+        let mut entries = Vec::new();
+        for index in ecmascript_field_order(fields) {
+            let name = &fields[index].0;
+            if name.starts_with("__") || name.starts_with('#') || name == "message" || name == "name" {
+                continue;
+            }
+            let read = self.lower_fixed_object_property_read(value.clone(), fields, name)?;
+            if let Ok(json) = self.coerce_to_declared(&HirType::Json, read) {
+                entries.push((name.clone(), json));
+            }
+        }
+        let name_read = self.lower_fixed_object_property_read(value.clone(), fields, "name")?;
+        let name_json = self.coerce_to_declared(&HirType::Json, name_read.clone())?;
+        let mut with_name = entries.clone();
+        with_name.push(("name".to_string(), name_json));
+        let object = HirExpr::Conditional(
+            Box::new(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(name_read),
+                Box::new(HirExpr::Lit(HirLit::Str(default_name))),
+            )),
+            Box::new(HirExpr::JsonObjectLit(entries, HirType::Json)),
+            Box::new(HirExpr::JsonObjectLit(with_name, HirType::Json)),
+            HirType::Json,
+        );
+        let text = HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".into())), vec![object]);
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
+            vec![value.clone(), text],
+        )))
+    }
+
     /// Build the tagged, owned provenance tuple for a source throw or
     /// Promise rejection. Union payload reads stay inside their matching arm.
     pub(crate) fn rejection_provenance_statements(
@@ -337,6 +380,9 @@ impl<'a> FnLowerer<'a> {
                     value.clone(), HirExpr::Lit(HirLit::Bool(false)),
                 ]));
                 out.push(call("__thaw_register_native_exception_describer", vec![value.clone(), describer]));
+                if let Some(register) = self.error_owner_props_call(&value, fields)? {
+                    out.push(HirStmt::Expr(register));
+                }
                 out.push(call("__thaw_set_pending_exception_object", vec![value]));
             }
             HirType::Object(fields) => {

@@ -107,6 +107,28 @@ pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const 
     }
 }
 
+/// `===`/`==` on two strings: 0 when equal. Two Error values (framed strings) with equal text are
+/// equal only when they are the same Error (the same canonical identity pointer), like Node.
+///
+/// # Safety
+///
+/// Both pointers must reference valid NUL-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_string_strict_equal(left: *const c_char, right: *const c_char) -> i32 {
+    let order = unsafe { thaw_string_compare(left, right) };
+    if order != 0 || left.is_null() || right.is_null() {
+        return order;
+    }
+    let (left_first, right_first) = unsafe { (*left, *right) };
+    if left_first == ERROR_TAG_MARKER as c_char && right_first == ERROR_TAG_MARKER as c_char {
+        let (left, right) = unsafe {
+            (thaw_error_canonical_pointer(left.cast()), thaw_error_canonical_pointer(right.cast()))
+        };
+        return i32::from(left != right);
+    }
+    0
+}
+
 #[no_mangle]
 /// # Safety
 /// `value` must reference a valid NUL-terminated UTF-8 string.

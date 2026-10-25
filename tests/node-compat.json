@@ -2436,6 +2436,36 @@
       "source": "class Reg extends Map<string, number> {}\nclass Tags extends Set<string> {}\nfunction size(m: Map<string, number> | undefined): number { return m === undefined ? -1 : m.size; }\nfunction main(): void {\n  const r = new Reg(); r.set(\"a\", 1); r.set(\"b\", 2);\n  const t = new Tags(); t.add(\"x\");\n  console.log(Array.from(r).length, Array.from(t).join(\",\"), size(r), size(undefined));\n  console.log(new Set([...t]).size, new Set<string>([...t, \"y\"]).size);\n  const alias: Map<string, number> = r;\n  alias.set(\"c\", 3);\n  console.log(r.size, [...r.entries()].length, r.get(\"c\"));\n  const list: Reg[] = [r, new Reg()];\n  console.log(list.map((m) => m.size).join(\",\"));\n  const holder = { m: r };\n  console.log(holder.m.size, holder.m.has(\"a\"));\n  console.log(Object.keys(r), JSON.stringify({ r }));\n}\n"
     },
     {
+      "name": "error subclass fields are own keys after throw and catch",
+      "expect": "matched",
+      "source": "class HttpError extends Error {\n  status: number;\n  constructor(m: string, s: number) { super(m); this.name = \"HttpError\"; this.status = s; }\n}\nclass Plain extends Error { code = \"C\"; extra: number[] = [1]; }\nfunction main(): void {\n  const h = new HttpError(\"nf\", 404);\n  console.log(Object.keys(h), Object.entries(h), Object.getOwnPropertyNames(h));\n  try { throw h; } catch (e: any) {\n    console.log(e.status, Object.keys(e), Object.entries(e), Object.getOwnPropertyNames(e), Reflect.ownKeys(e));\n    console.log(e.name, e.message, e instanceof HttpError, e === h);\n  }\n  try { throw new Plain(\"p\"); } catch (e: any) { console.log(e.code, e.extra, Object.keys(e), e.name); }\n}\n"
+    },
+    {
+      "name": "error carrier entries and own property names",
+      "expect": "matched",
+      "source": "function main(): void {\n  const x = new Error(\"c\") as any;\n  x.a = 1;\n  x.s = \"q\";\n  console.log(Object.entries(x), Object.getOwnPropertyNames(x), Reflect.ownKeys(x));\n  try { throw x; } catch (c: any) {\n    console.log(Object.entries(c), Object.getOwnPropertyNames(c), Reflect.ownKeys(c), Object.keys(c));\n  }\n  try { throw new Error(\"plain\"); } catch (c: any) {\n    console.log(Object.entries(c), Object.getOwnPropertyNames(c), Object.keys(c));\n  }\n}\n"
+    },
+    {
+      "name": "error property compound and update assignments",
+      "expect": "matched",
+      "source": "function main(): void {\n  const y = new Error(\"y\") as any;\n  y.n = 5; y.n *= 2; y.n -= 1; y.n **= 2;\n  console.log(y.n);\n  y.t = \"a\"; y.t += 1;\n  console.log(y.t);\n  y.u ??= 3; y.u &&= 4;\n  console.log(y.u);\n  y.k = 1;\n  console.log(y.k++, y.k, ++y.k, y.k--, y.k);\n  const x = new Error(\"c\") as any;\n  x.a = 1; x.s = \"q\";\n  try { throw x; } catch (c: any) {\n    c.a += 1; c.s += \"z\"; c.m ??= 5; c.a ||= 9; c.q = 4; c.q++;\n    console.log(c.a, c.s, c.m, c.q, Object.keys(c));\n  }\n}\n"
+    },
+    {
+      "name": "error with props and stack prints like Node",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"boom\") as any;\n  e.stack = \"Error: boom\\n    at x (y:1:1)\";\n  e.code = \"E_X\";\n  console.log(e);\n  console.log(\"a\", e);\n  console.log({ err: e });\n  console.log([e]);\n  const j = { ...e };\n  console.log(j);\n  try { throw e; } catch (c: any) { console.log(c); console.log(String(c), Object.keys(c)); }\n  const f = new Error(\"p\") as any;\n  f.stack = \"Error: p\";\n  f.cause = new Error(\"inner\");\n  f.cause.stack = \"Error: inner\";\n  f.n = 1;\n  console.log(f);\n}\n"
+    },
+    {
+      "name": "distinct Error objects with equal text are not strictly equal",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  const c = a;\n  console.log(a === b, a !== b, a === c, a == b, a == c, a != b);\n  console.log(a === (new TypeError(\"x\") as Error), new Error(\"q\") === new Error(\"q\"));\n  console.log(\"x\" === \"x\", String(a) === String(b), a.message === b.message);\n  const arr = [a, b];\n  console.log(arr[0] === a, arr[1] === a, arr[0] === arr[1], arr.indexOf(b), arr.includes(c), arr.lastIndexOf(a));\n  function id(x: Error): Error { return x; }\n  console.log(id(a) === a, id(a) === b);\n  const sw = (e: Error) => { switch (e) { case a: return \"a\"; case b: return \"b\"; default: return \"?\"; } };\n  console.log(sw(a), sw(b), sw(new Error(\"x\")));\n}\n"
+    },
+    {
+      "name": "caught Error keeps pointer identity under strict equality",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }\n  try { throw a; } catch (e) { console.log(e === a, e === b); }\n}\n"
+    },
+    {
       "name": "class extends Map/Set: toStringTag and own fields",
       "expect": "matched",
       "source": "class Counter extends Map<string, number> {\n  total = 0;\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); this.total++; }\n}\nclass Tags extends Set<string> { label = \"x\"; }\nclass Reg extends Map<string, number> {}\nclass Bag extends Set<number> {}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\");\n  console.log(String(c), Object.prototype.toString.call(c), `${c}`);\n  console.log(c);\n  const t = new Tags(); t.add(\"q\");\n  console.log(String(t), Object.prototype.toString.call(t));\n  console.log(t);\n  console.log(Object.keys(c), JSON.stringify(c), JSON.stringify(t));\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r.size, r);\n  const b = new Bag([1, 2, 2, 3]);\n  console.log(b.size, b);\n  console.log(c.total);\n}\n"

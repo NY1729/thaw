@@ -618,7 +618,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         let compared = self
                             .builder
                             .build_call(
-                                self.module.get_function("thaw_string_compare").unwrap(),
+                                self.module.get_function("thaw_string_strict_equal").unwrap(),
                                 &[lhs.into(), rhs.into()],
                                 "strcmp",
                             )
