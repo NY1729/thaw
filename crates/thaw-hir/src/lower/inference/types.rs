@@ -1567,6 +1567,7 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_error_cause"
                     | "__thaw_error_code"
                     | "__thaw_error_stack"
+                    | "__thaw_error_stack_with_frames"
                     | "__thaw_error_suppressed_error"
                     | "__thaw_error_suppressed"
                     | "__thaw_error_to_string" => {
@@ -1575,6 +1576,26 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Str, argument, "error property receiver")?;
                         return Ok(HirType::Str);
+                    }
+                    "__thaw_error_stack_trace_limit" => {
+                        if !args.is_empty() {
+                            return Err(format!("{name} expects no operands"));
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_error_set_stack_trace_limit" => {
+                        let [limit] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::F64, limit, "stack trace limit")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_json_capture_stack_trace" => {
+                        let [target] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::Json, target, "stack trace target")?;
+                        return Ok(HirType::F64);
                     }
                     "__thaw_error_frame" => {
                         let [name, message] = args.as_slice() else {
@@ -2702,7 +2723,9 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_brand_wrapper" => return Ok(HirType::Json),
-                    "__thaw_json_has_wrapper_key" => return Ok(HirType::Bool),
+                    "__thaw_json_has_wrapper_key" | "__thaw_json_is_error_instance" => {
+                        return Ok(HirType::Bool)
+                    }
                     "__thaw_json_map_or_set_entries"
                     | "__thaw_json_map_or_set_get"
                     | "__thaw_json_map_or_set_set"
@@ -2835,7 +2858,7 @@ impl<'a> FnLowerer<'a> {
                         )))));
                     }
                     "JSON.parse" => return Ok(HirType::Json),
-                    "JSON.stringify" => return Ok(HirType::Str),
+                    "JSON.stringify" | "__thaw_json_encode" => return Ok(HirType::Str),
                     "__thaw_json_stringify_number_space" => {
                         let [value, space] = args.as_slice() else {
                             return Err("JSON.stringify expects value and number space".into());
