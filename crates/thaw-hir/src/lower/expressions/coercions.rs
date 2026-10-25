@@ -1072,7 +1072,8 @@ impl<'a> FnLowerer<'a> {
     /// unchanged after one byte check). Internal conversions (console, throw) keep the raw tag.
     pub(crate) fn coerce_concat_operand_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         let ty = self.infer_expr_type(&value)?;
-        let may_be_error = (ty == HirType::Str && !matches!(value, HirExpr::Lit(_)))
+        // A `Json` value can hold a framed Error string (an Error widened to `any`).
+        let may_be_error = (matches!(ty, HirType::Str | HirType::Json) && !matches!(value, HirExpr::Lit(_)))
             || object_type_is_error_family(&ty);
         let text = self.coerce_primitive_to_string(value)?;
         Ok(if may_be_error {

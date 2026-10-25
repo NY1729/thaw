@@ -5518,7 +5518,8 @@ impl<'a> FnLowerer<'a> {
                     if object.sym == *"Error" && property.sym == *"captureStackTrace" {
                         // `Error.captureStackTrace(target[, constructorOpt])`: there are no call
                         // frames to capture, so an Error value only fixes its `stack` header (read
-                        // once, V8 serializes it lazily) and any other target is left unchanged.
+                        // once, V8 serializes it lazily), a Json object gets a `stack` string, and
+                        // any other target is left unchanged.
                         let (arguments, bindings) =
                             self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?;
                         let Some(target) = arguments.first().cloned() else {
@@ -5528,9 +5529,16 @@ impl<'a> FnLowerer<'a> {
                         for extra in arguments.iter().skip(1) {
                             statements.push(HirStmt::Expr(extra.clone()));
                         }
-                        if self.infer_expr_type(&target)? == HirType::Str {
+                        let target_type = self.infer_expr_type(&target)?;
+                        if target_type == HirType::Str {
                             statements.insert(0, HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+                                vec![target],
+                            )));
+                        } else if target_type == HirType::Json {
+                            // A plain object gets an own `stack` string built from its name/message.
+                            statements.insert(0, HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_capture_stack_trace".to_string())),
                                 vec![target],
                             )));
                         } else {

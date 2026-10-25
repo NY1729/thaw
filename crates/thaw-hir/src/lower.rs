@@ -21,7 +21,7 @@
 //! a `Let` followed by a `While`), so the statement lowering entry point is
 //! `lower_stmt_seq`, not a single-statement `lower_stmt`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
@@ -37,6 +37,21 @@ use swc_ecma_ast::{
     VarDeclKind, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+
+thread_local! {
+    static THAW_JS_ROUTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Lower for a thaw-js routed build (the CLI retries unrouted if it still needs QuickJS): values
+/// handed to package calls are plain data, so fresh object literals cross as native copies instead of
+/// QuickJS-hosted projections.
+pub fn set_thaw_js_routed(routed: bool) {
+    THAW_JS_ROUTED.with(|flag| flag.set(routed));
+}
+
+pub(crate) fn thaw_js_routed() -> bool {
+    THAW_JS_ROUTED.with(Cell::get)
+}
 
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,

@@ -523,6 +523,17 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonDelete(obj, key) => self.compile_json_delete(obj, key),
             HirExpr::JsonAsNumber(inner) => self.compile_json_as(inner, "thaw_json_as_number"),
             HirExpr::JsonAsString(inner) => self.compile_json_as(inner, "thaw_json_as_string"),
+            // A thaw-js routed build throws no live JS exception objects, so a caught Json value is
+            // never an instance of an error class by identity: no QuickJS `instanceof` is needed.
+            HirExpr::JsonAsBool(inner)
+                if self.thaw_js_routed
+                    && matches!(inner.as_ref(), HirExpr::Call(callee, args)
+                        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "callDynamic")
+                            && matches!(args.first(), Some(HirExpr::Lit(HirLit::Str(function)))
+                                if function == "__thaw_instanceof_dynamic_value_by_name")) =>
+            {
+                Ok(self.context.bool_type().const_zero().into())
+            }
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
             HirExpr::JsonAsNative(inner, ty) => {
                 // Local frame: see the fresh producer in `inner` even without a statement frame.
@@ -597,6 +608,21 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_json_object_lit(fields, element)
             }
             HirExpr::JsValueAsJson(inner) => {
+                if self.thaw_js_routed {
+                    if let Some(marker) = self.try_compile_thaw_js_callback_marker(inner)? {
+                        return Ok(marker);
+                    }
+                    // A thaw-js class instance handed back to thaw-js (an argument of a thaw-js call).
+                    if self.thaw_js_call_arguments {
+                        self.thaw_js_call_arguments = false;
+                        let handle = self.compile_expr(inner);
+                        self.thaw_js_call_arguments = true;
+                        let marker = self.compile_thaw_js_handle_marker(handle?.into_int_value())?;
+                        self.tracks_owned_json_roots = true;
+                        self.mark_fresh_owned_json_result(marker)?;
+                        return Ok(marker);
+                    }
+                }
                 // A live Host lease (primitives as scalars), not the
                 // `__thaw_js_handle_id__` placeholder object: every Json
                 // consumer (console.log, spread, property reads) reads it live.

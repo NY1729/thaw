@@ -1569,11 +1569,15 @@ impl<'ctx> HirCompiler<'ctx> {
         self.pop_catch_target();
         let marshalled = self.builder.get_insert_block().unwrap();
         self.builder.position_at_end(result_marshalling_failed);
-        let projected = self.builder.build_load(self.context.i64_type(), projected_method_slot,
-            "failed_projected_method_handle").map_err(|error| error.to_string())?;
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
-            &[projected.into()], "release_failed_projected_method")
-            .map_err(|error| error.to_string())?;
+        // Only a graph callback returning a function can have projected a method handle; emitting
+        // the QuickJS release anywhere else would make every callback depend on the QuickJS archive.
+        if graph_wire && matches!(ret, HirType::Function(..) | HirType::CallableFunction(..)) {
+            let projected = self.builder.build_load(self.context.i64_type(), projected_method_slot,
+                "failed_projected_method_handle").map_err(|error| error.to_string())?;
+            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[projected.into()], "release_failed_projected_method")
+                .map_err(|error| error.to_string())?;
+        }
         let array = self.builder.build_load(ptr_type, result_array_slot,
             "failed_callback_result_array").map_err(|error| error.to_string())?;
         self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
