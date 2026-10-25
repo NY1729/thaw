@@ -295,6 +295,14 @@ impl Visit for Walker {
     fn visit_private_name(&mut self, _: &a::PrivateName) {
         self.feature("private-name");
     }
+    fn visit_static_block(&mut self, n: &a::StaticBlock) {
+        self.feature("static-block");
+        n.visit_children_with(self);
+    }
+    fn visit_auto_accessor(&mut self, n: &a::AutoAccessor) {
+        self.feature("auto-accessor");
+        n.visit_children_with(self);
+    }
     fn visit_prop_or_spread(&mut self, n: &a::PropOrSpread) {
         if matches!(n, a::PropOrSpread::Spread(_)) {
             self.feature("object-spread");

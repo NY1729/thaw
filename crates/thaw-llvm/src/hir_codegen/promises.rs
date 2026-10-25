@@ -477,6 +477,7 @@ impl<'ctx> HirCompiler<'ctx> {
             loops: self.loop_scopes.clone(),
             loop_promotions: self.loop_promotion_scopes.clone(),
             active_async_completion: self.active_async_completion,
+            thaw_js_call_arguments: self.thaw_js_call_arguments,
         };
         let saved_for_iteration_frame_slots = self.for_iteration_frame_slots.clone();
         let saved_catch_native_text = self.catch_native_text.clone();
@@ -719,6 +720,7 @@ impl<'ctx> HirCompiler<'ctx> {
             loops: self.loop_scopes.clone(),
             loop_promotions: self.loop_promotion_scopes.clone(),
             active_async_completion: self.active_async_completion,
+            thaw_js_call_arguments: self.thaw_js_call_arguments,
         };
         let saved_for_iteration_frame_slots = self.for_iteration_frame_slots.clone();
         let saved_catch_native_text = self.catch_native_text.clone();

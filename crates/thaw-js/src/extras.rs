@@ -147,6 +147,58 @@ pub(crate) const EXTRAS: &str = r#"
   def(R, 'apply', function (f, t, a) { return Function.prototype.apply.call(f, t, a); });
   def(R, 'construct', function (C, a) { return new (Function.prototype.bind.apply(C, [null].concat(a)))(); });
   Reflect = R;
+  // WeakMap / WeakSet / WeakRef / FinalizationRegistry. ponytail: entries are held strongly (no GC is
+  // observable from a short-lived process); only the key checks and the API surface matter.
+  function isObject(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
+  function weakCollection(name, isMap) {
+    var C = function (iterable) {
+      if (!(this instanceof C)) throw new TypeError("Constructor " + name + " requires 'new'");
+      def(this, '__store', new Map());
+      if (iterable !== undefined && iterable !== null) {
+        var items = Array.isArray(iterable) ? iterable : Array.from(iterable);
+        for (var i = 0; i < items.length; i++) {
+          if (isMap) {
+            if (!isObject(items[i])) throw new TypeError('Iterator value ' + String(items[i]) + ' is not an entry object');
+            this.set(items[i][0], items[i][1]);
+          } else this.add(items[i]);
+        }
+      }
+    };
+    var bad = isMap ? 'Invalid value used as weak map key' : 'Invalid value used in weak set';
+    var P = C.prototype;
+    def(C, 'name', name);
+    def(P, 'constructor', C);
+    if (isMap) {
+      def(P, 'set', function set(k, v) { if (!isObject(k)) throw new TypeError(bad); this.__store.set(k, v); return this; });
+      def(P, 'get', function get(k) { return this.__store.get(k); });
+    } else {
+      def(P, 'add', function add(k) { if (!isObject(k)) throw new TypeError(bad); this.__store.set(k, true); return this; });
+    }
+    def(P, 'has', function has(k) { return this.__store.has(k); });
+    def(P, 'delete', function (k) { return this.__store['delete'](k); });
+    def(P, Symbol.toStringTag, name);
+    return C;
+  }
+  WeakMap = weakCollection('WeakMap', true);
+  WeakSet = weakCollection('WeakSet', false);
+  WeakRef = function WeakRef(target) {
+    if (!(this instanceof WeakRef)) throw new TypeError("Constructor WeakRef requires 'new'");
+    if (!isObject(target)) throw new TypeError('WeakRef: target must be an object');
+    def(this, '__target', target);
+  };
+  def(WeakRef.prototype, 'deref', function deref() { return this.__target; });
+  def(WeakRef.prototype, 'constructor', WeakRef);
+  def(WeakRef.prototype, Symbol.toStringTag, 'WeakRef');
+  FinalizationRegistry = function FinalizationRegistry(cleanup) {
+    if (!(this instanceof FinalizationRegistry)) throw new TypeError("Constructor FinalizationRegistry requires 'new'");
+    if (typeof cleanup !== 'function') throw new TypeError('FinalizationRegistry: cleanup must be callable');
+  };
+  def(FinalizationRegistry.prototype, 'register', function register(target) {
+    if (!isObject(target)) throw new TypeError('FinalizationRegistry.prototype.register: invalid target');
+  });
+  def(FinalizationRegistry.prototype, 'unregister', function unregister() { return false; });
+  def(FinalizationRegistry.prototype, 'constructor', FinalizationRegistry);
+  def(FinalizationRegistry.prototype, Symbol.toStringTag, 'FinalizationRegistry');
 })();
 "#;
 
