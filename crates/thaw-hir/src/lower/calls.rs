@@ -777,6 +777,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Symbol => "Symbol",
             HirType::Promise(_) => "Promise",
             HirType::I64 => "BigInt",
+            _ if native_base_tag(ty).is_some() => native_base_tag(ty).unwrap_or("Object"),
             _ => "Object",
         };
         let name = format!("__thaw_object_prototype_to_string_{}", self.next_binding);

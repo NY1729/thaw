@@ -91,6 +91,15 @@ impl<'a> FnLowerer<'a> {
         statements: &mut Vec<HirStmt>,
         immutable: bool,
     ) -> Result<(), String> {
+        // `const [a, ...rest] = stack`: destructure the wrapped array.
+        if let (Pat::Array(_), Some(base)) = (pattern, native_base_type(ty).cloned()) {
+            let projected = HirExpr::PropAccess(
+                Box::new(value),
+                ty.clone(),
+                NATIVE_BASE_FIELD.to_string(),
+            );
+            return self.lower_binding_pattern_impl(pattern, projected, &base, statements, immutable);
+        }
         let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             self.bind_destructure_source_once(value, ty, statements)
         } else {

@@ -176,6 +176,8 @@ impl<'a> FnLowerer<'a> {
                         bindings.extend(spread_bindings);
                         let mut ordered = vec![HirExpr::Var(receiver_name)];
                         for (position, value) in arguments.into_iter().enumerate() {
+                            // `a.concat(stack)` spreads an `extends Array` instance.
+                            let value = self.project_native_base(value)?;
                             let actual = self.infer_expr_type(&value)?;
                             let spreads_json = element == HirType::Json
                                 && (actual == HirType::Json || matches!(actual, HirType::Array(_)))

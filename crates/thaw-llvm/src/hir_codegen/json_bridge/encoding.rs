@@ -289,6 +289,7 @@ impl<'ctx> HirCompiler<'ctx> {
         preserve_undefined: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let (snapshot, wrapper_key, element_type) = match ty {
+            HirType::Array(element) => ("", "__thaw_array_items__", (**element).clone()),
             HirType::Map(key, value) => (
                 "thaw_map_snapshot_entries",
                 "__thaw_map_entries__",
@@ -297,13 +298,17 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Set(element) => ("thaw_map_snapshot_keys", "__thaw_set_values__", (**element).clone()),
             other => return Err(format!("{other:?} is not a native collection")),
         };
-        let buffer = self.builder
-            .build_call(self.module.get_function(snapshot).unwrap(), &[collection.into()], "console_collection_snapshot")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value().basic()
-            .ok_or("collection snapshot returned no value")?
-            .into_pointer_value();
-        let handle = self.compile_array_wrap(buffer)?;
+        let handle = if snapshot.is_empty() {
+            collection
+        } else {
+            let buffer = self.builder
+                .build_call(self.module.get_function(snapshot).unwrap(), &[collection.into()], "console_collection_snapshot")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value().basic()
+                .ok_or("collection snapshot returned no value")?
+                .into_pointer_value();
+            self.compile_array_wrap(buffer)?
+        };
         let entries = self.compile_native_array_to_json_with_undefined(handle, &element_type, preserve_undefined)?;
         let object = self.builder
             .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "console_collection_json")
@@ -362,7 +367,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[wrapper.into(), key.as_pointer_value().into(), name.as_pointer_value().into()],
                 "set_console_class",
             ).map_err(|error| error.to_string())?;
+            // Own fields of the subclass follow the entries, as in Node.
+            for index in self.visible_object_field_order(fields) {
+                self.compile_native_object_json_field(
+                    object, ty, fields, index, wrapper, preserve_undefined,
+                )?;
+            }
             return Ok(wrapper);
+        }
+        // Outside `console.log`, an `extends Array` instance is its items (as `JSON.stringify` sees it).
+        if let Some((_, HirType::Array(element))) = fields.get(1).filter(|(name, _)| name == "__thaw_base") {
+            let base = self.compile_accessor_aware_field_read(object, ty, fields, 1)?;
+            return self.compile_native_array_to_json_with_undefined(
+                base.into_pointer_value(), element, preserve_undefined,
+            );
         }
         let json = self
             .builder
