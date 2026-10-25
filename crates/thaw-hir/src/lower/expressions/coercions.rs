@@ -1366,6 +1366,22 @@ impl<'a> FnLowerer<'a> {
                                 ));
                             }
                         }
+                        if let Some(tag) = native_base_tag(&HirType::Object(fields.clone())) {
+                            if tag == "Array" {
+                                // `${stack}` joins the wrapped array like `Array.prototype.toString`.
+                                let projected = self.project_native_base(value)?;
+                                return self.coerce_primitive_to_string(projected);
+                            } else {
+                                let name = format!("__thaw_native_tag_source_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let object_type = HirType::Object(fields.clone());
+                                self.scope.insert(name.clone(), object_type.clone());
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::Lit(HirLit::Str(format!("[object {tag}]"))),
+                                    &[(name, object_type, value)],
+                                );
+                            }
+                        }
                         Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
                             vec![value],
@@ -3010,6 +3026,10 @@ impl<'a> FnLowerer<'a> {
         }
         // An Error-family record has no `valueOf`: `OrdinaryToPrimitive` falls to its `toString`.
         if object_type_is_error_family(&ty) {
+            return Ok((self.coerce_primitive_to_string(value)?, HirType::Str));
+        }
+        // `extends Map`/`Set`/`Array` inherit `Object.prototype.toString` / `Array.prototype.toString`.
+        if native_base_tag(&ty).is_some() {
             return Ok((self.coerce_primitive_to_string(value)?, HirType::Str));
         }
         Err(format!(
