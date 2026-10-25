@@ -1344,6 +1344,16 @@ impl<'a> FnLowerer<'a> {
             } else {
                 self.infer_expr_type(&value)?
             };
+            // `const [first] = map` / `= set`: destructure the snapshot of its entries / values.
+            let (value, ty) = if matches!(&decl.name, Pat::Array(_))
+                && matches!(&ty, HirType::Map(..) | HirType::Set(_))
+            {
+                let value = self.native_collection_entries(value)?;
+                let ty = self.infer_expr_type(&value)?;
+                (value, ty)
+            } else {
+                (value, ty)
+            };
             let destructurable_union = matches!(
                 &ty,
                 HirType::Union(elements)

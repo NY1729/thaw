@@ -5395,12 +5395,14 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                 let ctor = match class {
                     // module-scoped classes are mangled `__thawmod<N>_Name`
                     Some(name) if name != "Object" => {
-                        Ctor::Named(match name.strip_prefix("__thawmod") {
+                        let plain = match name.strip_prefix("__thawmod") {
                             Some(rest) => rest
                                 .split_once('_')
                                 .map_or(name.clone(), |(_, plain)| plain.to_string()),
                             None => name,
-                        })
+                        };
+                        // A monomorphised generic class is named `Box__thaw_f64`.
+                        Ctor::Named(plain.split("__thaw_").next().unwrap_or(&plain).to_string())
                     }
                     _ => Ctor::Plain,
                 };
