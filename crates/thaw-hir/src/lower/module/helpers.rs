@@ -575,6 +575,17 @@ fn native_base_type(ty: &HirType) -> Option<&HirType> {
         .map(|(_, ty)| ty)
 }
 
+/// `Map`/`Set`/`Array`: the builtin a class extending one of them inherits its
+/// `Symbol.toStringTag` (`[object Map]`) from.
+fn native_base_tag(ty: &HirType) -> Option<&'static str> {
+    match native_base_type(ty)? {
+        HirType::Map(..) => Some("Map"),
+        HirType::Set(_) => Some("Set"),
+        HirType::Array(_) => Some("Array"),
+        _ => None,
+    }
+}
+
 /// `receiver.__thaw_base`: the native collection behind a `Map`/`Set` subclass.
 fn native_base_member(receiver: Expr) -> Expr {
     Expr::Member(MemberExpr {
@@ -597,7 +608,7 @@ fn native_collection_base_type(
 ) -> Result<Option<HirType>, String> {
     let arity = match base_name {
         "Map" => 2,
-        "Set" => 1,
+        "Set" | "Array" => 1,
         _ => return Ok(None),
     };
     let params = declaration
@@ -620,6 +631,7 @@ fn native_collection_base_type(
     let first = lowered.next().expect("arity checked");
     let ty = match lowered.next() {
         Some(value) => HirType::Map(first, value),
+        None if base_name == "Array" => HirType::Array(first),
         None => HirType::Set(first),
     };
     if let HirType::Map(key, _) | HirType::Set(key) = &ty {

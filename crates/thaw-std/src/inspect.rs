@@ -74,8 +74,10 @@ pub(crate) enum Node {
     /// A JS string as UTF-16 code units (may hold lone surrogates).
     Str(Vec<u16>),
     /// `None` items are holes; `extra` are non-index own properties.
+    /// `ctor` names a user subclass (`Stack(2) [ 1, 2 ]`).
     Array {
         id: usize,
+        ctor: Option<String>,
         items: Vec<Option<Node>>,
         extra: Vec<(Vec<u16>, Node)>,
     },
@@ -89,11 +91,14 @@ pub(crate) enum Node {
         id: usize,
         ctor: Option<String>,
         entries: Vec<(Node, Node)>,
+        /// Own properties of a subclass instance (`Counter(1) [Map] { 'a' => 1, total: 1 }`).
+        props: Vec<(Vec<u16>, Node)>,
     },
     Set {
         id: usize,
         ctor: Option<String>,
         items: Vec<Node>,
+        props: Vec<(Vec<u16>, Node)>,
     },
     /// ISO string, or `None` for an invalid date (`Invalid Date`).
     Date(Option<String>),
@@ -484,18 +489,25 @@ impl Ctx<'_> {
         match node {
             Node::Array {
                 id: node_id,
+                ctor,
                 items,
                 extra,
             } => {
+                let (label, _, style) = collection_label("Array", ctor);
+                let prefix = if ctor.as_deref().is_some_and(|name| name != "Array") {
+                    format!("{label}({}) ", items.len())
+                } else {
+                    String::new()
+                };
                 if items.is_empty() && extra.is_empty() && !self.opts.show_hidden {
-                    return "[]".into();
+                    return format!("{prefix}[]");
                 }
                 id = *node_id;
-                braces = ["[".into(), "]".into()];
+                braces = [format!("{prefix}["), "]".into()];
                 extras = Extras::ArrayExtras;
                 kind = Kind::Array(items);
                 keys = extra;
-                ctx_style = "Array".into();
+                ctx_style = style;
             }
             Node::Typed { name, items } => {
                 if items.is_empty() {
@@ -513,32 +525,34 @@ impl Ctx<'_> {
                 id: node_id,
                 ctor,
                 items,
+                props,
             } => {
                 let (label, tag, style) = collection_label("Set", ctor);
-                if items.is_empty() {
+                if items.is_empty() && props.is_empty() {
                     return format!("{label}(0){tag} {{}}");
                 }
                 id = *node_id;
                 braces = [format!("{label}({}){tag} {{", items.len()), "}".into()];
                 extras = Extras::Object;
                 kind = Kind::Set(items);
-                keys = &[];
+                keys = props;
                 ctx_style = style;
             }
             Node::Map {
                 id: node_id,
                 ctor,
                 entries,
+                props,
             } => {
                 let (label, tag, style) = collection_label("Map", ctor);
-                if entries.is_empty() {
+                if entries.is_empty() && props.is_empty() {
                     return format!("{label}(0){tag} {{}}");
                 }
                 id = *node_id;
                 braces = [format!("{label}({}){tag} {{", entries.len()), "}".into()];
                 extras = Extras::Object;
                 kind = Kind::Map(entries);
-                keys = &[];
+                keys = props;
                 ctx_style = style;
             }
             Node::Object {
@@ -1017,6 +1031,7 @@ mod corpus_tests {
                         })
                         .collect();
                     Node::Array {
+                        ctor: None,
                         id,
                         items,
                         extra: pairs(&map["x"]),
@@ -1046,6 +1061,7 @@ mod corpus_tests {
                             .and_then(|name| name.as_str())
                             .map(str::to_string),
                         entries,
+                        props: Vec::new(),
                     }
                 } else if let Some(items) = map.get("e") {
                     Node::Set {
@@ -1055,6 +1071,7 @@ mod corpus_tests {
                             .and_then(|name| name.as_str())
                             .map(str::to_string),
                         items: items.as_array().unwrap().iter().map(decode).collect(),
+                        props: Vec::new(),
                     }
                 } else if let Some(iso) = map.get("d") {
                     Node::Date(iso.as_str().map(str::to_string))
@@ -1180,6 +1197,7 @@ mod unit_tests {
 
     fn arr(items: Vec<Node>) -> Node {
         Node::Array {
+            ctor: None,
             id: 0,
             items: items.into_iter().map(Some).collect(),
             extra: Vec::new(),
@@ -1271,6 +1289,7 @@ mod unit_tests {
         let long = show(&arr((0..105).map(|n| num(n as f64)).collect()));
         assert!(long.ends_with("... 5 more items\n]"), "{long}");
         let sparse = Node::Array {
+            ctor: None,
             id: 0,
             items: vec![Some(num(1.0)), None, None, Some(num(2.0)), None],
             extra: Vec::new(),
@@ -1321,13 +1340,15 @@ mod unit_tests {
             id: 0,
             ctor: None,
             entries: vec![(s("a"), num(1.0))],
+            props: Vec::new(),
         };
         assert_eq!(show(&map), "Map(1) { 'a' => 1 }");
         assert_eq!(
             show(&Node::Set {
                 id: 0,
                 ctor: None,
-                items: vec![num(1.0), s("x")]
+                items: vec![num(1.0), s("x")],
+                props: Vec::new(),
             }),
             "Set(2) { 1, 'x' }"
         );
@@ -1350,6 +1371,7 @@ mod unit_tests {
             ..InspectOptions::default()
         };
         let pair = Node::Array {
+            ctor: None,
             id: 0,
             items: vec![Some(Node::Number(1.0)), Some(Node::Number(2.0))],
             extra: Vec::new(),
@@ -1358,6 +1380,7 @@ mod unit_tests {
         assert_eq!(
             inspect(
                 &Node::Array {
+                    ctor: None,
                     id: 0,
                     items: vec![],
                     extra: Vec::new()

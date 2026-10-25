@@ -2753,6 +2753,11 @@ impl<'a> FnLowerer<'a> {
                         let (value, value_type) = self
                             .apply_class_to_json(value.clone(), &value_type)?
                             .unwrap_or((value, value_type));
+                        // An `extends Array` instance serializes as its items.
+                        let (value, value_type) = match native_base_type(&value_type).cloned() {
+                            Some(base @ HirType::Array(_)) => (self.project_native_base(value)?, base),
+                            _ => (value, value_type),
+                        };
                         if value_type == HirType::Str && arguments.len() == 1 {
                             // An Error value serializes as its own enumerable properties (`{}` for
                             // a fresh one); any other string stays a quoted JSON string.
@@ -4130,7 +4135,9 @@ impl<'a> FnLowerer<'a> {
                                 .iter()
                                 .enumerate()
                                 .filter_map(|(index, element)| {
-                        matches!(element, HirType::Array(_) | HirType::Tuple(_)).then_some(index)
+                        (matches!(element, HirType::Array(_) | HirType::Tuple(_))
+                            || matches!(native_base_type(element), Some(HirType::Array(_))))
+                        .then_some(index)
                                 })
                                 .collect::<Vec<_>>();
                             let name = format!("__thaw_is_array_{}", self.next_binding);
@@ -4176,10 +4183,10 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(name.clone(), ty.clone());
                         bindings.push((name, ty.clone(), value));
                         return self.wrap_call_argument_bindings(
-                            HirExpr::Lit(HirLit::Bool(matches!(
-                                ty,
-                                HirType::Array(_) | HirType::Tuple(_)
-                            ))),
+                            HirExpr::Lit(HirLit::Bool(
+                                matches!(ty, HirType::Array(_) | HirType::Tuple(_))
+                                    || matches!(native_base_type(&ty), Some(HirType::Array(_))),
+                            )),
                             &bindings,
                         );
                     }
@@ -4194,6 +4201,10 @@ impl<'a> FnLowerer<'a> {
                         };
                         let mut value = value.clone();
                         let mut ty = self.infer_expr_type(&value)?;
+                        if let Some(base @ HirType::Array(_)) = native_base_type(&ty).cloned() {
+                            value = self.project_native_base(value)?;
+                            ty = base;
+                        }
                         if let HirType::Union(members) = &ty {
                 if members
                     .iter()
@@ -5597,6 +5608,7 @@ impl<'a> FnLowerer<'a> {
                         if let [argument] = call.args.as_slice() {
                             if argument.spread.is_some() {
                                 let source = self.lower_expr(&argument.expr)?;
+                                let source = self.project_native_base(source)?;
                                 // A single spread of a runtime-length
                                 // `number[]` (not an array literal or
                                 // tuple, both already handled below by

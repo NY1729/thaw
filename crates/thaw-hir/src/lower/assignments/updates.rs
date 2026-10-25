@@ -415,6 +415,7 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = update.arg.as_ref() {
             if member_property_name(&member.prop).as_deref() == Some("length") {
                 let array = self.lower_expr(&member.obj)?;
+                let array = self.project_native_base(array)?;
                 let array_type = self.infer_expr_type(&array)?;
                 if matches!(&array_type, HirType::Array(_))
                     || matches!(&array_type, HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))))
