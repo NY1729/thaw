@@ -33,6 +33,8 @@ pub enum Reason {
     Iterate,
     Require,
     ShapeChange,
+    /// member / call of a Node built-in that has no table yet
+    Builtin,
     /// the `.d.ts` itself says `any` / generic / function / unsupported
     Declared,
     Other,
@@ -51,6 +53,10 @@ pub enum Atom {
     NLit(i32),
     Arr(usize),
     Obj(usize),
+    /// a specific function (declaration / literal / arrow): lets calls through values be resolved
+    Fn(u32),
+    /// a Node built-in namespace (`require('path')`, `console`, `process`, ...), see `builtins`
+    Ns(u8),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -79,7 +85,7 @@ impl Ty {
     }
     /// Non-empty and made only of primitives (never an object, array or `any`).
     pub fn prim_only(&self) -> bool {
-        matches!(self, Ty::Set(s) if s.iter().all(|a| !matches!(a, Atom::Arr(_) | Atom::Obj(_))))
+        matches!(self, Ty::Set(s) if s.iter().all(|a| !matches!(a, Atom::Arr(_) | Atom::Obj(_) | Atom::Fn(_) | Atom::Ns(_))))
     }
     /// Every atom is a string (or string literal).
     pub fn is_str(&self) -> bool {

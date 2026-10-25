@@ -283,6 +283,7 @@ impl An {
 
     fn atom_matches(&mut self, f: &Flt, at: Atom) -> bool {
         match (f, at) {
+            (Flt::IsFunc, Atom::Fn(_)) => true,
             (Flt::IsStr, Atom::Str | Atom::SLit(_)) => true,
             (Flt::IsNum, Atom::Num | Atom::NLit(_)) => true,
             (Flt::IsBool, Atom::Bool) => true,
@@ -293,7 +294,7 @@ impl An {
             (Flt::IsArr(_), Atom::Arr(_)) => true,
             (Flt::IsInst(k), Atom::Obj(s)) => {
                 let r = self.find(s);
-                self.site_class_of(r).as_ref() == Some(k)
+                self.site_class_of(r) == Some(self.family_root(k))
             }
             (Flt::EqStr(v), Atom::SLit(i)) => self.lits[i as usize] == *v,
             (Flt::EqNum(v), Atom::NLit(n)) => n == *v,
@@ -312,7 +313,7 @@ impl An {
             match f {
                 Flt::Truthy => {
                     let falsy_possible = match at {
-                        Atom::Arr(_) | Atom::Obj(_) => false,
+                        Atom::Arr(_) | Atom::Obj(_) | Atom::Fn(_) | Atom::Ns(_) => false,
                         Atom::NLit(n) => n == 0,
                         Atom::SLit(i) => self.lits[i as usize].is_empty(),
                         _ => true,
@@ -321,11 +322,6 @@ impl An {
                         && !matches!(at, Atom::NLit(0))
                         && !matches!(at, Atom::SLit(i) if self.lits[i as usize].is_empty());
                     if (pos && truthy_possible) || (!pos && falsy_possible) {
-                        out.push(at);
-                    }
-                }
-                Flt::IsFunc => {
-                    if !pos {
                         out.push(at);
                     }
                 }
@@ -345,6 +341,8 @@ impl An {
                         out.push(at);
                     }
                 }
+                // other classes of the same hierarchy share the record: cannot rule the class out
+                Flt::IsInst(k) if !pos && self.fam_size(k) > 1 => out.push(at),
                 _ => {
                     if self.atom_matches(f, at) == pos {
                         out.push(at);

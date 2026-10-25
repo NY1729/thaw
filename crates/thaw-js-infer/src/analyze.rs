@@ -45,6 +45,14 @@ pub struct An {
     pub dts_ret: HashMap<usize, Ty>,
     cb_flowed: std::collections::HashSet<usize>,
     pub lits: Vec<String>,
+    ev: HashMap<(String, String), Vec<Ty>>,
+    pub escape_final: bool,
+    pub(crate) read_key: u32,
+    /// (class, field) -> type stored by that class's own constructor
+    ctor_fields: HashMap<((usize, String), String), Ty>,
+    /// functions whose value reached dynamic code (their parameters are unknown)
+    pub esc_fns: std::collections::HashSet<usize>,
+    seen_fns: std::collections::HashSet<usize>,
     pub(crate) narrow: Vec<((usize, String), Ty)>,
     class_sites: HashMap<(usize, String), usize>,
     site_class: HashMap<usize, (usize, String)>,
@@ -55,6 +63,14 @@ pub struct An {
 
 fn ends_abruptly(stmts: &[a::Stmt]) -> bool {
     stmts.last().is_some_and(stmt_ends)
+}
+
+fn ft_has_fn(t: &Ty) -> bool {
+    matches!(t, Ty::Set(s) if s.iter().any(|a| matches!(a, Atom::Fn(_))))
+}
+
+fn ft_has_non_fn(t: &Ty) -> bool {
+    matches!(t, Ty::Set(s) if s.iter().any(|a| !matches!(a, Atom::Fn(_))))
 }
 
 pub(crate) fn stmt_ends(s: &a::Stmt) -> bool {
@@ -99,6 +115,12 @@ impl An {
             dts_ret: HashMap::new(),
             cb_flowed: Default::default(),
             lits: Vec::new(),
+            ev: HashMap::new(),
+            escape_final: false,
+            read_key: 0,
+            ctor_fields: HashMap::new(),
+            esc_fns: Default::default(),
+            seen_fns: Default::default(),
             narrow: Vec::new(),
             class_sites: HashMap::new(),
             site_class: HashMap::new(),
@@ -148,9 +170,43 @@ impl An {
     pub fn taint(&mut self, t: &Ty) {
         if let Ty::Set(atoms) = t {
             for at in atoms.clone() {
-                if let Atom::Arr(s) | Atom::Obj(s) = at {
-                    self.kill(s, Reason::Tainted);
+                match at {
+                    Atom::Arr(s) | Atom::Obj(s) => self.kill(s, Reason::Tainted),
+                    Atom::Fn(f) => self.escape_fn(f as usize),
+                    _ => {}
                 }
+            }
+        }
+    }
+
+    pub fn escape_fn(&mut self, f: usize) {
+        if self.esc_fns.insert(f) {
+            self.changed = true;
+        }
+    }
+
+    /// Mark every function reachable from `t` (through arrays / objects) as escaped without killing
+    /// the containers: used for values handed to external callers.
+    fn escape_fns_in(&mut self, t: &Ty, seen: &mut std::collections::HashSet<usize>) {
+        let Ty::Set(atoms) = t else { return };
+        for at in atoms.clone() {
+            match at {
+                Atom::Fn(f) => self.escape_fn(f as usize),
+                Atom::Arr(s) | Atom::Obj(s) => {
+                    let s = self.find(s);
+                    if !seen.insert(s) {
+                        continue;
+                    }
+                    let inner: Vec<Ty> = match &self.sites[s] {
+                        Site::Arr(e) => vec![e.clone()],
+                        Site::Obj(m) => m.values().cloned().collect(),
+                        _ => vec![],
+                    };
+                    for i in inner {
+                        self.escape_fns_in(&i, seen);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -410,7 +466,8 @@ impl An {
                             (Atom::Str | Atom::SLit(_), _) | (_, Atom::Str | Atom::SLit(_)) => {
                                 Ty::str()
                             }
-                            (Atom::Arr(_) | Atom::Obj(_), _) | (_, Atom::Arr(_) | Atom::Obj(_)) => {
+                            (Atom::Arr(_) | Atom::Obj(_) | Atom::Fn(_) | Atom::Ns(_), _)
+                            | (_, Atom::Arr(_) | Atom::Obj(_) | Atom::Fn(_) | Atom::Ns(_)) => {
                                 Ty::Any(Reason::Coercion)
                             }
                             _ => Ty::num(),
@@ -496,6 +553,14 @@ impl An {
             let t = match at {
                 Atom::Undef | Atom::Null => Ty::Bottom, // throws
                 Atom::Num | Atom::NLit(_) | Atom::Bool => Ty::Any(Reason::UnmodeledMethod),
+                Atom::Fn(_) => Ty::Any(Reason::UnmodeledMethod),
+                Atom::Ns(ns) => match key {
+                    Key::Name(n) => {
+                        let k = self.read_key;
+                        self.ns_prop(ns, n, k)
+                    }
+                    _ => Ty::Any(Reason::Builtin),
+                },
                 Atom::Str | Atom::SLit(_) => match key {
                     Key::Name(n) if n == "length" => Ty::num(),
                     Key::Num => Ty::Set(vec![Atom::Str, Atom::Undef]),
@@ -523,14 +588,10 @@ impl An {
                         }
                         (Site::Obj(m), Key::Name(n)) => {
                             let own = m.get(n).cloned();
-                            let method = self
-                                .site_class
-                                .get(&s)
-                                .and_then(|k| self.st.classes.get(k))
-                                .and_then(|c| c.methods.get(n).copied());
-                            match (own, method) {
-                                (None, Some(mf)) => {
-                                    self.unsafe_dyn.insert(mf);
+                            let methods = self.fam_candidates(s, n);
+                            match (own, methods.is_empty()) {
+                                (None, false) => {
+                                    self.unsafe_dyn.extend(methods);
                                     Ty::Any(Reason::Closure)
                                 }
                                 (o, _) => o.unwrap_or_else(Ty::undef),
@@ -614,6 +675,37 @@ impl An {
         }
     }
 
+    /// Call through a value: every function in the set is a possible target.
+    fn call_value(&mut self, callee: &Ty, args: &[(Ty, bool)], recv_site: Option<usize>) -> Ty {
+        match callee {
+            Ty::Bottom => Ty::Bottom,
+            Ty::Any(_) => self.unknown_call(args, Reason::UnknownCall),
+            Ty::Set(atoms) => {
+                let mut acc = Ty::Bottom;
+                for at in atoms.clone() {
+                    let t = match at {
+                        Atom::Fn(f) => {
+                            let f = f as usize;
+                            if let (Some(s), true) = (
+                                recv_site,
+                                self.st.funcs[f].uses_this && !self.st.funcs[f].arrow,
+                            ) {
+                                // `this` is the receiver: writes through it are invisible to us
+                                self.kill(s, Reason::This);
+                            }
+                            self.call_known(f, args)
+                        }
+                        Atom::Ns(crate::builtins::ASSERT) => Ty::undef(),
+                        // calling a non-function throws
+                        _ => Ty::Bottom,
+                    };
+                    acc = self.join(&acc, &t);
+                }
+                acc
+            }
+        }
+    }
+
     fn unknown_call(&mut self, args: &[(Ty, bool)], r: Reason) -> Ty {
         for (t, _) in args {
             self.taint(t);
@@ -634,7 +726,7 @@ impl An {
         }
     }
 
-    fn static_call(&mut self, obj: &str, name: &str, key: u32) -> Option<Ty> {
+    fn static_call(&mut self, obj: &str, name: &str, args: &[(Ty, bool)], key: u32) -> Option<Ty> {
         Some(match (obj, name) {
             ("Math", _) => Ty::num(),
             ("Number", "isInteger" | "isFinite" | "isNaN" | "isSafeInteger") => Ty::bool(),
@@ -643,6 +735,16 @@ impl An {
             ("Array", "isArray") => Ty::bool(),
             ("Date", "now" | "UTC") => Ty::num(),
             ("JSON", "stringify") => Ty::Set(vec![Atom::Str, Atom::Undef]),
+            ("Date", "parse") => Ty::num(),
+            ("Object", "freeze" | "seal" | "preventExtensions") => match args.first() {
+                Some((t, false)) => t.clone(),
+                _ => return None,
+            },
+            ("Object", "isFrozen" | "isSealed" | "isExtensible" | "hasOwn" | "is") => Ty::bool(),
+            ("Object", "getOwnPropertyNames") => {
+                let s = self.site((key, 14), Site::Arr(Ty::str()));
+                Ty::one(Atom::Arr(s))
+            }
             ("Object", "keys") => {
                 let s = self.site((key, 3), Site::Arr(Ty::str()));
                 Ty::one(Atom::Arr(s))
@@ -682,6 +784,15 @@ impl An {
             let t = match at {
                 Atom::Undef | Atom::Null => Ty::Bottom,
                 Atom::Arr(_) if cb_res.is_some() => cb_res.clone().unwrap(),
+                Atom::Ns(ns) => match self.ns_call(ns, name, args, key) {
+                    Some(t) => t,
+                    None => self.unknown_call(args, Reason::Builtin),
+                },
+                Atom::Fn(f) => {
+                    // `f.call/apply/bind(...)`: invoked with unknown arguments
+                    self.escape_fn(f as usize);
+                    self.unknown_call(args, Reason::UnmodeledMethod)
+                }
                 Atom::Num | Atom::NLit(_) => match name {
                     "toFixed" | "toString" | "toPrecision" | "toExponential" | "toLocaleString" => {
                         Ty::str()
@@ -771,15 +882,24 @@ impl An {
                 Atom::Obj(s) => {
                     let r = self.find_ro(s);
                     let own = matches!(&self.sites[r], Site::Obj(m) if m.contains_key(name));
-                    let method = self
-                        .site_class
-                        .get(&r)
-                        .and_then(|k| self.st.classes.get(k))
-                        .and_then(|c| c.methods.get(name).copied());
-                    if let (Some(m), false) = (method, own) {
-                        let t = self.call_known(m, args);
-                        acc = self.join(&acc, &t);
+                    let methods = self.fam_candidates(r, name);
+                    if !methods.is_empty() && !own {
+                        for m in methods {
+                            let t = self.call_known(m, args);
+                            acc = self.join(&acc, &t);
+                        }
                         continue;
+                    }
+                    let field = match &self.sites[r] {
+                        Site::Obj(m) => m.get(name).cloned(),
+                        _ => None,
+                    };
+                    if let Some(ft @ Ty::Set(_)) = &field {
+                        if ft_has_fn(ft) && !ft_has_non_fn(ft) {
+                            let t = self.call_value(ft, args, Some(r));
+                            acc = self.join(&acc, &t);
+                            continue;
+                        }
                     }
                     let has_own = matches!(&self.sites[r], Site::Obj(m) if m.contains_key(name));
                     if name == "hasOwnProperty" && !has_own {
@@ -799,6 +919,10 @@ impl An {
         self.norm(v)
     }
 
+    pub(crate) fn site_field_pub(&mut self, s: usize, name: &str, t: &Ty) {
+        self.site_field_flow(s, name, t, false);
+    }
+
     pub(crate) fn site_pub(&mut self, key: (u32, u8), mk: Site) -> usize {
         self.site(key, mk)
     }
@@ -813,24 +937,74 @@ impl An {
         if !self.class_modelled(k) {
             return None;
         }
-        let s = *self.class_sites.get(k)?;
+        let root = self.family_root(k);
+        let s = *self.class_sites.get(&root)?;
         let s = self.find(s);
         let Site::Obj(m) = self.sites[s].clone() else {
             return None;
         };
         let mut out = Vec::new();
         for (n, t) in m {
+            // the nearest class (self, then ancestors) whose own constructor stores the field
+            let mut definer: Option<(usize, String)> = None;
+            let mut cur = Some(k.clone());
+            for _ in 0..64 {
+                let Some(c) = cur else { break };
+                if self.ctor_fields.contains_key(&(c.clone(), n.clone())) {
+                    definer = Some(c);
+                    break;
+                }
+                cur = self.st.parents.get(&c).cloned();
+            }
+            let t = match &definer {
+                // inherited from an ancestor's declaration (the TS pipeline rejects redeclaration)
+                Some(d) if d != k => continue,
+                Some(d) => {
+                    let own = self.ctor_fields[&(d.clone(), n.clone())].clone();
+                    let keep_undef = matches!(&own, Ty::Set(s) if s.contains(&Atom::Undef));
+                    match &t {
+                        Ty::Set(s) => {
+                            let v: Vec<Atom> = s
+                                .iter()
+                                .copied()
+                                .filter(|a| keep_undef || *a != Atom::Undef)
+                                .collect();
+                            self.norm_pub(v)
+                        }
+                        o => o.clone(),
+                    }
+                }
+                None => {
+                    // not stored by this class's chain: declare it once, in the root, unless some
+                    // other class of the hierarchy stores it
+                    let others = self.ctor_fields.keys().any(|(c, f)| f == &n && c != k);
+                    if others || self.family_root(k) != *k {
+                        continue;
+                    }
+                    t
+                }
+            };
             let (c, _) = self.classify_pub(&t);
+            let s = if c == Class::Any {
+                "any".to_string()
+            } else {
+                self.ts_pub(&t)
+            };
             out.push((
                 n,
-                if c == Class::Any {
+                if s.contains("Function") || s.contains("NodeModule") {
                     "any".to_string()
                 } else {
-                    self.ts_pub(&t)
+                    s
                 },
             ));
         }
         Some(out)
+    }
+
+    pub(crate) fn fam_size(&self, k: &(usize, String)) -> usize {
+        let root = self.family_root(k);
+        self.st.fam_size.get(&root).copied().unwrap_or(1)
     }
 
     pub(crate) fn site_class_of(&self, root: usize) -> Option<(usize, String)> {
@@ -838,10 +1012,11 @@ impl An {
     }
 
     pub(crate) fn class_modelled(&self, k: &(usize, String)) -> bool {
-        self.st
-            .classes
-            .get(k)
-            .is_some_and(|c| !self.st.complex.contains(k) && (c.ctor.is_some() || c.es))
+        self.st.classes.get(k).is_some_and(|c| {
+            !self.st.complex.contains(k)
+                && self.st.family.contains_key(k)
+                && (c.ctor.is_some() || c.es)
+        })
     }
 
     fn is_definite(&self, name: &str) -> bool {
@@ -934,17 +1109,20 @@ impl An {
                 }
             })
             .collect();
-        let t = self.call_inner(c, &args, &cbs);
-        for f in cbs.iter().flatten() {
-            if !self.cb_flowed.contains(f) {
-                self.flow_all_params(*f, &Ty::Any(Reason::Escaped));
-            }
-        }
-        t
+        self.call_inner(c, &args, &cbs)
     }
 
     fn fn_of_expr(&self, e: &a::Expr) -> Option<usize> {
         match strip(e) {
+            a::Expr::Ident(i) => {
+                let k = self.st.resolve(*self.cur.last().unwrap(), &i.sym)?;
+                let b = self.st.binds.get(&k)?;
+                if b.n_assign == 1 {
+                    b.fn_value
+                } else {
+                    None
+                }
+            }
             a::Expr::Fn(f) => self
                 .st
                 .by_span
@@ -952,18 +1130,6 @@ impl An {
                 .copied(),
             a::Expr::Arrow(f) => self.st.by_span.get(&(f.span.lo.0, f.span.hi.0)).copied(),
             _ => None,
-        }
-    }
-
-    fn flow_all_params(&mut self, f: usize, t: &Ty) {
-        let names: Vec<String> = self.st.funcs[f]
-            .declared
-            .iter()
-            .filter(|(_, k)| **k == DK::Param)
-            .map(|(n, _)| n.clone())
-            .collect();
-        for n in names {
-            self.flow(&(f, n), t);
         }
     }
 
@@ -993,8 +1159,59 @@ impl An {
         let args = args.to_vec();
         let fid = *self.cur.last().unwrap();
         let a::Callee::Expr(ce) = &c.callee else {
+            // `super(args)`: the parent constructor runs on the same instance
+            let cur_class = self.st.fn_class.get(&self.nonarrow(fid)).cloned();
+            let parent = cur_class.and_then(|k| self.st.parents.get(&k).cloned());
+            if let (a::Callee::Super(_), Some(p)) = (&c.callee, parent) {
+                if let Some(ctor) = self.ctor_of(&p) {
+                    self.call_known(ctor, &args);
+                    return Ty::undef();
+                }
+            }
             return self.unknown_call(&args, Reason::Class);
         };
+        // `A.call(this, args)` / `A.apply(this, args)` in a constructor-function hierarchy
+        if let a::Expr::Member(mm) = strip(ce) {
+            if let (a::Expr::Ident(x), a::MemberProp::Ident(pn)) = (strip(&mm.obj), &mm.prop) {
+                let this_first = matches!(
+                    c.args.first().map(|a0| strip(&a0.expr)),
+                    Some(a::Expr::This(_))
+                );
+                if this_first && matches!(&*pn.sym, "call" | "apply") {
+                    if let Some(k) = self.st.resolve(fid, &x.sym) {
+                        if self.class_modelled(&k) {
+                            if let Some(ctor) = self.ctor_of(&k) {
+                                if &*pn.sym == "call" {
+                                    self.call_known(ctor, &args[1..]);
+                                } else {
+                                    self.call_known(ctor, &[(Ty::Any(Reason::Spread), true)]);
+                                }
+                                return Ty::undef();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // `super.m(args)`
+        if let a::Expr::SuperProp(sp) = strip(ce) {
+            if let a::SuperProp::Ident(pn) = &sp.prop {
+                let cur_class = self.st.fn_class.get(&self.nonarrow(fid)).cloned();
+                let parent = cur_class.and_then(|k| self.st.parents.get(&k).cloned());
+                if let Some(m) = parent.and_then(|p| self.method_up(&p, &pn.sym)) {
+                    return self.call_known(m, &args);
+                }
+            }
+            return self.unknown_call(&args, Reason::Class);
+        }
+        if matches!(strip(ce), a::Expr::Ident(i) if &*i.sym == "require") {
+            if let Some(a::Expr::Lit(a::Lit::Str(s))) = c.args.first().map(|x| &*x.expr) {
+                if let Some(ns) = crate::builtins::ns_of_require(s.value.as_str().unwrap_or("")) {
+                    return Ty::one(Atom::Ns(ns));
+                }
+            }
+            return Ty::Any(Reason::Require);
+        }
         match strip(ce) {
             a::Expr::Ident(i) => match self.st.resolve(fid, &i.sym) {
                 Some(k) => {
@@ -1002,7 +1219,8 @@ impl An {
                     if let (1, Some(f)) = (b.n_assign, b.fn_value) {
                         self.call_known(f, &args)
                     } else {
-                        self.unknown_call(&args, Reason::UnknownCall)
+                        let callee = self.read_name(&i.sym);
+                        self.call_value(&callee, &args, None)
                     }
                 }
                 None => self.global_call(&i.sym, &args),
@@ -1010,10 +1228,12 @@ impl An {
             a::Expr::Member(m) => {
                 if let (a::Expr::Ident(o), a::MemberProp::Ident(p)) = (strip(&m.obj), &m.prop) {
                     if self.st.resolve(fid, &o.sym).is_none() {
-                        if let Some(t) = self.static_call(&o.sym, &p.sym, c.span.lo.0) {
+                        if let Some(t) = self.static_call(&o.sym, &p.sym, &args, c.span.lo.0) {
                             return t;
                         }
-                        return self.unknown_call(&args, Reason::UnknownGlobal);
+                        if crate::builtins::ns_of_global(&o.sym).is_none() {
+                            return self.unknown_call(&args, Reason::UnknownGlobal);
+                        }
                     }
                 }
                 // Object.prototype.hasOwnProperty.call(o, k)
@@ -1026,6 +1246,17 @@ impl An {
                     }
                 }
                 let recv = self.ty(&m.obj);
+                // `var u = require('./x'); u.f(args)`: evidence for the exported `f` of that module
+                if let (a::Expr::Ident(o), a::MemberProp::Ident(p)) = (strip(&m.obj), &m.prop) {
+                    let target = self
+                        .st
+                        .resolve(fid, &o.sym)
+                        .and_then(|k| self.st.binds.get(&k))
+                        .and_then(|b| b.req.clone());
+                    if let Some(t) = target {
+                        self.add_evidence((t, p.sym.to_string()), &args);
+                    }
+                }
                 match &m.prop {
                     a::MemberProp::Ident(p) => {
                         if recv == Ty::Bottom {
@@ -1060,8 +1291,7 @@ impl An {
             }
             other => {
                 let t = self.ty(other);
-                self.taint(&t);
-                self.unknown_call(&args, Reason::UnknownCall)
+                self.call_value(&t, &args, None)
             }
         }
     }
@@ -1069,6 +1299,13 @@ impl An {
     // ---------- expressions ----------
     pub fn ty(&mut self, e: &a::Expr) -> Ty {
         let t = self.ty_inner(e);
+        if let Ty::Set(atoms) = &t {
+            for at in atoms {
+                if let Atom::Fn(f) = at {
+                    self.seen_fns.insert(*f as usize);
+                }
+            }
+        }
         let fid = *self.cur.last().unwrap();
         self.st.funcs[fid].exprs += 1;
         if let Ty::Any(r) = &t {
@@ -1092,7 +1329,10 @@ impl An {
                 "undefined" => Ty::undef(),
                 "NaN" | "Infinity" => Ty::num(),
                 "arguments" => Ty::Any(Reason::Arguments),
-                _ => Ty::Any(Reason::UnknownGlobal),
+                _ => match crate::builtins::ns_of_global(name) {
+                    Some(ns) => Ty::one(Atom::Ns(ns)),
+                    None => Ty::Any(Reason::UnknownGlobal),
+                },
             },
         }
     }
@@ -1229,8 +1469,16 @@ impl An {
             }
             E::Assign(asg) => self.assign(asg),
             E::Member(m) => {
+                if let (E::Ident(o), a::MemberProp::Ident(p)) = (strip(&m.obj), &m.prop) {
+                    if self.st.resolve(*self.cur.last().unwrap(), &o.sym).is_none() {
+                        if let Some(t) = self.global_prop(&o.sym, &p.sym) {
+                            return t;
+                        }
+                    }
+                }
                 let o = self.ty(&m.obj);
                 let k = self.key_of(&m.prop);
+                self.read_key = m.span.lo.0;
                 self.member_read(&o, &k)
             }
             E::Call(c) => self.call(c),
@@ -1280,11 +1528,21 @@ impl An {
             E::Object(o) => self.object_lit(o),
             E::Fn(f) => {
                 f.function.visit_with(self);
-                Ty::Any(Reason::Closure)
+                match self
+                    .st
+                    .by_span
+                    .get(&(f.function.span.lo.0, f.function.span.hi.0))
+                {
+                    Some(&id) => Ty::one(Atom::Fn(id as u32)),
+                    None => Ty::Any(Reason::Closure),
+                }
             }
             E::Arrow(f) => {
                 f.visit_with(self);
-                Ty::Any(Reason::Closure)
+                match self.st.by_span.get(&(f.span.lo.0, f.span.hi.0)) {
+                    Some(&id) => Ty::one(Atom::Fn(id as u32)),
+                    None => Ty::Any(Reason::Closure),
+                }
             }
             E::Class(c) => {
                 c.class.visit_with(self);
@@ -1403,13 +1661,19 @@ impl An {
                 };
                 // `this.f = e;` as a direct constructor statement: always initialised
                 let cur = *self.cur.last().unwrap();
-                self.def_write = binop.is_none()
-                    && self.st.funcs[cur].direct_this.contains(&asg.span.lo.0)
-                    && self
-                        .st
-                        .fn_class
-                        .get(&cur)
-                        .is_some_and(|k| self.st.classes[k].ctor == Some(cur));
+                let ctor_class = self
+                    .st
+                    .fn_class
+                    .get(&cur)
+                    .filter(|k| self.st.classes[*k].ctor == Some(cur))
+                    .cloned();
+                let direct = binop.is_none()
+                    && ctor_class.is_some()
+                    && self.st.funcs[cur].direct_this.contains_key(&asg.span.lo.0);
+                self.def_write = direct
+                    && ctor_class
+                        .as_ref()
+                        .is_some_and(|k| self.family_root(k) == *k);
                 let v = match binop {
                     None => rhs.clone(),
                     Some(op) => {
@@ -1419,6 +1683,19 @@ impl An {
                 };
                 self.assign_to_expr(&te, &v);
                 self.def_write = false;
+                if let (true, Some(k)) = (direct, ctor_class) {
+                    // what this class's own constructor stores (no `undefined` from mere absence)
+                    if let Some(name) = self.st.funcs[cur].direct_this.get(&asg.span.lo.0).cloned()
+                    {
+                        let w = self.widen(&v);
+                        let old = self
+                            .ctor_fields
+                            .remove(&(k.clone(), name.clone()))
+                            .unwrap_or(Ty::Bottom);
+                        let n = self.join(&old, &w);
+                        self.ctor_fields.insert((k, name), n);
+                    }
+                }
                 v
             }
             a::AssignTarget::Pat(p) => {
@@ -1437,15 +1714,54 @@ impl An {
     }
 
     // ---------- classes / `this` ----------
+    /// Root of the hierarchy a class belongs to (instances of the hierarchy share one record).
+    pub(crate) fn family_root(&self, k: &(usize, String)) -> (usize, String) {
+        self.st.family.get(k).cloned().unwrap_or_else(|| k.clone())
+    }
+
     fn class_site(&mut self, k: &(usize, String)) -> usize {
-        if let Some(&s) = self.class_sites.get(k) {
+        let root = self.family_root(k);
+        if let Some(&s) = self.class_sites.get(&root) {
             return self.find(s);
         }
         let id = self.sites.len();
         self.sites.push(Site::Obj(BTreeMap::new()));
-        self.class_sites.insert(k.clone(), id);
-        self.site_class.insert(id, k.clone());
+        self.class_sites.insert(root.clone(), id);
+        self.site_class.insert(id, root);
         id
+    }
+
+    /// Nearest constructor at or above `k` in its hierarchy.
+    fn ctor_of(&self, k: &(usize, String)) -> Option<usize> {
+        let mut cur = k.clone();
+        for _ in 0..64 {
+            if let Some(c) = self.st.classes.get(&cur).and_then(|c| c.ctor) {
+                return Some(c);
+            }
+            cur = self.st.parents.get(&cur)?.clone();
+        }
+        None
+    }
+
+    /// Nearest method `name` at or above `k` (for `super.m()`).
+    fn method_up(&self, k: &(usize, String), name: &str) -> Option<usize> {
+        let mut cur = k.clone();
+        for _ in 0..64 {
+            if let Some(m) = self.st.classes.get(&cur).and_then(|c| c.methods.get(name)) {
+                return Some(*m);
+            }
+            cur = self.st.parents.get(&cur)?.clone();
+        }
+        None
+    }
+
+    fn fam_candidates(&self, site: usize, name: &str) -> Vec<usize> {
+        self.site_class
+            .get(&site)
+            .and_then(|root| self.st.fam_methods.get(root))
+            .and_then(|m| m.get(name))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn nonarrow(&self, mut f: usize) -> usize {
@@ -1462,15 +1778,19 @@ impl An {
             return false;
         };
         let f = &self.st.funcs[fid];
-        if f.is_ctor || !f.is_proto || self.st.classes[&k].escaped || self.unsafe_dyn.contains(&fid)
+        let root = self.family_root(&k);
+        if f.is_ctor
+            || !f.is_proto
+            || self.st.fam_escaped.contains(&root)
+            || self.unsafe_dyn.contains(&fid)
         {
             return false;
         }
         // never instantiated in the package: the instances come from outside
-        if self.st.binds.get(&k).is_none_or(|b| b.new_refs == 0) {
+        if !self.st.fam_instantiated.contains(&root) {
             return false;
         }
-        match self.class_sites.get(&k).copied() {
+        match self.class_sites.get(&root).copied() {
             Some(s) => {
                 let s = self.find(s);
                 !matches!(self.sites[s], Site::Dead(_))
@@ -1498,11 +1818,10 @@ impl An {
 
     /// `new C(args)` for a modelled class.
     fn new_class(&mut self, k: &(usize, String), args: &[(Ty, bool)]) -> Option<Ty> {
-        let ci = self.st.classes.get(k)?;
-        if self.st.complex.contains(k) || !(ci.ctor.is_some() || ci.es) {
+        if !self.class_modelled(k) {
             return None;
         }
-        let ctor = ci.ctor;
+        let ctor = self.ctor_of(k);
         match ctor {
             Some(c) => {
                 let ret = self.call_known(c, args);
@@ -1518,6 +1837,68 @@ impl An {
         }
         let s = self.class_site(k);
         Some(Ty::one(Atom::Obj(self.find(s))))
+    }
+
+    // ---------- call-site evidence ----------
+    fn add_evidence(&mut self, key: (String, String), args: &[(Ty, bool)]) {
+        let spread = args.iter().any(|x| x.1);
+        let had = self.ev.contains_key(&key);
+        let mut v = self.ev.remove(&key).unwrap_or_default();
+        while v.len() < args.len() {
+            v.push(if had { Ty::undef() } else { Ty::Bottom });
+        }
+        for (i, slot) in v.iter_mut().enumerate() {
+            let t = if spread {
+                Ty::Any(Reason::Spread)
+            } else {
+                args.get(i).map_or_else(Ty::undef, |x| x.0.clone())
+            };
+            let t = self.widen(&t);
+            let n = self.join(slot, &t);
+            if n != *slot {
+                self.changed = true;
+            }
+            *slot = n;
+        }
+        self.ev.insert(key, v);
+    }
+
+    /// Parameter `i` of an exported function from observed calls (cross-module calls in the bundle and
+    /// the smoke programs / README examples given in `Config::evidence`). Trusted contract.
+    fn evidence_param(&mut self, fid: usize, i: usize) -> Option<Ty> {
+        let exports = self.st.funcs[fid].exports.clone();
+        let mut acc: Option<Ty> = None;
+        for (fk, name) in exports {
+            if let Some(v) = self.ev.get(&(fk.clone(), name.clone())).cloned() {
+                let t = v.get(i).cloned().unwrap_or_else(Ty::undef);
+                acc = Some(match acc {
+                    None => t,
+                    Some(p) => self.join(&p, &t),
+                });
+            }
+            let is_entry = match &self.st.bundle {
+                Some(b) => b.entry == fk,
+                None => fk.is_empty(),
+            };
+            let calls = match (&self.cfg.evidence, is_entry) {
+                (Some(ev), true) => ev.calls.get(&name).cloned().unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for (ci, call) in calls.iter().enumerate() {
+                let t = match call.get(i) {
+                    Some(dt) => {
+                        let mut ctr = 0;
+                        self.inst(dt, fid, 2_000_000 + ci * 64 + i, &mut ctr)
+                    }
+                    None => Ty::undef(),
+                };
+                acc = Some(match acc {
+                    None => t,
+                    Some(p) => self.join(&p, &t),
+                });
+            }
+        }
+        acc
     }
 
     // ---------- .d.ts hints ----------
@@ -1635,8 +2016,21 @@ impl An {
         for fid in 1..self.st.funcs.len() {
             let closed = {
                 let f = &self.st.funcs[fid];
-                f.iife || f.bind.is_some() || f.cb_arg
-            } || self.method_closed(fid);
+                f.iife || f.bind.is_some()
+            } || self.method_closed(fid)
+                || {
+                    // a function value we can follow: closed as long as it never reaches dynamic code
+                    let f = &self.st.funcs[fid];
+                    f.atomic()
+                        && f.exports.is_empty()
+                        && !self.esc_fns.contains(&fid)
+                        && (self.seen_fns.contains(&fid) || !self.escape_final)
+                };
+            if !closed {
+                // closures returned from a function that external code calls are called externally
+                let ret = self.st.funcs[fid].ret.clone();
+                self.escape_fns_in(&ret, &mut Default::default());
+            }
             let (uses_args, params, guess) = {
                 let f = &self.st.funcs[fid];
                 (f.uses_args, f.params.clone(), f.guess.clone())
@@ -1654,18 +2048,42 @@ impl An {
                     Some(Ty::Any(Reason::Destructure))
                 } else if uses_args {
                     Some(Ty::Any(Reason::Arguments))
-                } else if !closed && self.dts_fns.contains_key(&fid) {
+                } else if !closed {
                     let i = params
                         .iter()
                         .position(|p| p.as_deref() == Some(n.as_str()))
                         .unwrap();
-                    Some(self.dts_param(fid, i).unwrap_or(Ty::Any(Reason::Escaped)))
-                } else if !closed {
-                    Some(match (self.cfg.hint_params, guess.get(&n)) {
-                        (true, Some((true, false))) => Ty::num(),
-                        (true, Some((false, true))) => Ty::str(),
-                        _ => Ty::Any(Reason::Escaped),
-                    })
+                    let dts = if self.dts_fns.contains_key(&fid) {
+                        self.dts_param(fid, i)
+                    } else {
+                        None
+                    };
+                    if dts.is_some() {
+                        self.st.funcs[fid].trust |= TRUST_DTS;
+                        dts
+                    } else if let Some(t) = self.evidence_param(fid, i) {
+                        self.st.funcs[fid].trust |= TRUST_EVIDENCE;
+                        Some(t)
+                    } else if self.cfg.hint_params && self.st.funcs[fid].defaults[i] {
+                        // the default value (flowed in `enter`) is the evidence
+                        self.st.funcs[fid].trust |= TRUST_HINT;
+                        None
+                    } else if !self.escape_final && !self.st.funcs[fid].exports.is_empty() {
+                        // evidence about an exported function may still arrive: decide `any` at the end
+                        None
+                    } else {
+                        Some(match (self.cfg.hint_params, guess.get(&n)) {
+                            (true, Some((true, false))) => {
+                                self.st.funcs[fid].trust |= TRUST_HINT;
+                                Ty::num()
+                            }
+                            (true, Some((false, true))) => {
+                                self.st.funcs[fid].trust |= TRUST_HINT;
+                                Ty::str()
+                            }
+                            _ => Ty::Any(Reason::Escaped),
+                        })
+                    }
                 } else {
                     None
                 };
@@ -1793,6 +2211,22 @@ impl Visit for An {
             &|nm| assigns_in_stmt(&n.body, nm) || assigns_in_expr(&n.test, nm),
             |s| n.body.visit_with(s),
         );
+    }
+    fn visit_throw_stmt(&mut self, n: &a::ThrowStmt) {
+        let t = self.ty(&n.arg);
+        self.taint(&t);
+    }
+    fn visit_class_prop(&mut self, n: &a::ClassProp) {
+        if let Some(v) = &n.value {
+            let t = self.ty(v);
+            self.taint(&t);
+        }
+    }
+    fn visit_private_prop(&mut self, n: &a::PrivateProp) {
+        if let Some(v) = &n.value {
+            let t = self.ty(v);
+            self.taint(&t);
+        }
     }
     fn visit_return_stmt(&mut self, n: &a::ReturnStmt) {
         let t = match &n.arg {

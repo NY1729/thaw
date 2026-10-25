@@ -4,6 +4,7 @@ use thaw_js_infer::{analyze_source, Class, Config, Reason};
 fn main() {
     let mut cfg = Config::default();
     let mut dts_root: Option<String> = None;
+    let mut smoke_root: Option<String> = None;
     let (mut detail, mut annotate, mut files) = (false, false, Vec::new());
     for a in std::env::args().skip(1) {
         match a.as_str() {
@@ -11,6 +12,17 @@ fn main() {
             "--optimistic" => cfg.optimistic_uninit = true,
             "--detail" => detail = true,
             "--annotate" => annotate = true,
+            "--returns" => cfg.returns = true,
+            "--guards" => cfg.guards = true,
+            a if a.starts_with("--dts=") => {
+                let t = std::fs::read_to_string(&a["--dts=".len()..]).unwrap();
+                cfg.dts = Some(std::sync::Arc::new(
+                    thaw_js_infer::dts::DtsIndex::parse(&t).unwrap(),
+                ));
+            }
+            a if a.starts_with("--smoke-root=") => {
+                smoke_root = Some(a["--smoke-root=".len()..].to_string())
+            }
             a if a.starts_with("--dts-root=") => {
                 dts_root = Some(a["--dts-root=".len()..].to_string())
             }
@@ -23,7 +35,7 @@ fn main() {
         print!("{}", thaw_js_infer::annotate(&src, cfg.clone()).unwrap());
         return;
     }
-    println!("pkg\tfns\tconcrete\tnullable\tunion\tany\tdead\tclosed\tany_exprs/exprs\tpasses\tdts_matched\tdts_typed\tthis_matched\tthis_typed");
+    println!("pkg\tfns\tconcrete\tnullable\tunion\tany\tdead\tclosed\tany_exprs/exprs\tpasses\tdts_matched\tdts_typed\tthis_matched\tthis_typed\tev_matched\tev_typed\tsound_typed");
     let mut tot = thaw_js_infer::Summary::default();
     for path in files {
         let name = std::path::Path::new(&path)
@@ -47,6 +59,28 @@ fn main() {
                 }
             }
         }
+        if let Some(root) = &smoke_root {
+            // smoke program + README examples of the package, as call-site evidence
+            let dir = format!("{root}/proj/{name}/thaw_modules");
+            let pkg = std::fs::read_dir(&dir)
+                .ok()
+                .and_then(|rd| rd.flatten().next())
+                .map(|e| e.file_name().to_string_lossy().into_owned());
+            if let Some(pkg) = pkg {
+                let mut ev = thaw_js_infer::evidence::Evidence::default();
+                if let Ok(t) = std::fs::read_to_string(format!("{root}/pk/{name}.ts")) {
+                    ev.add_program(&pkg, &t);
+                }
+                for readme in ["README.md", "readme.md", "Readme.md"] {
+                    if let Ok(t) = std::fs::read_to_string(format!(
+                        "{root}/proj/{name}/node_modules/{pkg}/{readme}"
+                    )) {
+                        ev.add_readme(&pkg, &t);
+                    }
+                }
+                cfg.evidence = Some(std::sync::Arc::new(ev));
+            }
+        }
         // deep ASTs: run on a big stack
         let r = std::thread::Builder::new()
             .stack_size(512 << 20)
@@ -63,7 +97,7 @@ fn main() {
         };
         let c = |k: Class| s.by_class.get(&k).copied().unwrap_or(0);
         println!(
-            "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{}\t{}\t{}",
+            "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             s.functions,
             c(Class::Concrete),
             c(Class::Nullable),
@@ -77,7 +111,10 @@ fn main() {
             s.dts_matched,
             s.dts_typed,
             s.this_matched,
-            s.this_typed
+            s.this_typed,
+            s.ev_matched,
+            s.ev_typed,
+            s.sound_typed
         );
         let hist = |m: &std::collections::BTreeMap<Reason, usize>| {
             let mut v: Vec<_> = m.iter().collect();
@@ -91,6 +128,25 @@ fn main() {
         println!("  fn-any-reasons: {}", hist(&s.fn_reason));
         println!("  slot-any-reasons: {}", hist(&s.slot_reason));
         if detail {
+            for f in fns
+                .iter()
+                .filter(|f| f.trust & thaw_js_infer::TRUST_EVIDENCE != 0)
+                .take(25)
+            {
+                println!(
+                    "  EVID {}@{} {:?} ({}) -> {} {:?}",
+                    f.name,
+                    f.lo,
+                    f.class,
+                    f.slots
+                        .iter()
+                        .map(|s| format!("{}:{}", s.0, s.1))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    f.ret,
+                    f.reasons
+                );
+            }
             for f in fns.iter().filter(|f| f.closed).take(40) {
                 println!(
                     "  CLOSED {}@{} ({}) -> {}",
@@ -115,7 +171,11 @@ fn main() {
             dts_matched,
             dts_typed,
             this_matched,
-            this_typed
+            this_typed,
+            ev_matched,
+            ev_typed,
+            sound_typed,
+            guarded
         );
         for (k, v) in &s.by_class {
             *tot.by_class.entry(*k).or_default() += v;
@@ -135,7 +195,7 @@ fn main() {
     }
     let c = |k: Class| tot.by_class.get(&k).copied().unwrap_or(0);
     println!(
-        "TOTAL\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}/{}\t-\t{}\t{}\t{}\t{}",
+        "TOTAL\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}/{}\t-\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         tot.functions,
         c(Class::Concrete),
         c(Class::Nullable),
@@ -148,7 +208,10 @@ fn main() {
         tot.dts_matched,
         tot.dts_typed,
         tot.this_matched,
-        tot.this_typed
+        tot.this_typed,
+        tot.ev_matched,
+        tot.ev_typed,
+        tot.sound_typed
     );
     let mut v: Vec<_> = tot.fn_reason.iter().collect();
     v.sort_by(|a, b| b.1.cmp(a.1));
@@ -168,6 +231,7 @@ fn main() {
             .collect::<Vec<_>>()
             .join(" ")
     );
+    println!("TOTAL guarded: {}", tot.guarded);
     let mut v: Vec<_> = tot.dts_reason.iter().collect();
     v.sort_by(|a, b| b.1.cmp(a.1));
     println!(

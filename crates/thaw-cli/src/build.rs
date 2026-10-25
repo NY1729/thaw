@@ -592,6 +592,9 @@ fn build_with_native_mode_routed(
         if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         }
+        if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
+            manifest["js_infer"] = js_infer_entries(registry_dir, &resolved_packages);
+        }
         let constructor_package_qualifiers =
             package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
         let transform = |source: &str, module_path: &Path, is_override: bool| {
