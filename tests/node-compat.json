@@ -2468,7 +2468,7 @@
     {
       "name": "errors in an any container keep props and identity",
       "expect": "matched",
-      "source": "function main(): void {\n  const err = new Error(\"boom\") as any;\n  err.stack = \"Error: boom\";\n  err.code = \"C\";\n  const o: any = { e: err, n: 1 };\n  console.log(o.e.message, o.e.name, o.e.code, o.e.stack);\n  o.e.extra = { a: 1 };\n  console.log(err.extra, o.e.extra.a, Object.keys(err), Object.keys(o.e));\n  const other = new Error(\"boom\") as any;\n  other.stack = \"Error: boom\";\n  console.log(o.e === err, o.e === other, o.e !== err, o.e !== other);\n  delete o.e.extra;\n  console.log(\"extra\" in err, \"code\" in o.e, o.e.hasOwnProperty(\"code\"));\n  o.e.message = \"changed\";\n  console.log(err.message, o.e.message);\n  console.log(JSON.stringify(o));\n  console.log(o);\n  console.log(typeof o.e, o.e instanceof Error, String(o.e));\n}\n"
+      "source": "function main(): void {\n  const err = new Error(\"boom\") as any;\n  err.stack = \"Error: boom\";\n  err.code = \"C\";\n  const o: any = { e: err, n: 1 };\n  console.log(o.e.message, o.e.name, o.e.code, o.e.stack);\n  o.e.extra = { a: 1 };\n  console.log(err.extra, o.e.extra.a, Object.keys(err), Object.keys(o.e));\n  const other = new Error(\"boom\") as any;\n  other.stack = \"Error: boom\";\n  console.log(o.e === err, o.e === other, o.e !== err, o.e !== other);\n  delete o.e.extra;\n  console.log(\"extra\" in err, \"code\" in o.e, o.e.hasOwnProperty(\"code\"));\n  o.e.message = \"changed\";\n  console.log(err.message, o.e.message);\n  console.log(JSON.stringify(o));\n  console.log(o);\n  console.log(typeof o.e, o.e instanceof Error, `${o.e}`);\n}\n"
     },
     {
       "name": "errors in any arrays, records and parameters keep identity",

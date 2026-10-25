@@ -22,7 +22,7 @@ fn error_stack_json_container_props_and_identity() {
   console.log(err.message, o.e.message);
   console.log(JSON.stringify(o));
   console.log(o);
-  console.log(typeof o.e, o.e instanceof Error, String(o.e));
+  console.log(typeof o.e, o.e instanceof Error, `${o.e}`);
 }
 "#;
     assert_eq!(
