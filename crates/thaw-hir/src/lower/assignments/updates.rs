@@ -553,7 +553,10 @@ impl<'a> FnLowerer<'a> {
                                 match &object_type {
                                     HirType::Object(fields)
                                         if fields.iter().any(|(name, ty)| {
-                                            name == prop.sym.as_str() && matches!(ty, HirType::F64 | HirType::Json)
+                                            name == prop.sym.as_str()
+                                            && (matches!(ty, HirType::F64 | HirType::Json)
+                                                || (ty == &HirType::Optional(Box::new(HirType::F64))
+                                                    && is_uninit_class_field(fields, name)))
                                         }) =>
                                     {
                                         Target::Prop(object, object_type, prop.sym.to_string())
@@ -627,7 +630,10 @@ impl<'a> FnLowerer<'a> {
                             match &object_type {
                                 HirType::Object(fields)
                                     if fields.iter().any(|(name, ty)| {
-                                        name == prop.sym.as_str() && matches!(ty, HirType::F64 | HirType::Json)
+                                        name == prop.sym.as_str()
+                                            && (matches!(ty, HirType::F64 | HirType::Json)
+                                                || (ty == &HirType::Optional(Box::new(HirType::F64))
+                                                    && is_uninit_class_field(fields, name)))
                                     }) =>
                                 {
                                     Target::Prop(object, object_type, prop.sym.to_string())

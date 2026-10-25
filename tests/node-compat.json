@@ -2464,6 +2464,31 @@
       "name": "caught Error keeps pointer identity under strict equality",
       "expect": "matched",
       "source": "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }\n  try { throw a; } catch (e) { console.log(e === a, e === b); }\n}\n"
+    },
+    {
+      "name": "class definite-assignment fields read undefined before init",
+      "expect": "matched",
+      "source": "class P { n!: number; b!: boolean; o?: number; ready = false; init(): void { this.n = 5; this.b = true; } }\nclass Q { n: number; constructor(flag: boolean) { if (flag) this.n = 1; } }\nfunction main(): void {\n  const p = new P();\n  console.log(p.n, p.b, p.o, typeof p.n, p.n + 1, p.n === undefined);\n  console.log(p);\n  const q = new Q(false); console.log(q.n, q);\n  console.log((p.o as number) + 1, p.o! + 1);\n  p.init();\n  console.log(p.n + 1, p.b, p.n);\n}\n"
+    },
+    {
+      "name": "class field types read undefined before init",
+      "expect": "matched",
+      "source": "class Inner { v: number = 1; }\nclass C {\n  s!: string; a!: number[]; inner!: Inner; big!: bigint;\n  cnt!: number;\n  tag: string = \"t\";\n  set(): void { this.s = \"hi\"; this.a = [1]; this.inner = new Inner(); this.big = 3n; this.cnt = 1; }\n}\nclass Both { n: number; constructor(f: boolean) { if (f) this.n = 1; else this.n = 2; } }\nclass D extends C { extra!: boolean; }\nfunction show(x: number): number { return x * 2; }\nfunction main(): void {\n  const c = new C();\n  console.log(c.s, typeof c.s, c.a, c.inner, c.big, c.cnt);\n  console.log(c);\n  console.log(JSON.stringify(c), Object.keys(c));\n  console.log(`${c.s} ${c.cnt}`);\n  console.log(show(c.cnt), c.cnt === undefined, c.s === undefined, c.a === undefined);\n  c.cnt += 1; console.log(c.cnt);\n  c.set();\n  console.log(c.s, c.a, c.inner, c.big, c.cnt, show(c.cnt), c.s.length);\n  c.a.push(2); c.cnt++; console.log(c.a, c.cnt);\n  console.log(c);\n  console.log(new Both(true), new Both(false).n);\n  const d = new D();\n  console.log(d.extra, d.cnt, d);\n  console.log(d.cnt ?? 7, d.s ?? \"dflt\");\n}\n"
+    },
+    {
+      "name": "class late-assigned and conditional fields read undefined",
+      "expect": "matched",
+      "source": "class Inner { v: number = 1; }\nclass Holder { inner!: Inner; items!: string[]; name!: string; }\nclass Late {\n  total!: number;\n  label!: string;\n  constructor(seed: number) { Object.assign(this, { total: seed }); }\n}\nclass Cond {\n  a: number; b: number;\n  constructor(f: boolean) { this.a = 1; if (f) { this.b = 2; } }\n}\nfunction main(): void {\n  const h = new Holder();\n  console.log(h.inner, h.items, h.name);\n  h.inner = new Inner();\n  h.items = [\"x\"];\n  h.name = \"n\";\n  console.log(h.inner, h.items, h.name, h);\n  console.log(new Late(4).label, new Late(4).total);\n  const c = new Cond(false);\n  console.log(c.a, c.b, c);\n  console.log(new Cond(true).b);\n}\n"
+    },
+    {
+      "name": "class uninitialised fields in value contexts and interfaces",
+      "expect": "matched",
+      "source": "interface HasN { n: number }\nclass Svc {\n  n!: number; name!: string; items!: number[]; ok!: boolean;\n  start(): void { this.n = 3; this.name = \"svc\"; this.items = [1, 2, 3]; this.ok = true; }\n  calc(): number {\n    let total = 0;\n    for (let i = 0; i < this.n; i++) { total += this.items[i] * this.n; }\n    if (this.n > 2 && this.ok) total += Math.max(this.n, 10);\n    const arr: number[] = [];\n    arr.push(this.n);\n    return total + (this.ok ? 1 : 0) + arr[0];\n  }\n  desc(): string { return \"name=\" + this.name + \" len=\" + this.name.length + ` n=${this.n}`; }\n}\nfunction useN(x: HasN): number { return x.n + 1; }\nfunction takes(n: number, s: string, o: boolean): string { return n + s + o; }\nfunction main(): void {\n  const s = new Svc();\n  s.start();\n  console.log(useN(s), takes(s.n, s.name, s.ok));\n  const { n, name } = s;\n  console.log(n, name);\n  const copy = { ...s };\n  console.log(copy.n, JSON.stringify(s));\n  const m = new Map<string, number>(); m.set(\"a\", s.n);\n  console.log(m.get(\"a\"), s.items.map((x) => x * s.n), [s.n, s.n + 1]);\n  switch (s.n) { case 3: console.log(\"three\"); break; default: console.log(\"other\"); }\n  const fresh = new Svc();\n  console.log(fresh.n > 1, fresh.n < 1, !fresh.name, fresh.ok ? \"y\" : \"n\", fresh.name ?? \"none\", fresh.n || 9);\n  console.log(fresh.n == null, fresh.n === 0, typeof fresh.ok, `${fresh.name}`, \"\" + fresh.n);\n  if (fresh.name === undefined) console.log(\"unset\"); else console.log(\"set\");\n  console.log(fresh.items?.length, fresh.name?.length);\n}\n"
+    },
+    {
+      "name": "class uninitialised fields with inheritance and truthiness",
+      "expect": "matched",
+      "source": "abstract class Base {\n  id!: number;\n  log: string[] = [];\n  constructor() { this.log.push(\"base\"); }\n}\nclass Impl extends Base {\n  extra!: string;\n  constructor(p: number) { super(); this.id = p; }\n  bump(): void { this.id += 10; this.extra = (this.extra ?? \"\") + \"x\"; }\n  get twice(): number { return this.id * 2; }\n}\nclass Acc {\n  s!: string; n!: number; list!: string[]; flag!: boolean;\n  run(): string {\n    const f = () => this.n;\n    if (this.n !== undefined) return \"has\";\n    if (!this.list) this.list = [];\n    this.list.push(\"a\");\n    this.s = \"q\"; this.s += \"z\";\n    this.n = 5;\n    const g = () => this.n + f();\n    if (this.flag) return \"flag\"; else if (this.s) return this.s + g() + this.list.length + this.n!;\n    return \"none\";\n  }\n}\nasync function later(a: Acc): Promise<number> { await Promise.resolve(1); return a.n + 1; }\nfunction main(): void {\n  const i = new Impl(3);\n  console.log(i.id, i.twice, i.extra, i.log);\n  i.bump(); i.bump();\n  console.log(i.id, i.twice, i.extra, i);\n  const a = new Acc();\n  console.log(a.run(), a.run(), a);\n  const arr: Acc[] = [a, new Acc()];\n  console.log(arr.map((x) => x.n ?? 0), arr.filter((x) => x.n === undefined).length);\n  later(a).then((v) => console.log(\"later\", v));\n  let total = 0;\n  for (const x of arr) { if (x.n) total += x.n; }\n  console.log(total);\n}\n"
     }
   ]
 }
