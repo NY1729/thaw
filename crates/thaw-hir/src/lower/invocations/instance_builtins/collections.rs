@@ -27,6 +27,16 @@ impl<'a> FnLowerer<'a> {
         match expr {
             Expr::Ident(ident) => {
                 let resolved = self.resolve_binding(ident.sym.as_ref());
+                // A union narrowed to one native collection member is that collection.
+                if let (Some(HirType::Union(_)), Some((allowed, elements))) =
+                    (self.scope.get(&resolved), self.union_narrowings.get(&resolved))
+                {
+                    if let [index] = allowed.as_slice() {
+                        if matches!(&elements[*index], HirType::Map(..) | HirType::Set(_) | HirType::Array(_)) {
+                            return Some(elements[*index].clone());
+                        }
+                    }
+                }
                 self.narrowings
                     .get(&resolved)
                     .or_else(|| self.nullable_narrowings.get(&resolved))
