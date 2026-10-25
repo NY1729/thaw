@@ -646,3 +646,123 @@ fn reports_serialise_to_json() {
     assert!(j.contains("\"guard\":\"typeof a === 'number'\""), "{j}");
     assert!(j.starts_with("{\"summary\":{\"functions\":1,"), "{j}");
 }
+
+#[test]
+fn bundled_modules_export_records_that_other_modules_can_follow() {
+    let s = r#"module.exports = (function(require){
+var __thaw_bundle_entry_key = "a";
+var __thaw_bundle_factories = {
+  "a": function(module, exports, require){ var c = require('./b'); exports.twice = function(n){ return n * c.k; }; },
+  "b": function(module, exports, require){ exports.k = 4; exports.name = 'b'; }
+};
+var __thaw_bundle_require_maps = { "a": {"./b": "b"}, "b": {} };
+})(globalThis.require);"#;
+    // `c.k` is a number, so `twice` is fully typed once its parameter comes from the contract
+    let cfg = with_dts("declare function twice(n: number): number;");
+    let r = fnr(s, cfg, "twice");
+    assert_eq!(r.ret, "number");
+    assert!(r.closed, "{:?}", r);
+    // a dynamic `require(x)` makes every module record visible to unknown code
+    let s2 = s.replace(
+        "exports.twice =",
+        "var dyn = require(name); exports.twice =",
+    );
+    let cfg = with_dts("declare function twice(n: number): number;");
+    let r = fnr(&s2, cfg, "twice");
+    assert!(!r.closed);
+}
+
+#[test]
+fn evidence_types_identifiers_from_annotations_and_initialisers() {
+    let mut ev = crate::evidence::Evidence::default();
+    ev.add_program(
+        "pkg",
+        "import { add } from 'pkg'; const n = 5; let s: string = 'a'; function main(k: number) { add(n, k); add(n, s); }",
+    );
+    let calls = &ev.calls["add"];
+    assert_eq!(calls[0], vec![crate::dts::DT::Num, crate::dts::DT::Num]);
+    assert_eq!(calls[1], vec![crate::dts::DT::Num, crate::dts::DT::Str]);
+}
+
+#[test]
+fn dts_free_function_matches_a_function_on_a_plain_local_object() {
+    let cfg = with_dts("declare function merge(a: number, b: number): number;");
+    let r = fnr(
+        "var utils = {}; utils.merge = function(a, b){ return a + b; }; exports.u = utils;",
+        cfg,
+        "merge",
+    );
+    assert!(r.dts);
+    assert_eq!(r.slots[0].1, "number");
+}
+
+#[test]
+fn aot_clone_inlines_constants_and_helpers() {
+    let s = r#"module.exports = (function(require){
+var __thaw_bundle_entry_key = "a";
+var __thaw_bundle_factories = {
+  "a": function(module, exports, require){
+    var c = require('./b');
+    var SCALE = 3;
+    function clampIt(v) { return v < 0 ? 0 : v; }
+    exports.scaled = scaled;
+    function scaled(n) { return clampIt(Math.trunc(n * c.k)) * SCALE; }
+    exports.shout = function (s) { return s.toUpperCase() + '!'; };
+    exports.bad = function (s) { return /x/.test(s); };
+  },
+  "b": function(module, exports, require){ const k = (exports.k = 4); }
+};
+var __thaw_bundle_require_maps = { "a": {"./b": "b"}, "b": {} };
+})(globalThis.require);"#;
+    let cfg = with_dts(
+        "declare function scaled(n: number): number; declare function shout(s: string): string; \
+         declare function bad(s: string): boolean;",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    assert_eq!(names, vec!["scaled", "shout"], "{clones:#?}");
+    let scaled = &clones[0];
+    assert_eq!(scaled.params, vec![crate::clone::Prim::Num]);
+    assert!(scaled.ts.contains("var SCALE = 3;"), "{}", scaled.ts);
+    assert!(
+        scaled.ts.contains("function clampIt(v: number)"),
+        "{}",
+        scaled.ts
+    );
+    assert!(scaled.ts.contains("Math.trunc(n * 4)"), "{}", scaled.ts);
+    assert!(!scaled.ts.contains("__thaw_export"));
+}
+
+#[test]
+fn dts_default_export_and_babel_exports_are_recognised() {
+    // `export default function clamp` in the declarations, `module.exports = clamp` in the bundle
+    let cfg = with_dts("export default function clamp(a: number, lo: number, hi: number): number;");
+    let r = fnr("function clamp(a, lo, hi){ return a < lo ? lo : a > hi ? hi : a; } module.exports = clamp;", cfg, "clamp");
+    assert!(r.dts);
+    assert_eq!(r.slots[0].1, "number");
+    assert!(r.exports.contains(&"<default>".to_string()));
+    // Babel's UMD helper exports through a parameter called `_exports`
+    let cfg = with_dts("export function getRounds(h: string): number;");
+    let r = fnr("(function(_exports){ _exports.getRounds = getRounds; function getRounds(h){ return h.length; } })({});", cfg, "getRounds");
+    assert!(
+        r.exports.contains(&"getRounds".to_string()),
+        "{:?}",
+        r.exports
+    );
+}
+
+#[test]
+fn clones_support_self_recursion_and_reject_runtime_state() {
+    let s = "exports.fib = function fib(n){ return n < 2 ? n : fib(n - 1) + fib(n - 2); }; \
+             var cache = {}; exports.cached = function(n){ return cache[n]; };";
+    let cfg = with_dts(
+        "declare function fib(n: number): number; declare function cached(n: number): number;",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__a_").unwrap();
+    assert_eq!(clones.len(), 1, "{clones:#?}");
+    assert!(
+        clones[0].ts.contains("__a_0_fib(n - 1) + __a_0_fib(n - 2)"),
+        "{}",
+        clones[0].ts
+    );
+}

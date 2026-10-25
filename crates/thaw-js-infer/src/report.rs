@@ -25,6 +25,8 @@ pub struct FnReport {
     pub trust: u8,
     /// `this` was typed as an instance of a modelled class (needs a brand / field-tag guard at entry)
     pub this_typed: bool,
+    /// names under which the function is exported (`<default>` for `module.exports = f`)
+    pub exports: Vec<String>,
     /// JavaScript predicate over the parameters (and `this`) under which the typed signature holds;
     /// `Some` for every function whose types rest on a trusted contract
     pub guard: Option<String>,
@@ -330,7 +332,7 @@ fn link_classes(st: &mut State) {
     }
 }
 
-fn run(
+pub(crate) fn run(
     src: &str,
     cfg: Config,
 ) -> Result<
@@ -420,7 +422,14 @@ fn run(
             && m.iter().all(|x| !x.nested)
             && m[2..].iter().all(|x| x.pos >= m[1].rhs_end);
     }
+    // `module.exports = X` where X is a local object: its `X.m = function` members are the exports
+    let mut default_objects: Vec<(String, (usize, String))> = Vec::new();
     for (fk, name, t) in std::mem::take(&mut st.export_assigns) {
+        if name == crate::evidence::DEFAULT {
+            if let ExpTarget::Bind(k) = &t {
+                default_objects.push((fk.clone(), k.clone()));
+            }
+        }
         let f = match t {
             ExpTarget::Fn(f) => Some(f),
             ExpTarget::Bind(k) => {
@@ -439,6 +448,26 @@ fn run(
             if let Some(&f) = st.by_span.get(sp) {
                 st.funcs[f].exports.push((k.clone(), "<factory>".into()));
             }
+        }
+    }
+    for fid in 1..st.funcs.len() {
+        let f = &st.funcs[fid];
+        let (Some(owner), Some(pn)) = (f.owner.clone(), f.prop_name.clone()) else {
+            continue;
+        };
+        if f.is_proto || f.is_ctor {
+            continue;
+        }
+        let Some(key) = st.resolve(f.parent, &owner) else {
+            continue;
+        };
+        let hits: Vec<String> = default_objects
+            .iter()
+            .filter(|(_, k)| *k == key)
+            .map(|(fk, _)| fk.clone())
+            .collect();
+        for fk in hits {
+            st.funcs[fid].exports.push((fk, pn.clone()));
         }
     }
     let named_cbs: Vec<usize> = st
@@ -685,6 +714,12 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
             trust: an.st.funcs[fid].trust,
             this_typed: this_ok && an.st.funcs[fid].uses_this,
             guard,
+            exports: an.st.funcs[fid]
+                .exports
+                .iter()
+                .filter(|(_, n)| n != "<factory>")
+                .map(|(_, n)| n.clone())
+                .collect(),
             exprs,
             any_exprs,
         });

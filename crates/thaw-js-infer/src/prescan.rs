@@ -425,7 +425,7 @@ impl<'s> Pre<'s> {
                 && matches!(&mm.prop, a::MemberProp::Ident(p) if &*p.sym == "exports"))
         };
         let fk = self.st.factory_of(self.fid());
-        let named = matches!(strip(&m.obj), a::Expr::Ident(o) if &*o.sym == "exports")
+        let named = matches!(strip(&m.obj), a::Expr::Ident(o) if matches!(&*o.sym, "exports" | "_exports"))
             || is_module_exports(&m.obj);
         if named {
             if let a::MemberProp::Ident(p) = &m.prop {

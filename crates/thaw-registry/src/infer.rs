@@ -21,11 +21,28 @@ pub fn analyze(
     bundle: &str,
     want_annotated: bool,
 ) -> Result<(String, Option<String>), String> {
+    analyze_with_program(dts, bundle, want_annotated, None)
+}
+
+/// Like [`analyze`], additionally using the calls the compiled program itself makes into the package
+/// (`program` = package name and the program's TypeScript source) as trusted call-site evidence.
+pub fn analyze_with_program(
+    dts: Option<&str>,
+    bundle: &str,
+    want_annotated: bool,
+    program: Option<(&str, &str)>,
+) -> Result<(String, Option<String>), String> {
+    let evidence = program.map(|(package, source)| {
+        let mut ev = thaw_js_infer::evidence::Evidence::default();
+        ev.add_program(package, source);
+        Arc::new(ev)
+    });
     let dts = dts
         .and_then(|text| thaw_js_infer::dts::DtsIndex::parse(text).ok())
         .map(Arc::new);
     let cfg = thaw_js_infer::Config {
         dts,
+        evidence,
         returns: true,
         ..Default::default()
     };
