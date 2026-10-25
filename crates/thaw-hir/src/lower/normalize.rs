@@ -2707,3 +2707,161 @@ pub fn flatten_namespaces(module: &Module) -> Module {
     }
     Module { body, ..module.clone() }
 }
+
+/// `new Map()`/`new Set()` have no type arguments of their own; copy them from
+/// the annotation the value flows into, like TypeScript's contextual typing:
+/// `const m: Map<K, V> = new Map()`, `f: Map<K, V> = new Map()` class fields,
+/// `this.f = new Map()` / `x = new Map()` assignments to an annotated field or
+/// variable, and `return new Map()` from a function with a declared return type.
+/// Names annotated differently in different places are left alone.
+pub fn infer_collection_type_args(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    type Annotations = HashMap<String, Option<TsType>>;
+    /// The `Map<..>`/`Set<..>` reference inside `T`, `T | undefined`, `T | null`.
+    fn collection_ref(ty: &TsType) -> Option<(String, Box<TsTypeParamInstantiation>)> {
+        match ty {
+            TsType::TsTypeRef(reference) => {
+                let TsEntityName::Ident(name) = &reference.type_name else { return None };
+                matches!(name.sym.as_ref(), "Map" | "Set" | "WeakMap" | "WeakSet")
+                    .then(|| reference.type_params.clone().map(|params| (name.sym.to_string(), params)))
+                    .flatten()
+            }
+            TsType::TsParenthesizedType(paren) => collection_ref(&paren.type_ann),
+            TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+                let mut found = None;
+                for member in &union.types {
+                    match member.as_ref() {
+                        TsType::TsKeywordType(keyword)
+                            if matches!(keyword.kind, TsKeywordTypeKind::TsUndefinedKeyword | TsKeywordTypeKind::TsNullKeyword) => {}
+                        other => {
+                            if found.is_some() { return None; }
+                            found = Some(collection_ref(other)?);
+                        }
+                    }
+                }
+                found
+            }
+            _ => None,
+        }
+    }
+    fn fill(expression: &mut Expr, ty: Option<&TsType>) {
+        let Some((class, params)) = ty.and_then(collection_ref) else { return };
+        let mut current = &mut *expression;
+        while let Expr::Paren(paren) = current { current = &mut paren.expr; }
+        if let Expr::New(new) = current {
+            if new.type_args.is_none()
+                && matches!(new.callee.as_ref(), Expr::Ident(name) if name.sym.as_ref() == class)
+            {
+                new.type_args = Some(params);
+            }
+        }
+    }
+    struct Collect { names: Annotations, fields: Annotations }
+    fn note(map: &mut Annotations, name: String, ty: &TsType) {
+        match map.get(&name) {
+            Some(Some(existing)) if !swc_common::EqIgnoreSpan::eq_ignore_span(existing, ty) => { map.insert(name, None); }
+            Some(_) => {}
+            None => { map.insert(name, Some(ty.clone())); }
+        }
+    }
+    impl Visit for Collect {
+        fn visit_binding_ident(&mut self, binding: &BindingIdent) {
+            if let Some(annotation) = &binding.type_ann {
+                note(&mut self.names, binding.id.sym.to_string(), &annotation.type_ann);
+            }
+        }
+        fn visit_class_prop(&mut self, property: &ClassProp) {
+            if let (PropName::Ident(name), Some(annotation)) = (&property.key, &property.type_ann) {
+                note(&mut self.fields, name.sym.to_string(), &annotation.type_ann);
+            }
+            property.visit_children_with(self);
+        }
+    }
+    struct Fill { names: Annotations, fields: Annotations, returns: Vec<Option<TsType>> }
+    impl Fill {
+        fn lookup<'a>(map: &'a Annotations, name: &str) -> Option<&'a TsType> {
+            map.get(name).and_then(Option::as_ref)
+        }
+    }
+    impl VisitMut for Fill {
+        fn visit_mut_var_decl(&mut self, declaration: &mut VarDecl) {
+            if !declaration.declare {
+                declaration.visit_mut_children_with(self);
+            }
+        }
+        fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+            declarator.visit_mut_children_with(self);
+            if let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref_mut()) {
+                fill(init, binding.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref()));
+            }
+            // `let m: Map<K, V>;` assigned later: a collection has no
+            // `undefined` representation, so start it as an empty one.
+            if let (Pat::Ident(binding), None) = (&declarator.name, &declarator.init) {
+                let annotation = binding.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref());
+                if let Some(TsType::TsTypeRef(reference)) = annotation {
+                    if let (Some((class, params)), TsEntityName::Ident(name)) =
+                        (collection_ref(&TsType::TsTypeRef(reference.clone())), &reference.type_name)
+                    {
+                        declarator.init = Some(Box::new(Expr::New(NewExpr {
+                            span: name.span,
+                            ctxt: Default::default(),
+                            callee: Box::new(Expr::Ident(Ident::new_no_ctxt(class.into(), name.span))),
+                            args: Some(Vec::new()),
+                            type_args: Some(params),
+                        })));
+                    }
+                }
+            }
+        }
+        fn visit_mut_class_prop(&mut self, property: &mut ClassProp) {
+            property.visit_mut_children_with(self);
+            if let Some(value) = property.value.as_deref_mut() {
+                fill(value, property.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref()));
+            }
+        }
+        fn visit_mut_assign_expr(&mut self, assign: &mut AssignExpr) {
+            assign.visit_mut_children_with(self);
+            if assign.op != AssignOp::Assign { return; }
+            let ty = match &assign.left {
+                AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) => {
+                    Self::lookup(&self.names, binding.id.sym.as_ref())
+                }
+                AssignTarget::Simple(SimpleAssignTarget::Member(member))
+                    if matches!(member.obj.as_ref(), Expr::This(_)) =>
+                {
+                    match &member.prop {
+                        MemberProp::Ident(name) => Self::lookup(&self.fields, name.sym.as_ref()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let ty = ty.cloned();
+            fill(&mut assign.right, ty.as_ref());
+        }
+        fn visit_mut_function(&mut self, function: &mut Function) {
+            self.returns.push(function.return_type.as_ref().map(|annotation| (*annotation.type_ann).clone()));
+            function.visit_mut_children_with(self);
+            self.returns.pop();
+        }
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {
+            self.returns.push(arrow.return_type.as_ref().map(|annotation| (*annotation.type_ann).clone()));
+            arrow.visit_mut_children_with(self);
+            if let (Some(Some(ty)), ArrowFunctionBody::Expr(body)) = (self.returns.last(), arrow.body.as_mut()) {
+                fill(body, Some(&ty.clone()));
+            }
+            self.returns.pop();
+        }
+        fn visit_mut_return_stmt(&mut self, statement: &mut ReturnStmt) {
+            statement.visit_mut_children_with(self);
+            if let (Some(argument), Some(Some(ty))) = (statement.arg.as_deref_mut(), self.returns.last()) {
+                fill(argument, Some(&ty.clone()));
+            }
+        }
+    }
+    let mut collect = Collect { names: HashMap::new(), fields: HashMap::new() };
+    module.visit_with(&mut collect);
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Fill { names: collect.names, fields: collect.fields, returns: Vec::new() });
+    module
+}

@@ -766,3 +766,168 @@ fn clones_support_self_recursion_and_reject_runtime_state() {
         clones[0].ts
     );
 }
+
+#[test]
+fn aot_clone_container_parameters_are_copied_only_when_read() {
+    use crate::clone::{CTy, Prim};
+    let s = r#"exports.total = function (xs, k) { var t = 0; for (var i = 0; i < xs.length; i++) { t += xs[i]; } return t * k; };
+exports.joined = function (words) { return words.join('-'); };
+exports.area = function (r) { return r.w * r.h; };
+exports.push = function (xs) { xs.push(1); return xs.length; };
+exports.alias = function (xs) { var ys = xs; ys.push(1); return ys.length; };
+exports.sorted = function (xs) { return xs.sort().length; };
+exports.fieldalias = function (o) { var a = o.items; a.push(1); return a.length; };
+exports.fieldlen = function (o) { return o.items.length + o.n; };"#;
+    let cfg = with_dts(
+        "declare function total(xs: number[], k: number): number; declare function joined(words: string[]): string; \
+         declare function area(r: { w: number; h: number }): number; declare function push(xs: number[]): number; \
+         declare function alias(xs: number[]): number; declare function sorted(xs: number[]): number; \
+         declare function fieldalias(o: { items: number[] }): number; \
+         declare function fieldlen(o: { items: number[]; n: number }): number;",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    assert_eq!(
+        names,
+        vec!["total", "joined", "area", "fieldlen"],
+        "{clones:#?}"
+    );
+    assert_eq!(
+        clones[0].params,
+        vec![CTy::Arr(Prim::Num), CTy::Prim(Prim::Num)]
+    );
+    assert_eq!(clones[1].params, vec![CTy::Arr(Prim::Str)]);
+    assert_eq!(clones[2].params[0].ts(), "{ h: number; w: number }");
+    let helpers = clones[0].helpers();
+    assert!(
+        helpers.contains("__aot_0_total_p0_ok(v: Json): boolean"),
+        "{helpers}"
+    );
+    assert!(
+        helpers.contains("__aot_0_total_p0_cv(v: Json): number[]"),
+        "{helpers}"
+    );
+}
+
+#[test]
+fn clone_types_round_trip_through_their_declaration_text() {
+    use crate::clone::{CTy, Prim};
+    for t in [
+        CTy::Prim(Prim::Str),
+        CTy::Arr(Prim::Bool),
+        CTy::Obj(vec![
+            ("a".into(), CTy::Prim(Prim::Num)),
+            ("b".into(), CTy::Arr(Prim::Str)),
+        ]),
+    ] {
+        assert_eq!(CTy::parse(&t.ts()), Some(t.clone()), "{}", t.ts());
+    }
+    // declaration order of the fields does not matter, optional fields are not supported
+    assert_eq!(
+        CTy::parse("{ b: string, a: number }"),
+        CTy::parse("{ a: number; b: string }")
+    );
+    assert_eq!(CTy::parse("{ a?: number }"), None);
+    assert_eq!(CTy::parse("number[][]"), None);
+}
+
+#[test]
+fn a_function_using_this_keeps_its_call_site_typed_parameters() {
+    // `this` is `any`, but the parameter still comes from the visible calls
+    let s = "function f(a){ this.v = a; return a + 1; } f(1);";
+    assert_eq!(slot(s, "f", "a"), "number");
+    assert_eq!(fnr(s, Config::default(), "f").ret, "number");
+    // a value that depends on `this` is still `any`
+    let r = fnr("function g(){ return this; } g();", Config::default(), "g");
+    assert_eq!(r.class, Class::Any);
+    assert_eq!(r.reasons[0], Reason::This);
+}
+
+#[test]
+fn nested_containers_report_the_root_cause_not_tainted() {
+    let s = "var inner = [1]; var outer = [inner]; unknownFn(outer); function f(){ return inner; } f();";
+    let r = fnr(s, Config::default(), "f");
+    assert_eq!(r.class, Class::Any);
+    assert_ne!(r.reasons[0], Reason::Tainted);
+}
+
+#[test]
+fn aot_clone_array_reads_must_be_provably_in_bounds() {
+    let s = r#"exports.sum = function (x) { if (x.length === 0) { return 0; } var s = x[0]; for (var i = 1; i < x.length; i++) { s += x[i]; } return s; };
+exports.cached = function (x) { var n = x.length; var s = 0; for (var i = 0; i < n; i++) { s += x[i]; } return s; };
+exports.first = function (x) { return x[0]; };
+exports.shifted = function (x) { var s = 0; for (var i = 0; i < x.length; i++) { s += x[i + 1]; } return s; };
+exports.reused = function (x) { var s = 0; for (var i = 0; i < x.length; i++) { s += x[i]; i += 2; } return s; };
+exports.last = function (x) { if (x.length === 0) { throw new Error('empty'); } return x[x.length - 1]; };"#;
+    let cfg = with_dts(
+        "declare function sum(x: number[]): number; declare function cached(x: number[]): number; \
+         declare function first(x: number[]): number; declare function shifted(x: number[]): number; \
+         declare function reused(x: number[]): number; declare function last(x: number[]): number;",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    assert_eq!(names, vec!["sum", "cached", "last"], "{clones:#?}");
+    // proven reads are typed as the element type, not `number | undefined`
+    assert!(
+        clones[0].ts.contains("var s: number = x[0]") || clones[0].ts.contains("var s = x[0]"),
+        "{}",
+        clones[0].ts
+    );
+}
+
+#[test]
+fn aot_clone_kahan_sum_with_typeof_guards_is_eligible() {
+    let s = r#"exports.sum = function sum(x) {
+    if (x.length === 0) { return 0; }
+    var sum = x[0];
+    var correction = 0;
+    var transition;
+    if (typeof sum !== "number") { return Number.NaN; }
+    for (var i = 1; i < x.length; i++) {
+        if (typeof x[i] !== "number") { return Number.NaN; }
+        transition = sum + x[i];
+        if (Math.abs(sum) >= Math.abs(x[i])) { correction += sum - transition + x[i]; } else { correction += x[i] - transition + sum; }
+        sum = transition;
+    }
+    return sum + correction;
+};"#;
+    let cfg = with_dts("declare function sum(x: number[]): number;");
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    assert_eq!(clones.len(), 1, "{clones:#?}");
+}
+
+#[test]
+fn program_evidence_proves_a_contract_only_for_direct_calls_of_evident_types() {
+    use crate::dts::DT;
+    use crate::evidence::Evidence;
+    let want = [DT::Arr(Box::new(DT::Num)), DT::Num];
+    let prove = |program: &str| {
+        let mut ev = Evidence::default();
+        ev.add_program("pkg", program);
+        ev.proves(&["f"], &want)
+    };
+    let imp = "import { f } from \"pkg\";\n";
+    assert!(prove(&format!(
+        "{imp}const xs: number[] = [1]; let n = 2; f(xs, n * 3); f([1, 2], parseFloat(\"1\"));"
+    )));
+    // unknown argument types, a wrong type, a wrong arity
+    assert!(!prove(&format!("{imp}f(g(), 1);")));
+    assert!(!prove(&format!("{imp}f([\"a\"], 1);")));
+    assert!(!prove(&format!("{imp}f([1]);")));
+    assert!(!prove(&format!("{imp}const j: Json = 1; f(j, 1);")));
+    // used as a value, imported through a namespace, several files, `require`
+    assert!(!prove(&format!("{imp}const h = f; h([1], 1);")));
+    assert!(!prove(
+        "import * as p from \"pkg\";\nconsole.log(p);\np.f([1], 1);"
+    ));
+    assert!(!prove(&format!(
+        "{imp}import {{ y }} from \"./y\";\nf([1], 1);"
+    )));
+    assert!(!prove(&format!(
+        "{imp}const r = require(\"x\");\nf([1], 1);"
+    )));
+    // a function with a declared result type is evident too
+    assert!(prove(&format!(
+        "{imp}function two(): number {{ return 2; }}\nf([1], two());"
+    )));
+}
