@@ -67,6 +67,20 @@ impl<'a> FnLowerer<'a> {
                     false,
                 )
             }
+            Target::ErrorProp(object, key) => {
+                let object_name = format!("__thaw_update_error_object_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(object_name.clone(), HirType::Str);
+                bindings.push((object_name.clone(), HirType::Str, object));
+                let key_name = format!("__thaw_update_error_key_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(key_name.clone(), HirType::Str);
+                bindings.push((key_name.clone(), HirType::Str, *key));
+                (
+                    Target::ErrorProp(HirExpr::Var(object_name), Box::new(HirExpr::Var(key_name))),
+                    false,
+                )
+            }
             Target::Prop(object, object_type, field) => {
                 let is_json_field = matches!(
                     &object_type,
@@ -568,6 +582,15 @@ impl<'a> FnLowerer<'a> {
                                         Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                                         HirType::Json,
                                     ),
+                                    HirType::Str => Target::ErrorProp(
+                                        object,
+                                        Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                    ),
+                                    HirType::Union(_)
+                                        if object_type == crate::caught_exception_carrier_type() =>
+                                    {
+                                        self.lower_member_target_from_receiver(member, object, object_type)?
+                                    }
                                     _ => {
                                         return Err(format!(
                                             "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -627,6 +650,15 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                                     HirType::Json,
                                 ),
+                                HirType::Str => Target::ErrorProp(
+                                    object,
+                                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                ),
+                                HirType::Union(_)
+                                    if object_type == crate::caught_exception_carrier_type() =>
+                                {
+                                    self.lower_member_target_from_receiver(member, object, object_type)?
+                                }
                                 _ => {
                                     return Err(format!(
                                 "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -694,7 +726,8 @@ impl<'a> FnLowerer<'a> {
         let has_json_update_target = match &target {
             Target::JsonIndex(..)
             | Target::Dictionary(_, _, HirType::Json)
-            | Target::DynamicProperty(..) => true,
+            | Target::DynamicProperty(..)
+            | Target::ErrorProp(..) => true,
             Target::Prop(_, HirType::Object(fields), field) => fields
                 .iter()
                 .any(|(name, ty)| name == field && ty == &HirType::Json),

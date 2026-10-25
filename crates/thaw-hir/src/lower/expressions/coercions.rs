@@ -1294,8 +1294,10 @@ impl<'a> FnLowerer<'a> {
                                 .iter()
                                 .any(|(field, ty)| field == "name" && *ty == HirType::Str) =>
                     {
+                        let field_list = fields.clone();
                         let object_type = HirType::Object(fields);
                         let binding = format!("__thaw_error_tag_source_{}", self.next_binding);
+                        let object_binding = binding.clone();
                         self.next_binding += 1;
                         self.scope.insert(binding.clone(), object_type.clone());
                         let bound = HirExpr::Var(binding.clone());
@@ -1311,7 +1313,7 @@ impl<'a> FnLowerer<'a> {
                         );
                         let tagged_message = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
-                            vec![HirExpr::Lit(HirLit::Str(chain)), message],
+                            vec![HirExpr::Lit(HirLit::Str(chain.clone())), message],
                         );
                         let name_marker = HirExpr::Lit(HirLit::Str("\u{4}".to_string()));
                         let tagged_name = HirExpr::Call(
@@ -1322,9 +1324,54 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![tagged_message, tagged_name],
                         );
+                        // Own fields beyond the built-in ones become properties of the framed value, so
+                        // `catch (e: any) { e.status }` / `Object.keys(e)` see them. `name` is an own
+                        // enumerable property only when it differs from the inherited built-in name.
+                        let default_name = chain
+                            .split('$')
+                            .skip(1)
+                            .find(|part| is_error_family_name(part))
+                            .unwrap_or("Error")
+                            .to_string();
+                        let framed = format!("__thaw_error_throw_frame_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(framed.clone(), HirType::Str);
+                        let mut statements = Vec::new();
+                        for (field, _) in &field_list {
+                            if field.starts_with("__") || field.starts_with('#') || field == "message" || field == "name" {
+                                continue;
+                            }
+                            let read = HirExpr::PropAccess(
+                                Box::new(HirExpr::Var(object_binding.clone())),
+                                object_type.clone(),
+                                field.clone(),
+                            );
+                            let Ok(encoded) = self.coerce_to_declared(&HirType::Json, read) else { continue };
+                            statements.push(HirStmt::Expr(self.error_set_prop_call(&framed, field, encoded)));
+                        }
+                        let name_read = HirExpr::PropAccess(
+                            Box::new(HirExpr::Var(object_binding.clone())),
+                            object_type.clone(),
+                            "name".to_string(),
+                        );
+                        let name_json = self.coerce_to_declared(&HirType::Json, name_read.clone())?;
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(name_read),
+                                Box::new(HirExpr::Lit(HirLit::Str(default_name))),
+                            ),
+                            Vec::new(),
+                            vec![HirStmt::Expr(self.error_set_prop_call(&framed, "name", name_json))],
+                        ));
+                        statements.push(HirStmt::Return(Some(HirExpr::Var(framed.clone()))));
+                        let result = self.wrap_call_argument_bindings(
+                            HirExpr::Block(statements),
+                            &[(framed, HirType::Str, result)],
+                        )?;
                         self.wrap_call_argument_bindings(
                             result,
-                            &[(binding, object_type, value)],
+                            &[(object_binding, object_type, value)],
                         )
                     }
                     // A plain object/class instance with no `toPrimitive`

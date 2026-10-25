@@ -1651,7 +1651,27 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, source, "JSON object text")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_error_json_stringify" => {
+                    "__thaw_error_register_owner_props" => {
+                        let [owner, json] = args.as_slice() else {
+                            return Err(format!("{name} expects an owner and a JSON object text"));
+                        };
+                        if !matches!(self.infer_expr_type(owner)?, HirType::Object(_)) {
+                            return Err(format!("{name} expects an object owner"));
+                        }
+                        self.expect_type(&HirType::Str, json, "JSON object text")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_error_owner_props" => {
+                        let [owner, hidden] = args.as_slice() else {
+                            return Err(format!("{name} expects an owner and a hidden-keys flag"));
+                        };
+                        if !matches!(self.infer_expr_type(owner)?, HirType::Object(_)) {
+                            return Err(format!("{name} expects an object owner"));
+                        }
+                        self.expect_type(&HirType::Bool, hidden, "hidden-keys flag")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_error_json_stringify" | "__thaw_error_entries_json" => {
                         let [error] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
                         };

@@ -585,6 +585,14 @@ fn prune_error_extras(tracing: bool) {
             table.clear();
         }
     });
+    OWNER_PROPS.with(|table| {
+        let mut table = table.borrow_mut();
+        if tracing {
+            table.retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer));
+        } else {
+            table.clear();
+        }
+    });
 }
 
 fn extras_key(pointer: *const c_char) -> usize {
@@ -874,6 +882,25 @@ pub unsafe extern "C" fn thaw_error_assign_json(error: *const c_char, json_objec
     true
 }
 
+/// Own enumerable props of a framed Error as a JSON object: assigned props, then the JS-origin bag.
+fn error_props_object(error: *const c_char, text: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut object = serde_json::Map::new();
+    let props = with_extras(error, |extras| Some(extras.props.clone())).unwrap_or_default();
+    for (key, json) in props {
+        if let Ok(value) = serde_json::from_str(&json) {
+            object.insert(key, value);
+        }
+    }
+    if let Some(bag) = metadata_suffix(text).split_once(ERROR_PROPS_MARKER).map(|v| v.1) {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(bag) {
+            for (key, value) in map {
+                object.entry(key).or_insert(value);
+            }
+        }
+    }
+    object
+}
+
 /// `JSON.stringify(err)`: own enumerable props for an Error, a quoted string otherwise.
 ///
 /// # Safety
@@ -887,21 +914,119 @@ pub unsafe extern "C" fn thaw_error_json_stringify(error: *const c_char) -> *con
     if !is_framed_error_text(error) {
         return arena_json(text);
     }
-    let mut object = serde_json::Map::new();
-    let props = with_extras(error, |extras| Some(extras.props.clone())).unwrap_or_default();
-    for (key, json) in props {
-        if let Ok(value) = serde_json::from_str(&json) {
-            object.insert(key, value);
-        }
+    arena_json(error_props_object(error, &text))
+}
+
+/// JSON object of the own enumerable entries of an Error (`Object.entries(err)`); a plain string
+/// yields its index entries like `Object.entries("ab")`. Null input yields null.
+///
+/// # Safety
+/// `error` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_entries_json(error: *const c_char) -> *const c_char {
+    if error.is_null() {
+        return std::ptr::null();
     }
-    if let Some(bag) = metadata_suffix(&text).split_once(ERROR_PROPS_MARKER).map(|v| v.1) {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(bag) {
-            for (key, value) in map {
-                object.entry(key).or_insert(value);
+    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
+    if !is_framed_error_text(error) {
+        return arena_json(
+            text.encode_utf16()
+                .enumerate()
+                .map(|(i, unit)| (i.to_string(), serde_json::Value::String(String::from_utf16_lossy(&[unit]))))
+                .collect::<serde_json::Map<_, _>>(),
+        );
+    }
+    arena_json(error_props_object(error, &text))
+}
+
+/// The error's text with its side-table state baked into the legacy `\u{5}` property bag, so a
+/// copy of the text (a Json string, a QuickJS bridge value) carries the props, and the `message`
+/// and `stack` overrides, without needing the pointer identity. Returns `error` itself when there is
+/// nothing to add.
+///
+/// # Safety
+/// `error` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_with_props(error: *const c_char) -> *const c_char {
+    if error.is_null() || !is_framed_error_text(error) {
+        return error;
+    }
+    let overlay = with_extras(error, |extras| {
+        let mut pairs = extras.props.clone();
+        for (key, value) in [("message", &extras.message), ("stack", &extras.stack)] {
+            if let Some(value) = value {
+                pairs.push((key.to_string(), serde_json::Value::String(value.clone()).to_string()));
             }
         }
+        Some(pairs)
+    })
+    .unwrap_or_default();
+    if overlay.is_empty() {
+        return error;
     }
-    arena_json(object)
+    let bytes = unsafe { CStr::from_ptr(error) }.to_bytes();
+    let suffix_start = thaw_arena::error_wire::parse_tagged(bytes).map_or(0, |frame| bytes.len() - frame.suffix.len());
+    let bag_start = bytes[suffix_start..]
+        .iter()
+        .position(|byte| *byte == ERROR_PROPS_MARKER as u8)
+        .map(|offset| suffix_start + offset);
+    let mut bag = bag_start
+        .and_then(|start| serde_json::from_slice::<serde_json::Value>(&bytes[start + 1..]).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for (key, json) in overlay {
+        if let Ok(value) = serde_json::from_str(&json) {
+            bag.insert(key, value);
+        }
+    }
+    let mut out = bytes[..bag_start.unwrap_or(bytes.len())].to_vec();
+    out.push(ERROR_PROPS_MARKER as u8);
+    out.extend_from_slice(serde_json::Value::Object(bag).to_string().as_bytes());
+    thaw_arena::owned_string(out)
+}
+
+thread_local! {
+    /// Thrown Error-family class instance (owner pointer) -> JSON object text of its own enumerable
+    /// props at the throw (`message` excluded, `name` only when assigned), for a catch's
+    /// `Object.keys`/`entries`/`getOwnPropertyNames`.
+    static OWNER_PROPS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+}
+
+/// Records the own enumerable props (a JSON object text) of a thrown Error-family instance.
+///
+/// # Safety
+/// `json` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_register_owner_props(owner: *const u8, json: *const c_char) -> bool {
+    if owner.is_null() || json.is_null() {
+        return false;
+    }
+    thaw_arena::register_metadata_reset_hook(prune_error_extras);
+    let text = unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned();
+    OWNER_PROPS.with(|table| table.borrow_mut().insert(owner as usize, text));
+    true
+}
+
+/// The text registered by `thaw_error_register_owner_props`, or `""` for an owner without one.
+/// With `hidden` set, `stack` and `message` lead the object (for `getOwnPropertyNames`).
+#[no_mangle]
+pub extern "C" fn thaw_error_owner_props(owner: *const u8, hidden: u8) -> *const c_char {
+    let Some(text) = OWNER_PROPS.with(|table| table.borrow().get(&(owner as usize)).cloned()) else {
+        return arena_c_string("").map_or(std::ptr::null(), |value| value.cast());
+    };
+    if hidden == 0 {
+        return arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast());
+    }
+    let mut keys = serde_json::Map::new();
+    keys.insert("stack".into(), serde_json::Value::Null);
+    keys.insert("message".into(), serde_json::Value::Null);
+    if let Ok(serde_json::Value::Object(props)) = serde_json::from_str(&text) {
+        keys.extend(props);
+    }
+    arena_json(keys)
 }
 
 /// # Safety
@@ -1418,6 +1543,68 @@ mod error_extras_tests {
             assert!(ERROR_EXTRAS.with(|table| !table.borrow().is_empty()));
             thaw_arena::thaw_arena_reset();
             assert!(ERROR_EXTRAS.with(|table| table.borrow().is_empty()));
+        });
+    }
+
+    #[test]
+    fn with_props_bakes_props_and_overrides_into_the_property_bag() {
+        isolated(|| {
+            let error = frame("Error", "boom");
+            // Nothing to add: the text itself comes back.
+            assert_eq!(unsafe { thaw_error_with_props(error) }, error);
+            assert!(set(error, "code", "\"E_X\""));
+            assert!(set(error, "stack", "\"Error: boom\\n    at x\""));
+            let baked = unsafe { thaw_error_with_props(error) };
+            assert_ne!(baked, error);
+            let baked = text(baked);
+            let (_, bag) = baked.split_once(ERROR_PROPS_MARKER).unwrap();
+            assert_eq!(bag, r#"{"code":"E_X","stack":"Error: boom\n    at x"}"#);
+            // A second bake merges into the existing bag instead of appending another.
+            assert!(set(error, "n", "1"));
+            let baked = text(unsafe { thaw_error_with_props(error) });
+            assert_eq!(baked.matches(ERROR_PROPS_MARKER).count(), 1);
+            assert_eq!(text(unsafe { thaw_error_with_props(c("plain").as_ptr()) }), "plain");
+        });
+    }
+
+    #[test]
+    fn entries_json_lists_props_and_index_entries_of_plain_strings() {
+        isolated(|| {
+            let error = frame("Error", "e");
+            assert!(set(error, "a", "1"));
+            assert!(set(error, "b", "\"two\""));
+            assert_eq!(text(unsafe { thaw_error_entries_json(error) }), r#"{"a":1,"b":"two"}"#);
+            assert_eq!(text(unsafe { thaw_error_entries_json(c("ab").as_ptr()) }), r#"{"0":"a","1":"b"}"#);
+            assert!(unsafe { thaw_error_entries_json(std::ptr::null()) }.is_null());
+        });
+    }
+
+    #[test]
+    fn owner_props_round_trip_with_hidden_keys() {
+        isolated(|| {
+            let owner = 0x1000_usize as *const u8;
+            assert_eq!(text(unsafe { thaw_error_owner_props(owner, 0) }), "");
+            assert!(unsafe { thaw_error_register_owner_props(owner, c(r#"{"status":404,"name":"HttpError"}"#).as_ptr()) });
+            assert_eq!(
+                text(unsafe { thaw_error_owner_props(owner, 0) }),
+                r#"{"status":404,"name":"HttpError"}"#
+            );
+            assert_eq!(
+                text(unsafe { thaw_error_owner_props(owner, 1) }),
+                r#"{"stack":null,"message":null,"status":404,"name":"HttpError"}"#
+            );
+        });
+    }
+
+    #[test]
+    fn strict_equal_compares_errors_by_identity_and_other_strings_by_text() {
+        isolated(|| {
+            let first = frame("Error", "x");
+            let second = frame("Error", "x");
+            assert_ne!(unsafe { thaw_string_strict_equal(first, second) }, 0);
+            assert_eq!(unsafe { thaw_string_strict_equal(first, first) }, 0);
+            assert_eq!(unsafe { thaw_string_strict_equal(c("x").as_ptr(), c("x").as_ptr()) }, 0);
+            assert_ne!(unsafe { thaw_string_strict_equal(c("x").as_ptr(), c("y").as_ptr()) }, 0);
         });
     }
 }

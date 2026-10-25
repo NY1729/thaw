@@ -142,20 +142,8 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Call(Box::new(HirExpr::Var(function.into())), args)
                     };
                     let text = || HirExpr::UnionValue(Box::new(object.clone()), 3, members.clone());
-                    let property = |helper: &str| {
-                        call(
-                            "__thaw_json_receiver_string",
-                            vec![call(helper, vec![text()])],
-                        )
-                    };
-                    let error_object = HirExpr::JsonObjectLit(
-                        vec![
-                            ("name".into(), property("__thaw_error_name")),
-                            ("message".into(), property("__thaw_error_message")),
-                            ("stack".into(), property("__thaw_error_stack")),
-                        ],
-                        HirType::Json,
-                    );
+                    // The Json copy of the framed error carries its name, message, stack and props.
+                    let error_object = call("__thaw_json_receiver_string", vec![text()]);
                     let is_error_text = HirExpr::BinOp(
                         BinOp::EqEqEq,
                         Box::new(HirExpr::UnionTag(Box::new(object.clone()), members.clone())),

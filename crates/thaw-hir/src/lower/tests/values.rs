@@ -3789,18 +3789,19 @@ fn error_own_properties_lower_to_side_table_intrinsics() {
     }
 }
 
-/// Compound assignment and `++` on an Error property are rejected, not mis-lowered.
+/// Compound assignment and `++`/`--` on an Error property read and write the side table (they used
+/// to be rejected with "not supported yet").
 #[test]
-fn error_property_compound_assignment_is_rejected() {
-    for body in ["e.count += 1;", "e.count++;"] {
+fn error_property_compound_assignment_lowers_to_side_table_intrinsics() {
+    for body in ["e.count += 1;", "e.count++;", "--e.count;", "e.count ??= 2;", "e[\"k\"] *= 3;"] {
         let source = format!(
             "function main(): void {{ const e = new Error(\"x\") as any; {body} }}"
         );
         let module = thaw_parser::parse_typescript(&source).expect("parse error");
-        let error = lower_module(&module).unwrap_err();
-        if body.contains("+=") {
-            assert!(error.contains("Error property"), "{body}: {error}");
-        }
+        let program = lower_module(&module).unwrap_or_else(|error| panic!("{body}: {error}"));
+        let lowered = format!("{:?}", program.functions);
+        assert!(lowered.contains("__thaw_error_set_prop"), "{body}: {lowered}");
+        assert!(lowered.contains("__thaw_error_get_prop"), "{body}: {lowered}");
     }
 }
 
