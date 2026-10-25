@@ -247,7 +247,10 @@ fn ecmascript_object_field_order(fields: &[(String, HirType)]) -> Vec<usize> {
     indices.sort_by_key(|(index, array_index)| {
         (array_index.is_none(), array_index.unwrap_or(*index as u32))
     });
-    indices.into_iter().map(|(index, _)| index).collect()
+    thaw_hir::reorder_class_fields_by_definition(
+        fields,
+        indices.into_iter().map(|(index, _)| index).collect(),
+    )
 }
 
 fn object_array_index_key(name: &str) -> Option<u32> {

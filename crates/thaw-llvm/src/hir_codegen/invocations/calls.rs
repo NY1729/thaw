@@ -279,6 +279,31 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?;
                 return Ok(object.into());
             }
+            // `x` carries the "never assigned" marker NaN of a class field read through a structural view.
+            "__thaw_is_unset_number" => {
+                let [value] = args else {
+                    return Err("unset number check expects one number".into());
+                };
+                let value = self.compile_expr(value)?.into_float_value();
+                let bits = self.builder
+                    .build_bit_cast(value, self.context.i64_type(), "unset_number_bits")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let marker = self.context.i64_type().const_int(thaw_hir::UNSET_NUMBER_BITS, false);
+                return Ok(self.builder
+                    .build_int_compare(IntPredicate::EQ, bits, marker, "is_unset_number")
+                    .map_err(|error| error.to_string())?
+                    .into());
+            }
+            // Transparent: registers the function's `console.log` label (`"<kind><name>"`).
+            "__thaw_named_function" => {
+                let [closure, HirExpr::Lit(HirLit::Str(label))] = args else {
+                    return Err("named function expects a closure and its label".into());
+                };
+                let closure = self.compile_expr(closure)?;
+                self.compile_register_function_label(closure, label)?;
+                return Ok(closure);
+            }
             "__thaw_object_order_begin" => {
                 let [object] = args else {
                     return Err("object order initialization expects one object".into());

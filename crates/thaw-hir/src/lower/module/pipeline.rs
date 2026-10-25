@@ -173,6 +173,20 @@ fn class_names_referenced_as_values(
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
+    // The first attempt also keeps `undefined` through returns, initialisers, container
+    // writes and object literals; if that analysis changed anything and the module no
+    // longer lowers, the plain analysis decides.
+    EXTENDED_STORAGE.with(|extended| extended.set(true));
+    EXTENDED_STORAGE_USED.with(|used| used.set(false));
+    let first = lower_module_once(module);
+    EXTENDED_STORAGE.with(|extended| extended.set(false));
+    if first.is_err() && EXTENDED_STORAGE_USED.with(Cell::get) {
+        return lower_module_once(module);
+    }
+    first
+}
+
+fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());

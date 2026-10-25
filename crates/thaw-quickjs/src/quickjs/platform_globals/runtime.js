@@ -611,6 +611,18 @@
       }
       // 26: a null-prototype object (`Object.create(null)`), whose String() coercion throws.
       case 26: return thawGraphGetPrototypeOf(value) === null ? '1' : '0';
+      // 27: a typed array other than Buffer/DataView as `{"n":name,"v":[text,..]}` (console inspection), else ''.
+      case 27: {
+        if (!thawGraphIsView(value) || (thawGraphBufferIsBuffer && thawGraphBufferIsBuffer(value))
+          || thawNapiHasInstance(thawNapiDataViewConstructor, value)) return '';
+        const items = [];
+        for (let index = 0; index < value.length; index++) {
+          const item = value[index];
+          items[items.length] = typeof item === 'bigint' ? thawGraphString(item) + 'n'
+            : thawGraphObjectIs(item, -0) ? '-0' : thawGraphString(item);
+        }
+        return thawGraphStringify({ n: value[Symbol.toStringTag], v: items });
+      }
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
