@@ -9,6 +9,7 @@
 mod analyze;
 mod builtins;
 pub mod bundle;
+pub mod clone;
 pub mod dts;
 pub mod evidence;
 mod guard;

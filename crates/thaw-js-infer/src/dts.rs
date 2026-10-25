@@ -54,9 +54,30 @@ fn key_name(k: &a::Expr) -> Option<String> {
 
 fn collect(items: &[a::ModuleItem], cx: &mut Ctx, decls: &mut Vec<a::Decl>) {
     for it in items {
+        let synthesized;
         let d = match it {
             a::ModuleItem::Stmt(a::Stmt::Decl(d)) => d,
             a::ModuleItem::ModuleDecl(a::ModuleDecl::ExportDecl(e)) => &e.decl,
+            // `export default function clamp(...)`: declared under its own name
+            a::ModuleItem::ModuleDecl(a::ModuleDecl::ExportDefaultDecl(e)) => match &e.decl {
+                a::DefaultDecl::Fn(f) if f.ident.is_some() => {
+                    synthesized = a::Decl::Fn(a::FnDecl {
+                        ident: f.ident.clone().unwrap(),
+                        declare: false,
+                        function: f.function.clone(),
+                    });
+                    &synthesized
+                }
+                a::DefaultDecl::Class(c) if c.ident.is_some() => {
+                    synthesized = a::Decl::Class(a::ClassDecl {
+                        ident: c.ident.clone().unwrap(),
+                        declare: false,
+                        class: c.class.clone(),
+                    });
+                    &synthesized
+                }
+                _ => continue,
+            },
             _ => continue,
         };
         match d {

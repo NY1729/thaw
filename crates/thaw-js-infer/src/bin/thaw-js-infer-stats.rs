@@ -5,6 +5,7 @@ fn main() {
     let mut cfg = Config::default();
     let mut dts_root: Option<String> = None;
     let mut smoke_root: Option<String> = None;
+    let mut clones = false;
     let (mut detail, mut annotate, mut files) = (false, false, Vec::new());
     for a in std::env::args().skip(1) {
         match a.as_str() {
@@ -14,6 +15,7 @@ fn main() {
             "--annotate" => annotate = true,
             "--returns" => cfg.returns = true,
             "--guards" => cfg.guards = true,
+            "--clones" => clones = true,
             a if a.starts_with("--dts=") => {
                 let t = std::fs::read_to_string(&a["--dts=".len()..]).unwrap();
                 cfg.dts = Some(std::sync::Arc::new(
@@ -81,6 +83,29 @@ fn main() {
                 cfg.evidence = Some(std::sync::Arc::new(ev));
             }
         }
+        if clones {
+            let src2 = src.clone();
+            let cfg2 = cfg.clone();
+            let r = std::thread::Builder::new()
+                .stack_size(512 << 20)
+                .spawn(move || thaw_js_infer::clone::extract_clones(&src2, cfg2, "__aot_"))
+                .unwrap()
+                .join()
+                .unwrap();
+            match r {
+                Ok(cs) => {
+                    println!("{name}\tCLONES\t{}", cs.len());
+                    for c in cs {
+                        println!(
+                            "--- {:?} ({:?}) -> {:?}\n{}",
+                            c.exports, c.params, c.ret, c.ts
+                        );
+                    }
+                }
+                Err(e) => println!("{name}\tCLONES-ERROR\t{e}"),
+            }
+            continue;
+        }
         // deep ASTs: run on a big stack
         let r = std::thread::Builder::new()
             .stack_size(512 << 20)
@@ -128,6 +153,55 @@ fn main() {
         println!("  fn-any-reasons: {}", hist(&s.fn_reason));
         println!("  slot-any-reasons: {}", hist(&s.slot_reason));
         if detail {
+            for f in fns
+                .iter()
+                .filter(|f| f.dts && !f.this_typed && !matches!(f.class, Class::Any | Class::Dead))
+            {
+                println!(
+                    "  DTSTYPED {:?} {}@{} class={:?} any_exprs={}/{} ({}) -> {}",
+                    f.exports,
+                    f.name,
+                    f.lo,
+                    f.class,
+                    f.any_exprs,
+                    f.exprs,
+                    f.slots
+                        .iter()
+                        .map(|s| format!("{}:{}", s.0, s.1))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    f.ret
+                );
+            }
+            for f in fns.iter().filter(|f| f.closed && !f.exports.is_empty()) {
+                println!(
+                    "  EXPCLOSED {:?} {}@{} ({}) -> {} trust={}",
+                    f.exports,
+                    f.name,
+                    f.lo,
+                    f.slots
+                        .iter()
+                        .map(|s| format!("{}:{}", s.0, s.1))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    f.ret,
+                    f.trust
+                );
+            }
+            for f in fns.iter().filter(|f| f.closed && f.dts) {
+                println!(
+                    "  DTSCLOSED {}@{} ({}) -> {} guard={:?}",
+                    f.name,
+                    f.lo,
+                    f.slots
+                        .iter()
+                        .map(|s| format!("{}:{}", s.0, s.1))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    f.ret,
+                    f.guard
+                );
+            }
             for f in fns
                 .iter()
                 .filter(|f| f.trust & thaw_js_infer::TRUST_EVIDENCE != 0)

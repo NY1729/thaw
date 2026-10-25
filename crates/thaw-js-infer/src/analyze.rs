@@ -47,6 +47,9 @@ pub struct An {
     pub lits: Vec<String>,
     ev: HashMap<(String, String), Vec<Ty>>,
     pub escape_final: bool,
+    /// bundle factory key -> (exports record, module record)
+    mod_sites: HashMap<String, (usize, usize)>,
+    dyn_require: bool,
     pub(crate) read_key: u32,
     /// (class, field) -> type stored by that class's own constructor
     ctor_fields: HashMap<((usize, String), String), Ty>,
@@ -117,6 +120,8 @@ impl An {
             lits: Vec::new(),
             ev: HashMap::new(),
             escape_final: false,
+            mod_sites: HashMap::new(),
+            dyn_require: false,
             read_key: 0,
             ctor_fields: HashMap::new(),
             esc_fns: Default::default(),
@@ -575,7 +580,9 @@ impl An {
                     Key::Name(_) => Ty::Any(Reason::UnmodeledMethod),
                     Key::Pending => Ty::Bottom,
                     Key::Dyn => {
-                        self.kill(s, Reason::DynamicKey);
+                        // a read cannot change the elements, but what it returns is unknown code's
+                        let e = self.arr_elem(s);
+                        self.escape_fns_in(&e, &mut Default::default());
                         Ty::Any(Reason::DynamicKey)
                     }
                 },
@@ -597,10 +604,15 @@ impl An {
                                 (o, _) => o.unwrap_or_else(Ty::undef),
                             }
                         }
-                        _ => {
-                            self.kill(s, Reason::DynamicKey);
+                        (Site::Obj(m), _) => {
+                            // computed key read: the record is unchanged, its functions may be handed out
+                            let fields: Vec<Ty> = m.values().cloned().collect();
+                            for f in fields {
+                                self.escape_fns_in(&f, &mut Default::default());
+                            }
                             Ty::Any(Reason::DynamicKey)
                         }
+                        _ => Ty::Any(Reason::DynamicKey),
                     }
                 }
             };
@@ -1209,6 +1221,15 @@ impl An {
                 if let Some(ns) = crate::builtins::ns_of_require(s.value.as_str().unwrap_or("")) {
                     return Ty::one(Atom::Ns(ns));
                 }
+                let target = self.st.bundle.as_ref().and_then(|b| {
+                    let fk = self.st.factory_of(fid);
+                    b.require_maps.get(&fk)?.get(s.value.as_str()?).cloned()
+                });
+                if let Some(t) = target {
+                    return self.module_exports_value(&t);
+                }
+            } else if !c.args.is_empty() {
+                self.dyn_require = true;
             }
             return Ty::Any(Reason::Require);
         }
@@ -1839,6 +1860,59 @@ impl An {
         Some(Ty::one(Atom::Obj(self.find(s))))
     }
 
+    // ---------- bundle modules ----------
+    /// The `exports` and `module` records of a bundle factory (created on first use).
+    fn mod_site_pair(&mut self, key: &str) -> (usize, usize) {
+        if let Some(&(e, m)) = self.mod_sites.get(key) {
+            return (self.find(e), self.find(m));
+        }
+        let e = self.sites.len();
+        self.sites.push(Site::Obj(BTreeMap::new()));
+        let m = self.sites.len();
+        let mut fields = BTreeMap::new();
+        fields.insert("exports".to_string(), Ty::one(Atom::Obj(e)));
+        self.sites.push(Site::Obj(fields));
+        self.mod_sites.insert(key.to_string(), (e, m));
+        (e, m)
+    }
+
+    /// What `require('./x')` evaluates to: the target module's `module.exports`.
+    fn module_exports_value(&mut self, key: &str) -> Ty {
+        let (_, m) = self.mod_site_pair(key);
+        let v = match &self.sites[m] {
+            Site::Obj(f) => f.get("exports").cloned(),
+            Site::Dead(r) => return Ty::Any(*r),
+            _ => None,
+        };
+        match v {
+            Some(t) => self.join(&t, &Ty::Bottom),
+            None => Ty::Any(Reason::Require),
+        }
+    }
+
+    fn factory_key(&self, fid: usize) -> Option<String> {
+        self.st.funcs[fid]
+            .exports
+            .iter()
+            .find(|(_, n)| n == "<factory>")
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Records that leave the bundle (the entry module) or can be reached by a dynamic `require`
+    /// are visible to unknown code.
+    fn escape_module_records(&mut self) {
+        let keys: Vec<String> = match &self.st.bundle {
+            Some(b) if self.dyn_require => b.factories.iter().map(|(k, _)| k.clone()).collect(),
+            Some(b) => vec![b.entry.clone()],
+            None => return,
+        };
+        for k in keys {
+            let (e, m) = self.mod_site_pair(&k);
+            let t = Ty::Set(vec![Atom::Obj(e), Atom::Obj(m)]);
+            self.taint(&t);
+        }
+    }
+
     // ---------- call-site evidence ----------
     fn add_evidence(&mut self, key: (String, String), args: &[(Ty, bool)]) {
         let spread = args.iter().any(|x| x.1);
@@ -1919,6 +1993,12 @@ impl An {
                 .into_iter()
                 .cloned()
                 .collect();
+            let sigs = if sigs.is_empty() && f.owner.is_some() && !f.is_proto && !f.is_ctor {
+                // `utils.merge = function` on a plain local object: the declaration is a free function
+                idx.lookup(&name, None).into_iter().cloned().collect()
+            } else {
+                sigs
+            };
             if !sigs.is_empty() {
                 self.dts_fns.insert(fid, sigs);
             }
@@ -2013,6 +2093,7 @@ impl An {
     // ---------- driver ----------
     pub fn init_params(&mut self) {
         self.refresh_dts_ret();
+        self.escape_module_records();
         for fid in 1..self.st.funcs.len() {
             let closed = {
                 let f = &self.st.funcs[fid];
@@ -2042,9 +2123,20 @@ impl An {
                 .map(|(n, _)| n.clone())
                 .collect();
             declared_params.sort();
+            let factory = self.factory_key(fid);
             for n in declared_params {
                 let simple = params.iter().any(|p| p.as_deref() == Some(n.as_str()));
-                let t = if !simple {
+                let factory_param = factory.as_ref().and_then(|k| {
+                    let i = params
+                        .iter()
+                        .position(|p| p.as_deref() == Some(n.as_str()))?;
+                    (i < 2).then(|| (k.clone(), i))
+                });
+                let t = if let Some((k, i)) = factory_param {
+                    // `module` / `exports` of a bundled module are records we can follow
+                    let (e, m) = self.mod_site_pair(&k);
+                    Some(Ty::one(Atom::Obj(if i == 0 { m } else { e })))
+                } else if !simple {
                     Some(Ty::Any(Reason::Destructure))
                 } else if uses_args {
                     Some(Ty::Any(Reason::Arguments))

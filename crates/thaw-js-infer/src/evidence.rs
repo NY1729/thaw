@@ -15,9 +15,38 @@ pub struct Evidence {
     pub calls: HashMap<String, Vec<Vec<DT>>>,
 }
 
-fn dt_of(e: &a::Expr) -> DT {
+type Syms = HashMap<String, DT>;
+
+fn dt_of_ann(t: &a::TsType) -> DT {
+    use a::TsKeywordTypeKind as K;
+    match t {
+        a::TsType::TsKeywordType(k) => match k.kind {
+            K::TsNumberKeyword => DT::Num,
+            K::TsStringKeyword => DT::Str,
+            K::TsBooleanKeyword => DT::Bool,
+            K::TsUndefinedKeyword | K::TsVoidKeyword => DT::Undef,
+            K::TsNullKeyword => DT::Null,
+            _ => DT::Any,
+        },
+        a::TsType::TsLitType(l) => match &l.lit {
+            a::TsLit::Number(_) => DT::Num,
+            a::TsLit::Str(_) => DT::Str,
+            a::TsLit::Bool(_) => DT::Bool,
+            _ => DT::Any,
+        },
+        a::TsType::TsArrayType(x) => DT::Arr(Box::new(dt_of_ann(&x.elem_type))),
+        a::TsType::TsParenthesizedType(p) => dt_of_ann(&p.type_ann),
+        a::TsType::TsUnionOrIntersectionType(a::TsUnionOrIntersectionType::TsUnionType(u)) => {
+            DT::Union(u.types.iter().map(|x| dt_of_ann(x)).collect())
+        }
+        _ => DT::Any,
+    }
+}
+
+fn dt_of(e: &a::Expr, syms: &Syms) -> DT {
     match e {
-        a::Expr::Paren(p) => dt_of(&p.expr),
+        a::Expr::Ident(i) if syms.contains_key(&*i.sym) => syms[&*i.sym].clone(),
+        a::Expr::Paren(p) => dt_of(&p.expr, syms),
         a::Expr::Lit(a::Lit::Num(_)) => DT::Num,
         a::Expr::Lit(a::Lit::Str(_)) | a::Expr::Tpl(_) => DT::Str,
         a::Expr::Lit(a::Lit::Bool(_)) => DT::Bool,
@@ -28,7 +57,7 @@ fn dt_of(e: &a::Expr) -> DT {
             let mut elems = Vec::new();
             for e in &arr.elems {
                 match e {
-                    Some(x) if x.spread.is_none() => elems.push(dt_of(&x.expr)),
+                    Some(x) if x.spread.is_none() => elems.push(dt_of(&x.expr, syms)),
                     _ => return DT::Any,
                 }
             }
@@ -52,7 +81,7 @@ fn dt_of(e: &a::Expr) -> DT {
                     a::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
                     _ => return DT::Any,
                 };
-                fields.push((name, dt_of(&kv.value)));
+                fields.push((name, dt_of(&kv.value, syms)));
             }
             DT::Obj(fields)
         }
@@ -64,7 +93,23 @@ struct Collect<'a> {
     pkg: &'a str,
     /// local name -> exported name (`<default>` for the default import, `*` for a namespace)
     locals: HashMap<String, String>,
+    /// names whose static type is evident from an annotation or a literal initialiser
+    syms: Syms,
     out: &'a mut Evidence,
+}
+
+impl Collect<'_> {
+    /// Names are tracked flat (no scoping): two different types for one name mean "unknown".
+    fn note(&mut self, name: &str, t: DT) {
+        match self.syms.get(name) {
+            Some(old) if *old != t => {
+                self.syms.insert(name.to_string(), DT::Any);
+            }
+            _ => {
+                self.syms.insert(name.to_string(), t);
+            }
+        }
+    }
 }
 
 fn is_pkg(spec: &str, pkg: &str) -> bool {
@@ -97,7 +142,21 @@ impl Visit for Collect<'_> {
             }
         }
     }
+    fn visit_binding_ident(&mut self, n: &a::BindingIdent) {
+        // `x: number` on a variable or parameter
+        if let Some(ann) = &n.type_ann {
+            self.note(&n.id.sym, dt_of_ann(&ann.type_ann));
+        }
+    }
     fn visit_var_declarator(&mut self, d: &a::VarDeclarator) {
+        if let (a::Pat::Ident(i), Some(init)) = (&d.name, &d.init) {
+            if i.type_ann.is_none() {
+                let t = dt_of(init, &self.syms);
+                if t != DT::Any {
+                    self.note(&i.id.sym, t);
+                }
+            }
+        }
         // const x = require('pkg') / const { a, b: c } = require('pkg')
         if let Some(a::Expr::Call(c)) = d.init.as_deref() {
             if let (a::Callee::Expr(ce), Some(arg)) = (&c.callee, c.args.first()) {
@@ -163,7 +222,7 @@ impl Visit for Collect<'_> {
                 };
             if let Some(n) = name.filter(|n| !n.is_empty()) {
                 if c.args.iter().all(|x| x.spread.is_none()) {
-                    let args = c.args.iter().map(|x| dt_of(&x.expr)).collect();
+                    let args = c.args.iter().map(|x| dt_of(&x.expr, &self.syms)).collect();
                     self.out.calls.entry(n).or_default().push(args);
                 }
             }
@@ -181,6 +240,7 @@ impl Evidence {
         let mut c = Collect {
             pkg,
             locals: HashMap::new(),
+            syms: HashMap::new(),
             out: self,
         };
         module.visit_with(&mut c);
