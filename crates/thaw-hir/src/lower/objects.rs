@@ -3398,6 +3398,15 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Error")
+                    && prop.sym == *"stackTraceLimit"
+                    && !self.scope.contains_key("Error")
+                {
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_stack_trace_limit".to_string())),
+                        Vec::new(),
+                    ));
+                }
                 if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Math") {
                     let value = match prop.sym.as_ref() {
                         "E" => std::f64::consts::E,
@@ -3633,7 +3642,7 @@ impl<'a> FnLowerer<'a> {
                     // for why this can't just reuse `.toString()`'s
                     // intrinsic despite the similar rendering.
                     HirType::Str if prop.sym == *"stack" => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+                        Box::new(HirExpr::Var("__thaw_error_stack_with_frames".to_string())),
                         vec![obj],
                     )),
                     // Any other own property of an Error value (`err.status = 404` earlier): the
@@ -4050,6 +4059,18 @@ impl<'a> FnLowerer<'a> {
         fields: &[(Symbol, HirType)],
         property: &str,
     ) -> Result<HirExpr, String> {
+        // An Error subclass instance has no `stack` slot: it reads as `name: message` plus the
+        // generated frame line, like a native Error's.
+        if property == "stack"
+            && !fields.iter().any(|(name, _)| name == property)
+            && object_type_is_error_family(&HirType::Object(fields.to_vec()))
+        {
+            let framed = self.coerce_primitive_to_string(object)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_stack_with_frames".to_string())),
+                vec![framed],
+            ));
+        }
         if !fields.iter().any(|(name, _)| name == property) {
             return Err(format!("object has no field `{property}`"));
         }

@@ -2466,6 +2466,31 @@
       "source": "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }\n  try { throw a; } catch (e) { console.log(e === a, e === b); }\n}\n"
     },
     {
+      "name": "errors in an any container keep props and identity",
+      "expect": "matched",
+      "source": "function main(): void {\n  const err = new Error(\"boom\") as any;\n  err.stack = \"Error: boom\";\n  err.code = \"C\";\n  const o: any = { e: err, n: 1 };\n  console.log(o.e.message, o.e.name, o.e.code, o.e.stack);\n  o.e.extra = { a: 1 };\n  console.log(err.extra, o.e.extra.a, Object.keys(err), Object.keys(o.e));\n  const other = new Error(\"boom\") as any;\n  other.stack = \"Error: boom\";\n  console.log(o.e === err, o.e === other, o.e !== err, o.e !== other);\n  delete o.e.extra;\n  console.log(\"extra\" in err, \"code\" in o.e, o.e.hasOwnProperty(\"code\"));\n  o.e.message = \"changed\";\n  console.log(err.message, o.e.message);\n  console.log(JSON.stringify(o));\n  console.log(o);\n  console.log(typeof o.e, o.e instanceof Error, String(o.e));\n}\n"
+    },
+    {
+      "name": "errors in any arrays, records and parameters keep identity",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = new Error(\"a\") as any;\n  const b = new Error(\"a\") as any;\n  const arr: any[] = [a, b];\n  arr[1].tag = \"second\";\n  console.log(a.tag, b.tag, arr[0] === a, arr[1] === a, arr[1] === b, arr.indexOf(b), arr.lastIndexOf(a));\n  const nested: any = { a: { list: [a] } };\n  nested.a.list[0].deep = 1;\n  console.log(a.deep, nested.a.list[0] === a, Object.keys(a));\n  const rec: Record<string, any> = {};\n  rec[\"k\"] = b;\n  rec[\"k\"].viaRec = true;\n  console.log(b.viaRec, rec[\"k\"] === b, Object.values(rec)[0] === b, Object.values(rec)[0] === a);\n  const typed: Error[] = [new Error(\"x\"), new Error(\"y\")];\n  const view: any = typed;\n  view[0].tag = \"X\";\n  console.log((typed[0] as any).tag, view[0] === typed[0], view[1] === typed[0]);\n  function touch(x: any) { x.viaParam = 1; return x; }\n  const r = touch(a);\n  console.log(a.viaParam, r === a, r === b);\n  const back: Error = view[0] as Error;\n  console.log(back === typed[0], back.message, `${view[1]}` + String(view[0]));\n}\n"
+    },
+    {
+      "name": "error stack has an exact header and a frame line",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"boom\");\n  const lines = e.stack!.split(\"\\n\");\n  console.log(lines[0], lines.length > 1, /^    at /.test(lines[1]));\n  const t = new TypeError(\"tt\");\n  console.log(t.stack!.split(\"\\n\")[0], new RangeError(\"r\").stack!.startsWith(\"RangeError: r\"));\n  const e1 = new Error(\"x\");\n  e1.name = \"Renamed\";\n  console.log(e1.stack!.split(\"\\n\")[0]);\n  const e2 = new Error(\"y\");\n  console.log(e2.stack!.split(\"\\n\")[0]);\n  e2.message = \"late\";\n  console.log(e2.stack!.split(\"\\n\")[0], String(e2));\n  class MyErr extends Error { constructor(m: string) { super(m); this.name = \"MyErr\"; } }\n  const m = new MyErr(\"mm\");\n  console.log(m.stack!.split(\"\\n\")[0], m.stack!.split(\"\\n\").length > 1);\n  class Plain extends Error {}\n  console.log(new Plain(\"pp\").stack!.split(\"\\n\")[0]);\n  console.log(JSON.stringify(new Error(\"\").stack!.split(\"\\n\")[0]));\n  const c = new Error(\"outer\", { cause: new Error(\"inner\") });\n  console.log(c.stack!.split(\"\\n\")[0], (c.cause as Error).stack!.split(\"\\n\")[0]);\n  e.stack = \"custom\";\n  console.log(e.stack, e.message);\n}\n"
+    },
+    {
+      "name": "Error.stackTraceLimit controls the frame lines",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(typeof Error.stackTraceLimit, Error.stackTraceLimit);\n  Error.stackTraceLimit = 0;\n  const zero = new Error(\"zero\");\n  console.log(JSON.stringify(zero.stack));\n  Error.stackTraceLimit = 1;\n  const one = new Error(\"one\");\n  console.log(one.stack!.split(\"\\n\").length);\n  Error.stackTraceLimit = 10;\n  console.log(Error.stackTraceLimit, new Error(\"ten\").stack!.split(\"\\n\").length > 1);\n}\n"
+    },
+    {
+      "name": "Error.captureStackTrace on plain objects and errors",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: any = {};\n  Error.captureStackTrace(o);\n  console.log(typeof o.stack, o.stack.split(\"\\n\")[0], o.stack.split(\"\\n\").length > 1);\n  const p: any = { name: \"Foo\", message: \"bar\" };\n  Error.captureStackTrace(p);\n  console.log(p.stack.split(\"\\n\")[0]);\n  const q: any = { name: \"\", message: \"only\" };\n  Error.captureStackTrace(q);\n  console.log(q.stack.split(\"\\n\")[0]);\n  const r: any = { message: \"m\" };\n  Error.captureStackTrace(r);\n  console.log(r.stack.split(\"\\n\")[0]);\n  const n = new Error(\"n\");\n  Error.captureStackTrace(n);\n  console.log(n.stack!.split(\"\\n\")[0]);\n  class Custom extends Error { constructor(m: string) { super(m); this.name = \"Custom\"; Error.captureStackTrace(this); } }\n  console.log(new Custom(\"cc\").stack!.split(\"\\n\")[0]);\n}\n"
+    },
+    {
       "name": "class extends Map/Set: toStringTag and own fields",
       "expect": "matched",
       "source": "class Counter extends Map<string, number> {\n  total = 0;\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); this.total++; }\n}\nclass Tags extends Set<string> { label = \"x\"; }\nclass Reg extends Map<string, number> {}\nclass Bag extends Set<number> {}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\");\n  console.log(String(c), Object.prototype.toString.call(c), `${c}`);\n  console.log(c);\n  const t = new Tags(); t.add(\"q\");\n  console.log(String(t), Object.prototype.toString.call(t));\n  console.log(t);\n  console.log(Object.keys(c), JSON.stringify(c), JSON.stringify(t));\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r.size, r);\n  const b = new Bag([1, 2, 2, 3]);\n  console.log(b.size, b);\n  console.log(c.total);\n}\n"
