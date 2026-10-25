@@ -4986,6 +4986,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 id: 0,
                 ctor: None,
                 entries,
+                props: Vec::new(),
             }
         } else {
             let items = host_enumerate_values(lease, 5)
@@ -4996,6 +4997,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 id: 0,
                 ctor: None,
                 items,
+                props: Vec::new(),
             }
         };
         HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
@@ -5021,6 +5023,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             .map(|item| Some(inspect_node(item, stack)))
             .collect();
         Node::Array {
+            ctor: None,
             id: 0,
             items,
             extra: Vec::new(),
@@ -5177,6 +5180,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                 })
                 .collect();
             Node::Array {
+                ctor: None,
                 id,
                 items: converted,
                 extra: Vec::new(),
@@ -5184,7 +5188,15 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         }
         Value::Object(fields) => {
             let fields = shared_object_ref(fields);
-            if let Some(entries) = fields
+            if let Some(items @ Value::Array(_)) = fields.get(b"__thaw_array_items__".as_slice()) {
+                // console.log of an `extends Array` instance: its items plus own properties.
+                let mut node = inspect_node(items, stack);
+                if let Node::Array { ctor, extra, .. } = &mut node {
+                    *ctor = subclass_name(fields);
+                    *extra = subclass_props(fields, stack);
+                }
+                node
+            } else if let Some(entries) = fields
                 .get(b"__thaw_map_entries__".as_slice())
                 .and_then(Value::as_array)
             {
@@ -5201,6 +5213,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                     id,
                     ctor: subclass_name(fields),
                     entries,
+                    props: subclass_props(fields, stack),
                 }
             } else if let Some(values) = fields
                 .get(b"__thaw_set_values__".as_slice())
@@ -5213,6 +5226,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                         .iter()
                         .map(|item| inspect_node(item, stack))
                         .collect(),
+                    props: subclass_props(fields, stack),
                 }
             } else {
                 // console.log of a typed class instance carries its most-derived class name
@@ -5289,6 +5303,18 @@ fn subclass_name(fields: &indexmap::IndexMap<Vec<u8>, Value>) -> Option<String> 
     };
     // A monomorphised generic class is named `Q__thaw_f64`.
     Some(plain.split("__thaw_").next().unwrap_or(plain).to_string())
+}
+
+/// Own properties of a `Map`/`Set` subclass wrapper (everything not private to the encoding).
+fn subclass_props(
+    fields: &indexmap::IndexMap<Vec<u8>, Value>,
+    stack: &mut Vec<usize>,
+) -> Vec<(Vec<u16>, crate::inspect::Node)> {
+    ordered_object_fields(fields)
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with(b"__thaw_"))
+        .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
+        .collect()
 }
 
 /// Node's rendering of an error with no stack frames: `[Name: message]` (`[Name]` when empty).

@@ -14,6 +14,14 @@ impl<'a> FnLowerer<'a> {
         object_type: HirType,
         computed: &ComputedPropName,
     ) -> Result<Target, String> {
+        if let Some(base @ HirType::Array(_)) = native_base_type(&object_type).cloned() {
+            let object = HirExpr::PropAccess(
+                Box::new(object),
+                object_type,
+                NATIVE_BASE_FIELD.to_string(),
+            );
+            return self.lower_computed_target_from_receiver(object, base, computed);
+        }
         match &object_type {
             HirType::Array(_) => {
                 let index = self.lower_expr(&computed.expr)?;
@@ -96,6 +104,20 @@ impl<'a> FnLowerer<'a> {
         object: HirExpr,
         object_type: HirType,
     ) -> Result<Target, String> {
+        // `stack[i] = v` / `stack.length = n` on a class extending `Array`
+        // write through to the wrapped array.
+        if let Some(base @ HirType::Array(_)) = native_base_type(&object_type).cloned() {
+            let is_own = matches!(&member.prop, MemberProp::Ident(prop)
+                if Self::class_receiver_has_own_field(&object_type, prop.sym.as_ref()));
+            if !is_own {
+                let object = HirExpr::PropAccess(
+                    Box::new(object),
+                    object_type,
+                    NATIVE_BASE_FIELD.to_string(),
+                );
+                return self.lower_member_target_from_receiver(member, object, base);
+            }
+        }
         match &member.prop {
             MemberProp::Computed(computed) => {
                 self.lower_computed_target_from_receiver(object, object_type, computed)

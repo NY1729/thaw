@@ -1696,8 +1696,35 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             let (base_params, base_native_rest) = match signatures.get(&base_symbol) {
                 Some(signature) => (signature.params.clone(), signature.native_rest.clone()),
                 None if is_error_family_name(base.sym.as_ref()) => (vec![HirType::Str], None),
-                // `extends Map`/`Set` without a constructor takes no arguments.
-                None if matches!(base.sym.as_ref(), "Map" | "Set") => (Vec::new(), None),
+                // `extends Map`/`Set` without a constructor takes the optional
+                // entries/values array, like `new Map(entries)` / `new Set(values)`.
+                // `extends Array<T>` without one takes `...items: T[]`.
+                None if base.sym.as_ref() == "Array" => {
+                    match interfaces.get(derived_name).and_then(native_base_type) {
+                        Some(array @ HirType::Array(element)) => {
+                            (vec![array.clone()], Some(element.as_ref().clone()))
+                        }
+                        _ => {
+                            return Err(format!(
+                                "derived class `{derived_name}` has no native array layout"
+                            ))
+                        }
+                    }
+                }
+                None if matches!(base.sym.as_ref(), "Map" | "Set") => {
+                    let iterable = match interfaces.get(derived_name).and_then(native_base_type) {
+                        Some(HirType::Map(key, value)) => HirType::Array(Box::new(
+                            HirType::Tuple(vec![key.as_ref().clone(), value.as_ref().clone()]),
+                        )),
+                        Some(HirType::Set(element)) => HirType::Array(element.clone()),
+                        _ => {
+                            return Err(format!(
+                                "derived class `{derived_name}` has no native collection layout"
+                            ))
+                        }
+                    };
+                    (vec![HirType::Optional(Box::new(iterable))], None)
+                }
                 None => {
                     return Err(format!(
                         "derived class `{derived_name}` has no constructor signature for `{}`",
@@ -1705,10 +1732,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     ))
                 }
             };
-            let base_omittable = signatures
-                .get(&base_symbol)
-                .map(|signature| signature.source_omittable.clone())
-                .unwrap_or_default();
+            let base_omittable = signatures.get(&base_symbol).map_or_else(
+                || {
+                    // The native collection's optional entries argument.
+                    let native = matches!(base.sym.as_ref(), "Map" | "Set");
+                    HirOptionalMask::from_bools(&vec![native; base_params.len()])
+                },
+                |signature| signature.source_omittable.clone(),
+            );
             let constructor = signatures
                 .get_mut(&class_constructor_symbol(derived_name))
                 .expect("derived constructor signature");

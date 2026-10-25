@@ -2507,7 +2507,12 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_required_member_receiver(&mut self, expr: &Expr, property: &str) -> Result<HirExpr, String> {
-        let receiver = self.lower_member_receiver(expr)?;
+        let mut receiver = self.lower_member_receiver(expr)?;
+        // A builtin method reached on an `extends Map/Set/Array` instance (e.g. the result of a
+        // chained `stack.reverse().join()`) runs on the wrapped native collection.
+        if !matches!(property, "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable") {
+            receiver = self.project_native_base(receiver)?;
+        }
         let ty = self.infer_expr_type(&receiver)?;
         Ok(self.unwrap_required_optional_member(receiver, ty, property, self.receiver_requires_narrowing(expr))?.0)
     }
@@ -2765,6 +2770,16 @@ impl<'a> FnLowerer<'a> {
                         *forwarded.obj = native_base_member((*member.obj).clone());
                         return self.lower_member_read(&forwarded);
                     }
+                }
+            }
+        }
+        // `stack[i]` on a class extending `Array`: index the wrapped array.
+        if matches!(member.prop, MemberProp::Computed(_)) {
+            if let Some(receiver_type) = self.infer_member_receiver_type(&member.obj) {
+                if matches!(native_base_type(&receiver_type), Some(HirType::Array(_))) {
+                    let mut forwarded = member.clone();
+                    *forwarded.obj = native_base_member((*member.obj).clone());
+                    return self.lower_member_read(&forwarded);
                 }
             }
         }
