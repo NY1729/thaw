@@ -416,23 +416,45 @@ impl<'a> FnLowerer<'a> {
         base_name: &str,
         args: &[swc_ecma_ast::ExprOrSpread],
     ) -> Result<HirExpr, String> {
-        let construct = Expr::New(swc_ecma_ast::NewExpr {
-            span: swc_common::DUMMY_SP,
-            ctxt: Default::default(),
-            callee: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
-                base_name.into(),
-                swc_common::DUMMY_SP,
-            ))),
-            type_args: self.native_base_type_args.clone(),
-            args: Some(args.to_vec()),
-        });
-        let value = self.lower_expr(&construct)?;
         let this_name = self.resolve_binding("this");
         let this_type = self
             .scope
             .get(&this_name)
             .cloned()
             .ok_or("`super(...)` used outside a constructor")?;
+        let value = if base_name == "Array" {
+            let Some(array_type) = native_base_type(&this_type).cloned() else {
+                return Err("`extends Array` class has no array layout".into());
+            };
+            let HirType::Array(element) = array_type.clone() else {
+                return Err("`extends Array` class has no array layout".into());
+            };
+            let value = if args.is_empty() {
+                HirExpr::ArrayAlloc(Box::new(HirExpr::Lit(HirLit::F64(0.0))), *element)
+            } else if args.iter().any(|argument| argument.spread.is_some()) {
+                // `super(...xs)`: the elements, copied (a lone number is not a length here).
+                let literal = Expr::Array(swc_ecma_ast::ArrayLit {
+                    span: swc_common::DUMMY_SP,
+                    elems: args.iter().cloned().map(Some).collect(),
+                });
+                self.lower_expr_with_expected_type(&literal, Some(&array_type))?
+            } else {
+                self.lower_array_constructor(args, self.native_base_type_args.clone().as_deref(), None)?
+            };
+            self.coerce_to_declared(&array_type, value)?
+        } else {
+            let construct = Expr::New(swc_ecma_ast::NewExpr {
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                callee: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    base_name.into(),
+                    swc_common::DUMMY_SP,
+                ))),
+                type_args: self.native_base_type_args.clone(),
+                args: Some(args.to_vec()),
+            });
+            self.lower_expr(&construct)?
+        };
         Ok(HirExpr::PropAssign(
             Box::new(HirExpr::Var(this_name)),
             this_type,
@@ -455,6 +477,51 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// `Symbol.species`: `stack.filter(..)` of an `extends Array` class is another instance of
+    /// that class. Done when the result keeps the wrapped array type and the class can be
+    /// built without arguments (implicit or zero-parameter constructor); otherwise the plain
+    /// array is returned.
+    fn wrap_native_species(&mut self, class_type: &HirType, result: HirExpr) -> Result<HirExpr, String> {
+        let Some(base @ HirType::Array(_)) = native_base_type(class_type) else {
+            return Ok(result);
+        };
+        if self.infer_expr_type(&result)? != *base {
+            return Ok(result);
+        }
+        let Some(class) = class_name_from_type(class_type) else {
+            return Ok(result);
+        };
+        let constructor = class_constructor_symbol(class);
+        let Some(signature) = self.signatures.get(&constructor) else {
+            return Ok(result);
+        };
+        let arguments = match signature.params.as_slice() {
+            [] => Vec::new(),
+            [HirType::Array(items)] if signature.native_rest.is_some() => vec![HirExpr::ArrayAlloc(
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                items.as_ref().clone(),
+            )],
+            _ => return Ok(result),
+        };
+        let name = format!("__thaw_species_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), class_type.clone());
+        Ok(HirExpr::Block(vec![
+            HirStmt::Let(
+                name.clone(),
+                class_type.clone(),
+                HirExpr::Call(Box::new(HirExpr::Var(constructor)), arguments),
+            ),
+            HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(HirExpr::Var(name.clone())),
+                class_type.clone(),
+                NATIVE_BASE_FIELD.to_string(),
+                Box::new(result),
+            )),
+            HirStmt::Return(Some(HirExpr::Var(name))),
+        ]))
+    }
+
     /// Lowers a call forwarded to the wrapped collection. Chainable `set`/`add`
     /// return the subclass instance itself, as in JavaScript.
     fn lower_native_base_forward(
@@ -464,7 +531,14 @@ impl<'a> FnLowerer<'a> {
         receiver: &Expr,
     ) -> Result<HirExpr, String> {
         let result = self.lower_call(forwarded)?;
-        if matches!(method, "set" | "add") && matches!(receiver, Expr::Ident(_) | Expr::This(_)) {
+        if matches!(method, "map" | "filter" | "slice" | "splice" | "concat" | "flat" | "flatMap") {
+            if let Some(receiver_type) = self.infer_member_receiver_type(receiver) {
+                return self.wrap_native_species(&receiver_type, result);
+            }
+        }
+        if matches!(method, "set" | "add" | "sort" | "reverse" | "fill" | "copyWithin")
+            && matches!(receiver, Expr::Ident(_) | Expr::This(_))
+        {
             let wrapped = self.infer_member_receiver_type(receiver);
             if wrapped.as_ref().and_then(native_base_type) == Some(&self.infer_expr_type(&result)?) {
                 let this = self.lower_expr(receiver)?;
@@ -561,6 +635,41 @@ impl<'a> FnLowerer<'a> {
         ) {
             return Err("typed-wrapper JSON ownership marker is compiler-private".into());
         }
+        // `Stack.from(..)` / `Stack.of(..)`: statics inherited from `Array`, producing an instance
+        // of the class (see `wrap_native_species`).
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(member) = callee.as_ref() {
+                if let (Expr::Ident(class), MemberProp::Ident(property)) =
+                    (member.obj.as_ref(), &member.prop)
+                {
+                    let class_type = self.interfaces.get(class.sym.as_ref()).cloned();
+                    if matches!(property.sym.as_ref(), "from" | "of")
+                        && class_type
+                            .as_ref()
+                            .is_some_and(|ty| matches!(native_base_type(ty), Some(HirType::Array(_))))
+                        && !self.signatures.contains_key(&class_static_method_symbol(
+                            class.sym.as_ref(),
+                            property.sym.as_ref(),
+                        ))
+                    {
+                        let mut forwarded = call.clone();
+                        if let Callee::Expr(callee) = &mut forwarded.callee {
+                            if let Expr::Member(forwarded_member) = callee.as_mut() {
+                                *forwarded_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                    "Array".into(),
+                                    class.span,
+                                ));
+                            }
+                        }
+                        let result = self.lower_call(&forwarded)?;
+                        return match class_type {
+                            Some(class_type) => self.wrap_native_species(&class_type, result),
+                            None => Ok(result),
+                        };
+                    }
+                }
+            }
+        }
         if matches!(call.callee, Callee::Super(_)) {
             let (symbol, _base_type, base_name) = self
                 .super_initializer
@@ -575,7 +684,7 @@ impl<'a> FnLowerer<'a> {
             // (its own generated initializer function already runs this
             // assignment as part of its body), so only a *direct* `extends
             // Error`-family base needs this.
-            if matches!(base_name.as_str(), "Map" | "Set") && !self.signatures.contains_key(&symbol) {
+            if matches!(base_name.as_str(), "Map" | "Set" | "Array") && !self.signatures.contains_key(&symbol) {
                 return self.lower_native_collection_super(&base_name, &call.args);
             }
             if matches!(
@@ -709,7 +818,7 @@ impl<'a> FnLowerer<'a> {
                 // `super.set(...)` in a class extending `Map`/`Set`: call the
                 // method on the wrapped native collection.
                 if !self.class_static_context
-                    && matches!(base_name.as_str(), "Map" | "Set")
+                    && matches!(base_name.as_str(), "Map" | "Set" | "Array")
                     && !self.signatures.contains_key(&symbol)
                 {
                     let this = self.resolve_binding("this");
@@ -3057,6 +3166,7 @@ impl<'a> FnLowerer<'a> {
                 continue;
             }
 
+            value = self.project_native_base(value)?;
             let mut source_type = self.infer_expr_type(&value)?;
             let rest_element = signature
                 .as_ref()

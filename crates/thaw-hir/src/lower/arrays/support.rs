@@ -211,6 +211,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         combinator: &str,
     ) -> Result<HirExpr, String> {
+        let value = self.project_native_base(value)?;
         match self.infer_expr_type(&value)? {
             HirType::Array(element) => {
                 let HirType::Promise(resolved) = *element else {

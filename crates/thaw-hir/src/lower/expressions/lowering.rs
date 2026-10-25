@@ -2519,7 +2519,7 @@ impl<'a> FnLowerer<'a> {
                     let native_builtin_match =
                         native_builtin_instanceof_static_match(class.sym.as_ref(), &value_type);
                     let native_collection_subclass = native_base_type(&value_type).is_some()
-                        && matches!(class.sym.as_ref(), "Map" | "Set");
+                        && matches!(class.sym.as_ref(), "Map" | "Set" | "Array");
                     if !extends_error_family
                         && native_builtin_match.is_none()
                         && !native_collection_subclass
@@ -6281,7 +6281,7 @@ pub(in crate::lower) fn split_type_assertion(expr: &Expr) -> Option<(&Expr, &TsT
 /// native, non-`Json`/`JsValue` type.
 fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<bool> {
     // A `Map`/`Set` subclass instance is an object: its identity chain decides.
-    if native_base_type(ty).is_some() && matches!(class, "Map" | "Set") {
+    if native_base_type(ty).is_some() && matches!(class, "Map" | "Set" | "Array") {
         return None;
     }
     Some(match class {

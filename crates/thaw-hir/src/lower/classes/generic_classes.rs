@@ -1893,7 +1893,7 @@ fn specialize_generic_classes(
                     if declaration.class.type_params.is_some()
                         || (declaration.class.super_type_params.is_some()
                             && !matches!(declaration.class.super_class.as_deref(),
-                                Some(Expr::Ident(base)) if matches!(base.sym.as_ref(), "Map" | "Set")))
+                                Some(Expr::Ident(base)) if matches!(base.sym.as_ref(), "Map" | "Set" | "Array")))
                         || class_contains_unresolved_generic_type(&declaration.class, &names)
             )
         });
