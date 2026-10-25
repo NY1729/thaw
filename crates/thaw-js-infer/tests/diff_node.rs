@@ -1,6 +1,6 @@
 //! Differential test: annotate JS -> TypeScript, compile it with the existing `thaw` TS pipeline and
 //! compare stdout with Node. Opt-in: set `THAW_JS_INFER_THAW_BIN=/path/to/thaw` (and have `node` on
-//! PATH); otherwise the test is skipped. Scratch goes under `$TMPDIR`.
+//! PATH); otherwise the test is skipped. Scratch goes under the system temp dir (absolute paths, independent of the cwd).
 
 use std::process::Command;
 
@@ -17,8 +17,7 @@ fn run_case(thaw: &str, name: &str) {
         ));
     }
     let ts = thaw_js_infer::annotate(&src, cfg).unwrap();
-    let dir = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| ".".into()))
-        .join(format!("thaw-js-infer-diff-{name}"));
+    let dir = std::env::temp_dir().join(format!("thaw-js-infer-diff-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("package.json"),
