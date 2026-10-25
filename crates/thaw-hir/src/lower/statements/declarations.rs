@@ -1061,6 +1061,22 @@ impl<'a> FnLowerer<'a> {
                     }
                     other => other,
                 };
+                // `const a: number[] = stack` / `const m: Map<K, V> | undefined = registry`: the
+                // object stays the subclass instance (it prints, tests `instanceof` and dispatches
+                // as one), so an immutable binding keeps the instance type for the base member.
+                let ty = match native_base_type(&actual_type) {
+                    Some(base) if var_decl.kind == VarDeclKind::Const && binding.type_ann.is_some() => {
+                        let retain = |member: &HirType| if member == base { actual_type.clone() } else { member.clone() };
+                        match &ty {
+                            HirType::Optional(inner) => HirType::Optional(Box::new(retain(inner))),
+                            HirType::Nullable(inner) => HirType::Nullable(Box::new(retain(inner))),
+                            HirType::Nullish(inner) => HirType::Nullish(Box::new(retain(inner))),
+                            HirType::Union(members) => HirType::Union(members.iter().map(retain).collect()),
+                            other => retain(other),
+                        }
+                    }
+                    _ => ty,
+                };
                 // `const err: any = <caught error>`: an `any`/`Dynamic` or
                 // bare-`Json` annotation on a *caught-exception string*
                 // must stay `Str`. Coercing it to `Json` (the default an
