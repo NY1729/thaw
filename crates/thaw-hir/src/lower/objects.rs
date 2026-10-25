@@ -3661,7 +3661,13 @@ impl<'a> FnLowerer<'a> {
                         // receiver as its leading argument), a lone setter
                         // reads `undefined`, and an ordinary data field reads
                         // directly.
-                        self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())
+                        let read =
+                            self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())?;
+                        if is_observed_member(member.span) {
+                            Ok(read)
+                        } else {
+                            self.lenient_uninit_read(read)
+                        }
                     }
                     HirType::Union(elements) => {
                         self.lower_union_property_read(obj, elements, prop.sym.as_ref())
@@ -4076,6 +4082,39 @@ impl<'a> FnLowerer<'a> {
             object_type,
             property.to_string(),
         ))
+    }
+
+    /// A read of a class field widened to `Optional` because it may be
+    /// uninitialised (`is_uninit_class_field`), in a value context: an absent
+    /// field reads as NaN (number) or its zero payload, like Node's
+    /// `undefined` coerced to the declared type. Other reads pass through.
+    fn lenient_uninit_read(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        let HirExpr::PropAccess(_, HirType::Object(fields), field) = &read else {
+            return Ok(read);
+        };
+        if !is_uninit_class_field(fields, field) {
+            return Ok(read);
+        }
+        let Some((_, HirType::Optional(payload))) = fields.iter().find(|(name, _)| name == field)
+        else {
+            return Ok(read);
+        };
+        let payload = payload.as_ref().clone();
+        if payload != HirType::F64 {
+            return Ok(HirExpr::OptionalValue(Box::new(read), payload));
+        }
+        let name = format!("__thaw_uninit_read_{}", self.next_binding);
+        self.next_binding += 1;
+        let optional = HirType::Optional(Box::new(HirType::F64));
+        self.scope.insert(name.clone(), optional.clone());
+        let var = HirExpr::Var(name.clone());
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::F64)),
+            Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+            Box::new(HirExpr::OptionalValue(Box::new(var), HirType::F64)),
+            HirType::F64,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, optional, read)])
     }
 
     fn fixed_object_property_read_type(

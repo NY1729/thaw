@@ -6,6 +6,12 @@ struct StoragePlan {
     source_types: HashMap<(u32, u32), HirType>,
     source_conflicts: HashSet<(u32, u32)>,
     class_fields: HashMap<(String, String), (Span, bool)>,
+    /// `(class, field)` pairs widened to `Optional` because the constructor
+    /// may leave them unset (see `maybe_uninit_fields`).
+    uninit_fields: HashSet<(String, String)>,
+    /// Spans of member reads in `undefined`-observing positions (see
+    /// `ObservedMembers`); they keep the raw `Optional` of an uninit field.
+    observed_members: HashSet<(u32, u32)>,
     argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     callable_parameters: HashMap<u32, Vec<(u32, u32)>>,
     quickjs_function_value_nodes: HashSet<(u32, u32)>,
@@ -65,6 +71,12 @@ impl StoragePlan {
             source_types: HashMap::new(),
             source_conflicts: HashSet::new(),
             class_fields: HashMap::new(),
+            uninit_fields: HashSet::new(),
+            observed_members: {
+                let mut observed = ObservedMembers::default();
+                module.visit_with(&mut observed);
+                observed.0
+            },
             argument_parameters: graph.argument_parameters,
             callable_parameters,
             quickjs_function_value_nodes,
@@ -1218,6 +1230,92 @@ fn storage_source_type(span: Span) -> Option<HirType> {
     if span.is_dummy() { return None; }
     ACTIVE_STORAGE_PLAN.with(|active| { let active = active.borrow();
         (!active.source_conflicts.contains(&storage_key(span))).then(|| active.source_types.get(&storage_key(span)).cloned()).flatten()
+    })
+}
+/// Collects member reads whose value is observed as `undefined` rather than
+/// consumed as a number/string: `console.log` arguments, template
+/// substitutions, `typeof`/`!`/`if`/`?:` tests, `+`/equality/`??` operands, `?.` receivers.
+#[derive(Default)]
+struct ObservedMembers(HashSet<(u32, u32)>);
+
+impl ObservedMembers {
+    fn observe(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Paren(paren) => self.observe(&paren.expr),
+            Expr::Member(member) => {
+                self.0.insert(storage_key(member.span));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Visit for ObservedMembers {
+    fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+        if let swc_ecma_ast::Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(member) = callee.as_ref() {
+                if matches!(member.obj.as_ref(), Expr::Ident(ident) if ident.sym == *"console") {
+                    for argument in &call.args {
+                        self.observe(&argument.expr);
+                    }
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+    fn visit_tpl(&mut self, template: &swc_ecma_ast::Tpl) {
+        for expr in &template.exprs {
+            self.observe(expr);
+        }
+        template.visit_children_with(self);
+    }
+    fn visit_if_stmt(&mut self, statement: &swc_ecma_ast::IfStmt) {
+        self.observe(&statement.test);
+        statement.visit_children_with(self);
+    }
+    fn visit_cond_expr(&mut self, conditional: &swc_ecma_ast::CondExpr) {
+        self.observe(&conditional.test);
+        conditional.visit_children_with(self);
+    }
+    fn visit_unary_expr(&mut self, unary: &swc_ecma_ast::UnaryExpr) {
+        // `typeof x.f` and `!x.f` (truthiness of an absent array/object).
+        if matches!(unary.op, swc_ecma_ast::UnaryOp::TypeOf | swc_ecma_ast::UnaryOp::Bang) {
+            self.observe(&unary.arg);
+        }
+        unary.visit_children_with(self);
+    }
+    fn visit_bin_expr(&mut self, binary: &swc_ecma_ast::BinExpr) {
+        use swc_ecma_ast::BinaryOp::*;
+        if matches!(binary.op, Add | EqEq | NotEq | EqEqEq | NotEqEq | NullishCoalescing) {
+            self.observe(&binary.left);
+            self.observe(&binary.right);
+        }
+        binary.visit_children_with(self);
+    }
+    fn visit_opt_chain_expr(&mut self, chain: &swc_ecma_ast::OptChainExpr) {
+        if let swc_ecma_ast::OptChainBase::Member(member) = chain.base.as_ref() {
+            self.observe(&member.obj);
+        }
+        chain.visit_children_with(self);
+    }
+}
+
+fn is_observed_member(span: Span) -> bool {
+    ACTIVE_STORAGE_PLAN.with(|active| active.borrow().observed_members.contains(&storage_key(span)))
+}
+fn remember_uninit_class_field(class: &str, field: &str) {
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        active.borrow_mut().uninit_fields.insert((class.to_owned(), field.to_owned()));
+    });
+}
+/// Whether `field` of a class-instance layout (identified by its identity
+/// marker) was widened because the constructor may leave it unset.
+fn is_uninit_class_field(layout: &[(Symbol, HirType)], field: &str) -> bool {
+    let Some((marker, HirType::Bool)) = layout.first() else { return false };
+    let Some(chain) = marker.strip_prefix("__thaw_class_identity_\u{1e}") else { return false };
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        let active = active.borrow();
+        chain.split('\u{1f}').any(|class| active.uninit_fields.contains(&(class.to_owned(), field.to_owned())))
     })
 }
 fn remember_class_source_field(class: &str, field: &str, span: Span, optional: bool) {

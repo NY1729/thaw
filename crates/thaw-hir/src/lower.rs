@@ -461,6 +461,7 @@ include!("lower/classes/generic_classes.rs");
 include!("lower/classes/generic_methods.rs");
 
 include!("lower/module/helpers.rs");
+include!("lower/module/class_init.rs");
 include!("lower/module/classes.rs");
 include!("lower/module/pipeline.rs");
 include!("lower/module/globals.rs");
