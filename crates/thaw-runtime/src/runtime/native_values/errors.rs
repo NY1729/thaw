@@ -497,16 +497,32 @@ pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const 
 /// unwinding support.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_char {
+    unsafe { error_stack(message, false) }
+}
+
+/// `thaw_error_stack` plus the generated frame line (see `stack_frames`): what `err.stack` reads on
+/// an Error the program holds. A caught value keeps the header-only `thaw_error_stack` form.
+///
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_stack_with_frames(message: *const c_char) -> *const c_char {
+    unsafe { error_stack(message, true) }
+}
+
+unsafe fn error_stack(message: *const c_char, frames: bool) -> *const c_char {
     if message.is_null() {
         return std::ptr::null();
     }
-    let rendered = unsafe { stack_text(message) };
-    // V8 serializes `stack` on first access: later name/message writes no longer change it.
+    let rendered = unsafe { stack_text(message, frames) };
+    // V8 serializes `stack` on first access: later name/message writes no longer change it. Only the
+    // header is cached, so the frame line stays out of `console.log(error)` like before.
     if is_framed_error_text(message) {
+        let header = rendered.split("\n    at ").next().unwrap_or_default().to_string();
         thaw_arena::register_metadata_reset_hook(prune_error_extras);
         let key = extras_key(message);
         ERROR_EXTRAS.with(|table| {
-            extras_entry(&mut table.borrow_mut(), key).stack.get_or_insert_with(|| rendered.clone());
+            extras_entry(&mut table.borrow_mut(), key).stack.get_or_insert(header);
         });
     }
     arena_c_string(&rendered).map_or(std::ptr::null(), |value| value.cast())
@@ -579,6 +595,8 @@ struct ErrorExtras {
     stack: Option<String>,
     /// Hidden (non-enumerable) own `cause` from the constructor options, as JSON text.
     cause: Option<String>,
+    /// `stack` was assigned by the program (kept verbatim); otherwise `stack` caches only the header.
+    stack_user: bool,
     /// Deleted own `message`/`stack`/`cause`/`code`/`name`.
     deleted: Vec<String>,
 }
@@ -691,7 +709,10 @@ fn bag_keys(text: &str) -> Vec<String> {
     };
     match serde_json::from_str::<serde_json::Value>(bag) {
         Ok(serde_json::Value::Object(map)) => {
-            map.keys().filter(|key| *key != HIDDEN_CAUSE_KEY).cloned().collect()
+            map.keys()
+                .filter(|key| *key != HIDDEN_CAUSE_KEY && !key.starts_with('\0'))
+                .cloned()
+                .collect()
         }
         _ => Vec::new(),
     }
@@ -758,6 +779,7 @@ pub unsafe extern "C" fn thaw_error_set_prop(
             }
             "stack" => {
                 extras.stack = Some(plain);
+                extras.stack_user = true;
                 return;
             }
             _ => {}
@@ -797,7 +819,7 @@ pub unsafe extern "C" fn thaw_error_get_prop_json(error: *const c_char, key: *co
     match key.as_str() {
         "message" => arena_json(effective_name_message(error, &text).1),
         "name" => arena_json(effective_name_message(error, &text).0),
-        "stack" => arena_json(unsafe { stack_text(error) }),
+        "stack" => arena_json(unsafe { stack_text(error, true) }),
         "cause" if error_property_json(&text, &key).is_none() => split_error_cause(&text)
             .map_or(std::ptr::null(), |cause| arena_json(cause.to_string())),
         _ => error_property_json(&text, &key)
@@ -848,7 +870,10 @@ pub unsafe extern "C" fn thaw_error_delete_prop(error: *const c_char, key: *cons
         match key.as_str() {
             "message" => extras.message = None,
             "name" => extras.name = None,
-            "stack" => extras.stack = None,
+            "stack" => {
+                extras.stack = None;
+                extras.stack_user = false;
+            }
             "cause" => extras.cause = None,
             _ => {}
         }
@@ -932,7 +957,7 @@ fn error_props_object(error: *const c_char, text: &str) -> serde_json::Map<Strin
     }
     if let Some(bag) = metadata_suffix(text).split_once(ERROR_PROPS_MARKER).map(|v| v.1) {
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(bag) {
-            for (key, value) in map {
+            for (key, value) in map.into_iter().filter(|(key, _)| !key.starts_with('\0')) {
                 if key == HIDDEN_CAUSE_KEY {
                     continue;
                 }
@@ -990,10 +1015,29 @@ pub unsafe extern "C" fn thaw_error_entries_json(error: *const c_char) -> *const
 /// `error` must be null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_with_props(error: *const c_char) -> *const c_char {
+    unsafe { error_text_with_props(error, false) }
+}
+
+/// Reserved bag key holding the canonical pointer of the Error a Json string value refers to.
+/// Keys starting with NUL are never properties.
+const ERROR_ID_KEY: &str = "\u{0}id";
+
+/// `thaw_error_with_props` for a text copy that becomes a Json string value: the bag also records
+/// the canonical identity pointer of the Error (`ERROR_ID_KEY`), so the Json value stays a
+/// reference to the same Error (props, `===`) instead of an independent copy.
+///
+/// # Safety
+/// `error` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_json_text(error: *const c_char) -> *const c_char {
+    unsafe { error_text_with_props(error, true) }
+}
+
+unsafe fn error_text_with_props(error: *const c_char, with_id: bool) -> *const c_char {
     if error.is_null() || !is_framed_error_text(error) {
         return error;
     }
-    let overlay = with_extras(error, |extras| {
+    let mut overlay = with_extras(error, |extras| {
         let mut pairs = extras.props.clone();
         for (key, value) in [("message", &extras.message), ("stack", &extras.stack)] {
             if let Some(value) = value {
@@ -1006,6 +1050,9 @@ pub unsafe extern "C" fn thaw_error_with_props(error: *const c_char) -> *const c
         Some(pairs)
     })
     .unwrap_or_default();
+    if with_id {
+        overlay.push((ERROR_ID_KEY.to_string(), extras_key(error).to_string()));
+    }
     if overlay.is_empty() {
         return error;
     }
@@ -1023,6 +1070,10 @@ pub unsafe extern "C" fn thaw_error_with_props(error: *const c_char) -> *const c
         })
         .unwrap_or_default();
     for (key, json) in overlay {
+        // An id already in the bag (a re-widened Json copy) names the original Error.
+        if key == ERROR_ID_KEY && bag.contains_key(ERROR_ID_KEY) {
+            continue;
+        }
         if let Ok(value) = serde_json::from_str(&json) {
             bag.insert(key, value);
         }
@@ -1125,18 +1176,85 @@ fn prune_object_stacks(tracing: bool) {
 
 /// # Safety
 /// `error` must be a valid NUL-terminated string.
-unsafe fn stack_text(error: *const c_char) -> String {
-    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy();
-    if let Some(stack) = with_extras(error, |extras| extras.stack.clone()) {
-        return stack;
+unsafe fn stack_text(error: *const c_char, frames: bool) -> String {
+    let (cached, assigned) =
+        with_extras(error, |extras| Some((extras.stack.clone(), extras.stack_user))).unwrap_or_default();
+    if assigned {
+        return cached.unwrap_or_default();
     }
-    let (name, body) = effective_name_message(error, &text);
-    error_header(&name, &body)
+    let frames = if frames { stack_frames() } else { "" };
+    format!("{}{}", unsafe { stack_header(error, cached) }, frames)
+}
+
+/// The first line of a generated `stack`: the cached one (V8 serializes on first read), else
+/// `name: message` as of now.
+unsafe fn stack_header(error: *const c_char, cached: Option<String>) -> String {
+    cached.unwrap_or_else(|| {
+        let text = unsafe { CStr::from_ptr(error) }.to_string_lossy();
+        let (name, body) = effective_name_message(error, &text);
+        error_header(&name, &body)
+    })
+}
+
+thread_local! {
+    /// `Error.stackTraceLimit`.
+    static STACK_TRACE_LIMIT: Cell<f64> = const { Cell::new(10.0) };
+}
+
+/// `Error.stackTraceLimit`.
+#[no_mangle]
+pub extern "C" fn thaw_error_stack_trace_limit() -> f64 {
+    STACK_TRACE_LIMIT.with(Cell::get)
+}
+
+/// `Error.stackTraceLimit = limit`; returns the assigned value.
+#[no_mangle]
+pub extern "C" fn thaw_error_set_stack_trace_limit(limit: f64) -> f64 {
+    STACK_TRACE_LIMIT.with(|slot| slot.set(limit));
+    limit
+}
+
+/// The frame lines of a generated `stack`. Compiled code has no call-stack frames to walk (and
+/// file paths could not match Node's anyway), so a stack has one fixed frame of V8's anonymous
+/// shape while `Error.stackTraceLimit` allows at least one.
+// ponytail: one synthetic frame; real frames need compiler-emitted unwind tables.
+fn stack_frames() -> &'static str {
+    if thaw_error_stack_trace_limit() >= 1.0 {
+        "\n    at <anonymous>"
+    } else {
+        ""
+    }
+}
+
+/// The frame lines `stack_frames` appends, for the `stack` that `Error.captureStackTrace` builds
+/// on a plain object.
+#[no_mangle]
+pub extern "C" fn thaw_error_stack_frames() -> *const c_char {
+    arena_c_string(stack_frames()).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[cfg(test)]
 mod error_native_tests {
     use super::*;
+
+    #[test]
+    fn stack_frame_line_follows_the_trace_limit_and_assigned_stacks() {
+        // The limit and the side table are thread-local.
+        std::thread::spawn(|| unsafe {
+            let text = |pointer: *const c_char| CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            let error = thaw_error_frame(c"TypeError".as_ptr(), c"m".as_ptr());
+            assert_eq!(text(thaw_error_stack(error)), "TypeError: m");
+            assert_eq!(text(thaw_error_stack_with_frames(error)), "TypeError: m\n    at <anonymous>");
+            thaw_error_set_stack_trace_limit(0.0);
+            assert_eq!(text(thaw_error_stack_with_frames(error)), "TypeError: m");
+            thaw_error_set_stack_trace_limit(10.0);
+            assert!(thaw_error_set_prop(error, c"stack".as_ptr(), c"\"custom\"".as_ptr()));
+            assert_eq!(text(thaw_error_stack_with_frames(error)), "custom");
+            assert_eq!(text(thaw_error_stack(error)), "custom");
+        })
+        .join()
+        .unwrap();
+    }
 
     fn call_name(message: &str) -> String {
         let message = CString::new(message).unwrap();

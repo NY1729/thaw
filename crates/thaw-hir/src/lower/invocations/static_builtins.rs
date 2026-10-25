@@ -271,6 +271,158 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// Own visible (non-index) property names of an `extends Array` instance type: `Some` when
+    /// `ty` wraps an array and declares own fields.
+    fn array_subclass_own_fields(ty: &HirType) -> Option<Vec<String>> {
+        let HirType::Object(fields) = ty else {
+            return None;
+        };
+        if !matches!(native_base_type(ty), Some(HirType::Array(_))) {
+            return None;
+        }
+        let own = ecmascript_field_order(fields)
+            .into_iter()
+            .map(|index| fields[index].0.to_string())
+            .filter(|name| !name.starts_with("__thaw_class_identity_\u{1e}"))
+            .collect::<Vec<_>>();
+        (!own.is_empty()).then_some(own)
+    }
+
+    /// `Object.keys` / `getOwnPropertyNames` / `for...in` keys of an `extends Array` instance
+    /// with own fields: the index keys (plus `length` when `all`) of the wrapped array, then
+    /// the own property names. `object` is a variable of type `ty`.
+    pub(in crate::lower) fn lower_array_subclass_keys(
+        &mut self,
+        object: HirExpr,
+        ty: &HirType,
+        all: bool,
+    ) -> Result<HirExpr, String> {
+        let own = Self::array_subclass_own_fields(ty).unwrap_or_default();
+        let keys_type = HirType::Array(Box::new(HirType::Str));
+        let name = format!("__thaw_subclass_keys_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), keys_type.clone());
+        let base = HirExpr::PropAccess(Box::new(object), ty.clone(), NATIVE_BASE_FIELD.to_string());
+        let mut statements = vec![HirStmt::Let(
+            name.clone(),
+            keys_type,
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_keys".into())),
+                vec![base, HirExpr::Lit(HirLit::Bool(all))],
+            ),
+        )];
+        for field in own {
+            statements.push(HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str(field))],
+            )));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::Var(name))));
+        Ok(HirExpr::Block(statements))
+    }
+
+    /// `Object.values` / `Object.entries` of an `extends Array` instance with own fields: the
+    /// elements, then the own property values, as an `any[]` (the two kinds differ in type).
+    fn lower_array_subclass_sequence(
+        &mut self,
+        object: HirExpr,
+        ty: &HirType,
+        entries: bool,
+    ) -> Result<HirExpr, String> {
+        let (Some(own), Some(base_type), HirType::Object(fields)) =
+            (Self::array_subclass_own_fields(ty), native_base_type(ty).cloned(), ty)
+        else {
+            return Err("Object.values/entries expects an Array subclass with own fields".into());
+        };
+        let HirType::Array(element) = &base_type else {
+            return Err("Object.values/entries expects an Array subclass with own fields".into());
+        };
+        let element = element.as_ref().clone();
+        let json_array = HirType::Array(Box::new(HirType::Json));
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let (object_name, result_name, base_name, index_name, item_name) = (
+            format!("__thaw_subclass_object_{id}"),
+            format!("__thaw_subclass_items_{id}"),
+            format!("__thaw_subclass_base_{id}"),
+            format!("__thaw_subclass_index_{id}"),
+            format!("__thaw_subclass_item_{id}"),
+        );
+        self.scope.insert(object_name.clone(), ty.clone());
+        self.scope.insert(result_name.clone(), json_array.clone());
+        self.scope.insert(base_name.clone(), base_type.clone());
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope.insert(item_name.clone(), element.clone());
+        let push = |item: HirExpr| {
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(result_name.clone()), item],
+            ))
+        };
+        let wrap = |this: &mut Self, key: HirExpr, value: HirExpr| -> Result<HirExpr, String> {
+            let value = this.coerce_to_declared(&HirType::Json, value)?;
+            if !entries {
+                return Ok(value);
+            }
+            let key = this.coerce_to_declared(&HirType::Json, key)?;
+            this.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![key, value]))
+        };
+        let index_key = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+            vec![HirExpr::Var(index_name.clone())],
+        );
+        let element_item = wrap(self, index_key, HirExpr::Var(item_name.clone()))?;
+        let mut statements = vec![
+            HirStmt::Let(object_name.clone(), ty.clone(), object),
+            HirStmt::Let(result_name.clone(), json_array, HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(
+                base_name.clone(),
+                base_type.clone(),
+                HirExpr::PropAccess(
+                    Box::new(HirExpr::Var(object_name.clone())),
+                    ty.clone(),
+                    NATIVE_BASE_FIELD.to_string(),
+                ),
+            ),
+            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(base_name.clone())))),
+                ),
+                vec![
+                    HirStmt::Let(
+                        item_name.clone(),
+                        element.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(base_name)),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            element,
+                        ),
+                    ),
+                    push(element_item),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+        ];
+        for field in own {
+            let read =
+                self.lower_fixed_object_property_read(HirExpr::Var(object_name.clone()), fields, &field)?;
+            let item = wrap(self, HirExpr::Lit(HirLit::Str(field)), read)?;
+            statements.push(push(item));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
+        Ok(HirExpr::Block(statements))
+    }
+
     fn lower_visible_fixed_object_sequence(
         &mut self,
         value: HirExpr,
@@ -4207,6 +4359,15 @@ impl<'a> FnLowerer<'a> {
                         };
                         let mut value = value.clone();
                         let mut ty = self.infer_expr_type(&value)?;
+                        if Self::array_subclass_own_fields(&ty).is_some() {
+                            let name = format!("__thaw_subclass_object_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            let all = property.sym != *"keys";
+                            let result = self.lower_array_subclass_keys(HirExpr::Var(name.clone()), &ty, all)?;
+                            bindings.push((name, ty, value));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         if let Some(base @ HirType::Array(_)) = native_base_type(&ty).cloned() {
                             value = self.project_native_base(value)?;
                             ty = base;
@@ -4459,6 +4620,14 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Call(Box::new(HirExpr::Var(runtime.to_string())), vec![value]);
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        if Self::array_subclass_own_fields(&ty).is_some() {
+                            let result = self.lower_array_subclass_sequence(value, &ty, false)?;
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let Some(base @ HirType::Array(_)) = native_base_type(&ty).cloned() {
+                            value = self.project_native_base(value)?;
+                            ty = base;
+                        }
                         if let HirType::Array(element) = &ty {
                             let element = element.as_ref().clone();
                             let result = self.lower_array_filter(
@@ -4616,6 +4785,14 @@ impl<'a> FnLowerer<'a> {
                 let result =
                     HirExpr::Call(Box::new(HirExpr::Var(runtime.to_string())), vec![value]);
                             return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if Self::array_subclass_own_fields(&ty).is_some() {
+                            let result = self.lower_array_subclass_sequence(value, &ty, true)?;
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let Some(base @ HirType::Array(_)) = native_base_type(&ty).cloned() {
+                            value = self.project_native_base(value)?;
+                            ty = base;
                         }
                         if let HirType::Array(element) = &ty {
                             let receiver_name = format!("__thaw_array_entries_source_{}", self.next_binding);
@@ -4884,7 +5061,7 @@ impl<'a> FnLowerer<'a> {
                                                 vec![
                                                     HirExpr::Var(target_name.clone()),
                                                     HirExpr::Lit(HirLit::Str(name.clone())),
-                                                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_stringify_raw".to_string())), vec![json]),
+                                                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".to_string())), vec![json]),
                                                 ],
                                             )));
                                         }
@@ -4893,7 +5070,7 @@ impl<'a> FnLowerer<'a> {
                                         Box::new(HirExpr::Var("__thaw_error_assign_json".to_string())),
                                         vec![
                                             HirExpr::Var(target_name.clone()),
-                                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_stringify_raw".to_string())), vec![source.clone()]),
+                                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".to_string())), vec![source.clone()]),
                                         ],
                                     ))),
                                     other => {
@@ -5347,7 +5524,8 @@ impl<'a> FnLowerer<'a> {
                     if object.sym == *"Error" && property.sym == *"captureStackTrace" {
                         // `Error.captureStackTrace(target[, constructorOpt])`: there are no call
                         // frames to capture, so an Error value only fixes its `stack` header (read
-                        // once, V8 serializes it lazily) and any other target is left unchanged.
+                        // once, V8 serializes it lazily), a Json object gets a `stack` string, and
+                        // any other target is left unchanged.
                         let (arguments, bindings) = if call.args.iter().any(|argument| argument.spread.is_some()) {
                             self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?
                         } else {
@@ -5370,12 +5548,19 @@ impl<'a> FnLowerer<'a> {
                         for extra in arguments.iter().skip(1) {
                             statements.push(HirStmt::Expr(extra.clone()));
                         }
-                        if let HirType::Object(fields) = self.infer_expr_type(&target)? {
-                            let capture = self.lower_object_capture_stack(target, &fields)?;
+                        let target_type = self.infer_expr_type(&target)?;
+                        if let HirType::Object(fields) = &target_type {
+                            let capture = self.lower_object_capture_stack(target, fields)?;
                             statements.insert(0, HirStmt::Expr(capture));
-                        } else if self.infer_expr_type(&target)? == HirType::Str {
+                        } else if target_type == HirType::Str {
                             statements.insert(0, HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+                                vec![target],
+                            )));
+                        } else if target_type == HirType::Json {
+                            // A plain object gets an own `stack` string built from its name/message.
+                            statements.insert(0, HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_capture_stack_trace".to_string())),
                                 vec![target],
                             )));
                         } else {

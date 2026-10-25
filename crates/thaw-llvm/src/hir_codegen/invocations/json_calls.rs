@@ -87,11 +87,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
                 return self.compile_check_json_stringify_error(result);
             }
-            "__thaw_json_stringify_raw" => {
+            "__thaw_json_encode" => {
                 let result = self.compile_single_arg_call(
-                    "thaw_json_stringify_raw",
+                    "thaw_json_encode_public",
                     args,
-                    "internal JSON stringify",
+                    "JSON encode",
                 )?;
                 return self.compile_check_json_stringify_error(result);
             }
@@ -342,6 +342,36 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_has_wrapper_key")
                     .map(Into::into)
                     .map_err(|error| error.to_string());
+            }
+            "__thaw_json_is_error_instance" => {
+                let [value, key] = args else {
+                    return Err("__thaw_json_is_error_instance expects two arguments".into());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                let function = self.module.get_function("thaw_json_is_error_instance").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into(), key.into()], "json_is_error_instance_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_error_instance did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_is_error_instance")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_json_capture_stack_trace" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_capture_stack_trace",
+                    args,
+                    "JSON capture stack trace",
+                )
             }
             "__thaw_json_map_or_set_entries" => {
                 return self.compile_single_arg_call(

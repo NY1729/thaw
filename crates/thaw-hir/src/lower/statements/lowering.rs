@@ -335,7 +335,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::JsonObjectLit(with_name, HirType::Json)),
             HirType::Json,
         );
-        let text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_stringify_raw".into())), vec![object]);
+        let text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![object]);
         Ok(Some(HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
             vec![value.clone(), text],
@@ -2808,7 +2808,14 @@ impl<'a> FnLowerer<'a> {
                         keys_name.clone(),
                         HirType::Array(Box::new(HirType::Str)),
                     );
-                    let keys = if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
+                    let keys = if matches!(native_base_type(&object_type), Some(HirType::Array(_))) {
+                        // An `extends Array` instance: its index keys, then its own fields.
+                        self.lower_array_subclass_keys(
+                            HirExpr::Var(object_name.clone()),
+                            &object_type,
+                            false,
+                        )?
+                    } else if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_for_in_keys".into())),
                             vec![HirExpr::Var(object_name.clone())],

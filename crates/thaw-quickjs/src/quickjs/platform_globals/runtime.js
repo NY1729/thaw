@@ -19,6 +19,13 @@
     if (name !== baseName) {
       thawBootstrapDefineProperty(error, 'name', { value: name, writable: true, configurable: true });
     }
+    // QuickJS records only the frames; V8's `stack` starts with the `Name: message` header.
+    const frames = typeof error.stack === 'string' ? error.stack : '';
+    const header = message === '' ? name : name + ': ' + message;
+    if (!frames.startsWith(header)) {
+      thawBootstrapDefineProperty(error, 'stack', {
+        value: frames === '' ? header : header + '\n' + frames, writable: true, configurable: true });
+    }
     return error;
   };
   const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
@@ -2664,7 +2671,11 @@
     writable: false, configurable: false, enumerable: true,
   });
   thawGraphDefineProperty(globalThis, '__thaw_json_stringify_direct', {
-    value: value => thawStringifyWithoutSymbolKeys(value),
+    // A native Error copied into Json (its text carries the reserved "\0id" bag key) serializes as
+    // the Error it stands for: its own enumerable props.
+    value: value => thawStringifyWithoutSymbolKeys(value, (key, item) =>
+      typeof item === 'string' && item.charCodeAt(0) === 1 && item.indexOf('\\u0000id') >= 0
+        ? thawErrorFromTagged(item) : item),
     writable: false, configurable: false,
   });
   // A native function replacer receives the live native owner as its `this`
@@ -2852,27 +2863,38 @@
     if (typeof value === 'string') return value.charCodeAt(0) === 1 ? thawErrorFromTagged(value) : value;
     return Array.isArray(value) ? value.map(reviveTaggedErrors) : value;
   };
+  // A native Error copied into a Json value records its identity pointer as the reserved bag key
+  // "\0id": copies with the same id and text are one JS Error, so `===` holds across projections.
+  // ponytail: never pruned; ids are arena pointers, so a reused id only matches if name and message match too.
+  const thawNativeErrorIds = new Map();
   const thawErrorFromTagged = function (raw) {
     const frame = thawParseErrorFrame(raw);
     if (frame) {
-      const error = thawCreateError(
-        frame.name,
-        frame.original === null ? frame.display : frame.original,
-        frame.baseName,
-      );
       const propertiesIndex = frame.suffix.indexOf('\u0005');
-      restoreTaggedCause(error, propertiesIndex >= 0 ? frame.suffix.slice(0, propertiesIndex) : frame.suffix);
+      let properties = null;
       if (propertiesIndex >= 0) {
-        try {
-          const properties = JSON.parse(frame.suffix.slice(propertiesIndex + 1));
-          for (const key in properties) {
-            if (key === '\u0002cause') {
-              Object.defineProperty(error, 'cause', {
-                value: reviveTaggedErrors(properties[key]),
-                writable: true, configurable: true, enumerable: false });
-            } else error[key] = reviveTaggedErrors(properties[key]);
-          }
-        } catch (ignored) {}
+        try { properties = JSON.parse(frame.suffix.slice(propertiesIndex + 1)); } catch (ignored) {}
+      }
+      const nativeId = properties !== null && typeof properties === 'object' ? properties['\0id'] : undefined;
+      const idKey = nativeId === undefined ? null : nativeId + ':' + frame.name + ':' + frame.display;
+      let error = idKey === null ? undefined : thawNativeErrorIds.get(idKey);
+      if (error === undefined) {
+        error = thawCreateError(
+          frame.name,
+          frame.original === null ? frame.display : frame.original,
+          frame.baseName,
+        );
+        restoreTaggedCause(error, propertiesIndex >= 0 ? frame.suffix.slice(0, propertiesIndex) : frame.suffix);
+        if (idKey !== null) thawNativeErrorIds.set(idKey, error);
+      }
+      if (properties !== null && typeof properties === 'object') {
+        for (const key in properties) {
+          if (key === '\u0002cause') {
+            Object.defineProperty(error, 'cause', {
+              value: reviveTaggedErrors(properties[key]),
+              writable: true, configurable: true, enumerable: false });
+          } else if (key.charCodeAt(0) !== 0) error[key] = reviveTaggedErrors(properties[key]);
+        }
       }
       return error;
     }
