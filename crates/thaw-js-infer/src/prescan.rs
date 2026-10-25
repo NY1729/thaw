@@ -8,6 +8,15 @@ use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 use thaw_parser::common::Spanned;
 
+#[derive(Default, Debug)]
+pub struct ClassInfo {
+    pub ctor: Option<usize>,
+    pub methods: HashMap<String, usize>,
+    pub es: bool,
+    /// the class value itself is used other than `new X` / `X.prototype`
+    pub escaped: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DK {
     Param,
@@ -35,6 +44,19 @@ pub struct FnInfo {
     pub uses_args: bool,
     pub uses_eval: bool,
     pub iife: bool,
+    /// a function literal passed directly as a call argument
+    pub cb_arg: bool,
+    /// name this function is known by (declaration, `exports.x =`, `key: function`, class method)
+    pub prop_name: Option<String>,
+    /// owning class / constructor (`X.prototype.m =`, `class X { m(){} }`)
+    pub owner: Option<String>,
+    /// instance method (`X.prototype.m =` / non-static class method): `this` is an instance of `owner`
+    pub is_proto: bool,
+    /// ES class constructor
+    pub is_ctor: bool,
+    pub owner_key: Option<(usize, String)>,
+    /// spans of `this.f = e;` statements that are direct statements of the body
+    pub direct_this: std::collections::HashSet<u32>,
     /// the binding this function is the single value of
     pub bind: Option<(usize, String)>,
     pub ret: Ty,
@@ -51,6 +73,11 @@ pub struct Bind {
     pub callee_refs: u32,
     pub n_assign: u32,
     pub fn_value: Option<usize>,
+    pub is_const: bool,
+    /// assigned from inside a nested function: flow-sensitive narrowing must not trust it
+    pub captured_assign: bool,
+    pub new_refs: u32,
+    pub proto_refs: u32,
     pub mentions: Vec<Mention>,
     /// `var x;` is always followed by a sibling `x = e;` before any other mention: never observed
     /// as `undefined`.
@@ -108,6 +135,18 @@ impl<'a> F<'a> {
                 .collect(),
         }
     }
+    /// Offset of the `{` of a block body (where a return type annotation goes before).
+    pub fn block_lo(&self) -> Option<u32> {
+        match self {
+            F::Func(f) => f.body.as_ref().map(|b| b.span.lo.0),
+            F::Arrow(f) => match &*f.body {
+                a::ArrowFunctionBody::FunctionBody(b) => Some(b.span.lo.0),
+                _ => None,
+            },
+            F::Ctor(_) => None,
+        }
+    }
+
     pub fn body(&self) -> Body<'a> {
         match self {
             F::Func(f) => f
@@ -154,6 +193,13 @@ pub fn strip(mut e: &a::Expr) -> &a::Expr {
 
 #[derive(Default)]
 pub struct State {
+    pub classes: HashMap<(usize, String), ClassInfo>,
+    /// classes we do not model (inheritance, `X.prototype = ...`, mixins, foreign constructors)
+    pub complex: std::collections::HashSet<(usize, String)>,
+    /// constructor / instance method function -> its modelled class
+    pub fn_class: HashMap<usize, (usize, String)>,
+    /// (class, method) whose function value is read as a value: `this` may be rebound
+    pub unsafe_methods: std::collections::HashSet<((usize, String), String)>,
     pub funcs: Vec<FnInfo>,
     pub by_span: HashMap<(u32, u32), usize>,
     pub binds: HashMap<(usize, String), Bind>,
@@ -179,6 +225,12 @@ pub struct Pre<'s> {
     pub phase: u8,
     pub cur: Vec<usize>,
     pub pending_name: Option<String>,
+    pub pending_prop: Option<(String, Option<String>)>,
+    pub class_stack: Vec<Option<String>>,
+    pub class_keys: Vec<Option<(usize, String)>>,
+    pub pending_proto: bool,
+    pub decl_const: bool,
+    pub pending_owner_key: Option<(usize, String)>,
     pub list: u32,
     pub next_list: u32,
     pub direct: u32,
@@ -220,6 +272,13 @@ impl<'s> Pre<'s> {
                     info.declared.insert(n.to_string(), DK::Param);
                 }
             }
+            info.is_proto = std::mem::take(&mut self.pending_proto);
+            info.owner_key = self.pending_owner_key.take();
+            info.is_ctor = matches!(f, F::Ctor(_));
+            if let Some((n, o)) = self.pending_prop.take() {
+                info.prop_name = Some(n);
+                info.owner = o;
+            }
             if let Some(n) = self.pending_name.take() {
                 info.name = n.clone();
                 info.declared.entry(n).or_insert(DK::SelfName);
@@ -235,11 +294,44 @@ impl<'s> Pre<'s> {
             p.visit_with(self);
         }
         match f.body() {
-            Body::Stmts(s) => self.stmt_list(s),
+            Body::Stmts(s) => {
+                if self.phase == 1 {
+                    for st in s {
+                        if let a::Stmt::Expr(es) = st {
+                            if let a::Expr::Assign(asg) = strip(&es.expr) {
+                                if let a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) =
+                                    &asg.left
+                                {
+                                    if matches!(strip(&m.obj), a::Expr::This(_)) {
+                                        self.st.funcs[id].direct_this.insert(asg.span.lo.0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.stmt_list(s)
+            }
             Body::Expr(e) => e.visit_with(self),
             Body::None => {}
         }
         self.cur.pop();
+    }
+
+    fn mark_complex(&mut self, e: &a::Expr) {
+        let name = match strip(e) {
+            a::Expr::Ident(i) => Some(i.sym.to_string()),
+            a::Expr::Member(m) if matches!(&m.prop, a::MemberProp::Ident(q) if q.sym == "prototype") => {
+                match strip(&m.obj) {
+                    a::Expr::Ident(i) => Some(i.sym.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(k) = name.and_then(|n| self.st.resolve(self.fid(), &n)) {
+            self.st.complex.insert(k);
+        }
     }
 
     fn stmt_list(&mut self, s: &[a::Stmt]) {
@@ -311,7 +403,14 @@ impl<'s> Pre<'s> {
     }
 
     fn assigned(&mut self, name: &str, n: u32, fn_value: Option<usize>) {
+        let nested = self
+            .st
+            .resolve(self.fid(), name)
+            .is_some_and(|k| k.0 != self.fid());
         if let Some(b) = self.bind_mut(name) {
+            if nested {
+                b.captured_assign = true;
+            }
             b.n_assign += n;
             if let Some(f) = fn_value {
                 b.fn_value = Some(f);
@@ -369,6 +468,12 @@ const STR_METHODS: &[&str] = &[
 ];
 
 impl<'s> Visit for Pre<'s> {
+    fn visit_var_decl(&mut self, n: &a::VarDecl) {
+        let saved = self.decl_const;
+        self.decl_const = n.kind == a::VarDeclKind::Const;
+        n.visit_children_with(self);
+        self.decl_const = saved;
+    }
     fn visit_block_stmt(&mut self, n: &a::BlockStmt) {
         self.stmt_list(&n.stmts);
     }
@@ -405,6 +510,12 @@ impl<'s> Visit for Pre<'s> {
         self.fn_like(F::Arrow(n), n.is_async, n.is_generator, true);
     }
     fn visit_constructor(&mut self, n: &a::Constructor) {
+        if self.phase == 0 {
+            if let Some(Some(c)) = self.class_stack.last() {
+                self.pending_prop = Some(("constructor".into(), Some(c.clone())));
+                self.pending_owner_key = self.class_keys.last().cloned().flatten();
+            }
+        }
         self.fn_like(F::Ctor(n), false, false, false);
     }
     fn visit_fn_decl(&mut self, n: &a::FnDecl) {
@@ -412,6 +523,7 @@ impl<'s> Visit for Pre<'s> {
         if self.phase == 0 {
             self.declare(&name, DK::Fn);
             self.pending_name = None;
+            self.pending_prop = Some((name.clone(), None));
         } else {
             let f = self
                 .st
@@ -436,7 +548,60 @@ impl<'s> Visit for Pre<'s> {
         if self.phase == 0 {
             self.declare(&n.ident.sym, DK::Class);
         }
+        self.class_stack.push(Some(n.ident.sym.to_string()));
+        self.class_keys
+            .push(Some((self.fid(), n.ident.sym.to_string())));
         n.class.visit_with(self);
+        self.class_keys.pop();
+        self.class_stack.pop();
+    }
+    fn visit_class(&mut self, n: &a::Class) {
+        if self.phase == 1 {
+            if let Some(sup) = &n.super_class {
+                self.mark_complex(sup);
+                if let Some(Some(k)) = self.class_keys.last().cloned() {
+                    self.st.complex.insert(k);
+                }
+            }
+        }
+        n.visit_children_with(self);
+    }
+    fn visit_class_expr(&mut self, n: &a::ClassExpr) {
+        self.class_stack
+            .push(n.ident.as_ref().map(|i| i.sym.to_string()));
+        self.class_keys.push(None);
+        n.class.visit_with(self);
+        self.class_keys.pop();
+        self.class_stack.pop();
+    }
+    fn visit_class_method(&mut self, n: &a::ClassMethod) {
+        if let a::PropName::Ident(k) = &n.key {
+            let owner = self.class_stack.last().cloned().flatten();
+            self.pending_prop = Some((k.sym.to_string(), owner));
+            self.pending_proto = !n.is_static;
+            self.pending_owner_key = self.class_keys.last().cloned().flatten();
+        }
+        n.key.visit_with(self);
+        n.function.visit_with(self);
+        self.pending_prop = None;
+    }
+    fn visit_method_prop(&mut self, n: &a::MethodProp) {
+        if let a::PropName::Ident(k) = &n.key {
+            self.pending_prop = Some((k.sym.to_string(), None));
+        }
+        n.key.visit_with(self);
+        n.function.visit_with(self);
+        self.pending_prop = None;
+    }
+    fn visit_key_value_prop(&mut self, n: &a::KeyValueProp) {
+        if let (a::PropName::Ident(k), a::Expr::Fn(_) | a::Expr::Arrow(_)) =
+            (&n.key, strip(&n.value))
+        {
+            self.pending_prop = Some((k.sym.to_string(), None));
+        }
+        n.key.visit_with(self);
+        n.value.visit_with(self);
+        self.pending_prop = None;
     }
     fn visit_catch_clause(&mut self, n: &a::CatchClause) {
         if self.phase == 0 {
@@ -467,6 +632,11 @@ impl<'s> Visit for Pre<'s> {
             if let Some(init) = &n.init {
                 let f = self.fn_of(init);
                 self.assigned(&i.id.sym, 1, f);
+                if self.decl_const {
+                    if let Some(b) = self.bind_mut(&i.id.sym) {
+                        b.is_const = true;
+                    }
+                }
                 self.mention(&i.id.sym, i.span.lo.0, MK::Other, 0);
             } else {
                 self.mention(&i.id.sym, i.span.lo.0, MK::DeclUninit, 0);
@@ -476,7 +646,13 @@ impl<'s> Visit for Pre<'s> {
                 self.assigned(i, 2, None);
             }
         }
+        if let (0, a::Pat::Ident(i), Some(init)) = (self.phase, &n.name, &n.init) {
+            if matches!(strip(init), a::Expr::Fn(_) | a::Expr::Arrow(_)) {
+                self.pending_prop = Some((i.id.sym.to_string(), None));
+            }
+        }
         n.init.visit_with(self);
+        self.pending_prop = None;
     }
     fn visit_for_in_stmt(&mut self, n: &a::ForInStmt) {
         self.heads(&n.left);
@@ -501,11 +677,113 @@ impl<'s> Visit for Pre<'s> {
     }
     fn visit_expr(&mut self, e: &a::Expr) {
         if self.phase == 0 {
-            return e.visit_children_with(self);
+            if let a::Expr::Assign(asg) = e {
+                if let (
+                    a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)),
+                    a::Expr::Fn(_) | a::Expr::Arrow(_),
+                ) = (&asg.left, strip(&asg.right))
+                {
+                    if let a::MemberProp::Ident(p) = &m.prop {
+                        self.pending_proto = matches!(strip(&m.obj), a::Expr::Member(pm) if matches!(&pm.prop, a::MemberProp::Ident(q) if q.sym == "prototype"));
+                        let owner = match strip(&m.obj) {
+                            a::Expr::Member(pm) if matches!(&pm.prop, a::MemberProp::Ident(q) if q.sym == "prototype") => {
+                                match strip(&pm.obj) {
+                                    a::Expr::Ident(c) => Some(c.sym.to_string()),
+                                    _ => None,
+                                }
+                            }
+                            a::Expr::Ident(c) if c.sym != "exports" && c.sym != "module" => {
+                                Some(c.sym.to_string())
+                            }
+                            _ => None,
+                        };
+                        self.pending_prop = Some((p.sym.to_string(), owner));
+                    }
+                }
+            }
+            e.visit_children_with(self);
+            if matches!(e, a::Expr::Assign(_)) {
+                self.pending_prop = None;
+            }
+            return;
         }
         match e {
             a::Expr::Ident(i) => self.ref_ident(&i.sym, false, i.span.lo.0),
+            a::Expr::New(n) => {
+                if let a::Expr::Ident(i) = strip(&n.callee) {
+                    self.ref_ident(&i.sym, false, i.span.lo.0);
+                    if let Some(b) = self.bind_mut(&i.sym) {
+                        b.new_refs += 1;
+                    }
+                    n.args.visit_with(self);
+                } else {
+                    e.visit_children_with(self)
+                }
+            }
+            a::Expr::Member(m)
+                if matches!(&m.prop, a::MemberProp::Ident(q) if q.sym == "prototype")
+                    && matches!(strip(&m.obj), a::Expr::Ident(_)) =>
+            {
+                if let a::Expr::Ident(i) = strip(&m.obj) {
+                    self.ref_ident(&i.sym, false, i.span.lo.0);
+                    if let Some(b) = self.bind_mut(&i.sym) {
+                        b.proto_refs += 1;
+                    }
+                }
+            }
+            a::Expr::Member(m)
+                if matches!(&m.prop, a::MemberProp::Ident(_))
+                    && matches!(strip(&m.obj), a::Expr::Member(pm)
+                        if matches!(&pm.prop, a::MemberProp::Ident(q) if q.sym == "prototype")
+                        && matches!(strip(&pm.obj), a::Expr::Ident(_))) =>
+            {
+                // `X.prototype.m` read as a value: the method may be called with another `this`
+                if let (a::Expr::Member(pm), a::MemberProp::Ident(p)) = (strip(&m.obj), &m.prop) {
+                    if let a::Expr::Ident(c) = strip(&pm.obj) {
+                        if let Some(k) = self.st.resolve(self.fid(), &c.sym) {
+                            self.st.unsafe_methods.insert((k, p.sym.to_string()));
+                        }
+                    }
+                }
+                e.visit_children_with(self)
+            }
             a::Expr::Call(c) => {
+                let cname = match &c.callee {
+                    a::Callee::Expr(ce) => match strip(ce) {
+                        a::Expr::Ident(i) => Some(i.sym.to_string()),
+                        a::Expr::Member(m) => match &m.prop {
+                            a::MemberProp::Ident(p) => Some(p.sym.to_string()),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if matches!(
+                    cname.as_deref(),
+                    Some(
+                        "inherits"
+                            | "__extends"
+                            | "extend"
+                            | "setPrototypeOf"
+                            | "create"
+                            | "assign"
+                            | "mixin"
+                            | "defineProperty"
+                            | "defineProperties"
+                    )
+                ) {
+                    for x in &c.args {
+                        self.mark_complex(&x.expr);
+                    }
+                }
+                for x in &c.args {
+                    if x.spread.is_none() {
+                        if let Some(f) = self.fn_of(&x.expr) {
+                            self.st.funcs[f].cb_arg = true;
+                        }
+                    }
+                }
                 if let a::Callee::Expr(ce) = &c.callee {
                     match strip(ce) {
                         a::Expr::Ident(i) => {
@@ -575,6 +853,10 @@ impl<'s> Visit for Pre<'s> {
             }
             a::Expr::Assign(asg) => {
                 match &asg.left {
+                    a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) if matches!(&m.prop, a::MemberProp::Ident(q) if q.sym == "prototype") =>
+                    {
+                        self.mark_complex(&m.obj);
+                    }
                     a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(bi)) => {
                         let plain = asg.op == a::AssignOp::Assign;
                         match self.stmt_assign {

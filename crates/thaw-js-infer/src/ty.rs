@@ -33,6 +33,8 @@ pub enum Reason {
     Iterate,
     Require,
     ShapeChange,
+    /// the `.d.ts` itself says `any` / generic / function / unsupported
+    Declared,
     Other,
 }
 
@@ -43,6 +45,10 @@ pub enum Atom {
     Num,
     Str,
     Bool,
+    /// string literal type (interned); widened to `Str` when stored in a mutable binding
+    SLit(u32),
+    /// integer literal type
+    NLit(i32),
     Arr(usize),
     Obj(usize),
 }
@@ -74,6 +80,13 @@ impl Ty {
     /// Non-empty and made only of primitives (never an object, array or `any`).
     pub fn prim_only(&self) -> bool {
         matches!(self, Ty::Set(s) if s.iter().all(|a| !matches!(a, Atom::Arr(_) | Atom::Obj(_))))
+    }
+    /// Every atom is a string (or string literal).
+    pub fn is_str(&self) -> bool {
+        matches!(self, Ty::Set(s) if s.iter().all(|a| matches!(a, Atom::Str | Atom::SLit(_))))
+    }
+    pub fn is_num(&self) -> bool {
+        matches!(self, Ty::Set(s) if s.iter().all(|a| matches!(a, Atom::Num | Atom::NLit(_))))
     }
     pub fn only(&self, a: Atom) -> bool {
         matches!(self, Ty::Set(s) if s.len() == 1 && s[0] == a)

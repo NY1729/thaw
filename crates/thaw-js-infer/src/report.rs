@@ -19,6 +19,10 @@ pub struct FnReport {
     /// (slot name, TypeScript type, class); params, then locals
     pub slots: Vec<(String, String, Class)>,
     pub ret: String,
+    /// parameter / return types came from a `.d.ts` signature (trusted contract: needs an entry guard)
+    pub dts: bool,
+    /// `this` was typed as an instance of a modelled class (needs a brand / field-tag guard at entry)
+    pub this_typed: bool,
     pub exprs: usize,
     pub any_exprs: usize,
 }
@@ -38,9 +42,24 @@ pub struct Summary {
     pub any_exprs: usize,
     pub expr_reason: BTreeMap<Reason, usize>,
     pub passes: usize,
+    /// functions matched to a `.d.ts` signature / of those, ones that ended up typed (not `any`)
+    pub dts_matched: usize,
+    pub dts_typed: usize,
+    /// functions typed via a modelled `this` / of those, ones that ended up typed
+    pub this_matched: usize,
+    pub this_typed: usize,
+    /// first `any` reason of `.d.ts`-matched functions that stayed `any`
+    pub dts_reason: BTreeMap<Reason, usize>,
 }
 
 impl An {
+    pub(crate) fn classify_pub(&mut self, t: &Ty) -> (Class, Option<Reason>) {
+        self.classify(t, &mut HashSet::new())
+    }
+    pub(crate) fn ts_pub(&mut self, t: &Ty) -> String {
+        self.ts(t, 0)
+    }
+
     fn classify(&mut self, t: &Ty, seen: &mut HashSet<usize>) -> (Class, Option<Reason>) {
         let atoms = match t {
             Ty::Bottom => return (Class::Concrete, None),
@@ -48,10 +67,20 @@ impl An {
             Ty::Set(s) => s.clone(),
         };
         let (mut nonnull, mut nullish, mut worst) = (0, 0, Class::Concrete);
+        let mut kinds = HashSet::new();
         for at in atoms {
             match at {
                 Atom::Undef | Atom::Null => nullish += 1,
-                Atom::Num | Atom::Str | Atom::Bool => nonnull += 1,
+                Atom::Num | Atom::NLit(_) | Atom::Str | Atom::SLit(_) | Atom::Bool => {
+                    let kind = match at {
+                        Atom::Num | Atom::NLit(_) => 1,
+                        Atom::Str | Atom::SLit(_) => 2,
+                        _ => 3,
+                    };
+                    if kinds.insert(kind) {
+                        nonnull += 1;
+                    }
+                }
                 Atom::Arr(s) | Atom::Obj(s) => {
                     nonnull += 1;
                     let s = self.find(s);
@@ -100,6 +129,8 @@ impl An {
                         Atom::Num => "number".into(),
                         Atom::Str => "string".into(),
                         Atom::Bool => "boolean".into(),
+                        Atom::SLit(i) => format!("{:?}", self.lits[i as usize]),
+                        Atom::NLit(n) => n.to_string(),
                         Atom::Arr(s) => {
                             let s = self.find(s);
                             match self.sites[s].clone() {
@@ -116,6 +147,12 @@ impl An {
                         }
                         Atom::Obj(s) => {
                             let s = self.find(s);
+                            if let Some(k) = self.site_class_of(s) {
+                                if !matches!(self.sites[s], Site::Dead(_)) {
+                                    parts.push(k.1);
+                                    continue;
+                                }
+                            }
                             match self.sites[s].clone() {
                                 Site::Obj(m) => {
                                     let mut f = Vec::new();
@@ -145,6 +182,65 @@ impl An {
     }
 }
 
+/// Group constructors and instance methods by class; decide which classes we model.
+fn link_classes(st: &mut State) {
+    for fid in 1..st.funcs.len() {
+        let f = &st.funcs[fid];
+        let Some(owner) = f.owner.clone() else {
+            continue;
+        };
+        if !(f.is_ctor || f.is_proto) {
+            continue;
+        }
+        let key = f.owner_key.clone().or_else(|| st.resolve(f.parent, &owner));
+        let Some(key) = key else { continue };
+        let (is_ctor, pn) = (f.is_ctor, f.prop_name.clone());
+        let ci = st.classes.entry(key).or_default();
+        if is_ctor {
+            ci.ctor = Some(fid);
+            ci.es = true;
+        } else if let Some(pn) = pn {
+            ci.methods.insert(pn, fid);
+        }
+    }
+    let keys: Vec<_> = st.classes.keys().cloned().collect();
+    for k in keys {
+        if !st.classes[&k].es {
+            let ctor = st
+                .binds
+                .get(&k)
+                .and_then(|b| if b.n_assign == 1 { b.fn_value } else { None });
+            match ctor {
+                Some(c) => st.classes.get_mut(&k).unwrap().ctor = Some(c),
+                None => {
+                    st.complex.insert(k.clone());
+                }
+            }
+        }
+        if st.complex.contains(&k) {
+            continue;
+        }
+        let b = &st.binds[&k];
+        let escaped = b.refs > b.callee_refs + b.new_refs + b.proto_refs;
+        let ci = st.classes.get_mut(&k).unwrap();
+        ci.escaped = escaped;
+        let (ctor, methods): (Option<usize>, Vec<usize>) =
+            (ci.ctor, ci.methods.values().copied().collect());
+        if let Some(c) = ctor {
+            st.fn_class.insert(c, k.clone());
+            if !escaped {
+                st.funcs[c].bind = Some(k.clone());
+            }
+        }
+        for m in methods {
+            let name = st.funcs[m].prop_name.clone().unwrap_or_default();
+            if !st.unsafe_methods.contains(&(k.clone(), name)) {
+                st.fn_class.insert(m, k.clone());
+            }
+        }
+    }
+}
+
 fn run(
     src: &str,
     cfg: Config,
@@ -169,6 +265,12 @@ fn run(
             phase: 0,
             cur: vec![0],
             pending_name: None,
+            pending_prop: None,
+            class_stack: vec![],
+            class_keys: vec![],
+            pending_proto: false,
+            decl_const: false,
+            pending_owner_key: None,
             list: 0,
             next_list: 0,
             direct: 0,
@@ -198,6 +300,12 @@ fn run(
             phase: 1,
             cur: vec![0],
             pending_name: None,
+            pending_prop: None,
+            class_stack: vec![],
+            class_keys: vec![],
+            pending_proto: false,
+            decl_const: false,
+            pending_owner_key: None,
             list: 0,
             next_list: 0,
             direct: 0,
@@ -225,7 +333,9 @@ fn run(
         st.funcs[f].name = k.1.clone();
         st.funcs[f].bind = Some(k);
     }
+    link_classes(&mut st);
     let mut an = An::new(st, cfg);
+    an.init_dts();
     let mut passes = 0;
     while passes < 60 {
         passes += 1;
@@ -248,6 +358,7 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
     };
     let mut out = Vec::new();
     for fid in 1..an.st.funcs.len() {
+        let this_ok = an.this_ok(fid);
         let (name, lo, excluded, closed_world, nparams, params, mut locals, ret) = {
             let f = &an.st.funcs[fid];
             let excl = if f.async_ {
@@ -258,19 +369,19 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
                 Some(Reason::Eval)
             } else if f.uses_args {
                 Some(Reason::Arguments)
-            } else if f.uses_this && !f.arrow {
+            } else if f.uses_this && !f.arrow && !this_ok {
                 Some(Reason::This)
-            } else if f.exotic {
+            } else if f.exotic && !this_ok {
                 Some(Reason::Exotic)
             } else {
                 None
             };
-            let params: Vec<String> = f
-                .declared
-                .iter()
-                .filter(|(_, k)| **k == DK::Param)
-                .map(|(n, _)| n.clone())
-                .collect();
+            let mut params: Vec<String> = f.params.iter().flatten().cloned().collect();
+            for (n, k) in &f.declared {
+                if *k == DK::Param && !params.contains(n) {
+                    params.push(n.clone());
+                }
+            }
             let locals: Vec<String> = f
                 .declared
                 .iter()
@@ -278,7 +389,11 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
                 .map(|(n, _)| n.clone())
                 .collect();
             (
-                f.name.clone(),
+                if f.name.is_empty() {
+                    f.prop_name.clone().unwrap_or_default()
+                } else {
+                    f.name.clone()
+                },
                 f.lo,
                 excl,
                 f.bind.is_some() || f.iife,
@@ -315,6 +430,11 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
                 *sum.slot_reason.entry(r).or_default() += 1;
             }
         }
+        let dts_fn = an.dts_fns.contains_key(&fid);
+        let ret = match (&ret, an.dts_ret.get(&fid)) {
+            (Ty::Any(_), Some(d)) => d.clone(),
+            _ => ret,
+        };
         let (rc, rr) = an.classify(&ret, &mut HashSet::new());
         let ret_ts = an.ts(&ret, 0);
         class = class.max(rc);
@@ -343,6 +463,20 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
             }
         }
         sum.functions += 1;
+        if this_ok && an.st.funcs[fid].uses_this {
+            sum.this_matched += 1;
+            if class != Class::Any {
+                sum.this_typed += 1;
+            }
+        }
+        if dts_fn {
+            sum.dts_matched += 1;
+            if class != Class::Any {
+                sum.dts_typed += 1;
+            } else if let Some(r) = reasons.first() {
+                *sum.dts_reason.entry(*r).or_default() += 1;
+            }
+        }
         sum.exprs += exprs;
         sum.any_exprs += any_exprs;
         out.push(FnReport {
@@ -353,6 +487,8 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
             reasons,
             slots,
             ret: ret_ts,
+            dts: dts_fn,
+            this_typed: this_ok && an.st.funcs[fid].uses_this,
             exprs,
             any_exprs,
         });
@@ -367,6 +503,10 @@ struct Ann<'a> {
     /// (fid, name, ident lo, ident hi, arrow param needing parens)
     params: Vec<(usize, String, u32, u32)>,
     uninit: Vec<(usize, String, u32, bool)>,
+    /// (class key, hi of the class name, already-declared property names)
+    classes: Vec<((usize, String), u32, Vec<String>)>,
+    /// (function, offset of its block body)
+    blocks: Vec<(usize, u32)>,
 }
 
 impl<'a> Ann<'a> {
@@ -388,6 +528,9 @@ impl<'a> Ann<'a> {
                     .push((fid, i.id.sym.to_string(), i.span.lo.0, i.span.hi.0));
             }
         }
+        if let Some(lo) = f.block_lo() {
+            self.blocks.push((fid, lo));
+        }
         self.cur.push(fid);
         for p in f.pats() {
             p.visit_with(self);
@@ -402,6 +545,26 @@ impl<'a> Ann<'a> {
 }
 
 impl<'a> Visit for Ann<'a> {
+    fn visit_class_decl(&mut self, n: &a::ClassDecl) {
+        let declared = n
+            .class
+            .body
+            .iter()
+            .filter_map(|m| match m {
+                a::ClassMember::ClassProp(p) => match &p.key {
+                    a::PropName::Ident(i) => Some(i.sym.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        self.classes.push((
+            (*self.cur.last().unwrap(), n.ident.sym.to_string()),
+            n.ident.span.hi.0,
+            declared,
+        ));
+        n.class.visit_with(self);
+    }
     fn visit_function(&mut self, n: &a::Function) {
         self.fn_like(F::Func(n));
     }
@@ -449,28 +612,76 @@ pub fn annotate(src: &str, cfg: Config) -> Result<String, String> {
         cur: vec![0],
         params: vec![],
         uninit: vec![],
+        classes: vec![],
+        blocks: vec![],
     };
     module.visit_with(&mut ann);
-    let (params, uninit) = (
+    let blocks = std::mem::take(&mut ann.blocks);
+    let (params, uninit, classes) = (
         std::mem::take(&mut ann.params),
         std::mem::take(&mut ann.uninit),
+        std::mem::take(&mut ann.classes),
     );
     let off = |p: u32| cm.lookup_byte_offset(thaw_parser::common::BytePos(p)).pos.0 as usize;
     let mut ins: Vec<(usize, String)> = Vec::new();
-    let ty_of = |an: &mut An, fid: usize, n: &str| -> Option<String> {
+    let ty_of = |an: &mut An, fid: usize, n: &str, is_param: bool| -> Option<String> {
         let t = an.st.binds.get(&(fid, n.to_string()))?.ty.clone();
         if t == Ty::Bottom {
             return Some("any".into());
         }
-        let (c, _) = an.classify(&t, &mut HashSet::new());
+        let (c, why) = an.classify(&t, &mut HashSet::new());
+        if c == Class::Any && why == Some(Reason::Escaped) && is_param {
+            // unknown only because the function is part of the API: leave the TS pipeline's own
+            // call-site inference alone (an explicit `any` would make it strictly worse)
+            return None;
+        }
         Some(if c == Class::Any {
             "any".into()
         } else {
             an.ts(&t, 0)
         })
     };
+    // TS needs declared fields for `this.x = ...`: write the inferred instance struct
+    for (key, hi, declared) in classes {
+        let Some(fields) = an.class_fields(&key) else {
+            continue;
+        };
+        let Some(open) = src[off(hi)..].find('{') else {
+            continue;
+        };
+        let text: String = fields
+            .into_iter()
+            .filter(|(n, _)| !declared.contains(n))
+            .map(|(n, t)| format!("\n  {n}: {t};"))
+            .collect();
+        if !text.is_empty() {
+            ins.push((off(hi) + open + 1, text));
+        }
+    }
+    // return types of functions whose result is a single concrete type (the TS pipeline does not
+    // infer through method chains such as `v.scale(2).label()`)
+    let want_returns = an.cfg.returns;
+    for (fid, lo) in blocks.into_iter().filter(|_| want_returns) {
+        let f = &an.st.funcs[fid];
+        if f.async_ || f.gen || f.exotic {
+            continue;
+        }
+        let mut ret = f.ret.clone();
+        if let (Ty::Any(_), Some(d)) = (&ret, an.dts_ret.get(&fid)) {
+            ret = d.clone();
+        }
+        if ret == Ty::Bottom {
+            continue;
+        }
+        let (c, _) = an.classify_pub(&ret);
+        if c == Class::Any || c == Class::Union || c == Class::Nullable {
+            continue;
+        }
+        let t = an.ts_pub(&ret);
+        ins.push((off(lo), format!(": {t} ")));
+    }
     for (fid, n, lo, hi) in params {
-        let Some(t) = ty_of(&mut an, fid, &n) else {
+        let Some(t) = ty_of(&mut an, fid, &n, true) else {
             continue;
         };
         let before = src[..off(lo)].trim_end();
@@ -482,10 +693,10 @@ pub fn annotate(src: &str, cfg: Config) -> Result<String, String> {
         }
     }
     for (fid, n, hi, open) in uninit {
-        if let Some(t) = ty_of(&mut an, fid, &n) {
+        if let Some(t) = ty_of(&mut an, fid, &n, false) {
             // an initialised declaration keeps the TS pipeline's own inference unless the
             // inferred type is wider than the initializer (a union) or the initializer is open
-            if open || t.contains(" | ") {
+            if open || (t.contains(" | ") && !t.contains(['[', '{'])) {
                 ins.push((off(hi), format!(": {t}")));
             }
         }

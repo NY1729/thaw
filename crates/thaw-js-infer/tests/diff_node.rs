@@ -7,7 +7,16 @@ use std::process::Command;
 fn run_case(thaw: &str, name: &str) {
     let src_path = format!("{}/tests/cases/{name}.js", env!("CARGO_MANIFEST_DIR"));
     let src = std::fs::read_to_string(&src_path).unwrap();
-    let ts = thaw_js_infer::annotate(&src, thaw_js_infer::Config::default()).unwrap();
+    let mut cfg = thaw_js_infer::Config {
+        returns: true,
+        ..Default::default()
+    };
+    if let Ok(d) = std::fs::read_to_string(src_path.replace(".js", ".d.ts")) {
+        cfg.dts = Some(std::sync::Arc::new(
+            thaw_js_infer::dts::DtsIndex::parse(&d).unwrap(),
+        ));
+    }
+    let ts = thaw_js_infer::annotate(&src, cfg).unwrap();
     let dir = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| ".".into()))
         .join(format!("thaw-js-infer-diff-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -45,7 +54,14 @@ fn annotated_js_matches_node() {
         eprintln!("skipped: set THAW_JS_INFER_THAW_BIN to run");
         return;
     };
-    for case in ["numeric_string", "union_uninit"] {
+    for case in [
+        "numeric_string",
+        "union_uninit",
+        "array_callbacks",
+        "dts_api",
+        "classes",
+        "narrowing",
+    ] {
         run_case(&thaw, case);
     }
 }
