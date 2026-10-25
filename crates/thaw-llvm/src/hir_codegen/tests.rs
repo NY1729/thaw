@@ -740,6 +740,7 @@ include!("tests/typinggaps_contracts.rs");
 include!("tests/classgaps_contracts.rs");
 include!("tests/anyctor_contracts.rs");
 include!("tests/anyclasses_contracts.rs");
+include!("tests/classfields_contracts.rs");
 include!("tests/clsfld_contracts.rs");
 include!("tests/errobj_contracts.rs");
 include!("tests/mapsub_contracts.rs");

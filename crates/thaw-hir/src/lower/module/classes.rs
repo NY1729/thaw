@@ -204,6 +204,7 @@ fn collect_native_classes<'a>(
             HirType::Bool,
         )];
         fields.extend(inherited_fields);
+        let maybe_uninit = maybe_uninit_fields(&declaration.class);
         for member in &declaration.class.body {
             let ClassMember::ClassProp(property) = member else {
                 continue;
@@ -230,11 +231,25 @@ fn collect_native_classes<'a>(
                         format!("class `{name}` field `{field_name}` needs a type annotation")
                     })?,
             };
-            remember_class_source_field(name, &field_name, property.span, property.is_optional);
             field_type = storage_type(property.span, field_type);
             if property.is_optional {
                 field_type = optional_parameter_type(field_type);
             }
+            // A field the constructor may leave unset reads `undefined` in
+            // Node: store it like `x?: T`. The abstract-override comparison
+            // below uses the un-widened type.
+            let unwidened = field_type.clone();
+            let uninit = maybe_uninit.contains(field_name.as_str()) && can_be_uninit(&field_type);
+            if uninit {
+                field_type = optional_parameter_type(field_type);
+                remember_uninit_class_field(name, &field_name);
+            }
+            remember_class_source_field(
+                name,
+                &field_name,
+                property.span,
+                property.is_optional || uninit,
+            );
             if let Some((_, inherited_type)) =
                 fields.iter().find(|(existing, _)| existing == &field_name)
             {
@@ -279,7 +294,7 @@ fn collect_native_classes<'a>(
                         "class `{name}` field `{field_name}` collides with an inherited or local field"
                     ));
                 }
-                if inherited_type != &field_type {
+                if inherited_type != &field_type && inherited_type != &unwidened {
                     return Err(format!(
                         "class `{name}` implements abstract field `{field_name}` with type {field_type:?}, expected {inherited_type:?}"
                     ));
