@@ -3804,6 +3804,52 @@ impl<'a> FnLowerer<'a> {
     fn lower_optional_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         let object = self.lower_expr(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
+        // `view?.length` on an optional `extends Array/Map/Set` instance reads the wrapped collection.
+        let (object, object_type) = match &object_type {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload)
+                if native_base_type(payload).is_some() =>
+            {
+                let base = native_base_type(payload).cloned().expect("checked above");
+                let name = format!("__thaw_optional_view_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), object_type.clone());
+                let held = Box::new(HirExpr::Var(name.clone()));
+                let payload_type = payload.as_ref().clone();
+                let (absent, value, some, none, wrapped) = match &object_type {
+                    HirType::Optional(_) => (
+                        HirExpr::OptionalIsNone(held.clone(), payload_type.clone()),
+                        HirExpr::OptionalValue(held, payload_type.clone()),
+                        HirExpr::OptionalSome as fn(Box<HirExpr>, HirType) -> HirExpr,
+                        HirExpr::OptionalNone(base.clone()),
+                        HirType::Optional(Box::new(base.clone())),
+                    ),
+                    HirType::Nullable(_) => (
+                        HirExpr::NullableIsNone(held.clone(), payload_type.clone()),
+                        HirExpr::NullableValue(held, payload_type.clone()),
+                        HirExpr::NullableSome as fn(Box<HirExpr>, HirType) -> HirExpr,
+                        HirExpr::NullableNone(base.clone()),
+                        HirType::Nullable(Box::new(base.clone())),
+                    ),
+                    _ => (
+                        HirExpr::NullishIsNone(held.clone(), payload_type.clone()),
+                        HirExpr::NullishValue(held, payload_type.clone()),
+                        HirExpr::NullishSome as fn(Box<HirExpr>, HirType) -> HirExpr,
+                        HirExpr::NullishNull(base.clone()),
+                        HirType::Nullish(Box::new(base.clone())),
+                    ),
+                };
+                let projected = HirExpr::PropAccess(Box::new(value), payload_type, NATIVE_BASE_FIELD.to_string());
+                let conditional = HirExpr::Conditional(
+                    Box::new(absent),
+                    Box::new(none),
+                    Box::new(some(Box::new(projected), base)),
+                    wrapped.clone(),
+                );
+                let object = self.wrap_call_argument_bindings(conditional, &[(name, object_type, object)])?;
+                (object, wrapped)
+            }
+            _ => (object, object_type),
+        };
         // A dynamic `any` value (`Json`) short-circuits to `undefined` for
         // a nullish receiver -- read the key directly, without the
         // TypeError guard the non-optional `Json` read now applies.
@@ -3978,6 +4024,14 @@ impl<'a> FnLowerer<'a> {
                 ),
                 _ => return Err("unsupported optional string member".into()),
             },
+            HirType::Map(..) | HirType::Set(_)
+                if matches!(&member.prop, MemberProp::Ident(property) if property.sym == *"size") =>
+            {
+                (
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_size".to_string())), vec![unwrapped]),
+                    HirType::F64,
+                )
+            }
             HirType::Dictionary(element) => {
                 let key = match &member.prop {
                     MemberProp::Ident(property) => {
