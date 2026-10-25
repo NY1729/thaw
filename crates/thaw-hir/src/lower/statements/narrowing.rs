@@ -1575,7 +1575,22 @@ impl<'a> FnLowerer<'a> {
         let matching = allowed
             .iter()
             .copied()
-            .filter(|index| class_type_has_identity(&elements[*index], class.sym.as_ref()))
+            .filter(|index| {
+                let element = &elements[*index];
+                // `x instanceof Map` / `Set` / `Array`: the native collection (or a subclass of it).
+                let builtin = |ty: &HirType| match class.sym.as_ref() {
+                    "Map" => matches!(ty, HirType::Map(..)),
+                    "Set" => matches!(ty, HirType::Set(_)),
+                    "Array" => matches!(ty, HirType::Array(_)),
+                    _ => false,
+                };
+                if !self.interfaces.contains_key(class.sym.as_ref())
+                    && (builtin(element) || native_base_type(element).is_some_and(builtin))
+                {
+                    return true;
+                }
+                class_type_has_identity(element, class.sym.as_ref())
+            })
             .collect::<Vec<_>>();
         // Same-layout ordinary objects can fail the runtime identity check, so
         // the matching members stay possible in the false branch only when
@@ -1598,6 +1613,46 @@ impl<'a> FnLowerer<'a> {
                 }],
                 true,
                 !layouts_collide,
+            )
+        })
+    }
+
+    /// `Array.isArray(x)` on a union: keeps the array members (and `extends Array` instances).
+    fn union_is_array_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        let Expr::Call(call) = expr else { return None };
+        let Callee::Expr(callee) = &call.callee else { return None };
+        let Expr::Member(member) = callee.as_ref() else { return None };
+        let (Expr::Ident(object), MemberProp::Ident(method)) = (member.obj.as_ref(), &member.prop) else {
+            return None;
+        };
+        if object.sym != *"Array" || method.sym != *"isArray" || self.interfaces.contains_key("Array") {
+            return None;
+        }
+        let [argument] = call.args.as_slice() else { return None };
+        let Expr::Ident(value) = argument.expr.as_ref() else { return None };
+        let name = self.resolve_binding(value.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
+            .iter()
+            .copied()
+            .filter(|index| {
+                let element = &elements[*index];
+                matches!(element, HirType::Array(_))
+                    || matches!(native_base_type(element), Some(HirType::Array(_)))
+            })
+            .collect::<Vec<_>>();
+        (!matching.is_empty()).then(|| {
+            (
+                vec![UnionNarrowingTarget { name, matching, allowed, elements: elements.clone() }],
+                true,
+                true,
             )
         })
     }
@@ -1842,6 +1897,7 @@ impl<'a> FnLowerer<'a> {
             .or_else(|| self.union_member_equality_narrowing(expr))
             .or_else(|| self.union_boolean_discriminant_narrowing(expr))
             .or_else(|| self.union_instanceof_narrowing(expr))
+            .or_else(|| self.union_is_array_narrowing(expr))
             .or_else(|| self.union_in_narrowing(expr))
             .or_else(|| self.union_truthy_narrowing(expr))
     }
