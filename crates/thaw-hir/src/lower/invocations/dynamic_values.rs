@@ -174,6 +174,31 @@ impl<'a> FnLowerer<'a> {
                 if self.deferred_generic_binds.contains_key(&name) {
                     return None;
                 }
+                // A union narrowed to one native collection member (`typeof x !== "string"`,
+                // `x instanceof Map`) is that collection.
+                if let (Some(HirType::Union(_)), Some((allowed, elements))) =
+                    (self.scope.get(&name), self.union_narrowings.get(&name))
+                {
+                    if let [index] = allowed.as_slice() {
+                        if matches!(
+                            &elements[*index],
+                            HirType::Map(..) | HirType::Set(_) | HirType::Array(_)
+                        ) {
+                            return Some(elements[*index].clone());
+                        }
+                    }
+                }
+                // A narrowed optional `extends Array/Map/Set` instance is that instance.
+                if let Some(payload) = self
+                    .narrowings
+                    .get(&name)
+                    .or_else(|| self.nullable_narrowings.get(&name))
+                    .or_else(|| self.nullish_narrowings.get(&name))
+                {
+                    if native_base_type(payload).is_some() {
+                        return Some(payload.clone());
+                    }
+                }
                 self.native_class_aliases
                     .get(&name)
                     .cloned()

@@ -1375,6 +1375,34 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     })
                     .transpose()?
                     .unwrap_or_default();
+                let mut params = params;
+                // `Symbol.species` builds `new this.constructor(length)`: on an `extends Array`
+                // class every required parameter besides a numeric first one (and an optional
+                // non-numeric first one) is `any`, because the species call hands it a number /
+                // `undefined`.
+                if matches!(native_base_type(&instance_type), Some(HirType::Array(_))) {
+                    let patterns = constructors
+                        .first()
+                        .map(|constructor| {
+                            constructor.params.iter().map(class_constructor_param_pattern).collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for (index, (param, pattern)) in params.iter_mut().zip(&patterns).enumerate() {
+                        if !matches!(pattern, Pat::Ident(_)) {
+                            continue;
+                        }
+                        match param {
+                            HirType::Optional(payload)
+                                if index == 0 && !matches!(payload.as_ref(), HirType::F64 | HirType::Json) =>
+                            {
+                                **payload = HirType::Json;
+                            }
+                            HirType::Optional(_) | HirType::Json => {}
+                            HirType::F64 if index == 0 => {}
+                            _ => *param = HirType::Json,
+                        }
+                    }
+                }
                 signatures.insert(
                     class_constructor_symbol(&name),
                     FnSignature {

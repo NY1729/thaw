@@ -765,7 +765,7 @@ impl<'a> FnLowerer<'a> {
         let numeric = |ty: &HirType| match ty {
             HirType::F64 | HirType::Json => true,
             HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
-                matches!(inner.as_ref(), HirType::F64)
+                matches!(inner.as_ref(), HirType::F64 | HirType::Json)
             }
             HirType::Union(members) => members.contains(&HirType::F64),
             _ => false,
@@ -779,17 +779,27 @@ impl<'a> FnLowerer<'a> {
                 items.as_ref().clone(),
             )],
             [length, rest @ ..]
-                if numeric(length) && rest.iter().all(|param| matches!(param, HirType::Optional(_))) =>
+                if numeric(length)
+                    && rest.iter().all(|param| matches!(param, HirType::Optional(_) | HirType::Json)) =>
             {
                 let count = if matches!(method, "map" | "slice" | "splice" | "of" | "from") {
                     HirExpr::ArrayLen(Box::new(HirExpr::Var(result_name.clone())))
                 } else {
                     HirExpr::Lit(HirLit::F64(0.0))
                 };
-                let mut arguments = vec![self.coerce_to_declared(length, count)?];
+                // `Array.from(iterable)` calls `new C()` with no argument at all.
+                let first = match length {
+                    HirType::Optional(payload) if method == "from" => HirExpr::OptionalNone(payload.as_ref().clone()),
+                    HirType::Json if method == "from" => self.coerce_to_declared(length, HirExpr::Lit(HirLit::Undefined))?,
+                    _ => self.coerce_to_declared(length, count)?,
+                };
+                let mut arguments = vec![first];
                 for param in rest {
-                    let HirType::Optional(payload) = param else { unreachable!() };
-                    arguments.push(HirExpr::OptionalNone(payload.as_ref().clone()));
+                    arguments.push(match param {
+                        HirType::Optional(payload) => HirExpr::OptionalNone(payload.as_ref().clone()),
+                        // A required parameter widened to `any`: Node passes `undefined`.
+                        _ => self.coerce_to_declared(param, HirExpr::Lit(HirLit::Undefined))?,
+                    });
                 }
                 arguments
             }
