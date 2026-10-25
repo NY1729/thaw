@@ -2090,11 +2090,24 @@ impl<'a> FnLowerer<'a> {
                         }
                         _ => requested_property,
                     };
+                    // A function-valued field widened to `Optional` because it may
+                    // be uninitialised: call through its payload, throwing Node's
+                    // `TypeError` while it is still absent.
+                    let uninit_callable = match &object_ty {
+                        HirType::Object(fields) if is_uninit_class_field(fields, resolved_property) => fields
+                            .iter()
+                            .find(|(name, _)| name == resolved_property)
+                            .and_then(|(_, ty)| match ty {
+                                HirType::Optional(payload) => Some(payload.as_ref().clone()),
+                                _ => None,
+                            }),
+                        _ => None,
+                    };
                     let callable = match &object_ty {
                         HirType::Object(fields) => fields
                             .iter()
                             .find(|(name, _)| name == resolved_property)
-                            .and_then(|(_, ty)| match ty {
+                            .and_then(|(_, ty)| match uninit_callable.as_ref().unwrap_or(ty) {
                                 HirType::Function(params, ret) => Some((
                                     params.clone(),
                                     ret.as_ref().clone(),
@@ -2146,11 +2159,33 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         self.scope.insert(receiver_name.clone(), object_ty.clone());
                         let receiver = HirExpr::Var(receiver_name.clone());
-                        let callee = HirExpr::PropAccess(
+                        let mut callee = HirExpr::PropAccess(
                             Box::new(receiver.clone()),
                             object_ty.clone(),
                             resolved_property.to_string(),
                         );
+                        if let Some(payload) = &uninit_callable {
+                            let raw_name = format!("__thaw_uninit_callee_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let optional = HirType::Optional(Box::new(payload.clone()));
+                            self.scope.insert(raw_name.clone(), optional.clone());
+                            let raw = HirExpr::Var(raw_name.clone());
+                            let checked = HirExpr::Conditional(
+                                Box::new(HirExpr::OptionalIsNone(Box::new(raw.clone()), payload.clone())),
+                                Box::new(HirExpr::ThrowValue(
+                                    Box::new(HirExpr::Lit(HirLit::Str(format!(
+                                        "\u{1}TypeError\u{1}{object_label}.{property} is not a function"
+                                    )))),
+                                    Box::new(HirExpr::TypedClosure(
+                                        payload.clone(),
+                                        Box::new(Self::unreachable_value(payload)?),
+                                    )),
+                                )),
+                                Box::new(HirExpr::OptionalValue(Box::new(raw), payload.clone())),
+                                payload.clone(),
+                            );
+                            callee = self.wrap_call_argument_bindings(checked, &[(raw_name, optional, callee)])?;
+                        }
                         let callee_type = self.infer_expr_type(&callee)?;
                         let callee_name = format!("__thaw_method_callable_{}", self.next_binding);
                         self.next_binding += 1;
