@@ -3484,6 +3484,19 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 match &obj_ty {
+                    HirType::Array(_)
+                        if matches!(prop.sym.as_ref(), "byteLength" | "byteOffset")
+                            && self.infer_expr_type_inner(&obj)? == HirType::Bytes =>
+                    {
+                        Ok(if prop.sym == *"byteLength" {
+                            HirExpr::ArrayLen(Box::new(obj))
+                        } else {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_bytes_byte_offset".into())),
+                                vec![obj],
+                            )
+                        })
+                    }
                     HirType::Array(_) | HirType::Tuple(_) if prop.sym == *"length" => {
                         Ok(HirExpr::ArrayLen(Box::new(obj)))
                     }

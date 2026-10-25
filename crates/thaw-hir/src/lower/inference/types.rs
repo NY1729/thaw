@@ -1086,6 +1086,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bytes_write"
                     | "__thaw_bytes_write_i64"
                     | "__thaw_bytes_copy"
+                    | "__thaw_bytes_sync"
+                    | "__thaw_bytes_byte_offset"
                     | "__thaw_bytes_index_of" => return Ok(HirType::F64),
                     "__thaw_bytes_set_from_string" => {
                         return Ok(HirType::Object(vec![
@@ -1097,7 +1099,8 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_bytes_equals" => return Ok(HirType::Bool),
                     "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
                     | "__thaw_bytes_from_array" | "__thaw_bytes_concat"
-                    | "__thaw_bytes_slice" => {
+                    | "__thaw_bytes_slice"
+                    | "__thaw_bytes_view" => {
                         // `Bytes`, not `Array(F64)`, so a chained
                         // `Buffer.from(...).toString("hex")` decodes.
                         // `infer_expr_type` normalizes it away for every
