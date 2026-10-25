@@ -204,8 +204,18 @@ fn collect_native_classes<'a>(
             HirType::Bool,
         )];
         fields.extend(inherited_fields);
-        let maybe_uninit = maybe_uninit_fields(&declaration.class);
-        for member in &declaration.class.body {
+        let maybe_uninit = maybe_uninit_fields_with(&declaration.class, &bare_field_observed);
+        // Abstract fields are laid out after the concrete ones: the abstract
+        // base is never instantiated, and a subclass overriding them keeps
+        // their slot, so instances print `base fields, then overrides` like Node.
+        let concrete = |member: &&ClassMember| !matches!(member, ClassMember::ClassProp(p) if p.is_abstract);
+        let ordered_members = declaration
+            .class
+            .body
+            .iter()
+            .filter(concrete)
+            .chain(declaration.class.body.iter().filter(|member| !concrete(member)));
+        for member in ordered_members {
             let ClassMember::ClassProp(property) = member else {
                 continue;
             };

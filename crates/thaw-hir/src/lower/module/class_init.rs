@@ -87,7 +87,17 @@ fn walk_init_stmts(
 /// Names of own instance fields of `class` that may be unset after
 /// construction. Fields whose declared type already admits `undefined` are
 /// filtered out by the caller (it knows the lowered type).
+#[cfg(test)]
 fn maybe_uninit_fields(class: &swc_ecma_ast::Class) -> HashSet<String> {
+    maybe_uninit_fields_with(class, &|_| false)
+}
+
+/// Like `maybe_uninit_fields`; `bare_observed(field)` says whether a bare
+/// `x: T;` of a constructor-less class may be observed as `undefined`.
+fn maybe_uninit_fields_with(
+    class: &swc_ecma_ast::Class,
+    bare_observed: &dyn Fn(&str) -> bool,
+) -> HashSet<String> {
     let mut assigned = HashSet::new();
     let constructor = class.body.iter().find_map(|member| match member {
         ClassMember::Constructor(constructor) => constructor.body.as_ref(),
@@ -101,15 +111,19 @@ fn maybe_uninit_fields(class: &swc_ecma_ast::Class) -> HashSet<String> {
             assigned = sets.fold(first, |acc, set| acc.intersection(&set).cloned().collect());
         }
     }
-    // ponytail: a constructor-less class with a bare `x: T;` (rejected by
-    // strict TypeScript, so only `x!: T` counts there) keeps its zero value.
+    // A constructor-less class with a bare `x: T;` (rejected by strict
+    // TypeScript) keeps its zero layout unless the field may be observed, so
+    // programs that never print or inspect it stay on the raw layout.
     let has_constructor = constructor.is_some();
     class
         .body
         .iter()
         .filter_map(|member| match member {
             ClassMember::ClassProp(property)
-                if (property.definite || has_constructor)
+                if (property.definite
+                    || has_constructor
+                    || class_property_name(&property.key)
+                        .is_ok_and(|name| bare_observed(&name)))
                     && !property.is_static
                     && property.value.is_none()
                     && !property.is_optional
@@ -124,9 +138,8 @@ fn maybe_uninit_fields(class: &swc_ecma_ast::Class) -> HashSet<String> {
         .collect()
 }
 
-/// Field types that have a faithful `Optional` storage and lenient read.
-/// `Map`/`Set`/`Bytes` fields keep their zero value for now: the object
-/// printer has no optional encoding for them.
+/// Field types that have a faithful `Optional` storage and lenient read
+/// (everything whose declared type does not already admit `undefined`).
 fn can_be_uninit(ty: &HirType) -> bool {
     matches!(
         ty,
@@ -136,5 +149,12 @@ fn can_be_uninit(ty: &HirType) -> bool {
             | HirType::Str
             | HirType::Array(_)
             | HirType::Object(_)
+            | HirType::Map(..)
+            | HirType::Set(_)
+            | HirType::Bytes
+            | HirType::Function(..)
+            | HirType::CallableFunction(..)
+            | HirType::Json
+            | HirType::Nullable(_)
     )
 }

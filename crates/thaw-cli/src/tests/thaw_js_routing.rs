@@ -131,15 +131,15 @@ fn thaw_js_routing_off_is_the_unchanged_quickjs_path_with_the_same_result() {
 }
 
 #[test]
-fn thaw_js_routing_falls_back_to_quickjs_when_a_callback_would_cross_the_boundary() {
+fn thaw_js_routing_serves_a_callback_through_thaw_js_without_quickjs() {
     let (dir, registry, entry) = thaw_js_fixture(
         "callback",
         "import { apply } from 'tjs-kit';\nfunction main(): void { console.log(apply([1, 2, 3], (x: number): number => x * 2).join(',')); }\n",
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    assert_eq!(manifest["thaw_js_routed"], serde_json::json!([]));
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert_eq!(thaw_js_run(&output), "2,4,6\n");
     let _ = std::fs::remove_dir_all(dir);
 }

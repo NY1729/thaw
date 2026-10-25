@@ -94,6 +94,7 @@ impl<'ctx> HirCompiler<'ctx> {
             loops: std::mem::take(&mut self.loop_scopes),
             loop_promotions: std::mem::take(&mut self.loop_promotion_scopes),
             active_async_completion: self.active_async_completion.take(),
+            thaw_js_call_arguments: std::mem::take(&mut self.thaw_js_call_arguments),
         }
     }
 
@@ -115,6 +116,10 @@ impl<'ctx> HirCompiler<'ctx> {
             active_async_completion: std::mem::replace(
                 &mut self.active_async_completion,
                 next.active_async_completion,
+            ),
+            thaw_js_call_arguments: std::mem::replace(
+                &mut self.thaw_js_call_arguments,
+                next.thaw_js_call_arguments,
             ),
         }
     }

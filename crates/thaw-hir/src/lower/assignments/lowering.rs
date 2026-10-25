@@ -710,14 +710,14 @@ impl<'a> FnLowerer<'a> {
         self.merge_union_array_method_branches(array_name, members, branches)
     }
 
-    /// `__thaw_error_set_prop(error, "key", JSON.stringify(encoded))` for an already-bound error name.
+    /// `__thaw_error_set_prop(error, "key", <encoded text>)` for an already-bound error name.
     fn error_set_prop_call(&self, error: &str, key: &str, encoded: HirExpr) -> HirExpr {
         HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
             vec![
                 HirExpr::Var(error.to_string()),
                 HirExpr::Lit(HirLit::Str(key.to_string())),
-                HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".into())), vec![encoded]),
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![encoded]),
             ],
         )
     }
@@ -741,7 +741,7 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(key_name.clone(), HirType::Str);
         self.scope.insert(value_name.clone(), value_type.clone());
         let encoded = self.coerce_to_declared(&HirType::Json, HirExpr::Var(value_name.clone()))?;
-        let json_text = HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".into())), vec![encoded]);
+        let json_text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![encoded]);
         let stored = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
             vec![
@@ -790,6 +790,22 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        // `Error.stackTraceLimit = n` sets the native limit `stack` generation reads.
+        if assign.op == AssignOp::Assign {
+            if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Error")
+                    && member_property_name(&member.prop).as_deref() == Some("stackTraceLimit")
+                    && !self.scope.contains_key("Error")
+                {
+                    let value = self.lower_expr(&assign.right)?;
+                    let value = self.coerce_primitive_to_number(value)?;
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_set_stack_trace_limit".to_string())),
+                        vec![value],
+                    ));
+                }
+            }
+        }
         let assigned_function_property = if assign.op == AssignOp::Assign {
             match &assign.left {
                 AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {

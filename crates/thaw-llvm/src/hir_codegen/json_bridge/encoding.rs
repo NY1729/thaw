@@ -121,6 +121,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(result, 1, "call_dynamic_error")
             .map_err(|e| e.to_string())?
             .into_pointer_value();
+        // A thaw-js error string becomes the framed `Error` (name, message, code, properties) it was.
+        let error = if backend_symbol.starts_with("thaw_tjs_") {
+            self.compile_thaw_js_frame_error(error)?
+        } else {
+            error
+        };
         self.builder
             .build_call(
                 self.module.get_function("thaw_cstring_destroy").unwrap(),
@@ -1034,6 +1040,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {
                     value = self.compile_native_collection_to_json(value.into_pointer_value(), field_type, preserve_undefined)?;
+                    "thaw_json_object_set_json"
+                }
+                // `JSON.stringify` serialises a Map/Set field as `{}` (no own
+                // enumerable properties).
+                HirType::Map(..) | HirType::Set(_) => {
+                    value = self
+                        .builder
+                        .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "json_empty_collection")
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("thaw_json_object_new returned no value")?;
                     "thaw_json_object_set_json"
                 }
                 HirType::JsValue => {
