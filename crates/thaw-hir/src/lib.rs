@@ -27,5 +27,5 @@ mod lower;
 
 pub use lower::{
     jit_calls_requiring_dynamic_storage, lower_module, lower_module_with_source_map,
-    normalize_top_level_destructuring, LowerDiagnostic, SourceRange,
+    normalize_top_level_destructuring, set_thaw_js_routed, LowerDiagnostic, SourceRange,
 };

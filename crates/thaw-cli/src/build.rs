@@ -302,6 +302,39 @@ fn build_with_assets(
     )
 }
 
+/// `THAW_JS_RUNTIME_DEBUG=1`: name the compiled functions that call into QuickJS in a routed build.
+fn report_thaw_js_mixed(ir: &str) {
+    if let Ok(name) = std::env::var("THAW_JS_RUNTIME_DUMP_FN") {
+        let mut printing = false;
+        for line in ir.lines() {
+            if line.starts_with("define ") {
+                printing = line.contains(&format!("@{name}("));
+            }
+            if printing {
+                eprintln!("{line}");
+            }
+        }
+    }
+    let mut current = String::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for line in ir.lines() {
+        if let Some(rest) = line.strip_prefix("define ") {
+            current = rest.split('@').nth(1).and_then(|r| r.split('(').next()).unwrap_or("?").to_string();
+        } else if line.contains("call ") {
+            if let Some(callee) = line.split("@thaw_js_").nth(1) {
+                let callee = callee.split('(').next().unwrap_or("");
+                // `@thaw_js_symbol.N` / `@thaw_js_callback_key.N` are thaw-js string constants.
+                if !callee.contains([' ', ',', '.']) {
+                    seen.insert(format!("{current} -> thaw_js_{callee}"));
+                }
+            }
+        }
+    }
+    for entry in seen.iter().filter(|entry| !entry.starts_with("main ->")).take(12) {
+        eprintln!("thaw-js routing: QuickJS use in routed build: {entry}");
+    }
+}
+
 /// Marker error: a thaw-js-routed program also needs QuickJS (a callback or live JavaScript value
 /// crossed into thaw-js), so it is rebuilt with routing off.
 const THAW_JS_MIXED: &str = "thaw-js routing needs QuickJS";
@@ -351,7 +384,15 @@ fn build_with_thaw_js_routing(
         static_link, assets, embed_native_addons, install_missing, icu4c, routing,
     );
     match result {
-        Err(error) if routing && error == THAW_JS_MIXED => build_with_native_mode_routed(
+        // Whatever a routed build could not express (it needed QuickJS as well, or the compiler
+        // rejected a construct) is built the ordinary way: never a build failure or a wrong result
+        // that the unrouted path would not have had.
+        Err(error) if routing && {
+            if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+                eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+            }
+            true
+        } => build_with_native_mode_routed(
             input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
             static_link, assets, embed_native_addons, install_missing, icu4c, false,
         ),
@@ -571,6 +612,9 @@ fn build_with_native_mode_routed(
                 "source": input.display().to_string(),
             }));
         }
+        if let Ok(path) = std::env::var("THAW_JS_RUNTIME_DUMP_SHIM") {
+            let _ = std::fs::write(format!("{path}.{}", if thaw_js_routing { "routed" } else { "plain" }), &shim_source);
+        }
         #[allow(unused_mut)]
         let mut manifest = serde_json::json!({
             "packages": resolved_packages,
@@ -696,6 +740,7 @@ fn build_with_native_mode_routed(
         break (module, registry_native_libs, runtime_features, shim_source, manifest);
     };
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
+    thaw_hir::set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program
@@ -732,11 +777,15 @@ fn build_with_native_mode_routed(
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
+    compiler.set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
     compiler.compile_program(&program)?;
     compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
     if thaw_js_routing && compiler.uses_thaw_js() && uses_quickjs {
+        if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+            report_thaw_js_mixed(&compiler.print_to_string());
+        }
         return Err(THAW_JS_MIXED.to_string());
     }
 
