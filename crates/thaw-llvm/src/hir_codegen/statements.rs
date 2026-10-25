@@ -1150,6 +1150,10 @@ impl<'ctx> HirCompiler<'ctx> {
         catch_body: &[HirStmt],
         hidden_tag: Option<&str>,
     ) -> Result<bool, String> {
+        // Either arm may be skipped at run time, so a capture promoted lazily inside one would
+        // leave the arena cell uninitialised for code after the `try`. Promote up front.
+        let arms: Vec<HirStmt> = body.iter().chain(catch_body).cloned().collect();
+        self.prepromote_branch_captures(&HirExpr::Lit(HirLit::Bool(false)), &arms)?;
         let function = self.current_function();
 
         let try_bb = self.context.append_basic_block(function, "try");

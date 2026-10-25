@@ -1,6 +1,16 @@
 {
   "cases": [
     {
+      "name": "catch binding capture leaves later comparison intact",
+      "expect": "matched",
+      "source": "function main(): void { const a = 'x'; const b = 'y'; try {} catch (e: any) { console.log(e === b); } console.log(a === b); try {} catch (e: any) { const f = () => b; console.log(f()); } console.log(a === b, b); }"
+    },
+    {
+      "name": "try in a long loop does not grow the stack",
+      "expect": "matched",
+      "source": "function main(): void { let n = 0; for (let i = 0; i < 2000000; i++) { try { n += i % 3; } catch (e: any) { n = -1; } } console.log(n); }"
+    },
+    {
       "name": "path positional arguments",
       "expect": "matched",
       "source": "import { basename, join } from 'node:path'; function main(): void { console.log(join('a', 'b'), basename('/tmp/file.txt')); }"
