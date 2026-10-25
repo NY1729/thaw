@@ -3141,8 +3141,14 @@ impl<'a> FnLowerer<'a> {
                             )
                         } else if matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
                             value
+                        } else if value_type == crate::caught_exception_carrier_type() {
+                            self.caught_carrier_as_json(value)?
                         } else if json_convertible_native_type(&value_type) {
-                            self.wrap_native_value_as_json(value, value_type.clone())?
+                            let wrapped = self.wrap_native_value_as_json(value, value_type.clone())?;
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_stringify_scope".into())),
+                                vec![wrapped],
+                            )
                         } else {
                             return Err(format!(
                                 "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
@@ -4878,7 +4884,7 @@ impl<'a> FnLowerer<'a> {
                                                 vec![
                                                     HirExpr::Var(target_name.clone()),
                                                     HirExpr::Lit(HirLit::Str(name.clone())),
-                                                    HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".to_string())), vec![json]),
+                                                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_stringify_raw".to_string())), vec![json]),
                                                 ],
                                             )));
                                         }
@@ -4887,7 +4893,7 @@ impl<'a> FnLowerer<'a> {
                                         Box::new(HirExpr::Var("__thaw_error_assign_json".to_string())),
                                         vec![
                                             HirExpr::Var(target_name.clone()),
-                                            HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".to_string())), vec![source.clone()]),
+                                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_stringify_raw".to_string())), vec![source.clone()]),
                                         ],
                                     ))),
                                     other => {
@@ -5342,8 +5348,21 @@ impl<'a> FnLowerer<'a> {
                         // `Error.captureStackTrace(target[, constructorOpt])`: there are no call
                         // frames to capture, so an Error value only fixes its `stack` header (read
                         // once, V8 serializes it lazily) and any other target is left unchanged.
-                        let (arguments, bindings) =
-                            self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?;
+                        let (arguments, bindings) = if call.args.iter().any(|argument| argument.spread.is_some()) {
+                            self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?
+                        } else {
+                            // The constructor argument only trims frames; a member read like
+                            // `this.constructor` that cannot be lowered has no effect to keep.
+                            let mut lowered = Vec::new();
+                            for (index, argument) in call.args.iter().enumerate() {
+                                match self.lower_expr(&argument.expr) {
+                                    Ok(value) => lowered.push(value),
+                                    Err(_) if index > 0 && matches!(&*argument.expr, Expr::Member(_)) => {}
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            (lowered, Vec::new())
+                        };
                         let Some(target) = arguments.first().cloned() else {
                             return Err("`Error.captureStackTrace` expects a target object".into());
                         };
@@ -5351,7 +5370,10 @@ impl<'a> FnLowerer<'a> {
                         for extra in arguments.iter().skip(1) {
                             statements.push(HirStmt::Expr(extra.clone()));
                         }
-                        if self.infer_expr_type(&target)? == HirType::Str {
+                        if let HirType::Object(fields) = self.infer_expr_type(&target)? {
+                            let capture = self.lower_object_capture_stack(target, &fields)?;
+                            statements.insert(0, HirStmt::Expr(capture));
+                        } else if self.infer_expr_type(&target)? == HirType::Str {
                             statements.insert(0, HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
                                 vec![target],

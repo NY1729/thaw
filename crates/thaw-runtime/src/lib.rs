@@ -59,6 +59,10 @@ include!("runtime/native_values/objects.rs");
 include!("runtime/native_values/bytes.rs");
 include!("runtime/abi.rs");
 
+unsafe extern "C" {
+    fn thaw_error_inspect(value: *const c_char) -> *const c_char;
+}
+
 /// Prints an uncaught compiled exception before the process exits
 /// unsuccessfully.
 ///
@@ -87,7 +91,9 @@ include!("runtime/abi.rs");
 #[no_mangle]
 pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
     if !error.is_null() {
-        let rendered = unsafe { thaw_error_to_string(error) };
+        // thaw-std's inspector: the plain `Name: message` line, or Node's nested form when the
+        // error carries own properties or a `cause`.
+        let rendered = unsafe { thaw_error_inspect(error) };
         let text = if rendered.is_null() {
             unsafe { CStr::from_ptr(error) }.to_string_lossy()
         } else {
@@ -115,7 +121,10 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
         return std::ptr::null_mut();
     }
     let text: Vec<u8> = if error == native_text || is_detached_report_text(error) {
-        unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
+        // The copy has no identity for the Error side table, so bake the props into its text.
+        unsafe { CStr::from_ptr(thaw_error_with_props(error)) }
+            .to_bytes()
+            .to_vec()
     } else {
         match tag {
             1 => javascript_number_string(f64_value).into_bytes(),

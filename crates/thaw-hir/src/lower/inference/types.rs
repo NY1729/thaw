@@ -1613,6 +1613,16 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "error property name")?;
                         return Ok(HirType::Json);
                     }
+                    "__thaw_object_stack_set" | "__thaw_object_stack_has" | "__thaw_object_stack_get" => {
+                        // The owner is any record; the other operands are strings.
+                        for operand in args.iter().skip(1) {
+                            self.expect_type(&HirType::Str, operand, "stack text")?;
+                        }
+                        return Ok(match name.as_str() {
+                            "__thaw_object_stack_get" => HirType::Str,
+                            _ => HirType::Bool,
+                        });
+                    }
                     "__thaw_error_set_prop" => {
                         let [error, key, value] = args.as_slice() else {
                             return Err(format!("{name} expects an error, a key and a JSON text"));
@@ -2582,6 +2592,12 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
+                    "__thaw_json_stringify_scope" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        return self.infer_expr_type(value);
+                    }
                     "__thaw_json_undefined" | "__thaw_json_null" => {
                         if !args.is_empty() {
                             return Err(format!("{name} expects no operands"));
@@ -2835,7 +2851,7 @@ impl<'a> FnLowerer<'a> {
                         )))));
                     }
                     "JSON.parse" => return Ok(HirType::Json),
-                    "JSON.stringify" => return Ok(HirType::Str),
+                    "JSON.stringify" | "__thaw_json_stringify_raw" => return Ok(HirType::Str),
                     "__thaw_json_stringify_number_space" => {
                         let [value, space] = args.as_slice() else {
                             return Err("JSON.stringify expects value and number space".into());

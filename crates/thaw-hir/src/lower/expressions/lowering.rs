@@ -3280,6 +3280,52 @@ impl<'a> FnLowerer<'a> {
                             vec![object, key],
                         ));
                     }
+                    if let (HirType::Union(members), true) = (
+                        &object_type,
+                        object_type == crate::caught_exception_carrier_type(),
+                    ) {
+                        // `delete e.k` on a catch binding: a framed error deletes from its side
+                        // table, any other thrown value from its Json view.
+                        let key = match &member.prop {
+                            MemberProp::Ident(property) => {
+                                HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                            }
+                            MemberProp::Computed(computed) => {
+                                let key = self.lower_expr(&computed.expr)?;
+                                self.coerce_primitive_to_string(key)?
+                            }
+                            MemberProp::PrivateName(_) => {
+                                return Err(
+                                    "native `delete` does not support private properties".into()
+                                );
+                            }
+                        };
+                        let name = format!("__thaw_delete_carrier_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), object_type.clone());
+                        let carrier = HirExpr::Var(name.clone());
+                        let is_text = HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), members.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                        );
+                        let from_text = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_delete_prop".into())),
+                            vec![
+                                HirExpr::UnionValue(Box::new(carrier.clone()), 3, members.clone()),
+                                key.clone(),
+                            ],
+                        );
+                        let json = self.caught_carrier_as_json(carrier)?;
+                        let from_json = HirExpr::JsonDelete(Box::new(json), Box::new(key));
+                        let result = HirExpr::Conditional(
+                            Box::new(is_text),
+                            Box::new(from_text),
+                            Box::new(from_json),
+                            HirType::Bool,
+                        );
+                        return self.wrap_call_argument_bindings(result, &[(name, object_type, object)]);
+                    }
                     if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         return Err(format!(
                             "native `delete` requires a JSON or dictionary receiver, got {object_type:?}"
