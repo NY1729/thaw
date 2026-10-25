@@ -1602,10 +1602,12 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_error_cause"
             | "__thaw_error_code"
             | "__thaw_error_stack"
+            | "__thaw_error_stack_with_frames"
             | "__thaw_error_suppressed_error"
             | "__thaw_error_suppressed"
             | "__thaw_error_is_error"
             | "__thaw_native_wrapper_is_live"
+            | "__thaw_error_set_stack_trace_limit"
             | "__thaw_error_to_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -1624,6 +1626,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("error property access returned no value".into());
+            }
+            "__thaw_error_stack_trace_limit" => {
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_error_stack_trace_limit").unwrap(),
+                        &[],
+                        "stack_trace_limit",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("stack trace limit returned no value".into());
             }
             "__thaw_error_frame" => {
                 let [name, message] = args else {

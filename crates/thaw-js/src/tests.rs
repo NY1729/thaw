@@ -599,3 +599,374 @@ fn typed_abi_reports_js_exceptions_and_unroutable_calls_as_errors() {
         Err("thaw-js: `x` cannot cross".into())
     );
 }
+
+// ----- compiled callbacks (`thaw_tjs_register_callback`) -----
+
+/// A stand-in for a generated `(context, args_json) -> result_json` adapter: sums the numbers.
+unsafe extern "C" fn sum_adapter(
+    _context: *const std::ffi::c_void,
+    args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(args) }.to_str().unwrap();
+    let crate::host::Native::Array(items) = crate::host::Native::from_json(text).unwrap() else {
+        panic!("arguments are a JSON array")
+    };
+    let total: f64 = items
+        .iter()
+        .map(|n| {
+            if let crate::host::Native::Number(x) = n {
+                *x
+            } else {
+                0.0
+            }
+        })
+        .sum();
+    thaw_arena::owned_string(crate::number_to_string(total))
+}
+
+/// Reports a thrown error the way generated adapters do (`\u{2}` + `\u{1}Name\u{1}message`).
+unsafe extern "C" fn throwing_adapter(
+    _context: *const std::ffi::c_void,
+    _args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    thaw_arena::owned_string("\u{2}\u{1}RangeError\u{1}from native")
+}
+
+/// Echoes whether the first argument was `undefined` (the compiled side's marker).
+unsafe extern "C" fn undefined_probe_adapter(
+    _context: *const std::ffi::c_void,
+    args: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(args) }.to_str().unwrap();
+    thaw_arena::owned_string(if text.contains("$__thaw_napi_undefined$") {
+        "true"
+    } else {
+        "false"
+    })
+}
+
+const CALLBACK_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"p/index.js": function(module, exports, require) {
+  exports.apply = function (f, x) { return f(x, 1, undefined) * 2; };
+  exports.try = function (f) { try { return f(); } catch (e) { return e.name + ':' + e.message; } };
+  exports.mark = function (f) { return f(undefined); };
+  exports.same = function (f) { return f === f; };
+},
+};
+var __thaw_bundle_require_maps = { "p/index.js": {}, };
+var __thaw_bundle_entry_key = "p/index.js";
+})(globalThis.require);"#;
+
+/// What compiled code gets for an error string through `thaw_tjs_frame_error`.
+fn frame_text(display: &str) -> String {
+    use std::ffi::{CStr, CString};
+    let input = thaw_arena::owned_string(CString::new(display).unwrap().as_bytes());
+    let framed = unsafe { crate::host::thaw_tjs_frame_error(input) };
+    // SAFETY: `framed` was just returned by `thaw_tjs_frame_error` and is freed exactly once.
+    unsafe {
+        let text = CStr::from_ptr(framed).to_str().unwrap().to_string();
+        crate::host::thaw_tjs_free(framed);
+        text
+    }
+}
+
+fn callback_marker(id: i64) -> crate::host::Native {
+    crate::host::Native::Object(vec![(
+        "__thaw_tjs_cb__".into(),
+        crate::host::Native::Number(id as f64),
+    )])
+}
+
+#[test]
+fn compiled_callbacks_are_callable_from_package_code() {
+    use crate::host::{thaw_tjs_register_callback, HostError, Native, Package};
+    let sum = thaw_tjs_register_callback(sum_adapter as *const _, std::ptr::null(), 3);
+    let throwing = thaw_tjs_register_callback(throwing_adapter as *const _, std::ptr::null(), 0);
+    let probe =
+        thaw_tjs_register_callback(undefined_probe_adapter as *const _, std::ptr::null(), 1);
+    // the same closure registers once: stable function identity
+    assert_eq!(
+        sum,
+        thaw_tjs_register_callback(sum_adapter as *const _, std::ptr::null(), 3)
+    );
+    let mut p = Package::load(CALLBACK_BUNDLE).expect("loads");
+    // f(x, 1, undefined): `undefined` arrives as the marker object (0 in the sum); the package doubles the result
+    assert_eq!(
+        p.call("apply", &[callback_marker(sum), Native::Number(20.0)])
+            .ok(),
+        Some(Native::Number(42.0))
+    );
+    // a native throw becomes a catchable JS error with its name and message
+    assert_eq!(
+        p.call("try", &[callback_marker(throwing)]).ok(),
+        Some(Native::Str("RangeError:from native".into()))
+    );
+    // `undefined` reaches the compiled side as its marker; the marker comes back as `undefined`
+    assert_eq!(
+        p.call("mark", &[callback_marker(probe)]).ok(),
+        Some(Native::Bool(true))
+    );
+    assert_eq!(
+        p.call("same", &[callback_marker(sum)]).ok(),
+        Some(Native::Bool(true))
+    );
+    // the compiled side's `undefined` marker as an argument is `undefined` for the package
+    let absent = Native::Object(vec![("$__thaw_napi_undefined$".into(), Native::Bool(true))]);
+    assert_eq!(
+        p.call("apply", &[callback_marker(sum), absent]).ok(),
+        Some(Native::Number(2.0))
+    );
+    // an uncaught native throw surfaces as a framed error for the caller
+    match p.call("apply", &[callback_marker(throwing), Native::Number(1.0)]) {
+        Err(HostError::Thrown(display)) => {
+            assert_eq!(display, "RangeError: from native");
+            assert_eq!(frame_text(&display), "\u{1}RangeError\u{1}from native");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn thrown_errors_are_framed_with_name_message_code_and_properties() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.fail = function () { var e = new TypeError('bad'); e.code = 'E_BAD'; e.status = 400; throw e; };\nexports.fail2 = function () { throw 'plain'; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    match p.call("fail", &[]) {
+        Err(HostError::Thrown(display)) => {
+            assert_eq!(display, "TypeError: bad");
+            assert_eq!(
+                frame_text(&display),
+                "\u{1}TypeError\u{1}bad\u{3}E_BAD\u{5}{\"code\":\"E_BAD\",\"status\":400}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    match p.call("fail2", &[]) {
+        Err(HostError::Thrown(m)) => assert_eq!(m, "plain"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_package_can_be_called_again_from_its_own_callback() {
+    use crate::host::{
+        thaw_tjs_call_typed_result, thaw_tjs_free, thaw_tjs_register, thaw_tjs_register_callback,
+    };
+    use std::ffi::{CStr, CString};
+    // The callback calls `nest::inc(1)` through the C ABI while `nest::run` is still evaluating.
+    unsafe extern "C" fn reenter(
+        _context: *const std::ffi::c_void,
+        _args: *const std::ffi::c_char,
+    ) -> *mut std::ffi::c_char {
+        let symbol = CString::new("nest::inc").unwrap();
+        let args = CString::new("[1]").unwrap();
+        let result = thaw_tjs_call_typed_result(symbol.as_ptr(), args.as_ptr());
+        let text = if result.value.is_null() {
+            let error = unsafe { CStr::from_ptr(result.error) }
+                .to_str()
+                .unwrap()
+                .to_string();
+            unsafe { thaw_tjs_free(result.error) };
+            format!("{error:?}")
+        } else {
+            let value = unsafe { CStr::from_ptr(result.value) }
+                .to_str()
+                .unwrap()
+                .to_string();
+            unsafe { thaw_tjs_free(result.value) };
+            value
+        };
+        thaw_arena::owned_string(text)
+    }
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "n/index.js": function(module, exports, require) {
+  exports.inc = function (x) { return x + 1; };
+  exports.run = function (f) { return f() + 10; };
+}, };
+var __thaw_bundle_require_maps = { "n/index.js": {}, };
+var __thaw_bundle_entry_key = "n/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("nest").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let id = thaw_tjs_register_callback(reenter as *const _, std::ptr::null(), 0);
+    let symbol = CString::new("nest::run").unwrap();
+    let args = CString::new(format!("[{{\"__thaw_tjs_cb__\":{id}}}]")).unwrap();
+    let result = thaw_tjs_call_typed_result(symbol.as_ptr(), args.as_ptr());
+    assert!(result.error.is_null(), "{:?}", unsafe {
+        CStr::from_ptr(result.error)
+    });
+    let value = unsafe { CStr::from_ptr(result.value) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    unsafe { thaw_tjs_free(result.value) };
+    assert_eq!(value, "12");
+}
+
+// ----- class instances as handles (`thaw_tjs_class_call`) -----
+
+const CLASS_BUNDLE: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"k/index.js": function(module, exports, require) {
+  class Box {
+    constructor(v) { if (v === 'bad') throw new TypeError('bad box'); this.v = v; }
+    get() { return this.v; }
+    add(n) { this.v += n; return this; }
+    peek(other) { return other.v; }
+    static of(v) { return new Box(v); }
+  }
+  exports.Box = Box;
+},
+};
+var __thaw_bundle_require_maps = { "k/index.js": {}, };
+var __thaw_bundle_entry_key = "k/index.js";
+})(globalThis.require);"#;
+
+fn class_call(symbol: &str, args: &str, receiver: i64, handle: bool) -> Result<String, String> {
+    use std::ffi::{CStr, CString};
+    let (symbol, args) = (CString::new(symbol).unwrap(), CString::new(args).unwrap());
+    let result = crate::host::thaw_tjs_class_call(
+        symbol.as_ptr(),
+        args.as_ptr(),
+        receiver,
+        u8::from(handle),
+    );
+    // SAFETY: both strings come from `thaw_tjs_class_call` and are freed exactly once.
+    unsafe {
+        if result.value.is_null() {
+            let error = CStr::from_ptr(result.error).to_str().unwrap().to_string();
+            crate::host::thaw_tjs_free(result.error);
+            Err(error)
+        } else {
+            let value = CStr::from_ptr(result.value).to_str().unwrap().to_string();
+            crate::host::thaw_tjs_free(result.value);
+            Ok(value)
+        }
+    }
+}
+
+#[test]
+fn class_instances_live_behind_handles_and_can_be_passed_back() {
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("k").unwrap(),
+        CString::new(CLASS_BUNDLE).unwrap(),
+    );
+    assert_eq!(
+        crate::host::thaw_tjs_register(name.as_ptr(), source.as_ptr()),
+        1
+    );
+    let id: i64 = class_call("$new$k::Box$arity1", "[40]", 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(id > 0);
+    assert_eq!(
+        class_call("$method$k::Box$get$overload0$arity0", "[]", id, false).unwrap(),
+        "40"
+    );
+    // a method returning `this` hands out a second handle to the same object
+    let same: i64 = class_call("$method$k::Box$add$overload0$arity1", "[2]", id, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(same, id);
+    assert_eq!(
+        class_call("$method$k::Box$get$overload0$arity0", "[]", same, false).unwrap(),
+        "42"
+    );
+    // an instance handle passed as an argument arrives as the object itself
+    let other: i64 = class_call("$staticmethod$k::Box$of$overload0$arity1", "[7]", 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let marker = format!("[{{\"__thaw_tjs_handle__\":{other}}}]");
+    assert_eq!(
+        class_call("$method$k::Box$peek$overload0$arity1", &marker, id, false).unwrap(),
+        "7"
+    );
+    // errors keep their name and message; an unknown handle is an error, not a crash
+    let error = class_call("$new$k::Box$arity1", "[\"bad\"]", 0, true).unwrap_err();
+    assert_eq!(error, "TypeError: bad box");
+    assert_eq!(frame_text(&error), "\u{1}TypeError\u{1}bad box");
+    assert!(class_call("$method$k::Box$get$overload0$arity0", "[]", 9999, false).is_err());
+    // retain/release: the value is dropped with the last reference
+    assert_eq!(crate::host::thaw_tjs_retain_handle(id), 1);
+    assert_eq!(crate::host::thaw_tjs_release_handle(id), 1);
+    assert_eq!(
+        class_call("$method$k::Box$get$overload0$arity0", "[]", id, false).unwrap(),
+        "42"
+    );
+    assert_eq!(crate::host::thaw_tjs_release_handle(id), 1);
+    assert_eq!(crate::host::thaw_tjs_release_handle(id), 0);
+}
+
+// ----- WeakMap / WeakSet / WeakRef / FinalizationRegistry (expected text recorded from Node 22) -----
+
+#[test]
+fn weak_collections_match_node() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/differential/weak.js"
+    ))
+    .unwrap();
+    let want = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/differential/weak.out"
+    ))
+    .unwrap();
+    assert_eq!(run(&src).join("\n") + "\n", want);
+    assert!(
+        Interp::new().is_builtin_global("WeakMap") && Interp::new().is_builtin_global("WeakRef")
+    );
+}
+
+#[test]
+fn symbol_keyed_define_property_and_to_string_tag() {
+    assert_eq!(
+        one("const o = {}; Object.defineProperty(o, Symbol.toStringTag, { value: 'X' }); console.log(Object.prototype.toString.call(o), Object.getOwnPropertySymbols(o).length, o[Symbol.toStringTag], Object.getOwnPropertyDescriptor(o, Symbol.toStringTag).value)"),
+        "[object X] 1 X X"
+    );
+}
+
+// ----- static blocks (expected text recorded from Node 22) -----
+
+#[test]
+fn static_blocks_and_the_scan_features() {
+    assert_eq!(
+        one("class S { static n = 1; static { S.m = S.n + 1; var t = 5; S.t = t; } } console.log(S.m, S.t)"),
+        "2 5"
+    );
+    let with = |body: &str| MINI.replace("exports.VERSION = '1.0';", body);
+    let r = crate::scan::scan_bundle(&with("class C { static { C.y = 2; } }"))
+        .ok()
+        .unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+    // not implemented: the scan must say so (the evaluator would stop at load time)
+    let r = crate::scan::scan_bundle(&with("class C { #x = 1; } exports.n = 10n;"))
+        .ok()
+        .unwrap();
+    let names: Vec<&str> = r.blockers.keys().map(String::as_str).collect();
+    assert_eq!(names, ["bigint", "private-name"]);
+}
+
+// ----- user iterators are pulled lazily and closed on early exit (expected text recorded from Node 22) -----
+
+#[test]
+fn user_iterators_are_pulled_lazily_and_closed_on_early_exit() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/differential/lazy_iteration.js"
+    ))
+    .unwrap();
+    let want = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/differential/lazy_iteration.out"
+    ))
+    .unwrap();
+    assert_eq!(run(&src).join("\n") + "\n", want);
+}

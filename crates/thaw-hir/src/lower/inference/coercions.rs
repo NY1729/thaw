@@ -579,6 +579,23 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // A `Map`/`Set` (or a subclass instance) handed to the entries/values array of a
+        // native collection constructor: iterate it, like `new Map(other)` does.
+        if let HirType::Array(element) = target {
+            if let Ok(actual) = self.infer_expr_type(&value) {
+                let source = native_base_type(&actual).unwrap_or(&actual);
+                let iterable = match source {
+                    HirType::Map(key, entry) => {
+                        **element == HirType::Tuple(vec![key.as_ref().clone(), entry.as_ref().clone()])
+                    }
+                    HirType::Set(item) => element == item,
+                    _ => false,
+                };
+                if iterable {
+                    value = self.native_collection_entries(value)?;
+                }
+            }
+        }
         if matches!(declared, HirType::Function(..)
             | HirType::CallableFunction(_, _, None, _))
         {
@@ -1009,6 +1026,10 @@ impl<'a> FnLowerer<'a> {
             // already use for `JsValue === null`/`undefined` comparisons
             // elsewhere) since nothing static can know which case a
             // given call actually returns.
+            if actual == HirType::JsValue && crate::lower::thaw_js_routed() {
+                // A thaw-js build's `JsValue` is a handle into the thaw-js heap, never null.
+                return Ok(HirExpr::JsValueAsJson(Box::new(value)));
+            }
             if actual == HirType::JsValue {
                 let temp = format!("__thaw_json_wrap_source_{}", self.next_binding);
                 self.next_binding += 1;
@@ -1398,6 +1419,11 @@ impl<'a> FnLowerer<'a> {
                         || Self::is_wrapped_object_literal(&value)
                         || matches!(&value, HirExpr::Var(name)
                             if self.fresh_object_bindings.contains(name)));
+                    // A fresh literal handed to a thaw-js package is a plain-data copy: no QuickJS-hosted
+                    // projection is needed (a live reference to an existing owner keeps the projection).
+                    if !live && crate::lower::thaw_js_routed() {
+                        return self.wrap_native_value_as_json(value, actual.clone());
+                    }
                     let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live, false)?;
                     // A projected object lookup yields a newly retained JS
                     // handle. The consuming Json conversion applies the

@@ -66,25 +66,28 @@ impl Interp {
     /// `iter_items`, extended with the `Symbol.iterator` protocol for user-defined iterables
     /// (collected eagerly).
     pub(crate) fn iter_protocol(&mut self, v: &Value) -> R<Option<Vec<Value>>> {
+        self.iter_protocol_limit(v, None)
+    }
+
+    /// Like [`Interp::iter_protocol`], but pulls at most `limit` values from a user-defined iterator
+    /// (closing it if it has more), as array destructuring does.
+    pub(crate) fn iter_protocol_limit(
+        &mut self,
+        v: &Value,
+        limit: Option<usize>,
+    ) -> R<Option<Vec<Value>>> {
         if let Some(items) = self.iter_items(v) {
             return Ok(Some(items));
         }
-        if !matches!(v, Value::Object(_)) {
+        let Some((iter, next)) = self.get_iterator(v)? else {
             return Ok(None);
-        }
-        let sym = self
-            .lookup(&self.global.clone(), "Symbol")
-            .unwrap_or(Value::Undefined);
-        let tag = self.get(&sym, "iterator")?;
-        let key = self.key_of(&tag);
-        let method = self.get(v, &key)?;
-        if !method.is_callable() {
-            return Ok(None);
-        }
-        let iter = self.call(&method, v, &[])?;
-        let next = self.get(&iter, "next")?;
+        };
         let mut out = Vec::new();
         loop {
+            if limit.is_some_and(|n| out.len() >= n) {
+                self.close_iterator(&iter);
+                return Ok(Some(out));
+            }
             let r = self.call(&next, &iter, &[])?;
             if !matches!(r, Value::Object(_)) {
                 return self.throw_error("TypeError", "Iterator result is not an object");
@@ -93,6 +96,40 @@ impl Interp {
                 return Ok(Some(out));
             }
             out.push(self.get(&r, "value")?);
+        }
+    }
+
+    /// `(iterator, next)` of a `Symbol.iterator` iterable; `None` if it has no iterator method.
+    pub(crate) fn get_iterator(&mut self, iterable: &Value) -> R<Option<(Value, Value)>> {
+        if !matches!(iterable, Value::Object(_)) {
+            return Ok(None);
+        }
+        let symbol = self
+            .lookup(&self.global.clone(), "Symbol")
+            .unwrap_or(Value::Undefined);
+        let tag = self.get(&symbol, "iterator")?;
+        let key = self.key_of(&tag);
+        let method = self.get(iterable, &key)?;
+        if !method.is_callable() {
+            return Ok(None);
+        }
+        let iter = self.call(&method, iterable, &[])?;
+        if !matches!(iter, Value::Object(_)) {
+            return self.throw_error(
+                "TypeError",
+                "Result of the Symbol.iterator method is not an object",
+            );
+        }
+        let next = self.get(&iter, "next")?;
+        Ok(Some((iter, next)))
+    }
+
+    /// `iterator.return()` when an iteration ends early; errors from it are dropped.
+    pub(crate) fn close_iterator(&mut self, iter: &Value) {
+        if let Ok(ret) = self.get(iter, "return") {
+            if ret.is_callable() {
+                let _ = self.call(&ret, iter, &[]);
+            }
         }
     }
 

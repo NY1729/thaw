@@ -389,6 +389,7 @@ struct CodegenScopeContext<'ctx> {
     loops: Vec<LoopScope<'ctx>>,
     loop_promotions: Vec<LoopPromotionScope<'ctx>>,
     active_async_completion: Option<PointerValue<'ctx>>,
+    thaw_js_call_arguments: bool,
 }
 
 macro_rules! isolated_codegen_scope {
@@ -473,6 +474,12 @@ pub struct HirCompiler<'ctx> {
     next_lambda: usize,
     uses_napi: bool,
     uses_thaw_js: bool,
+    /// The program is a thaw-js routed build (it falls back to an unrouted one if it needs QuickJS), so
+    /// a plain callback coerced to a dynamic value is a thaw-js callback.
+    thaw_js_routed: bool,
+    /// Compiling the arguments of a thaw-js call (reset inside nested closure bodies): a `JsValue`
+    /// converted to `Json` there is a thaw-js handle or callback marker.
+    thaw_js_call_arguments: bool,
     uses_quickjs: bool,
     /// Entry is a CommonJS program: `process.nextTick` callbacks run before the promise jobs
     /// the main script queued (an ES module's body runs inside a microtask, so they run after).
@@ -828,6 +835,8 @@ impl<'ctx> HirCompiler<'ctx> {
             next_lambda: 0,
             uses_napi: false,
             uses_thaw_js: false,
+            thaw_js_routed: false,
+            thaw_js_call_arguments: false,
             uses_quickjs: false,
             commonjs_entry: false,
             uses_quickjs_handles: false,
@@ -911,6 +920,18 @@ impl<'ctx> HirCompiler<'ctx> {
             (false, None) => self.emit_c_main_entry(),
         }
 
+        // A routed build holds no QuickJS values: its `JsValue` handles live in the thaw-js heap, whose
+        // retain/release the thaw-js archive provides under its own names.
+        if self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
+            for (quickjs, thaw_js) in [
+                ("thaw_js_retain_handle", "thaw_tjs_retain_handle"),
+                ("thaw_js_release_handle", "thaw_tjs_release_handle"),
+            ] {
+                if let Some(function) = self.module.get_function(quickjs) {
+                    function.as_global_value().set_name(thaw_js);
+                }
+            }
+        }
         self.hoist_static_allocas();
         self.module
             .verify()
@@ -973,6 +994,10 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Whether the generated module calls the N-API addon host.
     /// Whether the program calls into the experimental thaw-js runtime (`DynamicBackend::ThawJs`).
+    pub fn set_thaw_js_routed(&mut self, routed: bool) {
+        self.thaw_js_routed = routed;
+    }
+
     pub fn uses_thaw_js(&self) -> bool {
         self.uses_thaw_js
     }
