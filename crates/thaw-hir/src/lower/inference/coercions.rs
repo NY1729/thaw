@@ -1026,6 +1026,10 @@ impl<'a> FnLowerer<'a> {
             // already use for `JsValue === null`/`undefined` comparisons
             // elsewhere) since nothing static can know which case a
             // given call actually returns.
+            if actual == HirType::JsValue && crate::lower::thaw_js_routed() {
+                // A thaw-js build's `JsValue` is a handle into the thaw-js heap, never null.
+                return Ok(HirExpr::JsValueAsJson(Box::new(value)));
+            }
             if actual == HirType::JsValue {
                 let temp = format!("__thaw_json_wrap_source_{}", self.next_binding);
                 self.next_binding += 1;
@@ -1415,6 +1419,11 @@ impl<'a> FnLowerer<'a> {
                         || Self::is_wrapped_object_literal(&value)
                         || matches!(&value, HirExpr::Var(name)
                             if self.fresh_object_bindings.contains(name)));
+                    // A fresh literal handed to a thaw-js package is a plain-data copy: no QuickJS-hosted
+                    // projection is needed (a live reference to an existing owner keeps the projection).
+                    if !live && crate::lower::thaw_js_routed() {
+                        return self.wrap_native_value_as_json(value, actual.clone());
+                    }
                     let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live, false)?;
                     // A projected object lookup yields a newly retained JS
                     // handle. The consuming Json conversion applies the

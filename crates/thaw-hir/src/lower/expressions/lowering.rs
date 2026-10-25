@@ -2317,6 +2317,35 @@ impl<'a> FnLowerer<'a> {
                                 })
                             });
                         if let Some(constructor) = dynamic_constructor {
+                            if is_error_family_name(class.sym.as_ref()) {
+                                // A Json copy of a native Error answers from the Error itself.
+                                let temp = format!("__thaw_instanceof_error_json_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(temp.clone(), HirType::Json);
+                                let native = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_is_error_instance".to_string())),
+                                    vec![
+                                        HirExpr::Var(temp.clone()),
+                                        HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                    ],
+                                );
+                                let host = self.lower_host_instanceof(
+                                    HirExpr::Var(temp.clone()),
+                                    HirType::Json,
+                                    constructor,
+                                    HirType::JsValue,
+                                )?;
+                                let body = HirExpr::Conditional(
+                                    Box::new(native),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                    Box::new(host),
+                                    HirType::Bool,
+                                );
+                                return self.wrap_call_argument_bindings(
+                                    body,
+                                    &[(temp, HirType::Json, value)],
+                                );
+                            }
                             return self.lower_host_instanceof(
                                 value,
                                 value_type,

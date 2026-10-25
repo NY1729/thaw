@@ -335,7 +335,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::JsonObjectLit(with_name, HirType::Json)),
             HirType::Json,
         );
-        let text = HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".into())), vec![object]);
+        let text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![object]);
         Ok(Some(HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
             vec![value.clone(), text],
