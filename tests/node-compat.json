@@ -2569,6 +2569,81 @@
       "name": "class uninitialised fields with inheritance and truthiness",
       "expect": "matched",
       "source": "abstract class Base {\n  id!: number;\n  log: string[] = [];\n  constructor() { this.log.push(\"base\"); }\n}\nclass Impl extends Base {\n  extra!: string;\n  constructor(p: number) { super(); this.id = p; }\n  bump(): void { this.id += 10; this.extra = (this.extra ?? \"\") + \"x\"; }\n  get twice(): number { return this.id * 2; }\n}\nclass Acc {\n  s!: string; n!: number; list!: string[]; flag!: boolean;\n  run(): string {\n    const f = () => this.n;\n    if (this.n !== undefined) return \"has\";\n    if (!this.list) this.list = [];\n    this.list.push(\"a\");\n    this.s = \"q\"; this.s += \"z\";\n    this.n = 5;\n    const g = () => this.n + f();\n    if (this.flag) return \"flag\"; else if (this.s) return this.s + g() + this.list.length + this.n!;\n    return \"none\";\n  }\n}\nasync function later(a: Acc): Promise<number> { await Promise.resolve(1); return a.n + 1; }\nfunction main(): void {\n  const i = new Impl(3);\n  console.log(i.id, i.twice, i.extra, i.log);\n  i.bump(); i.bump();\n  console.log(i.id, i.twice, i.extra, i);\n  const a = new Acc();\n  console.log(a.run(), a.run(), a);\n  const arr: Acc[] = [a, new Acc()];\n  console.log(arr.map((x) => x.n ?? 0), arr.filter((x) => x.n === undefined).length);\n  later(a).then((v) => console.log(\"later\", v));\n  let total = 0;\n  for (const x of arr) { if (x.n) total += x.n; }\n  console.log(total);\n}\n"
+    },
+    {
+      "name": "class extends Array: species result keeps the subclass when elements change",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> {\n  top(): number { return this[this.length - 1]; }\n}\nclass GStack<T> extends Array<T> {\n  last(): T { return this[this.length - 1]; }\n}\nclass Sized extends Array<number> {\n  tag: string;\n  constructor(tag: string) { super(); this.tag = tag; }\n}\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2); s.push(3);\n  const m = s.map(x => x + \"!\");\n  console.log(m, m instanceof Stack, m.length, Array.isArray(m));\n  const m2 = s.map(x => x * 2);\n  console.log(m2, m2 instanceof Stack, m2.top());\n  const f = s.filter(x => x > 1);\n  console.log(f, f instanceof Stack);\n  console.log(s.slice(1), s.concat([9]), s.slice(1) instanceof Stack);\n  const sp = s.splice(0, 1);\n  console.log(sp, sp instanceof Stack, s);\n}\n"
+    },
+    {
+      "name": "class extends Array: generic subclass species and flat",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> {\n  top(): number { return this[this.length - 1]; }\n}\nclass GStack<T> extends Array<T> {\n  last(): T { return this[this.length - 1]; }\n}\nclass Sized extends Array<number> {\n  tag: string;\n  constructor(tag: string) { super(); this.tag = tag; }\n}\nfunction main(): void {\n  const g = new GStack<number>(); g.push(1); g.push(2);\n  const gm = g.map(x => \"v\" + x);\n  console.log(gm, gm.length);\n  const gf = g.filter(x => x > 1);\n  console.log(gf, gf.last());\n  const fl = new GStack<number[]>(); fl.push([1, 2]); fl.push([3]);\n  console.log(fl.flat(), fl.flatMap(x => x));\n}\n"
+    },
+    {
+      "name": "class extends Array: species with numeric constructor, chains, from/of",
+      "expect": "matched",
+      "source": "class Sized extends Array<number> {\n  tag: number;\n  constructor(tag: number) { super(); this.tag = tag; }\n}\nclass Opt extends Array<number> {\n  tag: number;\n  extra: string;\n  constructor(tag?: number, extra?: string) { super(); this.tag = tag ?? -1; this.extra = extra ?? \"none\"; }\n}\nclass Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Wide extends Stack {}\nclass Deep extends Wide { extra = 1; }\nfunction main(): void {\n  const z = new Sized(9); z.push(5); z.push(6);\n  const zm = z.map(x => x + 1);\n  console.log(zm, zm instanceof Sized, zm.length);\n  const zf = z.filter(x => x > 5);\n  console.log(zf, zf instanceof Sized, z.slice(1), z.concat([1]));\n  const o = new Opt(3); o.push(1);\n  console.log(o.map(x => \"s\" + x), o.filter(x => true));\n  const w = new Wide(); w.push(4); w.push(5);\n  console.log(w.map(x => x * 3), w.map(x => x * 3) instanceof Wide, w.map(x => x * 3) instanceof Stack);\n  const d = new Deep(); d.push(1);\n  console.log(d.map(x => String(x)), d.filter(x => true));\n  const st = Stack.from([1, 2, 3]); const so = Stack.of(7, 8);\n  console.log(st, so, st instanceof Stack, so.top());\n  const mm: string[] = w.map(x => \"q\" + x);\n  console.log(mm.length, Array.isArray(mm));\n  console.log(w.map(x => \"a\" + x).map(x => x.length), w.filter(x => x > 4).map(x => x * 2) instanceof Wide);\n  console.log(Stack.from([3, 4]).map(x => x + 1), w.reverse().map(x => x));\n}\n"
+    },
+    {
+      "name": "class extends Array: Object.keys/values/entries include own fields",
+      "expect": "matched",
+      "source": "class Rows extends Array<number> {\n  label = \"rows\";\n  note: string;\n  constructor() { super(); this.note = \"n\"; }\n  sum(): number { let t = 0; for (const x of this) t += x; return t; }\n}\nclass Plain extends Array<number> {}\nfunction main(): void {\n  const r = new Rows(); r.push(3); r.push(4);\n  console.log(Object.keys(r), Object.values(r), Object.entries(r));\n  console.log(Object.getOwnPropertyNames(r), Reflect.ownKeys(r));\n  for (const k in r) console.log(k);\n  console.log(JSON.stringify(r), r.sum());\n  const p = new Plain(); p.push(1); p.push(2);\n  console.log(Object.keys(p), Object.values(p), Object.entries(p), Object.getOwnPropertyNames(p));\n  for (const k in p) console.log(\"p\", k);\n  for (const [k, v] of Object.entries(r)) console.log(k, v);\n  console.log(Object.values(r).length, Object.keys(r).length);\n  console.log(r instanceof Object, p instanceof Object, Object.prototype.hasOwnProperty.call(r, \"label\"));\n}\n"
+    },
+    {
+      "name": "class extends Array: keys, for-in, JSON with own fields",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> {\n  label = \"L\";\n  top(): number { return this[this.length - 1]; }\n}\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  s.label = \"hi\";\n  console.log(Object.keys(s), Object.values(s), Object.entries(s), Object.getOwnPropertyNames(s));\n  console.log(JSON.stringify(s));\n  for (const k in s) console.log(\"k\", k);\n  console.log(Object.keys(s).length);\n}\n"
+    },
+    {
+      "name": "class extends Map/Array: inherited statics through subclasses",
+      "expect": "matched",
+      "source": "class Counter extends Map<string, number> { static made = 0; static mk(): Counter { Counter.made++; return new Counter(); } }\nclass Wide extends Counter { static other = 2; }\nclass Deeper extends Wide {}\nclass Arr extends Array<string> { static tag = \"A\"; static build(): Arr { return Arr.of(\"a\"); } }\nclass Arr2 extends Arr {}\nfunction main(): void {\n  console.log(Deeper.made, Deeper.other, Deeper.mk().size, Counter.made);\n  const g = Deeper.groupBy([\"a\", \"bb\", \"cc\"], (s: string) => s.length);\n  console.log(g, g instanceof Map, g instanceof Deeper);\n  console.log(Arr2.tag, Arr2.build(), Arr2.isArray([1]), Arr2.isArray(Arr2.of(\"z\")), Arr2.of(\"q\", \"r\"));\n  const f = Arr2.from([\"u\", \"v\"]);\n  console.log(f, f instanceof Arr2, f instanceof Arr, f.length);\n}\n"
+    },
+    {
+      "name": "class extends Array/Map: isArray and groupBy via subclass",
+      "expect": "matched",
+      "source": "class Counter extends Array<number> {\n  static made = 0;\n  static mk(): Counter { Counter.made++; return new Counter(); }\n}\nclass Sub extends Counter { }\nclass M2 extends Map<number, number[]> { }\nclass M3 extends M2 { static k = 3; }\nfunction main(): void {\n  console.log(Array.isArray(new Counter()), Counter.isArray([1]), Counter.isArray(new Counter()));\n  console.log(Sub.made, Sub.mk() instanceof Counter, Sub.mk() instanceof Sub);\n  const mg = M2.groupBy([1, 2, 3], (x: number) => x % 2);\n  console.log(mg.size, mg, M3.groupBy([1, 2, 3, 4], (x: number) => x % 3), M3.k, mg instanceof M2);\n  const f = Sub.from([1, 2, 3]);\n  console.log(f, f instanceof Sub, Sub.of(7, 8) instanceof Sub);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: iterable constructor calls overridden set/add",
+      "expect": "matched",
+      "source": "const LOG: string[] = [];\nconst SEEN: number[] = [];\nclass Reg extends Map<string, number> {\n  \n  set(k: string, v: number): this { LOG.push(k); return super.set(k, v * 2); }\n}\nclass Bag extends Set<number> {\n  \n  add(v: number): this { SEEN.push(v); return super.add(v + 100); }\n}\nclass Plain extends Map<string, number> {}\nclass PlainS extends Set<number> {}\nfunction main(): void {\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r, LOG);\n  const b = new Bag([1, 2, 2]);\n  console.log(b, SEEN);\n  const other = new Map<string, number>([[\"x\", 1]]);\n  const p = new Plain(other);\n  console.log(p, p.size, p instanceof Plain);\n  const ps = new PlainS(new Set([1, 2]));\n  console.log(ps, ps.size);\n  const p2 = new Plain(new Plain(other));\n  console.log(p2);\n  const ps2 = new PlainS([3, 4]);\n  console.log(ps2);\n  const pl = new Plain(r);\n  console.log(pl);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: override through user base and super",
+      "expect": "matched",
+      "source": "const LOG: string[] = [];\nclass Counter extends Map<string, number> {\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); }\n}\nclass Logged extends Counter {\n  set(k: string, v: number): this { LOG.push(k + \"=\" + v); return super.set(k, v + 1); }\n}\nclass Explicit extends Map<string, number> {\n  constructor(e?: [string, number][]) { super(e); }\n  set(k: string, v: number): this { LOG.push(\"E\" + k); return super.set(k, v); }\n}\nclass Tags extends Set<string> {\n  add(v: string): this { LOG.push(\"add \" + v); return super.add(v.toUpperCase()); }\n}\nclass SubTags extends Tags {}\nfunction main(): void {\n  const l = new Logged([[\"a\", 1], [\"b\", 2]]);\n  console.log(l, LOG);\n  const c: Logged = new Logged();\n  c.set(\"z\", 10);\n  c.inc(\"z\");\n  console.log(c, LOG.length);\n  const e = new Explicit([[\"q\", 1]]);\n  console.log(e, LOG.length);\n  const e2 = new Explicit();\n  console.log(e2.size);\n  const t = new SubTags([\"x\", \"y\", \"x\"]);\n  console.log(t, LOG.slice(-3));\n  const t2 = new Tags(new Set([\"m\"]));\n  console.log(t2);\n  const f = new Logged(new Map([[\"k\", 5]]));\n  console.log(f);\n}\n"
+    },
+    {
+      "name": "class extends Array/Map: identity with the native view",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> {}\nclass Reg extends Map<string, number> {}\nfunction takes(a: number[]): number { a.push(9); return a.length; }\nfunction main(): void {\n  const s = new Stack(); s.push(1);\n  const a: number[] = s;\n  console.log(a === s, a !== s, s === a);\n  console.log(takes(s), s.length, s);\n  const r = new Reg();\n  const m: Map<string, number> = r;\n  console.log(m === r, m !== r);\n  const t = new Stack();\n  console.log(a === t, s === s);\n}\n"
+    },
+    {
+      "name": "Map/Set instanceof Object",
+      "expect": "matched",
+      "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>([[\"a\", 1]]); const st = new Set<number>([1]);\n  console.log(m instanceof Object, st instanceof Object, [1] instanceof Object);\n}\n"
+    },
+    {
+      "name": "instanceof a generic user class",
+      "expect": "matched",
+      "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const l = new Child();\n  console.log(l instanceof Base, l instanceof Child);\n}\n"
+    },
+    {
+      "name": "Map/Set array destructuring",
+      "expect": "matched",
+      "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>([[\"a\", 1], [\"b\", 2]]);\n  const [first] = m;\n  console.log(first);\n  const st = new Set<number>([1, 2]);\n  const [x, y] = st;\n  console.log(x, y);\n}\n"
+    },
+    {
+      "name": "new Map(map) and new Set(set)",
+      "expect": "matched",
+      "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>([[\"a\", 1], [\"b\", 2]]);\n  const st = new Set<number>([1, 2]);\n  const c = new Map(m); c.set(\"z\", 3);\n  console.log(c, m.size, c.size);\n  const d = new Set(st); d.add(7);\n  console.log(d, st.size);\n}\n"
+    },
+    {
+      "name": "Map/Set truthiness",
+      "expect": "matched",
+      "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>(); const st = new Set<number>();\n  if (m) console.log(\"truthy map\");\n  if (st) console.log(\"truthy set\");\n  if (!m) console.log(\"bad\");\n  console.log(m ? \"y\" : \"n\", st ? 1 : 2, m && \"and\");\n  const arr: number[] = [];\n  if (arr) console.log(\"arr\");\n  console.log(!!m, !st, Boolean(m), m || \"or\");\n}\n"
     }
   ]
 }
