@@ -100,6 +100,11 @@ impl<'a> FnLowerer<'a> {
             );
             return self.lower_binding_pattern_impl(pattern, projected, &base, statements, immutable);
         }
+        if matches!(pattern, Pat::Array(_)) && matches!(ty, HirType::Map(..) | HirType::Set(_)) {
+            let entries = self.native_collection_entries(value)?;
+            let entries_type = self.infer_expr_type(&entries)?;
+            return self.lower_binding_pattern_impl(pattern, entries, &entries_type, statements, immutable);
+        }
         let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             self.bind_destructure_source_once(value, ty, statements)
         } else {
