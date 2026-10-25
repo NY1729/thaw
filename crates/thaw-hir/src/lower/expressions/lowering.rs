@@ -2238,6 +2238,47 @@ impl<'a> FnLowerer<'a> {
                         }
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
+                    // `x instanceof C` on an optional / nullable value: absent is never an instance;
+                    // a present one is tested through its payload.
+                    if let HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) = &value_type {
+                        if matches!(inner.as_ref(), HirType::Object(_) | HirType::Map(..) | HirType::Set(_) | HirType::Array(_)) {
+                            let inner = inner.as_ref().clone();
+                            let id = self.next_binding;
+                            self.next_binding += 1;
+                            let holder = format!("__thaw_instanceof_optional_{id}");
+                            let payload = format!("__thaw_instanceof_payload_{id}");
+                            self.scope.insert(holder.clone(), value_type.clone());
+                            self.scope.insert(payload.clone(), inner.clone());
+                            let held = Box::new(HirExpr::Var(holder.clone()));
+                            let (absent, unwrapped) = match &value_type {
+                                HirType::Optional(_) => (
+                                    HirExpr::OptionalIsNone(held.clone(), inner.clone()),
+                                    HirExpr::OptionalValue(held, inner.clone()),
+                                ),
+                                HirType::Nullable(_) => (
+                                    HirExpr::NullableIsNone(held.clone(), inner.clone()),
+                                    HirExpr::NullableValue(held, inner.clone()),
+                                ),
+                                _ => (
+                                    HirExpr::NullishIsNone(held.clone(), inner.clone()),
+                                    HirExpr::NullishValue(held, inner.clone()),
+                                ),
+                            };
+                            let mut payload_test = bin.clone();
+                            *payload_test.left = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(payload.as_str().into(), bin.span));
+                            let test = self.lower_expr(&Expr::Bin(payload_test))?;
+                            let present = HirExpr::Conditional(
+                                Box::new(absent),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                Box::new(test),
+                                HirType::Bool,
+                            );
+                            return self.wrap_call_argument_bindings(
+                                present,
+                                &[(holder, value_type, value), (payload, inner, unwrapped)],
+                            );
+                        }
+                    }
                     // Every native object, array and collection is an `Object`; primitives are not.
                     if class.sym == *"Object" && self.is_unshadowed_class_identifier("Object") {
                         if let Some(result) = native_object_instanceof(&value_type) {
@@ -2360,9 +2401,11 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .enumerate()
                             .filter_map(|(index, element)| {
-                                (if class.sym == *"Array" {
-                                    native_builtin_instanceof_static_match("Array", element)
-                                        .unwrap_or(false)
+                                let native_member = matches!(class.sym.as_ref(), "Array" | "Map" | "Set")
+                                    && native_builtin_instanceof_static_match(class.sym.as_ref(), element)
+                                        == Some(true);
+                                (if class.sym == *"Array" || native_member {
+                                    native_member
                                 } else {
                                     // The caught-exception carrier's `Object([])` member
                                     // has an unknown layout; its identity is a runtime query.
@@ -2393,7 +2436,10 @@ impl<'a> FnLowerer<'a> {
                                 // A marker-shaped union member may also be an ordinary
                                 // object with the same physical fields. Test its actual
                                 // ancestry only after the tag matches.
-                                let check = if class.sym == *"Array" {
+                                let native_member = matches!(class.sym.as_ref(), "Array" | "Map" | "Set")
+                                    && native_builtin_instanceof_static_match(class.sym.as_ref(), &elements[index])
+                                        == Some(true);
+                                let check = if class.sym == *"Array" || native_member {
                                     check
                                 } else {
                                     let projected = HirExpr::UnionValue(
