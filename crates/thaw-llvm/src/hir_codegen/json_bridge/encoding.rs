@@ -121,6 +121,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(result, 1, "call_dynamic_error")
             .map_err(|e| e.to_string())?
             .into_pointer_value();
+        // A thaw-js error string becomes the framed `Error` (name, message, code, properties) it was.
+        let error = if backend_symbol.starts_with("thaw_tjs_") {
+            self.compile_thaw_js_frame_error(error)?
+        } else {
+            error
+        };
         self.builder
             .build_call(
                 self.module.get_function("thaw_cstring_destroy").unwrap(),

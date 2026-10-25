@@ -690,7 +690,7 @@ impl Interp {
                 Ok(obj)
             });
             self.set_native(o, "defineProperty", |it, _, args| {
-                let key = it.to_str(&arg(args, 1));
+                let key = it.key_of(&arg(args, 1));
                 it.define_property(&arg(args, 0), &key, &arg(args, 2))?;
                 Ok(arg(args, 0))
             });
@@ -750,7 +750,7 @@ impl Interp {
                 Ok(it.array(found))
             });
             self.set_native(o, "getOwnPropertyDescriptor", |it, _, args| {
-                let key = it.to_str(&arg(args, 1));
+                let key = it.key_of(&arg(args, 1));
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(Value::Undefined);
                 };
@@ -828,7 +828,18 @@ impl Interp {
             }))
         });
         self.set_native(&op, "valueOf", |_, this, _| Ok(this.clone()));
-        self.set_native(&op, "toString", |_, this, _| {
+        self.set_native(&op, "toString", |it, this, _| {
+            // an own or inherited string `Symbol.toStringTag` names the object
+            if matches!(this, Value::Object(_)) {
+                let symbol = it
+                    .lookup(&it.global.clone(), "Symbol")
+                    .unwrap_or(Value::Undefined);
+                let tag = it.get(&symbol, "toStringTag")?;
+                let key = it.key_of(&tag);
+                if let Value::Str(tag) = it.get(this, &key)? {
+                    return Ok(Value::str(&format!("[object {tag}]")));
+                }
+            }
             Ok(Value::str(match this {
                 Value::Undefined => "[object Undefined]",
                 Value::Null => "[object Null]",
