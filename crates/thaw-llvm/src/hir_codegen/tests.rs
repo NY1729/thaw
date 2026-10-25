@@ -746,3 +746,4 @@ include!("tests/errobj_contracts.rs");
 include!("tests/mapsub_contracts.rs");
 include!("tests/arrsub_contracts.rs");
 include!("tests/bufview_contracts.rs");
+include!("tests/bugfix_contracts.rs");
