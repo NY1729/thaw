@@ -126,6 +126,11 @@ impl<'a> FnLowerer<'a> {
                 Some(value) => value,
                 None => self.lower_expr_with_expected_type(&argument.expr, expected_type)?,
             };
+            let value = if argument.spread.is_some() {
+                self.project_native_base(value)?
+            } else {
+                value
+            };
             if argument.spread.is_some() {
                 if let HirType::Tuple(elements) = self.infer_expr_type(&value)? {
                     argument_offset += elements.len();

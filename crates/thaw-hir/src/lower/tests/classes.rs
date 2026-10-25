@@ -2802,7 +2802,7 @@ fn rejects_native_collection_subclasses_without_type_arguments_or_unsupported_ba
         ("class C extends Map {} function main(): void { new C(); }", "needs explicit type arguments"),
         ("class C extends Set {} function main(): void { new C(); }", "needs explicit type arguments"),
         ("class C extends WeakMap<object, number> {} function main(): void { new C(); }", "extends unknown native class `WeakMap`"),
-        ("class C extends Array<number> {} function main(): void { new C(); }", "extends unknown native class `Array`"),
+        ("class C extends Promise<number> {} function main(): void { new C(); }", "extends unknown native class `Promise`"),
     ] {
         let module = thaw_parser::parse_typescript(source).unwrap();
         let error = lower_module(&module).unwrap_err();
@@ -2871,4 +2871,75 @@ fn map_subclass_instanceof_queries_the_allocation_identity() {
     let main = program.functions.iter().find(|f| f.name == "main").unwrap();
     let body = format!("{:?}", main.body);
     assert!(body.matches("__thaw_object_has_class_identity").count() >= 3, "{body}");
+}
+
+#[test]
+fn array_subclasses_wrap_a_hidden_native_array() {
+    let program = lower(
+        r#"class Stack extends Array<number> { label: string = "s"; }
+        class Wide extends Stack {}
+        class Q<T> extends Array<T> {}
+        function main(): void {
+            const s = new Stack();
+            const w = new Wide();
+            const q = new Q<string>();
+        }"#,
+    );
+    let stack = native_subclass_layout(&program, "Stack");
+    assert_eq!(stack[0].0, "__thaw_class_identity_\u{1e}Stack\u{1f}Array");
+    assert_eq!(
+        stack[1],
+        ("__thaw_base".to_string(), HirType::Array(Box::new(HirType::F64)))
+    );
+    assert_eq!(stack[2].0, "label");
+    let wide = native_subclass_layout(&program, "Wide");
+    assert_eq!(wide[0].0, "__thaw_class_identity_\u{1e}Wide\u{1f}Stack\u{1f}Array");
+    assert_eq!(wide[1], stack[1]);
+    let body = format!("{:?}", program.functions);
+    assert!(body.contains("__thaw_base\", Array(Str)"), "{body}");
+}
+
+#[test]
+fn array_subclass_without_type_arguments_is_rejected() {
+    let module = thaw_parser::parse_typescript(
+        "class C extends Array {} function main(): void { new C(); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("needs explicit type arguments"), "{error}");
+}
+
+#[test]
+fn array_subclass_implicit_constructor_takes_the_items_as_a_rest_array() {
+    let program = lower(
+        r#"class Stack extends Array<number> {}
+        function main(): void { new Stack(1, 2); new Stack(); }"#,
+    );
+    let initializer = program
+        .functions
+        .iter()
+        .find(|function| function.name == class_initializer_symbol("Stack"))
+        .unwrap();
+    let body = format!("{:?}", initializer.body);
+    assert!(body.contains("PropAssign") && body.contains("\"__thaw_base\""), "{body}");
+    assert_eq!(initializer.params.len(), 2, "{:?}", initializer.params);
+}
+
+#[test]
+fn array_subclass_members_project_to_the_wrapped_array() {
+    let program = lower(
+        r#"class Stack extends Array<number> {
+            top(): number { this.length = 1; return this[this.length - 1]; }
+        }
+        function total(xs: number[]): number { return xs.length; }
+        function main(): void {
+            const s = new Stack();
+            s.push(1);
+            total(s);
+            for (const x of s) { total([x]); }
+        }"#,
+    );
+    let body = format!("{:?}", program.functions);
+    assert!(body.contains("PropAccess"), "{body}");
+    assert!(body.contains("\"__thaw_base\""), "{body}");
 }

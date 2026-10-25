@@ -284,12 +284,102 @@ fn lower_class_constructor(
                 .super_initializer
                 .clone()
                 .expect("derived class has a base initializer");
-            if matches!(base_name.as_str(), "Map" | "Set")
+            if base_name == "Array" && !signatures.contains_key(&base_initializer) {
+                // `new Stack(a, b)`: the rest array of items is the wrapped array.
+                let items = params.first().ok_or("implicit Array constructor is missing its items")?;
+                let items_var = HirExpr::Var(items.name.clone());
+                let mut base = items_var.clone();
+                if let HirType::Array(element) = &items.ty {
+                    if **element == HirType::F64 {
+                        // `new Stack(3)` is an array of length 3 (holes), like `new Array(3)`.
+                        let length = lowerer.lower_array_length_read(items_var.clone(), &items.ty)?;
+                        let fresh = format!("{}_sized", items.name);
+                        lowerer.scope.insert(fresh.clone(), items.ty.clone());
+                        let sized = lowerer.wrap_call_argument_bindings(
+                            HirExpr::Block(vec![
+                                HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_resize".into())),
+                                    vec![
+                                        HirExpr::Var(fresh.clone()),
+                                        HirExpr::TypedIndex(
+                                            Box::new(items_var.clone()),
+                                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                            HirType::F64,
+                                        ),
+                                    ],
+                                )),
+                                HirStmt::Return(Some(HirExpr::Var(fresh.clone()))),
+                            ]),
+                            &[(
+                                fresh,
+                                items.ty.clone(),
+                                HirExpr::ArrayAlloc(
+                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                    HirType::F64,
+                                ),
+                            )],
+                        )?;
+                        base = HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(length),
+                                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                            )),
+                            Box::new(sized),
+                            Box::new(items_var),
+                            items.ty.clone(),
+                        );
+                    }
+                }
+                initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
+                    Box::new(HirExpr::Var(this_name.clone())),
+                    instance_type.clone(),
+                    NATIVE_BASE_FIELD.to_string(),
+                    Box::new(base),
+                )));
+                initializer_body.append(&mut own_initializers);
+            } else if matches!(base_name.as_str(), "Map" | "Set")
                 && !signatures.contains_key(&base_initializer)
             {
-                initializer_body.push(HirStmt::Expr(
-                    lowerer.lower_native_collection_super(&base_name, &[])?,
-                ));
+                let entries = params
+                    .first()
+                    .map(|parameter| match &parameter.ty {
+                        HirType::Optional(payload) => Ok((parameter.name.clone(), payload.as_ref().clone())),
+                        other => Err(format!("implicit native collection constructor argument has type {other:?}")),
+                    })
+                    .transpose()?;
+                match entries {
+                    None => initializer_body.push(HirStmt::Expr(
+                        lowerer.lower_native_collection_super(&base_name, &[])?,
+                    )),
+                    Some((name, payload)) => {
+                        // `new Sub()` builds an empty collection, `new Sub(entries)` fills it.
+                        let empty = lowerer.lower_native_collection_super(&base_name, &[])?;
+                        let bound = format!("{name}_entries");
+                        lowerer.scope.insert(bound.clone(), payload.clone());
+                        lowerer.bindings.entry(bound.clone()).or_default().push(bound.clone());
+                        let argument = swc_ecma_ast::ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                bound.as_str().into(),
+                                swc_common::DUMMY_SP,
+                            ))),
+                        };
+                        let filled = lowerer.lower_native_collection_super(&base_name, &[argument])?;
+                        initializer_body.push(HirStmt::If(
+                            HirExpr::OptionalIsNone(Box::new(HirExpr::Var(name.clone())), payload.clone()),
+                            vec![HirStmt::Expr(empty)],
+                            vec![
+                                HirStmt::Let(
+                                    bound,
+                                    payload.clone(),
+                                    HirExpr::OptionalValue(Box::new(HirExpr::Var(name)), payload),
+                                ),
+                                HirStmt::Expr(filled),
+                            ],
+                        ));
+                    }
+                }
                 initializer_body.append(&mut own_initializers);
             } else if is_error_family_name(&base_name) {
                 let message = params

@@ -2434,6 +2434,61 @@
       "name": "class extends Map/Set: map subclass conversions and aliasing",
       "expect": "matched",
       "source": "class Reg extends Map<string, number> {}\nclass Tags extends Set<string> {}\nfunction size(m: Map<string, number> | undefined): number { return m === undefined ? -1 : m.size; }\nfunction main(): void {\n  const r = new Reg(); r.set(\"a\", 1); r.set(\"b\", 2);\n  const t = new Tags(); t.add(\"x\");\n  console.log(Array.from(r).length, Array.from(t).join(\",\"), size(r), size(undefined));\n  console.log(new Set([...t]).size, new Set<string>([...t, \"y\"]).size);\n  const alias: Map<string, number> = r;\n  alias.set(\"c\", 3);\n  console.log(r.size, [...r.entries()].length, r.get(\"c\"));\n  const list: Reg[] = [r, new Reg()];\n  console.log(list.map((m) => m.size).join(\",\"));\n  const holder = { m: r };\n  console.log(holder.m.size, holder.m.has(\"a\"));\n  console.log(Object.keys(r), JSON.stringify({ r }));\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: toStringTag and own fields",
+      "expect": "matched",
+      "source": "class Counter extends Map<string, number> {\n  total = 0;\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); this.total++; }\n}\nclass Tags extends Set<string> { label = \"x\"; }\nclass Reg extends Map<string, number> {}\nclass Bag extends Set<number> {}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\");\n  console.log(String(c), Object.prototype.toString.call(c), `${c}`);\n  console.log(c);\n  const t = new Tags(); t.add(\"q\");\n  console.log(String(t), Object.prototype.toString.call(t));\n  console.log(t);\n  console.log(Object.keys(c), JSON.stringify(c), JSON.stringify(t));\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r.size, r);\n  const b = new Bag([1, 2, 2, 3]);\n  console.log(b.size, b);\n  console.log(c.total);\n}\n"
+    },
+    {
+      "name": "class extends Map/Set: ctor-less entries and statics",
+      "expect": "matched",
+      "source": "class Counter extends Map<string, number> {\n  static made = 0;\n  static make(): Counter { const c = new Counter(); c.set(\"z\", 1); Counter.made++; return c; }\n  static count = 5;\n}\nclass Tags extends Set<string> { static of2(a: string, b: string): Tags { const t = new Tags(); t.add(a); t.add(b); return t; } }\nclass Wide extends Counter { static make2(): Wide { return new Wide([[\"q\", 2]]); } }\nfunction main(): void {\n  console.log(Counter.make().size, Counter.count, Tags.of2(\"a\", \"b\").size, Counter.made);\n  console.log(Wide.make2().size, Wide.count, Wide.make().size);\n  const g = Map.groupBy([1, 2, 3], (x: number) => x % 2);\n  console.log(g.size);\n  const e = new Counter([[\"k\", 1]]);\n  console.log(e.size, e instanceof Map);\n  const s = new Tags([\"a\", \"b\", \"a\"]);\n  console.log(s.size, [...s].join(\"\"));\n  const none = new Tags();\n  console.log(none.size, none);\n  const e2 = new Counter(undefined);\n  console.log(e2.size);\n}\n"
+    },
+    {
+      "name": "class extends Array: basic",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  console.log(s.length, s.top(), s instanceof Array, s instanceof Stack, Array.isArray(s));\n  console.log(s);\n}\n"
+    },
+    {
+      "name": "class extends Array: override super and length",
+      "expect": "matched",
+      "source": "class Logged extends Array<number> {\n  pushed = 0;\n  push(...xs: number[]): number { this.pushed += xs.length; return super.push(...xs); }\n  last(): number | undefined { return this.at(-1); }\n}\nfunction main(): void {\n  const a = new Logged(); a.push(1, 2); a.push(3);\n  console.log(a.length, a.pushed, a.last(), a.indexOf(2), a.join(\"-\"));\n  a.length = 1; console.log(a.length, a[0], a[1]);\n  a[1] = 9; console.log(a.length);\n}\n"
+    },
+    {
+      "name": "class extends Array: iteration and coercion",
+      "expect": "matched",
+      "source": "class Bag extends Array<string> {}\nfunction addOne(xs: string[]): void { xs.push(\"z\"); }\nfunction main(): void {\n  const b = new Bag(); b.push(\"a\", \"b\");\n  for (const x of b) console.log(x);\n  const [h, ...rest] = b; console.log(h, rest);\n  console.log([...b, \"c\"], b.concat([\"q\"]).length, Array.from(b).length);\n  addOne(b); console.log(b.length, `${b}`, String(b));\n  console.log(JSON.stringify(b), Object.keys(b));\n}\n"
+    },
+    {
+      "name": "class extends Array: generic isArray and ctor items",
+      "expect": "matched",
+      "source": "class Q<T> extends Array<T> { second(): T | undefined { return this[1]; } }\nfunction kind(x: number[] | string): string { return Array.isArray(x) ? \"arr\" : \"str\"; }\nclass Num extends Array<number> {}\nfunction main(): void {\n  const q = new Q<string>(); q.push(\"a\", \"b\");\n  const n = new Num(); n.push(1);\n  console.log(q.second(), kind(n), kind(\"x\"), n instanceof Array);\n  const m = new Num(4, 5, 6);\n  console.log(m.length, m, Object.prototype.toString.call(m));\n}\n"
+    },
+    {
+      "name": "class extends Array: constructor rest and methods",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> {\n  label: string;\n  constructor(label: string, ...items: number[]) { super(...items); this.label = label; }\n  sum(): number { return this.reduce((a, b) => a + b, 0); }\n  peek(): number | undefined { return this[this.length - 1]; }\n  bump(i: number): void { this[i]++; this[i] += 10; }\n  clear(): void { this.length = 0; }\n}\nclass Wide extends Stack { extra = 1; double(): number[] { return Array.from(this.map((x) => x * 2)); } }\nfunction total(xs: number[]): number { let t = 0; for (const x of xs) t += x; return t; }\nfunction sumAll(...xs: number[]): number { return xs.length; }\nfunction main(): void {\n  const s = new Stack(\"s\", 1, 2, 3);\n  console.log(s.sum(), s.peek(), s.label, s.length);\n  s.bump(0); console.log(s[0], s);\n  console.log(total(s), sumAll(...s), Math.max(...s));\n  console.log(s.includes(2), s.indexOf(3), s.slice(1).length, s.filter((x) => x > 5).length);\n  console.log(s.join(\",\"), s.reverse().join(\",\"), s.sort((a, b) => a - b).join(\",\"));\n  const w = new Wide(\"w\", 4, 5);\n  console.log(w.double(), w.extra, w instanceof Stack, w instanceof Wide, w instanceof Array);\n  console.log(w);\n  s.clear(); console.log(s.length, s);\n  console.log(new Stack(\"n\").length);\n  s.push(7, 8);\n  console.log(s.pop(), s.shift(), s.length);\n  s.unshift(1, 2); s.splice(1, 1); console.log(s.join(\"|\"));\n  s.forEach((x, i) => console.log(i, x));\n  for (const [i, x] of s.entries()) console.log(i, x);\n  console.log(Array.from(s).length);\n  console.log(s.at(-1), s.find((x) => x === 1), s.some((x) => x > 1), s.every((x) => x > 0));\n  console.log(Array.isArray(w), typeof s, Object.prototype.toString.call(s), String(s));\n}\n"
+    },
+    {
+      "name": "class extends Array: statics and aliasing",
+      "expect": "matched",
+      "source": "class Vec extends Array<number> {\n  static zero(n: number): Vec { const v = new Vec(); for (let i = 0; i < n; i++) v.push(0); return v; }\n  static count = 3;\n  add(o: Vec): Vec { const r = new Vec(); for (let i = 0; i < this.length; i++) r.push(this[i] + o[i]); return r; }\n  get first(): number { return this[0]; }\n  self(): this { return this; }\n}\nfunction mk(): Vec { const v = new Vec(); v.push(5); return v; }\nfunction main(): void {\n  const a = Vec.zero(2); a[0] = 1; a[1] = 2;\n  const b = a.add(a);\n  console.log(b, b.first, Vec.count, a.self().length);\n  console.log(new Vec().push(9));\n  console.log(mk().length, mk()[0]);\n  const list: Vec[] = [a, b];\n  console.log(list.length, list[1].length, list.map((v) => v.length));\n  const arr: number[] = a;\n  arr.push(99);\n  console.log(a.length, a);\n  const o = { v: a };\n  console.log(o.v.length);\n  const j = structuredClone(a);\n  console.log(j instanceof Vec, j);\n  const empty = new Vec();\n  console.log(empty, empty.length);\n}\n"
+    },
+    {
+      "name": "class extends Array: nested promises and strings",
+      "expect": "matched",
+      "source": "class Matrix extends Array<number[]> {\n  rows(): number { return this.length; }\n  cell(r: number, c: number): number { return this[r][c]; }\n}\nclass Words extends Array<string> {\n  shout(): string[] { const out: string[] = []; for (const w of this) out.push(w.toUpperCase()); return out; }\n  copy(): string[] { return [...this]; }\n  addAll(xs: string[]): this { this.push(...xs); return this; }\n  firstTwo(): string { const [a, b] = this; return a + b; }\n}\nasync function later(n: number): Promise<number> { return n * 2; }\nclass Jobs extends Array<Promise<number>> {}\nasync function run(): Promise<void> {\n  const j = new Jobs(); j.push(later(1)); j.push(later(2));\n  console.log(await Promise.all(j));\n}\nfunction main(): void {\n  const m = new Matrix(); m.push([1, 2], [3, 4]);\n  console.log(m.rows(), m.cell(1, 0), m);\n  const w = new Words().addAll([\"b\", \"a\", \"c\"]);\n  console.log(w.shout(), w.copy(), w.firstTwo(), \"\" + w, `${w}`, w.toString());\n  console.log(w.sort(), w.keys().next().value, [...w.values()]);\n  console.log(JSON.stringify({ w }), JSON.stringify([w]));\n  console.log(w.length === 3 ? \"three\" : \"other\", w.indexOf(\"a\"), w.lastIndexOf(\"c\"));\n  const copy = w.slice();\n  console.log(copy.length);\n  run();\n}\n"
+    },
+    {
+      "name": "class extends Array: species console and json",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Tagged extends Array<string> { tag = \"t\"; }\nfunction main(): void {\n  const s = new Stack(); s.push(1, 2);\n  const t = new Tagged(); t.push(\"x\");\n  console.log({ s, t });\n  console.log([s, t]);\n  const o = { list: s, n: 1 };\n  console.log(o);\n  console.log(JSON.stringify(o), JSON.stringify(t));\n  const e = new Tagged();\n  console.log(e);\n  console.log(s.filter((x) => x > 1), s.map((x) => x + 1), s.slice(0, 1));\n  console.log(s.concat([3]), s.concat(s));\n  const arr: (number[] | null) = s;\n  console.log(arr?.length);\n  console.log(s.flat(), s.flatMap((x) => [x, x]));\n  console.log(s.splice(0, 1));\n  console.log(Stack.from([4, 5]));\n  console.log(Stack.of(6, 7));\n}\n"
+    },
+    {
+      "name": "class extends Array: ctor length semantics",
+      "expect": "matched",
+      "source": "class Grid extends Array<number> {}\nclass Names extends Array<string> {}\nclass Sized extends Array<number> {\n  constructor(n: number) { super(n); }\n}\nfunction main(): void {\n  const g = new Grid(3);\n  console.log(g.length, g);\n  const g2 = new Grid(1, 2);\n  console.log(g2.length, g2);\n  const g3 = new Grid(7, 8, 9);\n  console.log(g3);\n  const n = new Names(\"a\");\n  console.log(n.length, n);\n  const z = new Grid();\n  console.log(z.length);\n  const s = new Sized(4);\n  console.log(s.length, s);\n  s.fill(2);\n  console.log(s.join(\"\"));\n}\n"
     }
   ]
 }

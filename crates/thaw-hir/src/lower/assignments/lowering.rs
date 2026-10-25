@@ -1058,6 +1058,7 @@ impl<'a> FnLowerer<'a> {
         if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
             if member_property_name(&member.prop).as_deref() == Some("length") {
                 let array = self.lower_expr(&member.obj)?;
+                let array = self.project_native_base(array)?;
                 let array_type = self.infer_expr_type(&array)?;
                 if matches!(&array_type, HirType::Array(_))
                     || matches!(&array_type, HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))))
@@ -2034,6 +2035,14 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
     ) -> Result<(), String> {
+        if let (Pat::Array(_), Some(base)) = (pattern, native_base_type(ty).cloned()) {
+            let projected = HirExpr::PropAccess(
+                Box::new(value),
+                ty.clone(),
+                NATIVE_BASE_FIELD.to_string(),
+            );
+            return self.lower_assignment_pattern(pattern, projected, &base, statements);
+        }
         let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             self.bind_destructure_source_once(value, ty, statements)
         } else {
