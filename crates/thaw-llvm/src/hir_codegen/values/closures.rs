@@ -1472,6 +1472,22 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(closure.into())
     }
 
+    /// Registers the `console.log` label (`"<kind><name>"`) of the function `closure` points to.
+    fn compile_register_function_label(
+        &mut self,
+        closure: BasicValueEnum<'ctx>,
+        label: &str,
+    ) -> Result<(), String> {
+        let label = self.builder.build_global_string_ptr(label, "function_label")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_function_name_set").unwrap(),
+            &[closure.into(), label.as_pointer_value().into()],
+            "register_function_label",
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     fn compile_function_ref(
         &mut self,
         name: &str,
@@ -1718,5 +1734,21 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(this_slot, this_entry.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
         Ok(closure.into())
+    }
+}
+
+/// The source name behind a function value's compiler symbol (`__thawmod3_f`, `__thaw_class_K_method_m__thaw_unbound`).
+fn function_display_name(symbol: &str) -> String {
+    let mut name = symbol.strip_suffix("__thaw_unbound").unwrap_or(symbol);
+    if name.starts_with("__thaw_class_") {
+        if let Some(position) = name.rfind("_method_").map(|index| index + "_method_".len())
+            .or_else(|| name.rfind("_static_").map(|index| index + "_static_".len()))
+        {
+            name = &name[position..];
+        }
+    }
+    match name.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
+        Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => original.to_string(),
+        _ => name.to_string(),
     }
 }

@@ -399,9 +399,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_recursive_closure(name, ty, closure)
             }
             HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => self.compile_expr(closure),
-            HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
+            HirExpr::FunctionRef(name, params, ret) => {
+                let closure = self.compile_function_ref(name, params, ret)?;
+                self.compile_register_function_label(closure, &format!("f{}", function_display_name(name)))?;
+                Ok(closure)
+            }
             HirExpr::MethodRef(unbound, explicit, params, ret, is_static, receiver_class) => {
-                self.compile_method_ref(unbound, explicit, params, ret, *is_static, receiver_class.as_deref())
+                let closure = self.compile_method_ref(unbound, explicit, params, ret, *is_static, receiver_class.as_deref())?;
+                self.compile_register_function_label(closure, &format!("f{}", function_display_name(unbound)))?;
+                Ok(closure)
             }
             HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args)?.ok_or_else(|| {
                 format!(

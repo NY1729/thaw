@@ -31,10 +31,20 @@ impl<'a> FnLowerer<'a> {
         let previous = self.non_arrow_receiver.replace((receiver, "__thaw_this".into()));
         let lowered = match contextual {
             Some((params, ret)) => self.lower_contextual_arrow(&arrow, params, ret),
-            None => self.lower_arrow(&arrow),
+            None => self.lower_arrow_unnamed(&arrow),
         };
         self.non_arrow_receiver = previous;
-        lowered.map(|closure| HirExpr::NonArrowFunction(Box::new(closure)))
+        let lowered = lowered?;
+        let lowered = match split_named_function(&lowered) {
+            Some((inner, _)) => inner.clone(),
+            None => lowered,
+        };
+        let closure = HirExpr::NonArrowFunction(Box::new(lowered));
+        let name = function_expression_name(
+            expression.ident.as_ref().map(|ident| ident.sym.as_ref()),
+            expression.function.span,
+        );
+        Ok(name_function_value(closure, name, expression.function.is_async, expression.function.is_generator))
     }
 
     fn function_expression_receiver_type(
@@ -249,6 +259,11 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
+        let lowered = self.lower_arrow_unnamed(arrow)?;
+        Ok(name_function_value(lowered, function_expression_name(None, arrow.span), arrow.is_async, arrow.is_generator))
+    }
+
+    fn lower_arrow_unnamed(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
         let sparse_mapping_result = self.sparse_mapping_result;
         self.sparse_mapping_result = false;
         let receiver = self.non_arrow_receiver.take();
@@ -906,6 +921,19 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_contextual_arrow(
+        &mut self,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        parameter_types: &[HirType],
+        expected_return: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let lowered = self.lower_contextual_arrow_unnamed(arrow, parameter_types, expected_return)?;
+        if split_named_function(&lowered).is_some() {
+            return Ok(lowered);
+        }
+        Ok(name_function_value(lowered, function_expression_name(None, arrow.span), arrow.is_async, arrow.is_generator))
+    }
+
+    fn lower_contextual_arrow_unnamed(
         &mut self,
         arrow: &swc_ecma_ast::ArrowExpr,
         parameter_types: &[HirType],
@@ -1912,5 +1940,37 @@ mod mutation_detection_tests {
             "const callback = (draft: any) => { const nested = () => { draft.x++; }; nested(); };",
         );
         assert!(arrow_body_mutates("draft", &captured));
+    }
+}
+
+/// Registers the label `console.log` prints for a named function value (`[Function: name]`,
+/// `[AsyncFunction: name]`).
+fn name_function_value(closure: HirExpr, name: Option<String>, is_async: bool, is_generator: bool) -> HirExpr {
+    let kind = match (is_async, is_generator) {
+        (false, false) => 'f',
+        (true, false) => 'a',
+        (false, true) => 'g',
+        (true, true) => 'A',
+    };
+    // Anonymous functions need no label (an unregistered function prints `(anonymous)`); keeping
+    // them unwrapped also leaves callback lambdas visible to the builtins that take them.
+    if name.is_none() {
+        return closure;
+    }
+    HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_named_function".into())),
+        vec![closure, HirExpr::Lit(HirLit::Str(format!("{kind}{}", name.unwrap_or_default())))],
+    )
+}
+
+/// The closure inside a `__thaw_named_function` wrapper, and its label.
+fn split_named_function(expr: &HirExpr) -> Option<(&HirExpr, &str)> {
+    let HirExpr::Call(callee, args) = expr else { return None };
+    if !matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_named_function") {
+        return None;
+    }
+    match args.as_slice() {
+        [closure, HirExpr::Lit(HirLit::Str(label))] => Some((closure, label)),
+        _ => None,
     }
 }

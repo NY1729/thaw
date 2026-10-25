@@ -830,7 +830,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .then_some((index, object_array_index_key(name))))
             .collect::<Vec<_>>();
         indices.sort_by_key(|(index, numeric)| (numeric.is_none(), numeric.unwrap_or(*index as u32)));
-        for (index, _) in indices {
+        // A class that overrides abstract fields in another order creates them in its own order.
+        let named = names.iter().map(|name| (name.clone(), ())).collect::<Vec<_>>();
+        let indices = thaw_hir::reorder_class_fields_by_definition(
+            &named,
+            indices.into_iter().map(|(index, _)| index).collect(),
+        );
+        for index in indices {
             let key = self.compile_expr(&HirExpr::Lit(HirLit::Str(names[index].clone())))?
                 .into_pointer_value();
             self.builder.build_call(

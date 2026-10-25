@@ -86,6 +86,15 @@ impl<'a> FnLowerer<'a> {
                 let HirType::Object(fields) = base_type else {
                     return None;
                 };
+                if is_dynamic_read(member.span)
+                    && (is_uninit_class_field(&fields, field.sym.as_ref())
+                        || is_unset_number_field(&fields, field.sym.as_ref()))
+                {
+                    return Some(HirType::Json);
+                }
+                if is_observed_member(member.span) && is_unset_number_field(&fields, field.sym.as_ref()) {
+                    return Some(HirType::Optional(Box::new(HirType::F64)));
+                }
                 let found = fields
                     .iter()
                     .find(|(name, _)| name == field.sym.as_ref())

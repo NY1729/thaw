@@ -3034,3 +3034,86 @@ fn untyped_new_map_takes_type_arguments_from_the_annotation() {
     .unwrap();
     assert!(lower_module(&module).is_ok());
 }
+
+fn constructor_layout(program: &HirProgram, class: &str) -> Vec<(String, HirType)> {
+    let constructor = program
+        .functions
+        .iter()
+        .find(|function| function.name == format!("__thaw_class_{class}_constructor"))
+        .unwrap();
+    let HirType::Object(fields) = &constructor.ret else { panic!("class layout") };
+    fields.clone()
+}
+
+fn bare_field_type(source: &str, class: &str, field: &str) -> HirType {
+    let program = lower(source);
+    constructor_layout(&program, class)
+        .into_iter()
+        .find_map(|(name, ty)| (name == field).then_some(ty))
+        .unwrap()
+}
+
+#[test]
+fn keeps_bare_fields_raw_when_printing_cannot_reach_an_instance() {
+    let raw = HirType::F64;
+    let widened = HirType::Optional(Box::new(HirType::F64));
+    // Printing primitives (literals, arithmetic, typed numbers, string-returning calls) never
+    // exposes the field, so the layout keeps its raw `number`.
+    assert_eq!(
+        bare_field_type(
+            r#"class A { x: number; size(): number { return 1; } }
+            function main(): void {
+                const a = new A();
+                const n: number = 3;
+                console.log("hi", 1 + 2, n, a.size(), `${n}`, [1, 2], { k: 1 });
+            }"#,
+            "A",
+            "x",
+        ),
+        raw
+    );
+    // An instance can reach `console.log`.
+    assert_eq!(
+        bare_field_type(
+            r#"class A { x: number; }
+            function main(): void { const a = new A(); console.log(a); }"#,
+            "A",
+            "x",
+        ),
+        widened
+    );
+    // The field itself is read where `undefined` is observable.
+    assert_eq!(
+        bare_field_type(
+            r#"class A { x: number; }
+            function main(): void { const a = new A(); console.log(a.x); }"#,
+            "A",
+            "x",
+        ),
+        widened
+    );
+    // A class nothing instantiates cannot expose its fields.
+    assert_eq!(
+        bare_field_type(
+            r#"class A { x: number; }
+            class B { y: number; }
+            function main(): void { const b = new B(); console.log(b); }"#,
+            "A",
+            "x",
+        ),
+        raw
+    );
+}
+
+#[test]
+fn widens_inherited_bare_fields_through_an_instantiated_subclass() {
+    let program = lower(
+        r#"class Base { x: number; }
+        class Derived extends Base { y: number; }
+        function main(): void { console.log(new Derived()); }"#,
+    );
+    let widened = HirType::Optional(Box::new(HirType::F64));
+    let layout = constructor_layout(&program, "Derived");
+    assert!(layout.contains(&("x".to_string(), widened.clone())));
+    assert!(layout.contains(&("y".to_string(), widened)));
+}

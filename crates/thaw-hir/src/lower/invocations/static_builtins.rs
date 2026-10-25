@@ -5628,6 +5628,14 @@ impl<'a> FnLowerer<'a> {
                                 // intrinsic the fixed-arity form already
                                 // calls, via a runtime loop instead of a
                                 // compile-time-unrolled argument list.
+                    // Elements that may be `undefined` (sink reads) arrive as `Json`: number-convert them.
+                                let source = if matches!(self.infer_expr_type(&source)?, HirType::Json)
+                                    || self.infer_expr_type(&source)? == HirType::Array(Box::new(HirType::Json))
+                                {
+                                    self.coerce_to_declared(&HirType::Array(Box::new(HirType::F64)), source)?
+                                } else {
+                                    source
+                                };
                     if self.infer_expr_type(&source)? == HirType::Array(Box::new(HirType::F64))
                                     && !matches!(source, HirExpr::ArrayLit(_))
                                 {
