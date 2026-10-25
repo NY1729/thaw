@@ -226,6 +226,8 @@ pub struct State {
     pub classes: HashMap<(usize, String), ClassInfo>,
     /// classes we do not model (inheritance, `X.prototype = ...`, mixins, foreign constructors)
     pub complex: std::collections::HashSet<(usize, String)>,
+    /// why a class is not modelled (diagnostics only)
+    pub complex_why: HashMap<(usize, String), String>,
     /// constructor / instance method function -> its modelled class
     pub fn_class: HashMap<usize, (usize, String)>,
     /// child class -> parent class (`extends`, `util.inherits`, `X.prototype = Object.create(Y.prototype)`)
@@ -502,7 +504,7 @@ impl<'s> Pre<'s> {
         }
     }
 
-    fn mark_complex(&mut self, e: &a::Expr) {
+    fn mark_complex(&mut self, e: &a::Expr, why: &str) {
         let name = match strip(e) {
             a::Expr::Ident(i) => Some(i.sym.to_string()),
             a::Expr::Member(m) if matches!(&m.prop, a::MemberProp::Ident(q) if q.sym == "prototype") => {
@@ -514,6 +516,10 @@ impl<'s> Pre<'s> {
             _ => None,
         };
         if let Some(k) = name.and_then(|n| self.st.resolve(self.fid(), &n)) {
+            self.st
+                .complex_why
+                .entry(k.clone())
+                .or_insert(why.to_string());
             self.st.complex.insert(k);
         }
     }
@@ -749,9 +755,13 @@ impl<'s> Visit for Pre<'s> {
                         self.st.parents.insert(c, p);
                     }
                     (Some(c), None) => {
+                        self.st
+                            .complex_why
+                            .entry(c.clone())
+                            .or_insert("ext-foreign".into());
                         self.st.complex.insert(c);
                     }
-                    _ => self.mark_complex(sup),
+                    _ => self.mark_complex(sup, "ext-expr"),
                 }
             }
         }
@@ -982,7 +992,10 @@ impl<'s> Visit for Pre<'s> {
                             self.bump_proto(&pa);
                             self.st.parents.insert(ch, pa);
                         }
-                        _ => c.args.iter().for_each(|x| self.mark_complex(&x.expr)),
+                        _ => c
+                            .args
+                            .iter()
+                            .for_each(|x| self.mark_complex(&x.expr, "inherits-unres")),
                     }
                 } else if (cname.as_deref() == Some("create")
                     && !self.st.ok_creates.contains(&c.span.lo.0))
@@ -1000,8 +1013,15 @@ impl<'s> Visit for Pre<'s> {
                         )
                     )
                 {
-                    for x in &c.args {
-                        self.mark_complex(&x.expr);
+                    let why = format!("call:{}", cname.clone().unwrap_or_default());
+                    // `Object.defineProperty(F, "static", ...)` changes the constructor function,
+                    // not its instances
+                    let statics = cname.as_deref() == Some("defineProperty")
+                        && c.args.len() == 3
+                        && matches!(strip(&c.args[0].expr), a::Expr::Ident(_))
+                        && matches!(strip(&c.args[1].expr), a::Expr::Lit(a::Lit::Str(s)) if s.value.as_str() != Some("prototype"));
+                    for x in c.args.iter().filter(|_| !statics) {
+                        self.mark_complex(&x.expr, &why);
                     }
                 }
                 // `A.call(this, ...)`: super-constructor call, not an escape of `A`
@@ -1128,7 +1148,7 @@ impl<'s> Visit for Pre<'s> {
                             }
                         }
                         if !inherited {
-                            self.mark_complex(&m.obj);
+                            self.mark_complex(&m.obj, "proto-assign");
                         }
                     }
                     a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(bi)) => {
