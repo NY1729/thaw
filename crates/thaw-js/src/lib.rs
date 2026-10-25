@@ -48,6 +48,7 @@ pub const SUPPORTED_FEATURES: &[&str] = &[
     "async",
     "await",
     "tagged-template",
+    "static-block",
 ];
 
 const MAX_DEPTH: usize = 100;
@@ -1147,7 +1148,17 @@ impl Interp {
                 if !matches!(value, Value::Object(_) | Value::Str(_)) {
                     return self.throw_error("TypeError", "value is not iterable");
                 }
-                let Some(items) = self.iter_protocol(&value)? else {
+                // only as many values as the pattern names are pulled (all of them with a rest element)
+                let wanted = if ap
+                    .elems
+                    .iter()
+                    .any(|el| matches!(el, Some(a::Pat::Rest(_))))
+                {
+                    None
+                } else {
+                    Some(ap.elems.len())
+                };
+                let Some(items) = self.iter_protocol_limit(&value, wanted)? else {
                     return unsupported("iterator-protocol");
                 };
                 for (i, el) in ap.elems.iter().enumerate() {
@@ -1514,19 +1525,54 @@ impl Interp {
             }
             a::Stmt::ForOf(f) => {
                 let iterable = self.eval(&f.right, scope)?;
-                let Some(items) = self.iter_protocol(&iterable)? else {
+                if let Some(items) = self.iter_items(&iterable) {
+                    for item in items {
+                        let item = if f.is_await {
+                            self.await_value(item)?
+                        } else {
+                            item
+                        };
+                        let iter = Scope::new(Some(scope.clone()));
+                        self.bind_for_head(&f.left, item, &iter)?;
+                        if step(self.exec(&f.body, &iter))? {
+                            break;
+                        }
+                    }
+                    return Ok(());
+                }
+                // a user-defined iterable or a generator: pulled one value at a time, closed on early exit
+                let Some((iterator, next)) = self.get_iterator(&iterable)? else {
                     return unsupported("iterator-protocol");
                 };
-                for item in items {
+                loop {
+                    let result = self.call(&next, &iterator, &[])?;
+                    if !matches!(result, Value::Object(_)) {
+                        return self.throw_error("TypeError", "Iterator result is not an object");
+                    }
+                    if self.get(&result, "done")?.truthy() {
+                        break;
+                    }
+                    let item = self.get(&result, "value")?;
                     let item = if f.is_await {
                         self.await_value(item)?
                     } else {
                         item
                     };
                     let iter = Scope::new(Some(scope.clone()));
-                    self.bind_for_head(&f.left, item, &iter)?;
-                    if step(self.exec(&f.body, &iter))? {
-                        break;
+                    let outcome = match self.bind_for_head(&f.left, item, &iter) {
+                        Ok(()) => step(self.exec(&f.body, &iter)),
+                        Err(e) => Err(e),
+                    };
+                    match outcome {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            self.close_iterator(&iterator);
+                            break;
+                        }
+                        Err(e) => {
+                            self.close_iterator(&iterator);
+                            return Err(e);
+                        }
                     }
                 }
                 Ok(())
@@ -2154,7 +2200,7 @@ impl Interp {
                 Value::Bool(false)
             }
             B::In => {
-                let key = self.to_str(l);
+                let key = self.key_of(l);
                 let Value::Object(o) = r else {
                     return self
                         .throw_error("TypeError", "Cannot use 'in' operator on a non-object");
