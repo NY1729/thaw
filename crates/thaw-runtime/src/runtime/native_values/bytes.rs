@@ -306,6 +306,7 @@ pub unsafe extern "C" fn thaw_bytes_set_from_string(
             array.add(8 + index * 8).cast::<f64>().write_unaligned(f64::from(*byte));
         }
     }
+    unsafe { thaw_bytes_sync(array, 0.0, decoded.len() as f64) };
     unsafe {
         result.cast::<f64>().write_unaligned(read as f64);
         result.add(8).cast::<f64>().write_unaligned(decoded.len() as f64);
@@ -477,6 +478,7 @@ pub unsafe extern "C" fn thaw_bytes_write(
                 .write_unaligned(f64::from(byte));
         }
     }
+    unsafe { thaw_bytes_sync(buf, offset as f64, width as f64) };
     end as f64
 }
 
@@ -558,6 +560,7 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
                 .write_unaligned(f64::from(byte));
         }
     }
+    unsafe { thaw_bytes_sync(buf, offset as f64, 8.0) };
     end as f64
 }
 
@@ -609,6 +612,7 @@ pub unsafe extern "C" fn thaw_bytes_copy(
                 .write_unaligned(f64::from(src[source_start + index]));
         }
     }
+    unsafe { thaw_bytes_sync(target, target_start as f64, count as f64) };
     count as f64
 }
 
@@ -784,4 +788,177 @@ pub unsafe extern "C" fn thaw_bytes_alloc_fill(size: f64, pattern: *const u8) ->
         pattern.iter().copied().cycle().take(size).collect()
     };
     unsafe { write_byte_array(&bytes) }
+}
+
+// Shared `Buffer` views. A Buffer is a plain `[len][f64 slot...]` block that
+// cannot alias another block, so `subarray`/`slice` copy and then register the
+// copy here as an overlay of its parent. Every Bytes write path calls
+// `thaw_bytes_sync`, which eagerly copies the written slots into the other
+// members of the group, so all reads stay coherent without read hooks.
+// ponytail: at most BYTE_VIEW_LARGE_MAX large (>= BYTE_VIEW_SMALL_LEN slots)
+// members per group and BYTE_VIEW_LINK_MAX links per thread; past that a new
+// view is an unlinked copy. Writes made by code that does not call
+// `thaw_bytes_sync` (native readers filling a buffer, QuickJS typed arrays)
+// are not propagated. Real shared u8 storage would remove both limits.
+const BYTE_VIEW_SMALL_LEN: usize = 256;
+const BYTE_VIEW_LARGE_MAX: usize = 256;
+const BYTE_VIEW_LINK_MAX: usize = 1 << 17;
+
+#[derive(Clone, Copy)]
+struct ByteViewMember {
+    buffer: usize,
+    offset: usize,
+    len: usize,
+}
+
+#[derive(Default)]
+struct ByteViewGroup {
+    // Few and long: scanned on every sync.
+    large: Vec<ByteViewMember>,
+    // Many and short: sorted by offset, so a sync only visits the members that
+    // can overlap the written range (`max_small` bounds how far back to look).
+    small: Vec<ByteViewMember>,
+    max_small: usize,
+}
+
+#[derive(Default)]
+struct ByteViews {
+    group_of: std::collections::HashMap<usize, (usize, usize)>,
+    groups: Vec<ByteViewGroup>,
+    links: usize,
+}
+
+thread_local! {
+    static BYTE_VIEWS: RefCell<ByteViews> = RefCell::new(ByteViews::default());
+}
+
+fn reset_byte_views(_tracing: bool) {
+    // Members are bare buffer addresses; drop the whole table rather than
+    // risk a link to reused memory (a surviving view degrades to a copy).
+    BYTE_VIEWS.with(|views| *views.borrow_mut() = ByteViews::default());
+}
+
+impl ByteViewGroup {
+    fn add(&mut self, member: ByteViewMember) -> bool {
+        if member.len >= BYTE_VIEW_SMALL_LEN {
+            if self.large.len() >= BYTE_VIEW_LARGE_MAX {
+                return false;
+            }
+            self.large.push(member);
+        } else {
+            let at = self.small.partition_point(|other| other.offset <= member.offset);
+            self.small.insert(at, member);
+            self.max_small = self.max_small.max(member.len);
+        }
+        true
+    }
+}
+
+#[no_mangle]
+/// Registers `child` (a fresh copy of `parent[start..]`, same relative
+/// index rule as `thaw_array_slice`) as a view of `parent`.
+///
+/// # Safety
+///
+/// `parent` and `child` must be null or Thaw `f64`-slot arrays.
+pub unsafe extern "C" fn thaw_bytes_link(parent: *const u8, child: *const u8, start: f64) {
+    let (Some(parent_len), Some(child_len)) = (
+        unsafe { native_array_length(parent) },
+        unsafe { native_array_length(child) },
+    ) else {
+        return;
+    };
+    if child_len == 0 || parent == child {
+        return;
+    }
+    let start = relative_array_index(start, parent_len);
+    thaw_arena::register_metadata_reset_hook(reset_byte_views);
+    BYTE_VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        if views.links >= BYTE_VIEW_LINK_MAX {
+            return;
+        }
+        let (group, parent_offset) = match views.group_of.get(&(parent as usize)).copied() {
+            Some(found) => found,
+            None => {
+                let mut group = ByteViewGroup::default();
+                group.add(ByteViewMember { buffer: parent as usize, offset: 0, len: parent_len });
+                views.groups.push(group);
+                let group = views.groups.len() - 1;
+                views.group_of.insert(parent as usize, (group, 0));
+                (group, 0)
+            }
+        };
+        let offset = parent_offset + start;
+        if views.groups[group].add(ByteViewMember { buffer: child as usize, offset, len: child_len }) {
+            views.group_of.insert(child as usize, (group, offset));
+            views.links += 1;
+        }
+    });
+}
+
+#[no_mangle]
+/// Propagates the `count` slots of `buffer` starting at `start` into every
+/// other buffer that overlays the same bytes. A no-op for an unlinked buffer.
+///
+/// # Safety
+///
+/// `buffer` must be null or a Thaw `f64`-slot array.
+pub unsafe extern "C" fn thaw_bytes_sync(buffer: *mut u8, start: f64, count: f64) {
+    let Some(length) = (unsafe { native_array_length(buffer) }) else {
+        return;
+    };
+    let start = if start > 0.0 { (start as usize).min(length) } else { 0 };
+    let count = if count > 0.0 { (count as usize).min(length - start) } else { 0 };
+    if count == 0 {
+        return;
+    }
+    BYTE_VIEWS.with(|views| {
+        let views = views.borrow();
+        let Some(&(group, base)) = views.group_of.get(&(buffer as usize)) else {
+            return;
+        };
+        let group = &views.groups[group];
+        let (from, to) = (base + start, base + start + count);
+        let copy_into = |member: &ByteViewMember| {
+            if member.buffer == buffer as usize {
+                return;
+            }
+            let (low, high) = (from.max(member.offset), to.min(member.offset + member.len));
+            if low < high {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.add(8 + (low - base) * 8),
+                        (member.buffer as *mut u8).add(8 + (low - member.offset) * 8),
+                        (high - low) * 8,
+                    );
+                }
+            }
+        };
+        group.large.iter().for_each(copy_into);
+        let upto = group.small.partition_point(|member| member.offset < to);
+        for member in group.small[..upto].iter().rev() {
+            if member.offset + group.max_small <= from {
+                break;
+            }
+            copy_into(member);
+        }
+    });
+}
+
+#[no_mangle]
+/// `buf.byteOffset`: the position of `buffer` inside the buffer it was
+/// viewed from (0 for an owner).
+///
+/// # Safety
+///
+/// `buffer` must be null or a Thaw `f64`-slot array.
+pub unsafe extern "C" fn thaw_bytes_byte_offset(buffer: *const u8) -> f64 {
+    BYTE_VIEWS.with(|views| {
+        views
+            .borrow()
+            .group_of
+            .get(&(buffer as usize))
+            .map_or(0.0, |&(_, offset)| offset as f64)
+    })
 }
