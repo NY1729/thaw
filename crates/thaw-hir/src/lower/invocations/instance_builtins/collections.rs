@@ -86,10 +86,23 @@ impl<'a> FnLowerer<'a> {
                 let HirType::Object(fields) = base_type else {
                     return None;
                 };
-                fields
-                    .into_iter()
+                let found = fields
+                    .iter()
                     .find(|(name, _)| name == field.sym.as_ref())
-                    .map(|(_, ty)| ty)
+                    .map(|(_, ty)| ty.clone());
+                // A maybe-uninitialised field read outside an observing
+                // position is lowered leniently (`lenient_uninit_read`): its
+                // value has the declared type, not the widened `Optional`.
+                if is_uninit_class_field(&fields, field.sym.as_ref()) {
+                    match found {
+                        Some(HirType::Optional(payload)) if payload.as_ref() == &HirType::Json => return Some(*payload),
+                        _ if is_observed_member(member.span) => {}
+                        Some(HirType::Optional(payload)) => return Some(*payload),
+                        Some(HirType::Nullish(payload)) => return Some(HirType::Nullable(payload)),
+                        _ => {}
+                    }
+                }
+                found
             }
             // `map.set(k, v).set(k2, v2)`/`set.add(a).add(b)`: `set`/`add`
             // return the receiver itself for chaining, so a call to either

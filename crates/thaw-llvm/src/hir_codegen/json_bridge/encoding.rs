@@ -1036,6 +1036,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_native_collection_to_json(value.into_pointer_value(), field_type, preserve_undefined)?;
                     "thaw_json_object_set_json"
                 }
+                // `JSON.stringify` serialises a Map/Set field as `{}` (no own
+                // enumerable properties).
+                HirType::Map(..) | HirType::Set(_) => {
+                    value = self
+                        .builder
+                        .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "json_empty_collection")
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("thaw_json_object_new returned no value")?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::JsValue => {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
