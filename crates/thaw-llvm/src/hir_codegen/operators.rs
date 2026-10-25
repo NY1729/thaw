@@ -325,6 +325,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             ]))))
                         }
                         "JSON.stringify"
+                        | "__thaw_json_encode"
                         | "__thaw_json_stringify_number_space"
                         | "__thaw_json_stringify_string_space"
                         | "__thaw_json_stringify_keys"

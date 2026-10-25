@@ -477,6 +477,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_encode_public",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_callback_error",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -1833,6 +1838,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_error_cause",
             "thaw_error_code",
             "thaw_error_stack",
+            "thaw_error_stack_with_frames",
             "thaw_error_suppressed_error",
             "thaw_error_suppressed",
             "thaw_error_to_string",
@@ -1846,6 +1852,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_error_frame",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_stack_trace_limit",
+            self.context.f64_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_set_stack_trace_limit",
+            self.context.f64_type().fn_type(&[self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_capture_stack_trace",
+            self.context.f64_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -2413,6 +2434,13 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_json_has_wrapper_key",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_error_instance",
             self.context
                 .i8_type()
                 .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),

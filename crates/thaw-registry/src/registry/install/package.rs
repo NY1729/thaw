@@ -839,5 +839,7 @@ fn write_bundle(directory: &Path, source: &str) -> Result<(), String> {
         fs::remove_file(&legacy)
             .map_err(|error| format!("failed to remove `{}`: {error}", legacy.display()))?;
     }
+    // opt-in (THAW_JS_INFER=1): inferred signatures + annotated bundle next to the bundle
+    crate::infer::emit(directory, source);
     Ok(())
 }

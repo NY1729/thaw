@@ -552,10 +552,10 @@ fn build_with_native_mode_routed(
             static_class_setter_rewrites,
             factory_class_rewrites,
             fallback_function_overload_rewrites,
-            external_exports,
+            mut external_exports,
             external_namespace_aliases,
             external_nested_namespaces,
-            external_export_assignments,
+            mut external_export_assignments,
             external_module_indices,
             jit_fallback_reasons,
             runtime_features,
@@ -580,8 +580,28 @@ fn build_with_native_mode_routed(
         // package-qualified alias `generate_registry_shims` actually
         // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
         // (and no parse at all) when there were no collisions.
+        let (registry_shim, js_infer_aot) = if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
+            js_infer_patch_shim(registry_shim, registry_dir, &resolved_packages, &user_source)
+        } else {
+            (registry_shim, JsInferAot::default())
+        };
+        for (package, symbol, clone) in &js_infer_aot.symbol_moves {
+            // every export bound to the typed fallback symbol (`clamp` and `default`, ...) moves
+            if let Some(exports) = external_exports.get_mut(package) {
+                for target in exports.values_mut().filter(|t| *t == symbol) {
+                    *target = clone.clone();
+                }
+            }
+            for target in external_export_assignments.values_mut().filter(|t| *t == symbol) {
+                *target = clone.clone();
+            }
+        }
         let registry_shim_len = registry_shim.len();
         let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
+        if let Ok(path) = std::env::var("THAW_DUMP_SHIM") {
+            // debugging aid: the generated registry shim (TypeScript) of this build
+            let _ = std::fs::write(path, &shim_source);
+        }
         if let Some(directory) = assets {
             shim_source.push_str(&generate_asset_shim(directory)?);
         }
@@ -616,6 +636,8 @@ fn build_with_native_mode_routed(
             let _ = std::fs::write(format!("{path}.{}", if thaw_js_routing { "routed" } else { "plain" }), &shim_source);
         }
         #[allow(unused_mut)]
+        // functions that now run as AOT clones are no longer QuickJS fallbacks
+        let quickjs_reasons = js_infer_retain_reasons(quickjs_reasons, &js_infer_aot);
         let mut manifest = serde_json::json!({
             "packages": resolved_packages,
             // Registry fallback wrappers contain `callDynamic(...)` even when a
@@ -635,6 +657,10 @@ fn build_with_native_mode_routed(
         });
         if std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1") {
             manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
+        }
+        if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
+            manifest["js_infer"] = js_infer_entries(registry_dir, &resolved_packages, &user_source);
+            manifest["js_infer_aot"] = js_infer_aot_manifest(&js_infer_aot);
         }
         let constructor_package_qualifiers =
             package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));

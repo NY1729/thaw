@@ -63,6 +63,8 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+pub mod infer;
+
 include!("registry/resolution.rs");
 
 include!("registry/install.rs");
