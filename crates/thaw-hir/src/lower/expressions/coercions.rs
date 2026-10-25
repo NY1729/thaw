@@ -220,6 +220,10 @@ impl<'a> FnLowerer<'a> {
             | HirType::Tuple(_)
             | HirType::Object(_)
             | HirType::Dictionary(_)
+            | HirType::Map(..)
+            | HirType::Set(_)
+            | HirType::WeakMap(..)
+            | HirType::WeakSet(_)
             | HirType::Promise(_) => Ok(HirExpr::Lit(HirLit::Bool(true))),
             HirType::Function(_, _) | HirType::CallableFunction(..) => Ok(HirExpr::BinOp(
                 BinOp::EqEqEq,
@@ -334,6 +338,18 @@ impl<'a> FnLowerer<'a> {
         let mut lhs_type = self.infer_expr_type(&lhs)?;
         let mut rhs = rhs;
         let mut rhs_type = self.infer_expr_type(&rhs)?;
+        // A `Map`/`Set` is always truthy: `m || other` is `m` (never evaluating `other`),
+        // `m && other` is `other`.
+        if matches!(
+            lhs_type,
+            HirType::Map(..) | HirType::Set(_) | HirType::WeakMap(..) | HirType::WeakSet(_)
+        ) {
+            return Ok(if is_and {
+                HirExpr::EvalThen(Box::new(lhs), Box::new(rhs))
+            } else {
+                lhs
+            });
+        }
         // A caught value has no member-wise `Json` form; read it through the carrier adapter
         // first (`catch (e) { e && e.message }`).
         let carrier = crate::caught_exception_carrier_type();
@@ -1750,6 +1766,16 @@ impl<'a> FnLowerer<'a> {
                 );
                 return Ok(HirExpr::Conditional(Box::new(active), Box::new(identical), Box::new(general), HirType::Bool));
             }
+        }
+        // A `Map`/`Set`/`Array` subclass instance is the wrapped collection itself in JavaScript:
+        // `const a: number[] = stack; a === stack`.
+        if native_base_type(&lhs_type).is_some_and(|base| *base == rhs_type) {
+            let lhs = self.project_native_base(lhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
+        if native_base_type(&rhs_type).is_some_and(|base| *base == lhs_type) {
+            let rhs = self.project_native_base(rhs)?;
+            return self.lower_strict_equality(lhs, rhs);
         }
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
