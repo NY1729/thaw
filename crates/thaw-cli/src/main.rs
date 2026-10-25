@@ -8,6 +8,7 @@ mod module_graph;
 include!("compat.rs");
 include!("node_compat.rs");
 include!("completeness.rs");
+include!("js_infer_report.rs");
 
 const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--icu4c] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
@@ -673,6 +674,9 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
                 println!("thaw-js: package={package} eligible=false blockers={blockers}");
             }
         }
+    }
+    for line in js_infer_inspect_lines(&manifest) {
+        println!("{line}");
     }
     println!("napi: {}", manifest["napi"].as_bool().unwrap_or(false));
     Ok(())
