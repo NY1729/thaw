@@ -2238,6 +2238,18 @@ impl<'a> FnLowerer<'a> {
                         }
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
+                    // Every native object, array and collection is an `Object`; primitives are not.
+                    if class.sym == *"Object" && self.is_unshadowed_class_identifier("Object") {
+                        if let Some(result) = native_object_instanceof(&value_type) {
+                            let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), value_type.clone());
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Bool(result)),
+                                &[(name, value_type, value)],
+                            );
+                        }
+                    }
                     // `instanceof Uint8Array`/`instanceof Array` both need
                     // a *third* HirType -- `HirType::Bytes` (a real
                     // Buffer/Uint8Array) and `HirType::Array(F64)` (a
@@ -2342,6 +2354,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                     }
+                    let class_names = self.instanceof_class_names(class.sym.as_ref());
                     if let HirType::Union(elements) = &value_type {
                         let matching = elements
                             .iter()
@@ -2353,7 +2366,9 @@ impl<'a> FnLowerer<'a> {
                                 } else {
                                     // The caught-exception carrier's `Object([])` member
                                     // has an unknown layout; its identity is a runtime query.
-                                    class_type_has_identity(element, class.sym.as_ref())
+                                    class_names
+                                        .iter()
+                                        .any(|name| class_type_has_identity(element, name))
                                         || (extends_error_family
                                             && matches!(element, HirType::Object(fields) if fields.is_empty()))
                                 })
@@ -2552,9 +2567,9 @@ impl<'a> FnLowerer<'a> {
                     if !extends_error_family
                         && native_builtin_match.is_none()
                         && !native_collection_subclass
-                        && !self
-                            .signatures
-                            .contains_key(&class_constructor_symbol(class.sym.as_ref()))
+                        && !class_names.iter().any(|name| {
+                            self.signatures.contains_key(&class_constructor_symbol(name))
+                        })
                     {
                         return Err(format!(
                             "native `instanceof` right operand `{}` is not a known class",
@@ -2562,7 +2577,9 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let result = native_builtin_match.unwrap_or_else(|| {
-                        class_type_has_identity(&value_type, class.sym.as_ref())
+                        class_names
+                            .iter()
+                            .any(|name| class_type_has_identity(&value_type, name))
                     });
                     // The static type may name only the base (a subclass instance
                     // is passed as its base), so a class-identity value always asks
@@ -2576,13 +2593,22 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
-                        let query = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
-                            vec![
-                                HirExpr::Var(name.clone()),
-                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
-                            ],
-                        );
+                        // A generic class is one monomorphised class per instantiation.
+                        let mut query = None;
+                        for class_name in &class_names {
+                            let check = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                                vec![
+                                    HirExpr::Var(name.clone()),
+                                    HirExpr::Lit(HirLit::Str(class_name.clone())),
+                                ],
+                            );
+                            query = Some(match query {
+                                None => check,
+                                Some(previous) => self.lower_logical_expr(previous, check, false)?,
+                            });
+                        }
+                        let query = query.expect("an instanceof target names at least itself");
                         return self
                             .wrap_call_argument_bindings(query, &[(name, value_type, value)]);
                     }
@@ -4648,7 +4674,7 @@ impl<'a> FnLowerer<'a> {
                                 ));
                             };
                             let mut entries = self.lower_expr(&argument.expr)?;
-                            entries = self.project_native_base(entries)?;
+                            entries = self.native_collection_entries(entries)?;
                             let actual_type = self.infer_expr_type(&entries)?;
                             if !is_weak {
                                 if let HirType::Union(members) = &actual_type {
@@ -4886,7 +4912,7 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         let mut iterable = self.lower_expr(&argument.expr)?;
-                        iterable = self.project_native_base(iterable)?;
+                        iterable = self.native_collection_entries(iterable)?;
                         let actual_type = self.infer_expr_type(&iterable)?;
                         if !is_weak {
                             if let HirType::Union(members) = &actual_type {
@@ -6308,6 +6334,25 @@ pub(in crate::lower) fn split_type_assertion(expr: &Expr) -> Option<(&Expr, &TsT
 /// `Some(bool)` is a compile-time-constant answer -- `ty` already fully
 /// determines it, since none of the eight is ever ambiguous at its own
 /// native, non-`Json`/`JsValue` type.
+/// Whether a value of static type `ty` is an `Object` (every native object, array and
+/// collection) or a primitive; `None` when the static type cannot tell.
+fn native_object_instanceof(ty: &HirType) -> Option<bool> {
+    match ty {
+        HirType::Array(_)
+        | HirType::Tuple(_)
+        | HirType::Object(_)
+        | HirType::Dictionary(_)
+        | HirType::Map(..)
+        | HirType::Set(_)
+        | HirType::WeakMap(..)
+        | HirType::WeakSet(_)
+        | HirType::Bytes
+        | HirType::Promise(_) => Some(true),
+        HirType::Bool => Some(false),
+        _ => None,
+    }
+}
+
 fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<bool> {
     // A `Map`/`Set` subclass instance is an object: its identity chain decides.
     if native_base_type(ty).is_some() && matches!(class, "Map" | "Set" | "Array") {

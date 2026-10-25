@@ -249,6 +249,7 @@ impl<'a> FnLowerer<'a> {
         receiver_type: &HirType,
         property: &str,
         overrides: &[(Symbol, HirType)],
+        native_forward: bool,
     ) -> Result<HirExpr, String> {
         let class_name = class_name_from_type(receiver_type)
             .expect("virtual dispatch receivers are native classes")
@@ -282,13 +283,34 @@ impl<'a> FnLowerer<'a> {
                 Some(class),
             )
         };
-        let mut result = build_call(self, &class_name, &receiver_name)?;
+        // `native_forward`: the receiver's class does not define the method; the base
+        // behaviour is the wrapped `Map`/`Set`/`Array` method.
+        let mut result = if native_forward {
+            let receiver_ident = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                receiver_name.as_str().into(),
+                call.span,
+            ));
+            let mut forwarded = call.clone();
+            if let Callee::Expr(callee) = &mut forwarded.callee {
+                if let Expr::Member(forwarded_member) = callee.as_mut() {
+                    *forwarded_member.obj = native_base_member(receiver_ident.clone());
+                }
+            }
+            self.lower_native_base_forward(&forwarded, property, &receiver_ident)?
+        } else {
+            build_call(self, &class_name, &receiver_name)?
+        };
         let result_type = self.infer_expr_type(&result)?;
         for (derived, derived_type) in overrides {
             let derived_name = format!("__thaw_virtual_receiver_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(derived_name.clone(), derived_type.clone());
             let invoked = build_call(self, derived, &derived_name)?;
+            let invoked = if self.infer_expr_type(&invoked)? == result_type {
+                invoked
+            } else {
+                HirExpr::TypedClosure(result_type.clone(), Box::new(invoked))
+            };
             let invoked = self.wrap_call_argument_bindings(
                 invoked,
                 &[(
@@ -442,6 +464,15 @@ impl<'a> FnLowerer<'a> {
                 self.lower_array_constructor(args, self.native_base_type_args.clone().as_deref(), None)?
             };
             self.coerce_to_declared(&array_type, value)?
+        } else if let (Some(argument), true) = (
+            args.first(),
+            args.len() == 1
+                && args[0].spread.is_none()
+                && self.native_super_dispatches_overrides(base_name, &this_type),
+        ) {
+            // `new Map(iterable)` calls `this.set(key, value)` per entry (`add` for a `Set`),
+            // so an overriding subclass sees every entry.
+            return self.lower_native_collection_super_by_method(base_name, argument);
         } else {
             let construct = Expr::New(swc_ecma_ast::NewExpr {
                 span: swc_common::DUMMY_SP,
@@ -463,6 +494,162 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// Whether `set` (`Map`) / `add` (`Set`) is defined by a user class that can be the dynamic
+    /// class of an instance built from `this_type`: its own or an inherited class, or a subclass.
+    fn native_super_dispatches_overrides(&self, base_name: &str, this_type: &HirType) -> bool {
+        let method = if base_name == "Map" { "set" } else { "add" };
+        let defines = |class: &str| {
+            self.signatures
+                .get(&class_method_symbol(class, method))
+                .is_some_and(|own| own.accessor_owner.as_deref() == Some(class))
+        };
+        let Some(class) = class_name_from_type(this_type) else {
+            return false;
+        };
+        let chain = match this_type {
+            HirType::Object(fields) => fields
+                .first()
+                .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+                .map(|chain| chain.split('\u{1f}').collect::<Vec<_>>())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        chain.into_iter().any(defines)
+            || self
+                .native_subclasses(class)
+                .iter()
+                .any(|(name, _)| defines(name))
+    }
+
+    /// `super(iterable)` of a `Map`/`Set` subclass overriding `set`/`add`: an empty collection,
+    /// then one call of the (dynamically dispatched) method per entry.
+    fn lower_native_collection_super_by_method(
+        &mut self,
+        base_name: &str,
+        argument: &swc_ecma_ast::ExprOrSpread,
+    ) -> Result<HirExpr, String> {
+        let this_name = self.resolve_binding("this");
+        let empty = self.lower_native_collection_super(base_name, &[])?;
+        let source = self.lower_expr(&argument.expr)?;
+        let source = self.native_collection_entries(source)?;
+        let source_type = self.infer_expr_type(&source)?;
+        let ident = |name: &str| {
+            Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), swc_common::DUMMY_SP))
+        };
+        let declare = |this: &mut Self, name: &str, ty: &HirType| {
+            this.scope.insert(name.to_string(), ty.clone());
+            this.bindings.entry(name.to_string()).or_default().push(name.to_string());
+        };
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let source_name = format!("__thaw_super_source_{id}");
+        let (payload_name, payload_type, absent) = match &source_type {
+            HirType::Optional(payload) => (
+                format!("__thaw_super_entries_{id}"),
+                payload.as_ref().clone(),
+                Some(HirExpr::OptionalIsNone(
+                    Box::new(HirExpr::Var(source_name.clone())),
+                    payload.as_ref().clone(),
+                )),
+            ),
+            other => (source_name.clone(), other.clone(), None),
+        };
+        declare(self, &source_name, &source_type);
+        if absent.is_some() {
+            declare(self, &payload_name, &payload_type);
+        }
+        let call_method = |method: &str, arguments: Vec<Expr>| {
+            Stmt::Expr(swc_ecma_ast::ExprStmt {
+                span: swc_common::DUMMY_SP,
+                expr: Box::new(Expr::Call(CallExpr {
+                    span: swc_common::DUMMY_SP,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span: swc_common::DUMMY_SP,
+                        obj: Box::new(Expr::This(swc_ecma_ast::ThisExpr {
+                            span: swc_common::DUMMY_SP,
+                        })),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                            method.into(),
+                            swc_common::DUMMY_SP,
+                        )),
+                    }))),
+                    args: arguments
+                        .into_iter()
+                        .map(|expr| swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(expr) })
+                        .collect(),
+                    type_args: None,
+                })),
+            })
+        };
+        let entry = format!("__thaw_super_entry_{id}");
+        let index = |position: f64| {
+            Expr::Member(MemberExpr {
+                span: swc_common::DUMMY_SP,
+                obj: Box::new(ident(&entry)),
+                prop: MemberProp::Computed(swc_ecma_ast::ComputedPropName {
+                    span: swc_common::DUMMY_SP,
+                    expr: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number {
+                        span: swc_common::DUMMY_SP,
+                        value: position,
+                        raw: None,
+                    }))),
+                }),
+            })
+        };
+        let body = if base_name == "Map" {
+            call_method("set", vec![index(0.0), index(1.0)])
+        } else {
+            call_method("add", vec![ident(&entry)])
+        };
+        let looped = Stmt::ForOf(swc_ecma_ast::ForOfStmt {
+            span: swc_common::DUMMY_SP,
+            is_await: false,
+            left: swc_ecma_ast::ForHead::VarDecl(Box::new(swc_ecma_ast::VarDecl {
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                kind: swc_ecma_ast::VarDeclKind::Const,
+                declare: false,
+                decls: vec![swc_ecma_ast::VarDeclarator {
+                    span: swc_common::DUMMY_SP,
+                    name: Pat::Ident(swc_ecma_ast::BindingIdent {
+                        id: swc_ecma_ast::Ident::new_no_ctxt(entry.as_str().into(), swc_common::DUMMY_SP),
+                        type_ann: None,
+                    }),
+                    init: None,
+                    definite: false,
+                }],
+            })),
+            right: Box::new(ident(&payload_name)),
+            body: Box::new(Stmt::Block(swc_ecma_ast::BlockStmt {
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                stmts: vec![body],
+            })),
+        });
+        let iteration = self.lower_stmt_seq(&looped)?;
+        let mut statements = vec![
+            HirStmt::Expr(empty),
+            HirStmt::Let(source_name.clone(), source_type.clone(), source),
+        ];
+        match absent {
+            Some(absent) => statements.push(HirStmt::If(
+                absent,
+                Vec::new(),
+                std::iter::once(HirStmt::Let(
+                    payload_name,
+                    payload_type.clone(),
+                    HirExpr::OptionalValue(Box::new(HirExpr::Var(source_name)), payload_type),
+                ))
+                .chain(iteration)
+                .collect(),
+            )),
+            None => statements.extend(iteration),
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::Var(this_name))));
+        Ok(HirExpr::Block(statements))
+    }
+
     /// A `Map`/`Set` subclass instance used where the native collection is
     /// consumed (spread, `for...of`, conversions): its wrapped collection.
     fn project_native_base(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -477,15 +664,93 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
-    /// `Symbol.species`: `stack.filter(..)` of an `extends Array` class is another instance of
-    /// that class. Done when the result keeps the wrapped array type and the class can be
-    /// built without arguments (implicit or zero-parameter constructor); otherwise the plain
-    /// array is returned.
-    fn wrap_native_species(&mut self, class_type: &HirType, result: HirExpr) -> Result<HirExpr, String> {
+    /// Whether `expr` is a call chain (`stack.filter(..)`, `Stack.from(..)`, ...) rooted at an
+    /// `extends Array` class whose methods yield instances of that class.
+    fn is_array_subclass_chain(&self, expr: &Expr) -> bool {
+        let Expr::Call(call) = peel_parens(expr) else {
+            return false;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return false;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return false;
+        };
+        let Some(method) = member_property_name(&member.prop) else {
+            return false;
+        };
+        let array_class = |ty: &HirType| matches!(native_base_type(ty), Some(HirType::Array(_)));
+        if let Expr::Ident(class) = member.obj.as_ref() {
+            if matches!(method.as_str(), "from" | "of") {
+                return self.interfaces.get(class.sym.as_ref()).is_some_and(array_class);
+            }
+        }
+        if !matches!(
+            method.as_str(),
+            "map" | "filter" | "slice" | "splice" | "concat" | "flat" | "flatMap" | "sort" | "reverse" | "fill" | "copyWithin"
+        ) {
+            return false;
+        }
+        match self.infer_member_receiver_type(&member.obj) {
+            Some(ty) => array_class(&ty),
+            None => self.is_array_subclass_chain(&member.obj),
+        }
+    }
+
+    /// The class names an `instanceof C` target stands for: `C` itself plus, for a generic
+    /// class, every instantiation it was monomorphised into (`C__thaw_f64`, ...).
+    pub(in crate::lower) fn instanceof_class_names(&self, class: &str) -> Vec<String> {
+        let prefix = format!("{class}__thaw_");
+        let mut names = vec![class.to_string()];
+        let mut instances = self
+            .interfaces
+            .keys()
+            .filter(|name| name.starts_with(&prefix))
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        instances.sort();
+        names.extend(instances);
+        names
+    }
+
+    /// A `Map`/`Set` consumed as an iterable (`new Map(other)`, `const [first] = set`):
+    /// the snapshot array of its entries / values, as `[...collection]` builds it.
+    pub(in crate::lower) fn native_collection_entries(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let value = self.project_native_base(value)?;
+        let (intrinsic, array_type) = match self.infer_expr_type(&value)? {
+            HirType::Map(key, element) => (
+                "__thaw_map_snapshot_entries",
+                HirType::Array(Box::new(HirType::Tuple(vec![*key, *element]))),
+            ),
+            HirType::Set(element) => ("__thaw_map_snapshot_keys", HirType::Array(element)),
+            _ => return Ok(value),
+        };
+        Ok(HirExpr::TypedClosure(
+            array_type,
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var(intrinsic.into())), vec![value])),
+        ))
+    }
+
+    /// `Symbol.species`: `stack.map(..)`, `filter`, `slice`, `splice`, `concat`, `flat`,
+    /// `flatMap` (and `Stack.from`/`of`) of an `extends Array` class give another instance
+    /// of that class, built by its constructor with the length Node passes
+    /// (`new this.constructor(length)`). Representable when the class can be built from no
+    /// arguments, from its rest items, or from one numeric argument. A result whose element
+    /// type differs from the wrapped array's (`Stack<number>.map(x => "s")`) is the same
+    /// class record retyped to carry the new element type; other constructors keep the
+    /// plain array.
+    fn wrap_native_species(
+        &mut self,
+        class_type: &HirType,
+        result: HirExpr,
+        method: &str,
+    ) -> Result<HirExpr, String> {
         let Some(base @ HirType::Array(_)) = native_base_type(class_type) else {
             return Ok(result);
         };
-        if self.infer_expr_type(&result)? != *base {
+        let base = base.clone();
+        let result_type = self.infer_expr_type(&result)?;
+        if !matches!(result_type, HirType::Array(_)) {
             return Ok(result);
         }
         let Some(class) = class_name_from_type(class_type) else {
@@ -495,18 +760,57 @@ impl<'a> FnLowerer<'a> {
         let Some(signature) = self.signatures.get(&constructor) else {
             return Ok(result);
         };
-        let arguments = match signature.params.as_slice() {
+        let params = signature.params.clone();
+        let has_rest = signature.native_rest.is_some();
+        let numeric = |ty: &HirType| match ty {
+            HirType::F64 | HirType::Json => true,
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                matches!(inner.as_ref(), HirType::F64)
+            }
+            HirType::Union(members) => members.contains(&HirType::F64),
+            _ => false,
+        };
+        let result_name = format!("__thaw_species_items_{}", self.next_binding);
+        self.next_binding += 1;
+        let arguments = match params.as_slice() {
             [] => Vec::new(),
-            [HirType::Array(items)] if signature.native_rest.is_some() => vec![HirExpr::ArrayAlloc(
+            [HirType::Array(items)] if has_rest => vec![HirExpr::ArrayAlloc(
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                 items.as_ref().clone(),
             )],
+            [length, rest @ ..]
+                if numeric(length) && rest.iter().all(|param| matches!(param, HirType::Optional(_))) =>
+            {
+                let count = if matches!(method, "map" | "slice" | "splice" | "of" | "from") {
+                    HirExpr::ArrayLen(Box::new(HirExpr::Var(result_name.clone())))
+                } else {
+                    HirExpr::Lit(HirLit::F64(0.0))
+                };
+                let mut arguments = vec![self.coerce_to_declared(length, count)?];
+                for param in rest {
+                    let HirType::Optional(payload) = param else { unreachable!() };
+                    arguments.push(HirExpr::OptionalNone(payload.as_ref().clone()));
+                }
+                arguments
+            }
             _ => return Ok(result),
+        };
+        let target_type = if result_type == base {
+            class_type.clone()
+        } else {
+            let HirType::Object(fields) = class_type else {
+                return Ok(result);
+            };
+            let mut fields = fields.clone();
+            fields[1].1 = result_type.clone();
+            HirType::Object(fields)
         };
         let name = format!("__thaw_species_{}", self.next_binding);
         self.next_binding += 1;
+        self.scope.insert(result_name.clone(), result_type.clone());
         self.scope.insert(name.clone(), class_type.clone());
         Ok(HirExpr::Block(vec![
+            HirStmt::Let(result_name.clone(), result_type, result),
             HirStmt::Let(
                 name.clone(),
                 class_type.clone(),
@@ -516,9 +820,12 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var(name.clone())),
                 class_type.clone(),
                 NATIVE_BASE_FIELD.to_string(),
-                Box::new(result),
+                Box::new(HirExpr::TypedClosure(base, Box::new(HirExpr::Var(result_name)))),
             )),
-            HirStmt::Return(Some(HirExpr::Var(name))),
+            HirStmt::Return(Some(HirExpr::TypedClosure(
+                target_type,
+                Box::new(HirExpr::Var(name)),
+            ))),
         ]))
     }
 
@@ -533,7 +840,7 @@ impl<'a> FnLowerer<'a> {
         let result = self.lower_call(forwarded)?;
         if matches!(method, "map" | "filter" | "slice" | "splice" | "concat" | "flat" | "flatMap") {
             if let Some(receiver_type) = self.infer_member_receiver_type(receiver) {
-                return self.wrap_native_species(&receiver_type, result);
+                return self.wrap_native_species(&receiver_type, result, method);
             }
         }
         if matches!(method, "set" | "add" | "sort" | "reverse" | "fill" | "copyWithin")
@@ -635,36 +942,45 @@ impl<'a> FnLowerer<'a> {
         ) {
             return Err("typed-wrapper JSON ownership marker is compiler-private".into());
         }
-        // `Stack.from(..)` / `Stack.of(..)`: statics inherited from `Array`, producing an instance
-        // of the class (see `wrap_native_species`).
+        // `Stack.from(..)` / `Stack.of(..)` / `Stack.isArray(..)` / `Counter.groupBy(..)`: statics
+        // inherited from `Array` / `Map` (through any number of subclasses). `from`/`of` produce
+        // an instance of the class (see `wrap_native_species`); `Map.groupBy` is a plain `Map`.
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = callee.as_ref() {
                 if let (Expr::Ident(class), MemberProp::Ident(property)) =
                     (member.obj.as_ref(), &member.prop)
                 {
                     let class_type = self.interfaces.get(class.sym.as_ref()).cloned();
-                    if matches!(property.sym.as_ref(), "from" | "of")
-                        && class_type
-                            .as_ref()
-                            .is_some_and(|ty| matches!(native_base_type(ty), Some(HirType::Array(_))))
-                        && !self.signatures.contains_key(&class_static_method_symbol(
-                            class.sym.as_ref(),
-                            property.sym.as_ref(),
-                        ))
-                    {
+                    let builtin = match (
+                        class_type.as_ref().and_then(native_base_type),
+                        property.sym.as_ref(),
+                    ) {
+                        (Some(HirType::Array(_)), "from" | "of" | "isArray") => Some("Array"),
+                        (Some(HirType::Map(..)), "groupBy") => Some("Map"),
+                        _ => None,
+                    };
+                    if let Some(builtin) = builtin.filter(|_| {
+                        self.is_unshadowed_class_identifier(class.sym.as_ref())
+                            && !self.signatures.contains_key(&class_static_method_symbol(
+                                class.sym.as_ref(),
+                                property.sym.as_ref(),
+                            ))
+                    }) {
                         let mut forwarded = call.clone();
                         if let Callee::Expr(callee) = &mut forwarded.callee {
                             if let Expr::Member(forwarded_member) = callee.as_mut() {
                                 *forwarded_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
-                                    "Array".into(),
+                                    builtin.into(),
                                     class.span,
                                 ));
                             }
                         }
                         let result = self.lower_call(&forwarded)?;
                         return match class_type {
-                            Some(class_type) => self.wrap_native_species(&class_type, result),
-                            None => Ok(result),
+                            Some(class_type) if matches!(property.sym.as_ref(), "from" | "of") => {
+                                self.wrap_native_species(&class_type, result, property.sym.as_ref())
+                            }
+                            _ => Ok(result),
                         };
                     }
                 }
@@ -817,10 +1133,7 @@ impl<'a> FnLowerer<'a> {
                 };
                 // `super.set(...)` in a class extending `Map`/`Set`: call the
                 // method on the wrapped native collection.
-                if !self.class_static_context
-                    && matches!(base_name.as_str(), "Map" | "Set" | "Array")
-                    && !self.signatures.contains_key(&symbol)
-                {
+                if !self.class_static_context && !self.signatures.contains_key(&symbol) {
                     let this = self.resolve_binding("this");
                     if self.scope.get(&this).and_then(native_base_type).is_some() {
                         let mut forwarded = call.clone();
@@ -1135,6 +1448,28 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 let receiver_type = self.infer_member_receiver_type(&member.obj);
+                // `stack.filter(..).map(..)`: the receiver is another species result; bind it so
+                // the call sees its class (and wraps its own result in turn).
+                if receiver_type.is_none() && self.is_array_subclass_chain(&member.obj) {
+                    let chained = self.lower_expr(&member.obj)?;
+                    let chained_type = self.infer_expr_type(&chained)?;
+                    if native_base_type(&chained_type).is_some() {
+                        let name = format!("__thaw_chain_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), chained_type.clone());
+                        let mut rewritten = call.clone();
+                        if let Callee::Expr(callee) = &mut rewritten.callee {
+                            if let Expr::Member(rewritten_member) = callee.as_mut() {
+                                *rewritten_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                    name.as_str().into(),
+                                    call.span,
+                                ));
+                            }
+                        }
+                        let result = self.lower_call(&rewritten)?;
+                        return self.wrap_call_argument_bindings(result, &[(name, chained_type, chained)]);
+                    }
+                }
                 if let Some(class_receiver_type) = receiver_type.clone().filter(|ty| {
                     class_name_from_type(ty).is_some()
                         && !Self::class_receiver_has_own_field(ty, &property)
@@ -1156,6 +1491,7 @@ impl<'a> FnLowerer<'a> {
                                 &class_receiver_type,
                                 &property,
                                 &overrides,
+                                false,
                             );
                         }
                         let mut args = Vec::with_capacity(call.args.len() + 1);
@@ -1180,6 +1516,27 @@ impl<'a> FnLowerer<'a> {
                     // A class extending `Map`/`Set` forwards every method it does
                     // not define itself to the wrapped native collection.
                     if native_base_type(&class_receiver_type).is_some() {
+                        // A subclass that defines the method itself overrides it for
+                        // instances reaching here through the base type.
+                        let overrides = self
+                            .native_subclasses(class_name)
+                            .into_iter()
+                            .filter(|(name, _)| {
+                                self.signatures
+                                    .get(&class_method_symbol(name, &property))
+                                    .is_some_and(|own| own.accessor_owner.as_deref() == Some(name.as_str()))
+                            })
+                            .collect::<Vec<_>>();
+                        if !overrides.is_empty() && !self.class_static_context {
+                            return self.lower_virtual_class_method_call(
+                                call,
+                                member,
+                                &class_receiver_type,
+                                &property,
+                                &overrides,
+                                true,
+                            );
+                        }
                         let mut forwarded = call.clone();
                         let receiver = (*member.obj).clone();
                         if let Callee::Expr(callee) = &mut forwarded.callee {

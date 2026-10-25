@@ -641,6 +641,23 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // A `Map`/`Set` (or a subclass instance) handed to the entries/values array of a
+        // native collection constructor: iterate it, like `new Map(other)` does.
+        if let HirType::Array(element) = target {
+            if let Ok(actual) = self.infer_expr_type(&value) {
+                let source = native_base_type(&actual).unwrap_or(&actual);
+                let iterable = match source {
+                    HirType::Map(key, entry) => {
+                        **element == HirType::Tuple(vec![key.as_ref().clone(), entry.as_ref().clone()])
+                    }
+                    HirType::Set(item) => element == item,
+                    _ => false,
+                };
+                if iterable {
+                    value = self.native_collection_entries(value)?;
+                }
+            }
+        }
         if matches!(declared, HirType::Function(..)
             | HirType::CallableFunction(_, _, None, _))
         {
