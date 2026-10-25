@@ -4714,7 +4714,9 @@ impl<'a> FnLowerer<'a> {
                         ecmascript_field_order(fields).into_iter().all(|index| {
                                         let (name, ty) = &fields[index];
                                         target_fields.iter().any(|(target_name, target_ty)| {
-                                            target_name == name && target_ty == ty
+                                            target_name == name
+                                                && (target_ty == ty
+                                                    || matches!(target_ty, HirType::Optional(payload) if payload.as_ref() == ty))
                                         })
                         })
                     }
@@ -4744,16 +4746,25 @@ impl<'a> FnLowerer<'a> {
                                         source.clone(),
                                     ));
                                     for index in ecmascript_field_order(fields) {
-                                        let (name, _) = &fields[index];
+                                        let (name, field_ty) = &fields[index];
+                                        let mut value = HirExpr::PropAccess(
+                                            Box::new(HirExpr::Var(source_name.clone())),
+                                            source_type.clone(),
+                                            name.clone(),
+                                        );
+                                        // A target field stored as `Optional(T)` (`x?: T`,
+                                        // or possibly uninitialised) takes the value as `Some`.
+                                        if target_fields.iter().any(|(target_name, target_ty)| {
+                                            target_name == name
+                                                && matches!(target_ty, HirType::Optional(payload) if payload.as_ref() == field_ty)
+                                        }) {
+                                            value = HirExpr::OptionalSome(Box::new(value), field_ty.clone());
+                                        }
                                         statements.push(HirStmt::Expr(HirExpr::PropAssign(
                                             Box::new(HirExpr::Var(target_name.clone())),
                                             target_type.clone(),
                                             name.clone(),
-                                            Box::new(HirExpr::PropAccess(
-                                                Box::new(HirExpr::Var(source_name.clone())),
-                                                source_type.clone(),
-                                                name.clone(),
-                                            )),
+                                            Box::new(value),
                                         )));
                                     }
                                 }

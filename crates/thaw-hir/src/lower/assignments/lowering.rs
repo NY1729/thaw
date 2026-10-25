@@ -246,6 +246,18 @@ impl<'a> FnLowerer<'a> {
             }
             other => other,
         };
+        // `++`/`--`/compound writes compute a bare number for a number field
+        // that may be uninitialised (`Optional(F64)` storage).
+        let value = match &target {
+            Target::Prop(_, HirType::Object(fields), field)
+                if fields.iter().any(|(name, ty)| {
+                    name == field && ty == &HirType::Optional(Box::new(HirType::F64))
+                }) && self.infer_expr_type(&value)? == HirType::F64 =>
+            {
+                HirExpr::OptionalSome(Box::new(value), HirType::F64)
+            }
+            _ => value,
+        };
         let result = match target {
             Target::Index(array, index)
                 if self.infer_expr_type_inner(&array)? == HirType::Bytes =>
@@ -364,7 +376,8 @@ impl<'a> FnLowerer<'a> {
             } else {
                 object.clone()
             };
-            return self.lower_fixed_object_property_read(object, fields, property);
+            let read = self.lower_fixed_object_property_read(object, fields, property)?;
+            return self.lenient_uninit_read(read);
         }
         let private_json_read = match target {
             Target::Dictionary(object, key, _)
