@@ -1381,6 +1381,23 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        // Shared Buffer views: (parent, child, start), (buffer, start, count)
+        // and (buffer) -> byteOffset.
+        self.module.add_function(
+            "thaw_bytes_link",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_bytes_sync",
+            self.context.void_type().fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_bytes_byte_offset",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         // `buf.indexOf(needle, from)` -- haystack + needle buffers, a
         // start offset, and a reverse flag, to an index or `-1`.
         self.module.add_function(

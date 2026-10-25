@@ -246,6 +246,18 @@ impl<'a> FnLowerer<'a> {
             }
             other => other,
         };
+        // `++`/`--`/compound writes compute a bare number for a number field
+        // that may be uninitialised (`Optional(F64)` storage).
+        let value = match &target {
+            Target::Prop(_, HirType::Object(fields), field)
+                if fields.iter().any(|(name, ty)| {
+                    name == field && ty == &HirType::Optional(Box::new(HirType::F64))
+                }) && self.infer_expr_type(&value)? == HirType::F64 =>
+            {
+                HirExpr::OptionalSome(Box::new(value), HirType::F64)
+            }
+            _ => value,
+        };
         let result = match target {
             Target::Index(array, index)
                 if self.infer_expr_type_inner(&array)? == HirType::Bytes =>
@@ -258,6 +270,16 @@ impl<'a> FnLowerer<'a> {
             return Ok(result);
         };
         self.guard_private_json_receiver_access(object, key, result, true)
+    }
+
+    /// A temp that re-binds an index-assignment receiver must stay `Bytes`
+    /// so the write still routes through `lower_bytes_index_write`.
+    fn keep_bytes_type(&mut self, array: &HirExpr, erased: HirType) -> Result<HirType, String> {
+        Ok(if self.infer_expr_type_inner(array)? == HirType::Bytes {
+            HirType::Bytes
+        } else {
+            erased
+        })
     }
 
     /// `buf[i] = v` on a Buffer/Uint8Array: an out-of-range, negative or
@@ -291,6 +313,11 @@ impl<'a> FnLowerer<'a> {
             Box::new(index_var.clone()),
             Box::new(value_var.clone()),
         ));
+        // Keep any `subarray`/`slice` view of this buffer coherent.
+        let sync = HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_sync".into())),
+            vec![array_var.clone(), index_var.clone(), HirExpr::Lit(HirLit::F64(1.0))],
+        ));
         let is_int = HirExpr::BinOp(
             BinOp::EqEqEq,
             Box::new(index_var.clone()),
@@ -310,7 +337,7 @@ impl<'a> FnLowerer<'a> {
                 is_int,
                 vec![HirStmt::If(
                     non_negative,
-                    vec![HirStmt::If(in_len, vec![write], Vec::new())],
+                    vec![HirStmt::If(in_len, vec![write, sync], Vec::new())],
                     Vec::new(),
                 )],
                 Vec::new(),
@@ -349,7 +376,8 @@ impl<'a> FnLowerer<'a> {
             } else {
                 object.clone()
             };
-            return self.lower_fixed_object_property_read(object, fields, property);
+            let read = self.lower_fixed_object_property_read(object, fields, property)?;
+            return self.lenient_uninit_read(read);
         }
         let private_json_read = match target {
             Target::Dictionary(object, key, _)
@@ -1432,6 +1460,7 @@ impl<'a> FnLowerer<'a> {
                     let array_name = format!("__thaw_assign_array_{}", self.next_binding);
                     self.next_binding += 1;
                     let array_type = self.infer_expr_type(&array)?;
+                    let array_type = self.keep_bytes_type(&array, array_type)?;
                     self.scope.insert(array_name.clone(), array_type.clone());
                     bindings.push((array_name.clone(), array_type, array));
 

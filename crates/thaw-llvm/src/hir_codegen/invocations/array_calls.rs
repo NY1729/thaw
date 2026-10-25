@@ -73,6 +73,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_slice"
                 | "__thaw_array_rest"
                 | "__thaw_bytes_slice"
+                | "__thaw_bytes_view"
+                | "__thaw_bytes_sync"
+                | "__thaw_bytes_byte_offset"
                 | "__thaw_array_to_reversed"
                 | "__thaw_array_push"
                 | "__thaw_array_unshift"
@@ -103,7 +106,49 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Err(error) = self.guard_array_mutation(name, args) {
             return Some(Err(error));
         }
-        Some(self.compile_array_call(name, args))
+        let result = self.compile_array_call(name, args);
+        if result.is_ok() {
+            if let Err(error) = self.sync_bytes_views_after_mutation(name, args) {
+                return Some(Err(error));
+            }
+        }
+        Some(result)
+    }
+
+    /// Whole-array mutators (`fill`/`reverse`/`copyWithin`/`sort`) cannot tell
+    /// a `Buffer` from a `number[]` after erasure; `thaw_bytes_sync` is a no-op
+    /// for any array that is not a linked `subarray`/`slice` view.
+    fn sync_bytes_views_after_mutation(
+        &mut self,
+        name: &str,
+        args: &[HirExpr],
+    ) -> Result<(), String> {
+        if !matches!(
+            name.rsplit("_array_").next(),
+            Some("fill" | "reverse" | "copy_within" | "sort")
+        ) {
+            return Ok(());
+        }
+        let Some(receiver @ HirExpr::Var(_)) = args.first() else {
+            return Ok(());
+        };
+        if !matches!(
+            self.expr_hir_type(receiver),
+            Some(HirType::Array(element)) if *element == HirType::F64
+        ) {
+            return Ok(());
+        }
+        let handle = self.compile_expr(receiver)?.into_pointer_value();
+        let buffer = self.compile_array_data(handle)?;
+        let f64_type = self.context.f64_type();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_bytes_sync").unwrap(),
+                &[buffer.into(), f64_type.const_zero().into(), f64_type.const_float(f64::INFINITY).into()],
+                "bytes_view_sync",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Throws a `TypeError` when a mutating array method targets an array that
@@ -420,6 +465,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| format!("`{name}` returned no value"));
+            }
+            "__thaw_bytes_sync" | "__thaw_bytes_byte_offset" => {
+                let [receiver, rest @ ..] = args else {
+                    return Err(format!("`{name}` expects a receiver"));
+                };
+                let handle = self.compile_expr(receiver)?.into_pointer_value();
+                let mut call_args = vec![self.compile_array_data(handle)?.into()];
+                for argument in rest {
+                    call_args.push(self.compile_expr(argument)?.into());
+                }
+                let runtime = if name == "__thaw_bytes_sync" {
+                    "thaw_bytes_sync"
+                } else {
+                    "thaw_bytes_byte_offset"
+                };
+                let value = self
+                    .builder
+                    .build_call(self.module.get_function(runtime).unwrap(), &call_args, "bytes_view_call")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic();
+                return Ok(value.unwrap_or_else(|| self.context.f64_type().const_zero().into()));
             }
             "__thaw_bytes_byte_length" => {
                 let [text, encoding] = args else {
@@ -759,7 +826,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // `__thaw_bytes_slice` is `__thaw_array_slice` with a `Bytes`
             // result type (see thaw-hir inference) -- identical codegen:
             // the receiver is bound as an `Array(F64)` either way.
-            "__thaw_array_slice" | "__thaw_array_rest" | "__thaw_bytes_slice" => {
+            "__thaw_array_slice" | "__thaw_array_rest" | "__thaw_bytes_slice" | "__thaw_bytes_view" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
                 }
@@ -796,6 +863,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array slice returned no value".to_string())?
                     .into_pointer_value();
+                if name == "__thaw_bytes_view" {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_bytes_link").unwrap(),
+                            &[buffer.into(), result.into(), start.into()],
+                            "bytes_link",
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
                 let presence = self.compile_array_presence(handle)?;
                 let sliced_presence = self
                     .builder

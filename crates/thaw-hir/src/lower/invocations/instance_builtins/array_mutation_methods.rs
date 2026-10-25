@@ -1076,7 +1076,7 @@ impl<'a> FnLowerer<'a> {
                         bindings.push((name, HirType::F64, index));
                     }
                     let intrinsic = if receiver_is_bytes {
-                        "__thaw_bytes_slice"
+                        "__thaw_bytes_view"
                     } else {
                         "__thaw_array_slice"
                     };

@@ -1085,9 +1085,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_console_js_value(payload.into_int_value(), newline, descriptor)?
             }
             other => {
-                return Err(format!(
-                    "console.log does not support optional payload {other:?} yet"
-                ))
+                self.compile_console_arg(Some(other.clone()), payload, newline, descriptor)?;
             }
         }
         self.builder

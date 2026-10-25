@@ -2943,3 +2943,45 @@ fn array_subclass_members_project_to_the_wrapped_array() {
     assert!(body.contains("PropAccess"), "{body}");
     assert!(body.contains("\"__thaw_base\""), "{body}");
 }
+
+fn maybe_uninit_of(source: &str) -> Vec<String> {
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let class = module
+        .body
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            swc_ecma_ast::ModuleItem::Stmt(Stmt::Decl(swc_ecma_ast::Decl::Class(decl))) => {
+                Some(&decl.class)
+            }
+            _ => None,
+        })
+        .expect("class");
+    let mut names = maybe_uninit_fields(class).into_iter().collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[test]
+fn maybe_uninit_fields_follow_constructor_assignment_paths() {
+    for (source, expected) in [
+        ("class A { n: number = 1; s: string = ''; }", vec![]),
+        ("class A { n!: number; }", vec!["n"]),
+        ("class A { n: number; }", vec![]),
+        ("class A { n: number; constructor() {} }", vec!["n"]),
+        ("class A { o?: number; }", vec![]),
+        ("class A { n: number; constructor() { this.n = 1; } }", vec![]),
+        ("class A { n!: number; constructor() { this.n = 1; } }", vec![]),
+        ("class A { n: number; constructor(f: boolean) { if (f) this.n = 1; } }", vec!["n"]),
+        ("class A { n: number; constructor(f: boolean) { if (f) this.n = 1; else this.n = 2; } }", vec![]),
+        ("class A { n: number; constructor(f: boolean) { if (f) { this.n = 1; } else { throw 1; } } }", vec![]),
+        ("class A { n: number; constructor(f: boolean) { if (f) return; this.n = 1; } }", vec!["n"]),
+        ("class A { n: number; constructor(f: boolean) { while (f) { this.n = 1; } } }", vec!["n"]),
+        ("class A { n: number; constructor(p: any) { Object.assign(this, p); } }", vec!["n"]),
+        ("class A { a: number; b: number; constructor() { this.a = this.b = 0; } }", vec![]),
+        ("class A { n: number; k: number = 2; constructor() { const f = () => { this.n = 1; }; f(); } }", vec!["n"]),
+        ("class B { x: number = 0; } class A extends B { n: number; constructor() { super(); this.n = 1; } }", vec![]),
+    ] {
+        assert_eq!(maybe_uninit_of(source), expected, "{source}");
+    }
+}
