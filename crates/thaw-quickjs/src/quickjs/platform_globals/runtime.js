@@ -2865,7 +2865,13 @@
       if (propertiesIndex >= 0) {
         try {
           const properties = JSON.parse(frame.suffix.slice(propertiesIndex + 1));
-          for (const key in properties) error[key] = reviveTaggedErrors(properties[key]);
+          for (const key in properties) {
+            if (key === '\u0002cause') {
+              Object.defineProperty(error, 'cause', {
+                value: reviveTaggedErrors(properties[key]),
+                writable: true, configurable: true, enumerable: false });
+            } else error[key] = reviveTaggedErrors(properties[key]);
+          }
         } catch (ignored) {}
       }
       return error;
@@ -2898,7 +2904,13 @@
     if (propertiesJson) {
       try {
         const properties = JSON.parse(propertiesJson);
-        for (const key in properties) error[key] = properties[key];
+        for (const key in properties) {
+          if (key === '\u0002cause') {
+            Object.defineProperty(error, 'cause', {
+              value: reviveTaggedErrors(properties[key]),
+              writable: true, configurable: true, enumerable: false });
+          } else error[key] = properties[key];
+        }
       } catch (ignored) {}
     }
     return error;

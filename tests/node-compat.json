@@ -2569,6 +2569,73 @@
       "name": "class uninitialised fields with inheritance and truthiness",
       "expect": "matched",
       "source": "abstract class Base {\n  id!: number;\n  log: string[] = [];\n  constructor() { this.log.push(\"base\"); }\n}\nclass Impl extends Base {\n  extra!: string;\n  constructor(p: number) { super(); this.id = p; }\n  bump(): void { this.id += 10; this.extra = (this.extra ?? \"\") + \"x\"; }\n  get twice(): number { return this.id * 2; }\n}\nclass Acc {\n  s!: string; n!: number; list!: string[]; flag!: boolean;\n  run(): string {\n    const f = () => this.n;\n    if (this.n !== undefined) return \"has\";\n    if (!this.list) this.list = [];\n    this.list.push(\"a\");\n    this.s = \"q\"; this.s += \"z\";\n    this.n = 5;\n    const g = () => this.n + f();\n    if (this.flag) return \"flag\"; else if (this.s) return this.s + g() + this.list.length + this.n!;\n    return \"none\";\n  }\n}\nasync function later(a: Acc): Promise<number> { await Promise.resolve(1); return a.n + 1; }\nfunction main(): void {\n  const i = new Impl(3);\n  console.log(i.id, i.twice, i.extra, i.log);\n  i.bump(); i.bump();\n  console.log(i.id, i.twice, i.extra, i);\n  const a = new Acc();\n  console.log(a.run(), a.run(), a);\n  const arr: Acc[] = [a, new Acc()];\n  console.log(arr.map((x) => x.n ?? 0), arr.filter((x) => x.n === undefined).length);\n  later(a).then((v) => console.log(\"later\", v));\n  let total = 0;\n  for (const x of arr) { if (x.n) total += x.n; }\n  console.log(total);\n}\n"
+    },
+    {
+      "name": "error cause chain nests with stacks like Node",
+      "expect": "matched",
+      "source": "function main(): void {\n  const c1 = new Error(\"inner\") as any;\n  c1.stack = \"Error: inner\\n    at a (x:1:1)\\n    at b (x:2:1)\";\n  const e1 = new Error(\"outer\", { cause: c1 }) as any;\n  e1.stack = \"Error: outer\\n    at c (x:3:1)\\n    at b (x:2:1)\";\n  console.log(e1);\n  console.log([e1]);\n  console.log({ e: e1 });\n  const e5 = new Error(\"nested\", { cause: e1 }) as any;\n  e5.stack = \"Error: nested\\n    at n (x:7:1)\";\n  console.log(e5);\n  const e6 = new Error(\"withprop\", { cause: c1 }) as any;\n  e6.stack = \"Error: withprop\\n    at n (x:7:1)\";\n  e6.code = \"E1\";\n  console.log(e6);\n}\n"
+    },
+    {
+      "name": "error cause values print in the cause slot",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: any = { code: 5 };\n  const e2 = new Error(\"o2\", { cause: o }) as any;\n  e2.stack = \"Error: o2\\n    at c (x:3:1)\";\n  console.log(e2);\n  const e3 = new Error(\"o3\", { cause: \"str\" }) as any;\n  e3.stack = \"Error: o3\\n    at c (x:3:1)\";\n  console.log(e3);\n  const e4 = new Error(\"o4\", { cause: 42 }) as any;\n  e4.stack = \"Error: o4\\n    at c (x:3:1)\";\n  console.log([e4]);\n  const e5 = new TypeError(\"o5\", { cause: true }) as any;\n  e5.stack = \"TypeError: o5\\n    at c (x:3:1)\";\n  console.log(e5);\n  const e6 = new Error(\"o6\", { cause: null }) as any;\n  e6.stack = \"Error: o6\\n    at c (x:3:1)\";\n  console.log(e6);\n  const e7 = new Error(\"o7\", { cause: [1, \"x\"] }) as any;\n  e7.stack = \"Error: o7\\n    at c (x:3:1)\";\n  console.log(e7);\n  const e8 = new Error(\"o8\", { cause: { a: { b: [1, 2] } } as any }) as any;\n  e8.stack = \"Error: o8\\n    at c (x:3:1)\";\n  console.log(e8);\n}\n"
+    },
+    {
+      "name": "stackless errors with a cause print bracketed",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = new Error(\"plain\", { cause: \"x\" }) as any;\n  a.stack = \"Error: plain\";\n  console.log(a);\n  const inner = new RangeError(\"deep\") as any;\n  inner.stack = \"RangeError: deep\";\n  const b = new Error(\"wrap\", { cause: inner }) as any;\n  b.stack = \"Error: wrap\";\n  console.log(b);\n  console.log([b]);\n}\n"
+    },
+    {
+      "name": "error constructor options accept any cause value",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"m\", { cause: \"why\" });\n  console.log(e.cause, \"cause\" in e, Object.getOwnPropertyNames(e));\n  const n = new Error(\"m\", { cause: 42 }) as any;\n  console.log(n.cause, typeof n.cause);\n  const o = { code: 5 };\n  const p = new Error(\"m\", { cause: o }) as any;\n  console.log(p.cause, p.cause.code, Object.keys(p));\n  const arr = new Error(\"m\", { cause: [1, 2] }) as any;\n  console.log(arr.cause);\n  const opts: any = { cause: \"dyn\" };\n  const d = new TypeError(\"m\", opts) as any;\n  console.log(d.cause, d instanceof TypeError);\n  const noCause = new Error(\"m\", {}) as any;\n  console.log(noCause.cause, \"cause\" in noCause, Object.getOwnPropertyNames(noCause));\n  const none = new Error(\"m\") as any;\n  console.log(none.cause);\n  const nested = new Error(\"m\", { cause: new Error(\"in\") }) as any;\n  console.log(nested.cause.message, nested.cause instanceof Error);\n  const callForm = Error(\"m\", { cause: { k: 1 } }) as any;\n  console.log(callForm.cause);\n}\n"
+    },
+    {
+      "name": "error cause is a hidden own property",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"x\", { cause: { code: 5 } }) as any;\n  console.log(e.cause, e.cause.code, Object.keys(e), Object.getOwnPropertyNames(e), \"cause\" in e);\n  console.log(JSON.stringify(e), String(e), e.message);\n  e.cause = 7;\n  console.log(e.cause, Object.keys(e));\n  delete e.cause;\n  console.log(\"cause\" in e, e.cause);\n}\n"
+    },
+    {
+      "name": "captureStackTrace fills a declared stack slot",
+      "expect": "matched",
+      "source": "class M { x = 1; stack?: string; }\nclass N { name = \"Custom\"; message = \"note\"; stack: string = \"\"; }\nfunction main(): void {\n  const m = new M();\n  console.log(m.stack);\n  Error.captureStackTrace(m);\n  console.log(typeof m.stack, (m.stack as string).split(\"\\n\")[0]);\n  const n = new N();\n  Error.captureStackTrace(n);\n  console.log(n.stack.split(\"\\n\")[0]);\n}\n"
+    },
+    {
+      "name": "stack on a class instance without a slot",
+      "expect": "matched",
+      "source": "class M { x = 1; }\nclass P { name = \"Named\"; message = \"hello\"; }\nfunction main(): void {\n  const m = new M();\n  console.log(m.stack === undefined, typeof m.stack);\n  Error.captureStackTrace(m);\n  console.log(typeof m.stack, String(m.stack).split(\"\\n\")[0]);\n  const p = new P();\n  Error.captureStackTrace(p);\n  console.log(String(p.stack).split(\"\\n\")[0]);\n  const q = new M();\n  q.stack = \"custom\";\n  console.log(q.stack);\n}\n"
+    },
+    {
+      "name": "stack header on Error subclass instances",
+      "expect": "matched",
+      "source": "class MyErr extends Error {\n  constructor(msg: string) {\n    super(msg);\n    this.name = \"MyErr\";\n    Error.captureStackTrace(this, MyErr);\n  }\n}\nclass Quiet extends Error {\n  constructor(msg: string) { super(msg); }\n}\nclass Named extends TypeError {\n  constructor(msg: string) { super(msg); this.name = \"Named\"; }\n}\nfunction main(): void {\n  const e = new MyErr(\"boom\");\n  console.log(typeof e.stack, e.stack.split(\"\\n\")[0]);\n  console.log(String(e), e.message, e.name, e instanceof MyErr, e instanceof Error);\n  const q = new Quiet(\"calm\");\n  console.log(q.stack.split(\"\\n\")[0]);\n  q.name = \"Renamed\";\n  console.log(q.stack.split(\"\\n\")[0], String(q));\n  const n = new Named(\"lazy\");\n  console.log(n.stack.split(\"\\n\")[0]);\n  n.message = \"changed\";\n  console.log(n.stack.split(\"\\n\")[0]);\n  Error.captureStackTrace(n);\n  console.log(n.stack.split(\"\\n\")[0]);\n  const s = new Quiet(\"custom\");\n  s.stack = \"replaced\";\n  console.log(s.stack);\n}\n"
+    },
+    {
+      "name": "captured stack survives throwing a subclass",
+      "expect": "matched",
+      "source": "class MyErr extends Error {\n  constructor(msg: string) {\n    super(msg);\n    this.name = \"MyErr\";\n    Error.captureStackTrace(this, this.constructor);\n  }\n}\nfunction main(): void {\n  try { throw new MyErr(\"boom\"); } catch (x: any) {\n    console.log(String(x.stack).split(\"\\n\")[0], x.name, x instanceof MyErr);\n  }\n}\n"
+    },
+    {
+      "name": "catch binding property writes and deletes",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    e.code = \"E1\";\n    e.extra = { a: 1 };\n    console.log(e.code, e.extra, Object.keys(e), e.message);\n    console.log(JSON.stringify(e));\n    e.code = \"E2\";\n    console.log(e.code, e instanceof Error, e.message);\n    delete e.extra;\n    console.log(\"extra\" in e, e.extra, Object.keys(e));\n  }\n  try { throw new TypeError(\"t\"); } catch (e) {\n    (e as any).status = 404;\n    console.log((e as any).status, e instanceof TypeError, (e as Error).message);\n  }\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    e.message = \"changed\";\n    e.name = \"Custom\";\n    console.log(String(e), e.message, e.name, Object.keys(e));\n    e.stack = \"my stack\";\n    console.log(e.stack);\n  }\n}\n"
+    },
+    {
+      "name": "JSON.stringify of Error subclass instances",
+      "expect": "matched",
+      "source": "class AppError extends Error {\n  constructor(msg: string) { super(msg); this.name = \"AppError\"; }\n}\nclass Coded extends Error {\n  code: number;\n  constructor(msg: string, code: number) { super(msg); this.code = code; }\n}\nclass Plain extends Error {\n  constructor(msg: string) { super(msg); }\n}\nfunction main(): void {\n  const a = new AppError(\"bad\");\n  console.log(JSON.stringify(a));\n  console.log(JSON.stringify({ err: a }));\n  console.log(JSON.stringify([a]));\n  console.log(Object.keys(a));\n  const c = new Coded(\"bad\", 3);\n  console.log(JSON.stringify(c), JSON.stringify({ c }));\n  const p = new Plain(\"bad\");\n  console.log(JSON.stringify(p), JSON.stringify([p, 1]));\n  console.log(JSON.stringify(new Error(\"x\")));\n  console.log(JSON.stringify({ e: new TypeError(\"y\") }));\n  console.log(JSON.stringify([new Error(\"z\"), 1]));\n  const w: any = new Error(\"q\");\n  w.code = 1;\n  console.log(JSON.stringify({ w }), JSON.stringify(w, null, 2));\n  console.log(JSON.stringify(new AggregateError([1], \"m\")));\n}\n"
+    },
+    {
+      "name": "uncaught error with cause exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void { throw new TypeError(\"tt\", { cause: new Error(\"root\") }); }"
+    },
+    {
+      "name": "uncaught plain object exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void { throw { code: 5, msg: \"obj\" }; }"
     }
   ]
 }

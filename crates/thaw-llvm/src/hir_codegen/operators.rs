@@ -325,6 +325,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             ]))))
                         }
                         "JSON.stringify"
+                        | "__thaw_json_stringify_raw"
                         | "__thaw_json_stringify_number_space"
                         | "__thaw_json_stringify_string_space"
                         | "__thaw_json_stringify_keys"
@@ -412,6 +413,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "deleteDynamicProperty"
                         | "hasDynamicProperty"
                         | "__thaw_error_is_error"
+                        | "__thaw_object_stack_set"
+                        | "__thaw_object_stack_has"
                         | "__thaw_error_set_prop"
                         | "__thaw_error_has_prop"
                         | "__thaw_error_delete_prop"

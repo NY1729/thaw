@@ -146,6 +146,19 @@ impl<'a> FnLowerer<'a> {
                     object,
                     Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                 )),
+                // `record.stack = text` where the class declares no `stack`: kept in the runtime
+                // side table `Error.captureStackTrace` also writes (see `lower_error_prop_assign`).
+                HirType::Object(fields)
+                    if prop.sym == *"stack"
+                        && !fields.iter().any(|(name, _)| {
+                            name == "stack" || name == "__thaw_getter_stack" || name == "__thaw_setter_stack"
+                        }) =>
+                {
+                    Ok(Target::ErrorProp(
+                        object,
+                        Box::new(HirExpr::Lit(HirLit::Str("stack".to_string()))),
+                    ))
+                }
                 // `err.code = x`: an Error is a framed string; its own properties live in the
                 // runtime side table (see thaw-runtime `thaw_error_set_prop`).
                 HirType::Str => Ok(Target::ErrorProp(

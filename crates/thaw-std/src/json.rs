@@ -1289,6 +1289,67 @@ fn stringify_ancestor(value: &Value) -> Option<StringifyAncestor> {
 
 fn begin_stringify() {
     STRINGIFY_ERROR.with(|error| error.set(false));
+    USER_STRINGIFY.with(|user| user.set(false));
+}
+
+thread_local! {
+    /// Set by the user-facing `JSON.stringify` entry points: a framed Error string inside the value
+    /// then serializes as its own enumerable properties instead of its wire text.
+    static USER_STRINGIFY: Cell<bool> = const { Cell::new(false) };
+}
+
+fn begin_user_stringify() {
+    begin_stringify();
+    USER_STRINGIFY.with(|user| user.set(true));
+}
+
+/// The JSON object text `JSON.stringify` gives an Error carried as a framed string: its own
+/// enumerable properties (`message`, `stack` and the hidden `cause` are not).
+fn write_framed_error(
+    bytes: &[u8],
+    out: &mut Vec<u8>,
+    indent: Option<&[u8]>,
+    depth: usize,
+) -> bool {
+    let Some(frame) = thaw_arena::error_wire::parse_tagged(bytes) else {
+        return false;
+    };
+    let bag = frame
+        .suffix
+        .iter()
+        .position(|byte| *byte == 5)
+        .and_then(|at| JsonParser::new(&frame.suffix[at + 1..]).parse());
+    let entries: Vec<(&Vec<u8>, &Value)> = match bag.as_ref().and_then(Value::as_object) {
+        Some(object) => object
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_slice(), b"message" | b"stack" | b"\x02cause"))
+            .collect(),
+        None => Vec::new(),
+    };
+    if entries.is_empty() {
+        out.extend_from_slice(b"{}");
+        return true;
+    }
+    out.push(b'{');
+    for (index, (key, value)) in entries.into_iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        if let Some(indent) = indent {
+            write_json_indent(out, indent, depth + 1);
+        }
+        write_json_string(key, out);
+        out.push(b':');
+        if indent.is_some() {
+            out.push(b' ');
+        }
+        write_json_value(value, out, indent, depth + 1);
+    }
+    if let Some(indent) = indent {
+        write_json_indent(out, indent, depth);
+    }
+    out.push(b'}');
+    true
 }
 
 fn stringify_cycle_error() -> *const c_char {
@@ -4243,6 +4304,18 @@ fn top_level_undefined_string() -> *const c_char {
     CString::new("undefined").unwrap_or_default().into_raw()
 }
 
+/// `thaw_json_stringify_public` for compiler-internal uses (an Error's property side table): a
+/// framed Error string inside the value stays wire text instead of becoming its props object.
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_raw(value: *mut Value) -> *const c_char {
+    begin_stringify();
+    let value = unsafe { &*value };
+    if is_napi_undefined(value) {
+        return top_level_undefined_string();
+    }
+    stringify_value(&ordered_json_omitting_undefined(value), &[])
+}
+
 /// The user-facing `JSON.stringify(value)` (no replacer/space) entry
 /// point -- distinct from `thaw_json_stringify` precisely because that
 /// one is *also* used internally for argument/result marshaling and
@@ -4253,7 +4326,7 @@ fn top_level_undefined_string() -> *const c_char {
 /// string`'s own doc comment).
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char {
-    begin_stringify();
+    begin_user_stringify();
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
@@ -5372,7 +5445,14 @@ fn tagged_error_node(bytes: &[u8], stack: &mut Vec<usize>) -> Option<crate::insp
     };
     // Node drops `name`/`message` from the key list when the stack already shows them.
     // A `cause` from the frame's cause marker (the constructor option) is non-enumerable.
-    let marker_cause = frame.suffix.contains(&2) && !frame_bag_has(frame.suffix, b"cause");
+    let marker_cause = (frame.suffix.contains(&2) && !frame_bag_has(frame.suffix, b"cause"))
+        || frame_bag_has(frame.suffix, b"\x02cause");
+    // Node lists a hidden `cause` after the enumerable keys.
+    let hidden_cause = if marker_cause {
+        fields.shift_remove(b"cause".as_slice())
+    } else {
+        None
+    };
     for key in [b"name".as_slice(), b"message"] {
         if fields
             .get(key)
@@ -5382,17 +5462,16 @@ fn tagged_error_node(bytes: &[u8], stack: &mut Vec<usize>) -> Option<crate::insp
             fields.shift_remove(key);
         }
     }
-    let entries: Vec<(Vec<u16>, Node)> = ordered_object_fields(&fields)
+    let mut entries: Vec<(Vec<u16>, Node)> = ordered_object_fields(&fields)
         .into_iter()
-        .map(|(key, value)| {
-            let label: Vec<u16> = if key == b"cause".as_slice() && marker_cause {
-                "\u{1}[cause]".encode_utf16().collect()
-            } else {
-                wtf8_decode_utf16(key)
-            };
-            (label, inspect_node(value, stack))
-        })
+        .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
         .collect();
+    if let Some(cause) = hidden_cause {
+        entries.push((
+            "\u{1}[cause]".encode_utf16().collect(),
+            inspect_node(&cause, stack),
+        ));
+    }
     Some(if entries.is_empty() {
         if base.contains('\n') {
             Node::ErrorStack(base)
@@ -5422,19 +5501,21 @@ pub unsafe extern "C" fn thaw_error_inspect(value: *const c_char) -> *const c_ch
     let bytes = unsafe { CStr::from_ptr(merged) }.to_bytes();
     // A bag holding only `errors`/`name` (an AggregateError) keeps the existing plain rendering.
     let has_extras = thaw_arena::error_wire::parse_tagged(bytes).is_some_and(|frame| {
-        frame
-            .suffix
-            .iter()
-            .position(|byte| *byte == 5)
-            .is_some_and(|at| {
-                JsonParser::new(&frame.suffix[at + 1..])
-                    .parse()
-                    .is_some_and(|bag| {
-                        bag.as_object().is_some_and(|object| {
-                            object.keys().any(|key| key != b"errors" && key != b"name")
+        // A constructor `cause` (the `\u{2}` suffix) prints as `[cause]` like in Node.
+        frame.suffix.contains(&2)
+            || frame
+                .suffix
+                .iter()
+                .position(|byte| *byte == 5)
+                .is_some_and(|at| {
+                    JsonParser::new(&frame.suffix[at + 1..])
+                        .parse()
+                        .is_some_and(|bag| {
+                            bag.as_object().is_some_and(|object| {
+                                object.keys().any(|key| key != b"errors" && key != b"name")
+                            })
                         })
-                    })
-            })
+                })
     });
     if !has_extras {
         return unsafe { thaw_error_to_string(value) };
@@ -5526,7 +5607,13 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
     let text = match value {
         // A bare top-level string prints unquoted; everything else (including a nested
-        // string) goes through `util.inspect`.
+        // string) goes through `util.inspect`. A framed Error prints like a lone `console.log(error)`.
+        Value::String(value) if value.as_bytes().first() == Some(&1) => {
+            CString::new(value.as_bytes())
+                .ok()
+                .map(|owned| to_str(unsafe { thaw_error_inspect(owned.as_ptr()) }))
+                .unwrap_or_else(|| value.clone())
+        }
         Value::String(value) => value.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
@@ -5800,7 +5887,12 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
             }
             out.extend_from_slice(number.to_string().as_bytes());
         }
-        Value::String(text) => write_json_string(text.as_bytes(), out),
+        Value::String(text) => {
+            let error = text.as_bytes().first() == Some(&1) && USER_STRINGIFY.with(Cell::get);
+            if !(error && write_framed_error(text.as_bytes(), out, indent, depth)) {
+                write_json_string(text.as_bytes(), out);
+            }
+        }
         Value::Wtf8(bytes) => write_json_string(bytes, out),
         Value::Array(items) => {
             let items = shared_array_ref(items);
@@ -5886,7 +5978,7 @@ fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
 }
 
 fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
-    begin_stringify();
+    begin_user_stringify();
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
@@ -5919,7 +6011,7 @@ fn stringify_with_keys(
     presence: *const u8,
     indent: &[u8],
 ) -> *const c_char {
-    begin_stringify();
+    begin_user_stringify();
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
@@ -8609,7 +8701,10 @@ fn add_error_suffix_properties(
                                 value.clone()
                             };
                             // `message`/`stack` overrides replace the derived header values.
-                            if key == b"message" || key == b"stack" || key == b"cause" {
+                            if key == b"\x02cause" {
+                                // The constructor's hidden `cause` (see thaw-runtime errors.rs).
+                                fields.insert(b"cause".to_vec(), value);
+                            } else if key == b"message" || key == b"stack" || key == b"cause" {
                                 fields.insert(key.clone(), value);
                             } else {
                                 fields.entry(key.clone()).or_insert(value);

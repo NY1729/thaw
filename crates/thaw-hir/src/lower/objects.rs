@@ -3554,6 +3554,14 @@ impl<'a> FnLowerer<'a> {
                             vec![obj],
                         ))
                     }
+                    HirType::Object(fields)
+                        if prop.sym == *"stack"
+                            && !fields.iter().any(|(name, _)| {
+                                name == "stack" || name == "__thaw_getter_stack"
+                            }) =>
+                    {
+                        self.lower_object_stack_read(obj, fields)
+                    }
                     HirType::Str if prop.sym == *"length" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
@@ -3607,10 +3615,6 @@ impl<'a> FnLowerer<'a> {
                     )),
                     HirType::Str if prop.sym == *"name" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_error_name".to_string())),
-                        vec![obj],
-                    )),
-                    HirType::Str if prop.sym == *"cause" => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_error_cause".to_string())),
                         vec![obj],
                     )),
                     // `SuppressedError`'s two sub-errors, recovered from the

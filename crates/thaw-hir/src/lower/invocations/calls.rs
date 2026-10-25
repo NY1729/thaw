@@ -2657,30 +2657,7 @@ impl<'a> FnLowerer<'a> {
             };
             let options = self.lower_expr(&options.expr)?;
             let options_type = self.infer_expr_type(&options)?;
-            let HirType::Object(fields) = &options_type else {
-                return Err(format!(
-                    "`{callee_name}()` options must be an object with a `cause` field"
-                ));
-            };
-            let cause_type = fields
-                .iter()
-                .find(|(name, _)| name == "cause")
-                .map(|(_, ty)| ty)
-                .ok_or_else(|| format!("`{callee_name}()` options must have a `cause` field"))?;
-            let cause =
-                HirExpr::PropAccess(Box::new(options), options_type.clone(), "cause".to_string());
-            let cause = match cause_type {
-                HirType::Str => cause,
-                _ => self.coerce_primitive_to_string(cause)?,
-            };
-            let with_marker = HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
-            );
-            return Ok(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                vec![with_marker, cause],
-            ));
+            return self.lower_error_options(tagged, options, options_type);
         }
 
         let signature = self.signatures.get(&callee_name).cloned();
@@ -4361,28 +4338,227 @@ impl<'a> FnLowerer<'a> {
         };
         let options = self.lower_expr(&options.expr)?;
         let options_type = self.infer_expr_type(&options)?;
-        let HirType::Object(fields) = &options_type else {
-            return Err("Error options must be an object with a `cause` field".into());
+        self.lower_error_options(tagged, options, options_type)
+    }
+
+    /// Applies the `cause` of an Error constructor's options argument to the framed `tagged` error.
+    /// A string cause rides in the frame (`\u{2}` suffix); anything else is stored hidden in the
+    /// runtime side table (`__thaw_error_set_prop` with the `\u{2}cause` key), after a presence
+    /// check, since `cause` is an own non-enumerable property only when the options have it.
+    // ponytail: `{ cause: undefined }` is treated as no cause (Json cannot carry an own undefined).
+    fn lower_error_options(
+        &mut self,
+        tagged: HirExpr,
+        options: HirExpr,
+        options_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let key = HirExpr::Lit(HirLit::Str("cause".into()));
+        let mut bindings = Vec::new();
+        let (present, cause) = match &options_type {
+            HirType::Object(fields) => {
+                let Some((_, cause_type)) = fields.iter().find(|(name, _)| name == "cause") else {
+                    return Ok(tagged);
+                };
+                let cause = HirExpr::PropAccess(
+                    Box::new(options),
+                    options_type.clone(),
+                    "cause".to_string(),
+                );
+                if matches!(cause_type, HirType::Str) {
+                    let with_marker = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                        vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
+                    );
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                        vec![with_marker, cause],
+                    ));
+                }
+                (HirExpr::Lit(HirLit::Bool(true)), self.coerce_to_declared(&HirType::Json, cause)?)
+            }
+            HirType::Json | HirType::Dictionary(_) | HirType::JsValue | HirType::Dynamic => {
+                let json_name = format!("__thaw_error_options_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(json_name.clone(), HirType::Json);
+                let json = match options_type {
+                    HirType::JsValue => HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_exception_json_from_handle".into())),
+                        vec![options],
+                    ),
+                    HirType::Json => options,
+                    _ => self.coerce_to_declared(&HirType::Json, options)?,
+                };
+                bindings.push((json_name.clone(), HirType::Json, json));
+                let source = HirExpr::Var(json_name);
+                let object_like = self.json_operand_is_object_like(source.clone(), &HirType::Json)?;
+                let has = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_has".into())),
+                    vec![source.clone(), key.clone()],
+                );
+                (
+                    HirExpr::Conditional(
+                        Box::new(object_like),
+                        Box::new(has),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                        HirType::Bool,
+                    ),
+                    HirExpr::JsonKey(Box::new(source), Box::new(key)),
+                )
+            }
+            _ => return Ok(tagged),
         };
-        let cause_type = fields
-            .iter()
-            .find(|(name, _)| name == "cause")
-            .map(|(_, ty)| ty)
-            .ok_or("Error options must have a `cause` field")?;
-        let cause =
-            HirExpr::PropAccess(Box::new(options), options_type.clone(), "cause".to_string());
-        let cause = match cause_type {
-            HirType::Str => cause,
-            _ => self.coerce_primitive_to_string(cause)?,
+        let framed = format!("__thaw_error_cause_frame_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(framed.clone(), HirType::Str);
+        let store = self.error_set_prop_call(&framed, "\u{2}cause", cause);
+        bindings.insert(0, (framed.clone(), HirType::Str, tagged));
+        let body = HirExpr::Block(vec![
+            HirStmt::If(present, vec![HirStmt::Expr(store)], Vec::new()),
+            HirStmt::Return(Some(HirExpr::Var(framed))),
+        ]);
+        self.wrap_call_argument_bindings(body, &bindings)
+    }
+
+    /// The family name an Error-family record inherits (`Error`, `TypeError`, ...), or `None` for
+    /// a record that is not an Error subclass instance.
+    fn error_record_default_name(fields: &[(Symbol, HirType)]) -> Option<String> {
+        let chain = fields.first()?.0.strip_prefix("__thaw_class_identity_\u{1e}")?;
+        chain.split('\u{1f}').find(|part| is_error_family_name(part)).map(str::to_string)
+    }
+
+    /// `Name: message` for a record, read from its own `name`/`message` fields (the header a stack
+    /// starts with).
+    fn object_stack_header(
+        &mut self,
+        object: &HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let text = |this: &mut Self, field: &str, default: &str| -> Result<HirExpr, String> {
+            if fields.iter().any(|(name, ty)| {
+                name == field && matches!(ty, HirType::Str | HirType::StrLiteral(_))
+            }) {
+                let read = this.lower_fixed_object_property_read(object.clone(), fields, field)?;
+                this.coerce_primitive_to_string(read)
+            } else {
+                Ok(HirExpr::Lit(HirLit::Str(default.to_string())))
+            }
         };
-        let with_marker = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-            vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
-        );
+        let name = text(self, "name", "Error")?;
+        let message = text(self, "message", "")?;
         Ok(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-            vec![with_marker, cause],
+            Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
+                vec![name, message],
+            )],
         ))
+    }
+
+    /// `obj.stack` on a record without a `stack` slot. An Error subclass instance reads the stack
+    /// remembered by `Error.captureStackTrace`/an assignment, else formats (and keeps) its
+    /// `Name: message` header on first access. Any other record has no `stack` until one is
+    /// stored, so it reads `undefined`.
+    // ponytail: no call frames exist in a native binary, so a stack is only its header line.
+    pub(crate) fn lower_object_stack_read(
+        &mut self,
+        object: HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_stack_owner_{}", self.next_binding);
+        self.next_binding += 1;
+        let object_type = HirType::Object(fields.to_vec());
+        self.scope.insert(name.clone(), object_type.clone());
+        let owner = HirExpr::Var(name.clone());
+        let result = if Self::error_record_default_name(fields).is_some() {
+            // V8 formats the header on first access: later `name`/`message` writes do not change it.
+            let header = self.object_stack_header(&owner, fields)?;
+            let freeze = HirStmt::If(
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_stack_has".into())),
+                    vec![owner.clone()],
+                ),
+                Vec::new(),
+                vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_stack_set".into())),
+                    vec![owner.clone(), header],
+                ))],
+            );
+            HirExpr::Block(vec![
+                freeze,
+                HirStmt::Return(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_stack_get".into())),
+                    vec![owner, HirExpr::Lit(HirLit::Str(String::new()))],
+                ))),
+            ])
+        } else {
+            let captured = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_stack_get".into())),
+                vec![owner.clone(), HirExpr::Lit(HirLit::Str(String::new()))],
+            );
+            HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_stack_has".into())),
+                    vec![owner],
+                )),
+                Box::new(self.coerce_to_declared(&HirType::Json, captured)?),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                    Vec::new(),
+                )),
+                HirType::Json,
+            )
+        };
+        self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
+    }
+
+    /// `Error.captureStackTrace(record)`: store the current `Name: message` header as the record's
+    /// `stack` (its slot when it declares one, else the side table).
+    pub(crate) fn lower_object_capture_stack(
+        &mut self,
+        object: HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_capture_owner_{}", self.next_binding);
+        self.next_binding += 1;
+        let object_type = HirType::Object(fields.to_vec());
+        self.scope.insert(name.clone(), object_type.clone());
+        let owner = HirExpr::Var(name.clone());
+        let header = self.object_stack_header(&owner, fields)?;
+        let header = match fields.iter().find(|(field, _)| field == "stack") {
+            Some((_, HirType::Str)) => Some(header),
+            Some((_, HirType::Optional(inner))) if **inner == HirType::Str => {
+                Some(HirExpr::OptionalSome(Box::new(header), HirType::Str))
+            }
+            Some(_) => None,
+            None => {
+                let text = format!("__thaw_capture_header_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(text.clone(), HirType::Str);
+                let store = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_stack_set".into())),
+                    vec![owner.clone(), HirExpr::Var(text.clone())],
+                );
+                return self.wrap_call_argument_bindings(
+                    HirExpr::Block(vec![
+                        HirStmt::Let(text, HirType::Str, header),
+                        HirStmt::Expr(store),
+                        HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))),
+                    ]),
+                    &[(name, object_type, object)],
+                );
+            }
+        };
+        let mut statements = Vec::new();
+        if let Some(value) = header {
+            statements.push(HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(owner),
+                object_type.clone(),
+                "stack".to_string(),
+                Box::new(value),
+            )));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))));
+        self.wrap_call_argument_bindings(HirExpr::Block(statements), &[(name, object_type, object)])
     }
 
     /// A trusted Error-family record: the first field is the class-identity

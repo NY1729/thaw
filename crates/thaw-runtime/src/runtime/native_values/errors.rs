@@ -257,7 +257,10 @@ pub unsafe extern "C" fn thaw_error_suppress(
 fn error_property(message: &str, name: &str) -> Option<String> {
     let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
     let value: serde_json::Value = serde_json::from_str(bag).ok()?;
-    let value = value.as_object()?.get(name)?;
+    let object = value.as_object()?;
+    let value = object
+        .get(name)
+        .or_else(|| if name == "cause" { object.get(HIDDEN_CAUSE_KEY) } else { None })?;
     Some(match value {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Null => return None,
@@ -268,7 +271,10 @@ fn error_property(message: &str, name: &str) -> Option<String> {
 fn error_property_json(message: &str, name: &str) -> Option<String> {
     let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
     let value: serde_json::Value = serde_json::from_str(bag).ok()?;
-    let value = value.as_object()?.get(name)?;
+    let object = value.as_object()?;
+    let value = object
+        .get(name)
+        .or_else(|| if name == "cause" { object.get(HIDDEN_CAUSE_KEY) } else { None })?;
     serde_json::to_string(value).ok()
 }
 
@@ -288,7 +294,7 @@ pub unsafe extern "C" fn thaw_error_property(
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     if let Some(json) = with_extras(message, |extras| {
-        extras.props.iter().find(|prop| prop.0 == *name).map(|prop| prop.1.clone())
+        extras.lookup(&name)
     }) {
         return arena_c_string(&json_text_as_plain(&json)).map_or(std::ptr::null(), |value| value.cast());
     }
@@ -314,7 +320,7 @@ pub unsafe extern "C" fn thaw_error_property_json(
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     if let Some(json) = with_extras(message, |extras| {
-        extras.props.iter().find(|prop| prop.0 == *name).map(|prop| prop.1.clone())
+        extras.lookup(&name)
     }) {
         return arena_c_string(&json).map_or(std::ptr::null(), |value| value.cast());
     }
@@ -387,11 +393,14 @@ pub unsafe extern "C" fn thaw_error_cause(message: *const c_char) -> *const c_ch
         return std::ptr::null();
     }
     if let Some(json) = with_extras(message, |extras| {
-        extras.props.iter().find(|prop| prop.0 == "cause").map(|prop| prop.1.clone())
+        extras.lookup("cause")
     }) {
         return arena_c_string(&json_text_as_plain(&json)).map_or(std::ptr::null(), |value| value.cast());
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    if let Some(value) = error_property(&text, "cause") {
+        return arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast());
+    }
     arena_c_string(split_error_cause(&text).unwrap_or_default())
         .map_or(std::ptr::null(), |value| value.cast())
 }
@@ -568,9 +577,26 @@ struct ErrorExtras {
     message: Option<String>,
     name: Option<String>,
     stack: Option<String>,
+    /// Hidden (non-enumerable) own `cause` from the constructor options, as JSON text.
+    cause: Option<String>,
     /// Deleted own `message`/`stack`/`cause`/`code`/`name`.
     deleted: Vec<String>,
 }
+
+impl ErrorExtras {
+    /// JSON text of own property `key`: an enumerable prop, or the hidden constructor `cause`.
+    fn lookup(&self, key: &str) -> Option<String> {
+        self.props
+            .iter()
+            .find(|prop| prop.0 == key)
+            .map(|prop| prop.1.clone())
+            .or_else(|| if key == "cause" { self.cause.clone() } else { None })
+    }
+}
+
+/// Key under which the constructor's hidden `cause` travels through `thaw_error_set_prop` and the
+/// `\u{5}` property bag; it never names an enumerable property.
+const HIDDEN_CAUSE_KEY: &str = "\u{2}cause";
 
 thread_local! {
     static ERROR_EXTRAS: RefCell<HashMap<usize, ErrorExtras>> = RefCell::new(HashMap::new());
@@ -664,7 +690,9 @@ fn bag_keys(text: &str) -> Vec<String> {
         return Vec::new();
     };
     match serde_json::from_str::<serde_json::Value>(bag) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        Ok(serde_json::Value::Object(map)) => {
+            map.keys().filter(|key| *key != HIDDEN_CAUSE_KEY).cloned().collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -716,6 +744,10 @@ pub unsafe extern "C" fn thaw_error_set_prop(
         let extras = extras_entry(&mut table, table_key);
         extras.deleted.retain(|deleted| *deleted != key);
         let plain = json_text_as_plain(&json);
+        if key == HIDDEN_CAUSE_KEY || (key == "cause" && extras.cause.is_some()) {
+            extras.cause = Some(json);
+            return;
+        }
         match key.as_str() {
             "message" | "name" => {
                 if key == "message" {
@@ -750,7 +782,7 @@ pub unsafe extern "C" fn thaw_error_get_prop_json(error: *const c_char, key: *co
     }
     let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
     if let Some(json) = with_extras(error, |extras| {
-        extras.props.iter().find(|prop| prop.0 == key).map(|prop| prop.1.clone())
+        extras.lookup(&key)
     }) {
         return arena_c_string(&json).map_or(std::ptr::null(), |value| value.cast());
     }
@@ -766,6 +798,8 @@ pub unsafe extern "C" fn thaw_error_get_prop_json(error: *const c_char, key: *co
         "message" => arena_json(effective_name_message(error, &text).1),
         "name" => arena_json(effective_name_message(error, &text).0),
         "stack" => arena_json(unsafe { stack_text(error) }),
+        "cause" if error_property_json(&text, &key).is_none() => split_error_cause(&text)
+            .map_or(std::ptr::null(), |cause| arena_json(cause.to_string())),
         _ => error_property_json(&text, &key)
             .and_then(|json| arena_c_string(&json))
             .map_or(std::ptr::null(), |value| value.cast()),
@@ -780,7 +814,7 @@ pub unsafe extern "C" fn thaw_error_has_prop(error: *const c_char, key: *const c
         return false;
     }
     let name = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
-    if with_extras(error, |extras| Some(extras.props.iter().any(|prop| prop.0 == name))) == Some(true) {
+    if with_extras(error, |extras| Some(extras.lookup(&name).is_some())) == Some(true) {
         return true;
     }
     if !is_framed_error_text(error) {
@@ -790,7 +824,9 @@ pub unsafe extern "C" fn thaw_error_has_prop(error: *const c_char, key: *const c
         return false;
     }
     let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
-    matches!(name.as_str(), "message" | "stack") || bag_keys(&text).contains(&name)
+    matches!(name.as_str(), "message" | "stack")
+        || bag_keys(&text).contains(&name)
+        || (name == "cause" && split_error_cause(&text).is_some())
 }
 
 /// `delete err.key`. Returns 1 (JS `delete` is true for absent keys too).
@@ -813,6 +849,7 @@ pub unsafe extern "C" fn thaw_error_delete_prop(error: *const c_char, key: *cons
             "message" => extras.message = None,
             "name" => extras.name = None,
             "stack" => extras.stack = None,
+            "cause" => extras.cause = None,
             _ => {}
         }
         if matches!(key.as_str(), "message" | "stack" | "cause" | "code") && !extras.deleted.contains(&key) {
@@ -846,7 +883,9 @@ pub unsafe extern "C" fn thaw_error_own_keys(error: *const c_char, include_hidde
     if include_hidden != 0 {
         keys.push("stack".to_string());
         keys.push("message".to_string());
-        if split_error_cause(&text).is_some() {
+        if split_error_cause(&text).is_some()
+            || with_extras(error, |extras| extras.cause.as_ref().map(|_| ())).is_some()
+        {
             keys.push("cause".to_string());
         }
     }
@@ -894,6 +933,9 @@ fn error_props_object(error: *const c_char, text: &str) -> serde_json::Map<Strin
     if let Some(bag) = metadata_suffix(text).split_once(ERROR_PROPS_MARKER).map(|v| v.1) {
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(bag) {
             for (key, value) in map {
+                if key == HIDDEN_CAUSE_KEY {
+                    continue;
+                }
                 object.entry(key).or_insert(value);
             }
         }
@@ -957,6 +999,9 @@ pub unsafe extern "C" fn thaw_error_with_props(error: *const c_char) -> *const c
             if let Some(value) = value {
                 pairs.push((key.to_string(), serde_json::Value::String(value.clone()).to_string()));
             }
+        }
+        if let Some(cause) = &extras.cause {
+            pairs.push((HIDDEN_CAUSE_KEY.to_string(), cause.clone()));
         }
         Some(pairs)
     })
@@ -1027,6 +1072,55 @@ pub extern "C" fn thaw_error_owner_props(owner: *const u8, hidden: u8) -> *const
         keys.extend(props);
     }
     arena_json(keys)
+}
+
+thread_local! {
+    /// Own `stack` of a record that has no `stack` slot (an Error-family class instance after
+    /// `Error.captureStackTrace`, or any class instance captured into): owner pointer -> text.
+    static OBJECT_STACKS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+}
+
+/// `Error.captureStackTrace(owner)` for a record: remembers `text` as the owner's `stack`.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_object_stack_set(owner: *const u8, text: *const c_char) -> bool {
+    if owner.is_null() || text.is_null() {
+        return false;
+    }
+    thaw_arena::register_metadata_reset_hook(prune_object_stacks);
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+    OBJECT_STACKS.with(|table| table.borrow_mut().insert(owner as usize, text));
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_object_stack_has(owner: *const u8) -> bool {
+    OBJECT_STACKS.with(|table| table.borrow().contains_key(&(owner as usize)))
+}
+
+/// The remembered `stack` of `owner`, or `fallback` when none was captured.
+///
+/// # Safety
+/// `fallback` must be a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_object_stack_get(owner: *const u8, fallback: *const c_char) -> *const c_char {
+    match OBJECT_STACKS.with(|table| table.borrow().get(&(owner as usize)).cloned()) {
+        Some(text) => arena_c_string(&text).map_or(fallback, |value| value.cast()),
+        None => fallback,
+    }
+}
+
+fn prune_object_stacks(tracing: bool) {
+    OBJECT_STACKS.with(|table| {
+        let mut table = table.borrow_mut();
+        if tracing {
+            table.retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer));
+        } else {
+            table.clear();
+        }
+    });
 }
 
 /// # Safety
@@ -1494,6 +1588,46 @@ mod error_extras_tests {
                 text(unsafe { thaw_error_property_json(error, c("code").as_ptr()) }),
                 "\"E_CODE\""
             );
+        });
+    }
+
+    #[test]
+    fn constructor_cause_is_hidden_but_readable_and_baked() {
+        isolated(|| {
+            let error = frame("Error", "c");
+            assert!(set(error, HIDDEN_CAUSE_KEY, r#"{"code":5}"#));
+            assert_eq!(get(error, "cause").as_deref(), Some(r#"{"code":5}"#));
+            assert!(unsafe { thaw_error_has_prop(error, c("cause").as_ptr()) });
+            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), "{}");
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(error, 1) }),
+                r#"{"stack":null,"message":null,"cause":null}"#
+            );
+            assert_eq!(text(unsafe { thaw_error_json_stringify(error) }), "{}");
+            // Assigning `cause` later keeps the property hidden; deleting removes it.
+            assert!(set(error, "cause", "7"));
+            assert_eq!(get(error, "cause").as_deref(), Some("7"));
+            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), "{}");
+            // A copy of the text carries the cause through the property bag.
+            let baked = unsafe { thaw_error_with_props(error) };
+            assert_eq!(text(unsafe { thaw_error_cause(baked) }), "7");
+            assert_eq!(text(unsafe { thaw_error_own_keys(baked, 0) }), "{}");
+            assert!(unsafe { thaw_error_delete_prop(error, c("cause").as_ptr()) });
+            assert!(!unsafe { thaw_error_has_prop(error, c("cause").as_ptr()) });
+        });
+    }
+
+    #[test]
+    fn record_stacks_use_the_owner_side_table() {
+        isolated(|| {
+            let owner = 0x1000usize as *const u8;
+            let fallback = c("Error: fallback");
+            assert!(!thaw_object_stack_has(owner));
+            assert_eq!(text(unsafe { thaw_object_stack_get(owner, fallback.as_ptr()) }), "Error: fallback");
+            assert!(unsafe { thaw_object_stack_set(owner, c("Named: kept").as_ptr()) });
+            assert!(thaw_object_stack_has(owner));
+            assert_eq!(text(unsafe { thaw_object_stack_get(owner, fallback.as_ptr()) }), "Named: kept");
+            assert!(!unsafe { thaw_object_stack_set(std::ptr::null(), c("x").as_ptr()) });
         });
     }
 
