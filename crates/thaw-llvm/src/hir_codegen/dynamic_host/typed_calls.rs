@@ -18,6 +18,23 @@ pub(crate) fn thaw_js_plain_type(ty: &HirType) -> bool {
     }
 }
 
+/// A callback parameter thaw-js can call back into: a plain-data function that returns plain data
+/// synchronously (no Promise), optionally absent.
+pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Function(params, ret) => {
+            params.iter().all(thaw_js_plain_type) && thaw_js_plain_type(ret)
+        }
+        HirType::Optional(inner) => matches!(inner.as_ref(), HirType::Function(..)) && thaw_js_callback_type(inner),
+        _ => false,
+    }
+}
+
+/// A parameter type that can cross into thaw-js: plain data or a plain callback.
+pub(crate) fn thaw_js_param_type(ty: &HirType) -> bool {
+    thaw_js_plain_type(ty) || thaw_js_callback_type(ty)
+}
+
 fn ordinary_quickjs_typed_call(signature: &DynamicSignature) -> bool {
     signature.backend == DynamicBackend::QuickJs
         && ![
@@ -1653,37 +1670,20 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if signature.symbol.starts_with('$') {
+            return self.compile_typed_thaw_js_class_call(signature, args);
+        }
         self.uses_thaw_js = true;
         if let Some(bad) = signature
             .params
             .iter()
-            .chain(std::iter::once(&signature.ret))
-            .find(|ty| !thaw_js_plain_type(ty))
+            .find(|ty| !thaw_js_param_type(ty))
+            .or_else(|| (!thaw_js_plain_type(&signature.ret)).then_some(&signature.ret))
         {
-            // The shim generator only routes plain-data signatures the program calls here, but
-            // every generated wrapper is compiled, called or not. Calling this one throws.
-            let message = format!(
+            self.compile_thaw_js_unsupported_stub(&format!(
                 "\u{1}thaw-js: `{}` has the non-plain-data type {bad:?}, which cannot cross the thaw-js boundary",
                 signature.symbol
-            );
-            let name = self
-                .builder
-                .build_global_string_ptr(&message, "thaw_js_unsupported")
-                .map_err(|error| error.to_string())?;
-            let empty = self
-                .builder
-                .build_call(self.module.get_function("thaw_json_array_new").unwrap(), &[], "thaw_js_no_args")
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
-            self.compile_json_backend_values_with_extra(
-                name.as_pointer_value().into(),
-                empty,
-                "thaw_tjs_call_typed_result",
-                &[],
-                &[],
-            )?;
+            ))?;
             return Ok(self.basic_type(&signature.ret)?.const_zero());
         }
         let array = self
@@ -1694,13 +1694,21 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
-            let value = self.compile_expr(arg)?;
+            self.thaw_js_call_arguments = true;
+            let value = self.compile_expr(arg);
+            self.thaw_js_call_arguments = false;
+            let value = value?;
             if value.is_int_value() && matches!(ty, HirType::Json) {
                 return Err(format!(
                     "thaw-js call `{}`: argument {} is a live JsValue handle",
                     signature.symbol,
                     index + 1
                 ));
+            }
+            if thaw_js_callback_type(ty) {
+                self.compile_thaw_js_callback_argument(array, value, ty)
+                    .map_err(|error| format!("thaw-js callback argument {}: {error}", index + 1))?;
+                continue;
             }
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("thaw-js argument {} ({ty:?}): {error}", index + 1))?;
@@ -1717,6 +1725,290 @@ impl<'ctx> HirCompiler<'ctx> {
             &[],
         )?;
         self.compile_typed_dynamic_result(json, &signature.ret)
+    }
+
+    /// `thaw_tjs_frame_error(error)` when a thaw-js call returned an error string (null stays null).
+    fn compile_thaw_js_frame_error(
+        &mut self,
+        error: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        let function = self.current_function();
+        let before = self.builder.get_insert_block().ok_or("no insertion block")?;
+        let failed = self.context.append_basic_block(function, "thaw_js_error_present");
+        let done = self.context.append_basic_block(function, "thaw_js_error_checked");
+        let present = self
+            .builder
+            .build_is_not_null(error, "thaw_js_error_is_present")
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_conditional_branch(present, failed, done)
+            .map_err(|e| e.to_string())?;
+        self.builder.position_at_end(failed);
+        let framed = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_tjs_frame_error").unwrap(),
+                &[error.into()],
+                "thaw_js_framed_error",
+            )
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_tjs_frame_error returned no value")?
+            .into_pointer_value();
+        let failed_end = self.builder.get_insert_block().ok_or("no insertion block")?;
+        self.builder.build_unconditional_branch(done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(done);
+        let merged = self
+            .builder
+            .build_phi(error.get_type(), "thaw_js_error")
+            .map_err(|e| e.to_string())?;
+        merged.add_incoming(&[(&error, before), (&framed, failed_end)]);
+        Ok(merged.as_basic_value().into_pointer_value())
+    }
+
+    /// Calling an unsupported thaw-js signature throws instead of failing the build (every generated
+    /// wrapper is compiled, called or not).
+    fn compile_thaw_js_unsupported_stub(&mut self, message: &str) -> Result<(), String> {
+        let name = self
+            .builder
+            .build_global_string_ptr(message, "thaw_js_unsupported")
+            .map_err(|error| error.to_string())?;
+        let empty = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_array_new").unwrap(), &[], "thaw_js_no_args")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        self.compile_json_backend_values_with_extra(
+            name.as_pointer_value().into(),
+            empty,
+            "thaw_tjs_call_typed_result",
+            &[],
+            &[],
+        )?;
+        Ok(())
+    }
+
+    /// A thaw-js class operation: `new Class(..)`, an instance method or a static method (symbols
+    /// `$new$..`, `$method$..`, `$staticmethod$..`). Instances are `JsValue` handles into the thaw-js
+    /// heap; arguments and results cross as JSON, with a handle marker for instances.
+    fn compile_typed_thaw_js_class_call(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_thaw_js = true;
+        let symbol = signature.symbol.as_str();
+        let is_new = symbol.starts_with("$new$");
+        let is_static = symbol.starts_with("$staticmethod$") || symbol.starts_with("$staticmethodvoid$");
+        let is_method = symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$");
+        let handle_param = |ty: &HirType| *ty == HirType::JsValue;
+        let ret_handle = signature.ret == HirType::JsValue;
+        let supported = (is_new || is_static || is_method)
+            && (ret_handle || (!is_new && thaw_js_plain_type(&signature.ret)))
+            && signature.params.iter().skip(usize::from(is_method)).all(|ty| thaw_js_plain_type(ty) || handle_param(ty))
+            && (!is_method || signature.params.first().is_some_and(handle_param))
+            && args.len() == signature.params.len();
+        if !supported {
+            // Class operations are only emitted where the program uses them (unlike the wrappers of
+            // plain functions), so an unsupported one is a build error the CLI answers by rebuilding
+            // the program on QuickJS.
+            return Err(format!(
+                "thaw-js: class operation `{}` has a signature that cannot cross the thaw-js boundary",
+                signature.symbol
+            ));
+        }
+        let (receiver_expr, rest) = if is_method { (Some(&args[0]), &args[1..]) } else { (None, args) };
+        let receiver = match receiver_expr {
+            Some(expr) => self.compile_expr(expr)?.into_int_value(),
+            None => self.context.i64_type().const_zero(),
+        };
+        let array = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_array_new").unwrap(), &[], "thaw_js_class_args")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
+            self.thaw_js_call_arguments = true;
+            let value = self.compile_expr(arg);
+            self.thaw_js_call_arguments = false;
+            let value = value?;
+            if handle_param(ty) {
+                let marker = self.compile_thaw_js_handle_marker(value.into_int_value())?;
+                self.compile_json_array_push_owned(array, marker)?;
+                continue;
+            }
+            if value.is_int_value() && matches!(ty, HirType::Json) {
+                return Err(format!(
+                    "thaw-js class call `{}`: argument {} is a live JsValue handle",
+                    signature.symbol,
+                    index + 1
+                ));
+            }
+            self.compile_typed_dynamic_argument(array, value, ty)
+                .map_err(|error| format!("thaw-js class argument {} ({ty:?}): {error}", index + 1))?;
+        }
+        let name = self
+            .builder
+            .build_global_string_ptr(symbol, "thaw_js_class_symbol")
+            .map_err(|error| error.to_string())?;
+        let want_handle = self.context.i8_type().const_int(u64::from(ret_handle), false);
+        let json = self.compile_json_backend_values_with_extra(
+            name.as_pointer_value().into(),
+            array,
+            "thaw_tjs_class_call",
+            &[receiver.into(), want_handle.into()],
+            &[],
+        )?;
+        if ret_handle {
+            let id = self.compile_json_value_to_native(json, &HirType::F64)?.into_float_value();
+            return Ok(self
+                .builder
+                .build_float_to_signed_int(id, self.context.i64_type(), "thaw_js_class_handle")
+                .map_err(|error| error.to_string())?
+                .into());
+        }
+        self.compile_typed_dynamic_result(json, &signature.ret)
+    }
+
+    /// `{"__thaw_tjs_handle__": id}` for an instance handle passed back into thaw-js.
+    fn compile_thaw_js_handle_marker(
+        &mut self,
+        handle: inkwell::values::IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let id = self
+            .builder
+            .build_signed_int_to_float(handle, self.context.f64_type(), "thaw_js_handle_id")
+            .map_err(|error| error.to_string())?;
+        let marker = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "thaw_js_handle_marker")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let key = self
+            .builder
+            .build_global_string_ptr("__thaw_tjs_handle__", "thaw_js_handle_key")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_object_set_number").unwrap(),
+                &[marker.into(), key.as_pointer_value().into(), id.into()],
+                "thaw_js_handle_marker_id",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(marker)
+    }
+
+    /// Registers a compiled closure with thaw-js (`thaw_tjs_register_callback`) and pushes the
+    /// `{"__thaw_tjs_cb__": id}` marker thaw-js turns into a callable function. An absent optional
+    /// callback becomes the `undefined` marker.
+    fn compile_thaw_js_callback_argument(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<(), String> {
+        let (optional, function_type) = match ty {
+            HirType::Optional(inner) => (true, inner.as_ref()),
+            other => (false, other),
+        };
+        let HirType::Function(params, ret) = function_type else {
+            return Err("not a function type".into());
+        };
+        let (closure, present) = if optional {
+            let tagged = value.into_struct_value();
+            let present = self.builder.build_extract_value(tagged, 0, "thaw_js_callback_present")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let closure = self.builder.build_extract_value(tagged, 1, "thaw_js_callback_closure")
+                .map_err(|error| error.to_string())?.into_pointer_value();
+            (closure, Some(present))
+        } else {
+            (value.into_pointer_value(), None)
+        };
+        let function = self.current_function();
+        let done = self.context.append_basic_block(function, "thaw_js_callback_done");
+        let absent_block = present.map(|present| {
+            let register = self.context.append_basic_block(function, "thaw_js_callback_register");
+            let absent = self.context.append_basic_block(function, "thaw_js_callback_absent");
+            (present, register, absent)
+        });
+        if let Some((present, register, absent)) = absent_block {
+            self.builder.build_conditional_branch(present, register, absent)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(absent);
+            let undefined = self.compile_napi_undefined_json()?;
+            self.compile_json_array_push_owned(array, undefined)?;
+            self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(register);
+        }
+        let marker = self.compile_thaw_js_callback_marker(closure, params, ret)?;
+        self.compile_json_array_push_owned(array, marker)?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    /// Registers the closure with thaw-js and returns the `{"__thaw_tjs_cb__": id}` marker Json.
+    fn compile_thaw_js_callback_marker(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_thaw_js = true;
+        // JSON text both ways (`graph_wire` off): thaw-js has no live-handle graph protocol.
+        let (adapter, context, _) =
+            self.compile_value_callback_from_closure(closure, params, ret, false, None, false, false, false)?;
+        let i64_type = self.context.i64_type();
+        let id = self.builder.build_call(
+            self.module.get_function("thaw_tjs_register_callback").unwrap(),
+            &[adapter.into(), context.into(), i64_type.const_int(params.len() as u64, false).into()],
+            "thaw_js_callback_id",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_tjs_register_callback returned no value")?.into_int_value();
+        let id = self.builder.build_signed_int_to_float(id, self.context.f64_type(), "thaw_js_callback_id_f64")
+            .map_err(|error| error.to_string())?;
+        let marker = self.builder.build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "thaw_js_callback_marker")
+            .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let key = self.builder.build_global_string_ptr("__thaw_tjs_cb__", "thaw_js_callback_key")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_object_set_number").unwrap(),
+            &[marker.into(), key.as_pointer_value().into(), id.into()],
+            "thaw_js_callback_marker_id",
+        ).map_err(|error| error.to_string())?;
+        Ok(marker)
+    }
+
+    /// `JsValueAsJson(registerNativeCallback(closure))` inside a thaw-js call: the coercion of a
+    /// plain callback into a `Json` parameter. Anything else keeps the QuickJS meaning.
+    fn try_compile_thaw_js_callback_marker(
+        &mut self,
+        inner: &HirExpr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let HirExpr::Call(callee, args) = inner else { return Ok(None) };
+        let (HirExpr::Var(name), [closure_expr @ HirExpr::TypedClosure(HirType::Function(params, ret), _)]) =
+            (callee.as_ref(), args.as_slice())
+        else {
+            return Ok(None);
+        };
+        if name != "registerNativeCallback"
+            || !thaw_js_callback_type(&HirType::Function(params.clone(), ret.clone()))
+        {
+            return Ok(None);
+        }
+        let closure = self.compile_expr(closure_expr)?.into_pointer_value();
+        let marker = self.compile_thaw_js_callback_marker(closure, params, ret)?;
+        self.tracks_owned_json_roots = true;
+        self.mark_fresh_owned_json_result(marker)?;
+        Ok(Some(marker))
     }
 
     fn compile_typed_quickjs_exact_call(
