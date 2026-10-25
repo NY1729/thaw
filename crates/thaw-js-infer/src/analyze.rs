@@ -165,18 +165,19 @@ impl An {
         }
         let old = std::mem::replace(&mut self.sites[s], Site::Dead(r));
         self.changed = true;
+        // containers nested in a dead one are dead for the same reason (root cause, not "Tainted")
         match old {
-            Site::Arr(e) => self.taint(&e),
-            Site::Obj(m) => m.values().for_each(|t| self.taint(t)),
+            Site::Arr(e) => self.taint_as(&e, r),
+            Site::Obj(m) => m.values().for_each(|t| self.taint_as(t, r)),
             _ => {}
         }
     }
 
-    pub fn taint(&mut self, t: &Ty) {
+    pub fn taint_as(&mut self, t: &Ty, r: Reason) {
         if let Ty::Set(atoms) = t {
             for at in atoms.clone() {
                 match at {
-                    Atom::Arr(s) | Atom::Obj(s) => self.kill(s, Reason::Tainted),
+                    Atom::Arr(s) | Atom::Obj(s) => self.kill(s, r),
                     Atom::Fn(f) => self.escape_fn(f as usize),
                     _ => {}
                 }
@@ -235,8 +236,8 @@ impl An {
         let merged = match (kx, ky) {
             (Site::Dead(r), other) | (other, Site::Dead(r)) => {
                 match other {
-                    Site::Arr(e) => self.taint(&e),
-                    Site::Obj(m) => m.values().for_each(|t| self.taint(t)),
+                    Site::Arr(e) => self.taint_as(&e, r),
+                    Site::Obj(m) => m.values().for_each(|t| self.taint_as(t, r)),
                     _ => {}
                 }
                 Site::Dead(r)
@@ -341,7 +342,7 @@ impl An {
         match (x, y) {
             (Ty::Any(a), Ty::Any(b)) => Ty::Any(*a.min(b)),
             (Ty::Any(r), s @ Ty::Set(_)) | (s @ Ty::Set(_), Ty::Any(r)) => {
-                self.taint(s);
+                self.taint_as(s, *r);
                 Ty::Any(*r)
             }
             (Ty::Any(r), Ty::Bottom) | (Ty::Bottom, Ty::Any(r)) => Ty::Any(*r),
@@ -358,7 +359,7 @@ impl An {
     fn flow(&mut self, key: &(usize, String), t: &Ty) {
         let Some((old, is_const)) = self.st.binds.get(key).map(|b| (b.ty.clone(), b.is_const))
         else {
-            self.taint(t);
+            self.taint_as(t, Reason::UnknownGlobal);
             return;
         };
         let w;
@@ -381,7 +382,7 @@ impl An {
     fn flow_name(&mut self, name: &str, t: &Ty) {
         match self.st.resolve(*self.cur.last().unwrap(), name) {
             Some(k) => self.flow(&k, t),
-            None => self.taint(t),
+            None => self.taint_as(t, Reason::UnknownGlobal),
         }
     }
 
@@ -407,7 +408,7 @@ impl An {
                 self.sites[s] = Site::Arr(n);
             }
         } else {
-            self.taint(t);
+            self.taint_as(t, Reason::ShapeChange);
         }
     }
 
@@ -415,7 +416,7 @@ impl An {
         let t = &self.widen(t);
         let s = self.find(s);
         let Site::Obj(m) = &self.sites[s] else {
-            self.taint(t);
+            self.taint_as(t, Reason::ShapeChange);
             return;
         };
         let old = m.get(name).cloned();
@@ -575,7 +576,11 @@ impl An {
                     Key::Name(n) if n == "length" => Ty::num(),
                     Key::Num => {
                         let e = self.arr_elem(s);
-                        self.join(&e, &Ty::undef())
+                        if self.cfg.in_bounds_reads {
+                            e
+                        } else {
+                            self.join(&e, &Ty::undef())
+                        }
                     }
                     Key::Name(_) => Ty::Any(Reason::UnmodeledMethod),
                     Key::Pending => Ty::Bottom,
@@ -626,7 +631,7 @@ impl An {
             return;
         }
         let atoms = match obj {
-            Ty::Any(_) => return self.taint(v),
+            Ty::Any(r) => return self.taint_as(v, *r),
             Ty::Bottom => return,
             Ty::Set(s) => s.clone(),
         };
@@ -666,12 +671,12 @@ impl An {
             };
             match (p, t) {
                 (Some(n), Some(t)) => self.flow(&(f, n.clone()), &t),
-                (None, Some(t)) => self.taint(&t),
+                (None, Some(t)) => self.taint_as(&t, Reason::Destructure),
                 _ => {}
             }
         }
         for (t, _) in args.iter().skip(params.len()) {
-            self.taint(t);
+            self.taint_as(t, Reason::Arguments);
         }
         let fi = &self.st.funcs[f];
         if fi.async_ {
@@ -720,7 +725,7 @@ impl An {
 
     fn unknown_call(&mut self, args: &[(Ty, bool)], r: Reason) -> Ty {
         for (t, _) in args {
-            self.taint(t);
+            self.taint_as(t, r);
         }
         Ty::Any(r)
     }
@@ -777,7 +782,7 @@ impl An {
             Ty::Bottom => return Ty::Bottom,
             Ty::Any(r) => {
                 for (t, _) in args {
-                    self.taint(t);
+                    self.taint_as(t, *r);
                 }
                 return Ty::Any(*r);
             }
@@ -1151,7 +1156,7 @@ impl An {
                 let n = n.clone();
                 self.flow(&(f, n), t)
             }
-            Some(None) => self.taint(t),
+            Some(None) => self.taint_as(t, Reason::Destructure),
             None => {}
         }
     }
@@ -1289,7 +1294,7 @@ impl An {
                         self.method_call(&recv, &p.sym, &args, cbs, c.span.lo.0)
                     }
                     _ => {
-                        self.taint(&recv);
+                        self.taint_as(&recv, Reason::DynamicKey);
                         self.unknown_call(&args, Reason::DynamicKey)
                     }
                 }
@@ -1387,7 +1392,7 @@ impl An {
             E::Tpl(t) => {
                 t.exprs.iter().for_each(|x| {
                     let ty = self.ty(x);
-                    self.taint(&ty);
+                    self.taint_as(&ty, Reason::Coercion);
                 });
                 Ty::str()
             }
@@ -1521,7 +1526,7 @@ impl An {
                     Some(t) => t,
                     None => {
                         for (t, _) in &args {
-                            self.taint(t);
+                            self.taint_as(t, Reason::New);
                         }
                         Ty::Any(Reason::New)
                     }
@@ -1535,7 +1540,7 @@ impl An {
                         Some(x) => {
                             let t = self.ty(&x.expr);
                             let t = if x.spread.is_some() {
-                                self.taint(&t);
+                                self.taint_as(&t, Reason::Spread);
                                 Ty::Any(Reason::Spread)
                             } else {
                                 t
@@ -1571,7 +1576,7 @@ impl An {
             }
             E::Await(x) => {
                 let t = self.ty(&x.arg);
-                self.taint(&t);
+                self.taint_as(&t, Reason::Async);
                 Ty::Any(Reason::Async)
             }
             E::Yield(y) => {
@@ -1596,7 +1601,7 @@ impl An {
             match p {
                 a::PropOrSpread::Spread(sp) => {
                     let t = self.ty(&sp.expr);
-                    self.taint(&t);
+                    self.taint_as(&t, Reason::Spread);
                     dead = Some(Reason::Spread);
                 }
                 a::PropOrSpread::Prop(p) => match &**p {
@@ -1644,7 +1649,7 @@ impl An {
                 let k = self.key_of(&m.prop);
                 self.member_write(&o, &k, v);
             }
-            _ => self.taint(v),
+            _ => self.taint_as(v, Reason::DynamicKey),
         }
     }
 
@@ -1677,7 +1682,7 @@ impl An {
                     _ => None,
                 };
                 let Some(te) = target_expr else {
-                    self.taint(&rhs);
+                    self.taint_as(&rhs, Reason::Other);
                     return Ty::Any(Reason::Other);
                 };
                 // `this.f = e;` as a direct constructor statement: always initialised
@@ -1720,7 +1725,7 @@ impl An {
                 v
             }
             a::AssignTarget::Pat(p) => {
-                self.taint(&rhs);
+                self.taint_as(&rhs, Reason::Destructure);
                 let pat = match p {
                     a::AssignTargetPat::Array(x) => Some(a::Pat::Array(x.clone())),
                     a::AssignTargetPat::Object(x) => Some(a::Pat::Object(x.clone())),
@@ -1849,12 +1854,12 @@ impl An {
                 // a constructor returning an object replaces `this`
                 if !matches!(&ret, Ty::Bottom) && !ret.only(Atom::Undef) {
                     for (t, _) in args {
-                        self.taint(t);
+                        self.taint_as(t, Reason::New);
                     }
                     return None;
                 }
             }
-            None => args.iter().for_each(|(t, _)| self.taint(t)),
+            None => args.iter().for_each(|(t, _)| self.taint_as(t, Reason::New)),
         }
         let s = self.class_site(k);
         Some(Ty::one(Atom::Obj(self.find(s))))
@@ -1909,7 +1914,7 @@ impl An {
         for k in keys {
             let (e, m) = self.mod_site_pair(&k);
             let t = Ty::Set(vec![Atom::Obj(e), Atom::Obj(m)]);
-            self.taint(&t);
+            self.taint_as(&t, Reason::Escaped);
         }
     }
 
@@ -2060,7 +2065,7 @@ impl An {
     }
 
     /// Declared type of parameter `i` of `fid` (join over overloads), `None` if no signature has it.
-    fn dts_param(&mut self, fid: usize, i: usize) -> Option<Ty> {
+    pub(crate) fn dts_param(&mut self, fid: usize, i: usize) -> Option<Ty> {
         let sigs = self.dts_fns.get(&fid)?.clone();
         let mut acc: Option<Ty> = None;
         for (si, s) in sigs.iter().enumerate() {
@@ -2207,7 +2212,7 @@ impl An {
                 if let a::Pat::Ident(bi) = &*asg.left {
                     self.flow(&(fid, bi.id.sym.to_string()), &t);
                 } else {
-                    self.taint(&t);
+                    self.taint_as(&t, Reason::Destructure);
                 }
                 asg.left.visit_with(self);
             } else {
@@ -2306,18 +2311,18 @@ impl Visit for An {
     }
     fn visit_throw_stmt(&mut self, n: &a::ThrowStmt) {
         let t = self.ty(&n.arg);
-        self.taint(&t);
+        self.taint_as(&t, Reason::Catch);
     }
     fn visit_class_prop(&mut self, n: &a::ClassProp) {
         if let Some(v) = &n.value {
             let t = self.ty(v);
-            self.taint(&t);
+            self.taint_as(&t, Reason::Class);
         }
     }
     fn visit_private_prop(&mut self, n: &a::PrivateProp) {
         if let Some(v) = &n.value {
             let t = self.ty(v);
-            self.taint(&t);
+            self.taint_as(&t, Reason::Class);
         }
     }
     fn visit_return_stmt(&mut self, n: &a::ReturnStmt) {
@@ -2352,7 +2357,7 @@ impl Visit for An {
             (p, init) => {
                 if let Some(e) = init {
                     let t = self.ty(e);
-                    self.taint(&t);
+                    self.taint_as(&t, Reason::Destructure);
                 }
                 self.flow_any_pat(p, Reason::Destructure);
                 p.visit_with(self);
@@ -2380,7 +2385,7 @@ impl Visit for An {
             },
             Ty::Bottom => Ty::Bottom,
             _ => {
-                self.taint(&r);
+                self.taint_as(&r, Reason::Iterate);
                 Ty::Any(Reason::Iterate)
             }
         };

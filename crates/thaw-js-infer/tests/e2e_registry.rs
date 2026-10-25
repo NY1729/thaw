@@ -7,10 +7,26 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 struct Case {
-    /// directory under tests/e2e and the npm package it uses
+    /// directory under tests/e2e
     name: &'static str,
-    /// functions that must have been compiled ahead of time
+    /// the npm package it uses (`name` when empty)
+    package: &'static str,
+    /// a package shipped with the tests (tests/e2e_local/<package>) instead of one fetched from npm
+    local: bool,
+    /// functions that must have been compiled ahead of time and called directly
     direct: &'static [&'static str],
+    /// functions whose clone must sit behind a run-time guard (the static types prove nothing)
+    guarded: &'static [&'static str],
+}
+
+impl Case {
+    fn package_name(&self) -> &str {
+        if self.package.is_empty() {
+            self.name
+        } else {
+            self.package
+        }
+    }
 }
 
 fn run(cmd: &mut Command) -> (bool, String, f64) {
@@ -38,10 +54,23 @@ fn case(thaw: &str, c: &Case) {
     )
     .unwrap();
 
-    let (ok, log, _) = run(Command::new(thaw)
-        .current_dir(&dir)
-        .args(["add", c.name, "--prefix", "."]));
-    assert!(ok, "{}: thaw add failed\n{log}", c.name);
+    if c.local {
+        let target = dir.join("node_modules").join(c.package_name());
+        std::fs::create_dir_all(&target).unwrap();
+        let source = format!("{manifest}/tests/e2e_local/{}", c.package_name());
+        for entry in std::fs::read_dir(&source).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    } else {
+        let (ok, log, _) = run(Command::new(thaw).current_dir(&dir).args([
+            "add",
+            c.package_name(),
+            "--prefix",
+            ".",
+        ]));
+        assert!(ok, "{}: thaw add failed\n{log}", c.name);
+    }
     let (ok, want, node_s) = run(Command::new("node").current_dir(&dir).args([
         "--experimental-strip-types",
         "--no-warnings",
@@ -77,11 +106,21 @@ fn case(thaw: &str, c: &Case) {
     );
 
     let (_, inspect, _) = run(Command::new(thaw).arg("inspect").arg(dir.join("aot.bin")));
+    for f in c.guarded {
+        assert!(
+            inspect.contains(&format!(
+                "js-infer-aot-guarded: package={} function={f} ",
+                c.package_name()
+            )),
+            "{}: `{f}` is not behind a guard\n{inspect}",
+            c.name
+        );
+    }
     for f in c.direct {
         assert!(
             inspect.contains(&format!(
                 "js-infer-aot-direct: package={} function={f} ",
-                c.name
+                c.package_name()
             )),
             "{}: `{f}` was not compiled ahead of time\n{inspect}",
             c.name
@@ -89,7 +128,7 @@ fn case(thaw: &str, c: &Case) {
     }
     assert!(dir
         .join("thaw_modules")
-        .join(c.name)
+        .join(c.package_name())
         .join("inferred.json")
         .is_file());
     let size = |n: &str| std::fs::metadata(dir.join(n)).map(|m| m.len()).unwrap_or(0);
@@ -108,18 +147,99 @@ fn aot_clones_match_node_and_beat_the_quickjs_calls() {
         eprintln!("skipped: set THAW_JS_INFER_THAW_BIN to run");
         return;
     };
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipped: node is not installed");
+        return;
+    }
     for c in [
         Case {
             name: "date-fns",
+            package: "",
+            local: false,
             direct: &["yearsToMonths", "minutesToSeconds"],
+            guarded: &[],
         },
         Case {
             name: "bcryptjs",
+            package: "",
+            local: false,
             direct: &["getRounds", "getSalt", "truncates"],
+            guarded: &[],
         },
         Case {
             name: "just-clamp",
+            package: "",
+            local: false,
             direct: &["clamp"],
+            guarded: &[],
+        },
+        // array parameters (copied at the typed-call boundary, in-bounds element reads proven)
+        Case {
+            name: "simple-statistics",
+            package: "",
+            local: false,
+            direct: &[
+                "sum",
+                "mean",
+                "max",
+                "min",
+                "product",
+                "geometricMean",
+                "zScore",
+            ],
+            guarded: &[],
+        },
+        // the same package with `Json` arguments: guarded, and a contract violation matches Node
+        Case {
+            name: "simple-statistics-guard",
+            package: "simple-statistics",
+            local: false,
+            direct: &[],
+            guarded: &["sum", "max"],
+        },
+        // records, string / boolean arrays; the mutating `grow` stays a QuickJS call
+        Case {
+            name: "aot-shapes",
+            package: "aot-shapes",
+            local: true,
+            direct: &["area", "label", "longest", "allTrue"],
+            guarded: &[],
+        },
+        Case {
+            name: "aot-shapes-guard",
+            package: "aot-shapes",
+            local: true,
+            direct: &[],
+            guarded: &["area", "label", "longest"],
+        },
+        Case {
+            name: "just-is-prime",
+            package: "",
+            local: false,
+            direct: &["isPrime"],
+            guarded: &[],
+        },
+        // nothing is cloned here: the opt-in build must still produce the baseline's output
+        Case {
+            name: "uuid",
+            package: "",
+            local: false,
+            direct: &[],
+            guarded: &[],
+        },
+        Case {
+            name: "marked",
+            package: "",
+            local: false,
+            direct: &[],
+            guarded: &[],
+        },
+        Case {
+            name: "dayjs",
+            package: "",
+            local: false,
+            direct: &[],
+            guarded: &[],
         },
     ] {
         case(&thaw, &c);

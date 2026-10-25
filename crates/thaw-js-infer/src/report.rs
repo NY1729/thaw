@@ -257,6 +257,9 @@ fn link_classes(st: &mut State) {
             match ctor {
                 Some(c) => st.classes.get_mut(k).unwrap().ctor = Some(c),
                 None => {
+                    st.complex_why
+                        .entry(k.clone())
+                        .or_insert("ctor-binding".into());
                     st.complex.insert(k.clone());
                 }
             }
@@ -552,8 +555,6 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
                 Some(Reason::Eval)
             } else if f.uses_args {
                 Some(Reason::Arguments)
-            } else if f.uses_this && !f.arrow && !this_ok {
-                Some(Reason::This)
             } else if f.exotic && !this_ok {
                 Some(Reason::Exotic)
             } else {

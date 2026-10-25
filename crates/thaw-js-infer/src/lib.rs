@@ -38,6 +38,11 @@ pub struct Config {
     pub guards: bool,
     /// `var x;` does not contribute `undefined` (assumes definite assignment). Upper bound.
     pub optimistic_uninit: bool,
+    /// `a[i]` is typed as the element type, without `undefined`. Only for code whose element reads
+    /// are proven in bounds (AOT clone bodies, see `clone`).
+    pub in_bounds_reads: bool,
+    /// top-level names of the program an AOT clone is compiled into (helpers with these names are renamed)
+    pub reserved_names: Vec<String>,
 }
 
 #[cfg(test)]
