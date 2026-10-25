@@ -11,6 +11,7 @@ sha2 = "0.10"
 flate2 = "1.1"
 tar = "0.4"
 thaw-parser = { path = "../thaw-parser" }
+thaw-js-infer = { path = "../thaw-js-infer" }
 swc_ecma_visit = "29.0.0"
 ureq = "3.4.0"
 

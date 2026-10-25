@@ -3133,6 +3133,7 @@ dependencies = [
  "thaw-bridge",
  "thaw-hir",
  "thaw-js",
+ "thaw-js-infer",
  "thaw-llvm",
  "thaw-parser",
  "thaw-registry",
@@ -3190,6 +3191,14 @@ dependencies = [
  "regress",
  "swc_ecma_visit",
  "thaw-arena",
+ "thaw-parser",
+]
+
+[[package]]
+name = "thaw-js-infer"
+version = "0.1.0"
+dependencies = [
+ "swc_ecma_visit",
  "thaw-parser",
 ]
 
@@ -3299,6 +3308,7 @@ dependencies = [
  "sha2",
  "swc_ecma_visit",
  "tar",
+ "thaw-js-infer",
  "thaw-parser",
  "thaw-quickjs",
  "ureq",
