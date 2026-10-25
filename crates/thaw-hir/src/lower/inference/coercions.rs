@@ -897,15 +897,27 @@ impl<'a> FnLowerer<'a> {
                 let mut uses_accessor = false;
                 for (name, expected) in declared_fields {
                     if let Some((_, actual)) = actual_fields.iter().find(|(n, _)| n == name) {
-                        if actual != expected {
+                        // A field widened to `Optional` because it may be
+                        // uninitialised no longer shares the interface's
+                        // layout: the structural view is a snapshot whose
+                        // absent value reads like `undefined` coerced to `T`.
+                        let uninit = matches!(actual, HirType::Optional(payload) if payload.as_ref() == expected)
+                            && is_uninit_class_field(&actual_fields, name);
+                        if actual != expected && !uninit {
                             reads.clear();
                             break;
                         }
-                        reads.push((name.clone(), HirExpr::PropAccess(
+                        let read = HirExpr::PropAccess(
                             Box::new(HirExpr::Var(binding.clone())),
                             object_type.clone(),
                             name.clone(),
-                        )));
+                        );
+                        if uninit {
+                            uses_accessor = true;
+                            reads.push((name.clone(), self.lenient_uninit_read(read)?));
+                        } else {
+                            reads.push((name.clone(), read));
+                        }
                         continue;
                     }
                     let Some(owner) = self.class_instance_accessor_owner(&object_type, name) else {
@@ -1647,7 +1659,19 @@ impl<'a> FnLowerer<'a> {
                 }
                 actual if actual == *declared => Ok(value),
                 _ => {
-                    let value = self.coerce_to_declared(payload.as_ref(), value)?;
+                    let mut value = self.coerce_to_declared(payload.as_ref(), value)?;
+                    // An empty `[]` infers as `number[]`; `OptionalSome` checks its
+                    // operand against the payload, so type the empty array.
+                    if let (HirExpr::ArrayLit(elements), HirType::Array(element)) =
+                        (&value, payload.as_ref())
+                    {
+                        if elements.is_empty() && element.as_ref() != &HirType::F64 {
+                            value = HirExpr::ArrayAlloc(
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                element.as_ref().clone(),
+                            );
+                        }
+                    }
                     Ok(HirExpr::OptionalSome(
                         Box::new(value),
                         payload.as_ref().clone(),

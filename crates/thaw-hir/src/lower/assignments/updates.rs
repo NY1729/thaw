@@ -540,7 +540,10 @@ impl<'a> FnLowerer<'a> {
                                 match &object_type {
                                     HirType::Object(fields)
                                         if fields.iter().any(|(name, ty)| {
-                                            name == prop.sym.as_str() && matches!(ty, HirType::F64 | HirType::Json)
+                                            name == prop.sym.as_str()
+                                            && (matches!(ty, HirType::F64 | HirType::Json)
+                                                || (ty == &HirType::Optional(Box::new(HirType::F64))
+                                                    && is_uninit_class_field(fields, name)))
                                         }) =>
                                     {
                                         Target::Prop(object, object_type, prop.sym.to_string())
@@ -605,7 +608,10 @@ impl<'a> FnLowerer<'a> {
                             match &object_type {
                                 HirType::Object(fields)
                                     if fields.iter().any(|(name, ty)| {
-                                        name == prop.sym.as_str() && matches!(ty, HirType::F64 | HirType::Json)
+                                        name == prop.sym.as_str()
+                                            && (matches!(ty, HirType::F64 | HirType::Json)
+                                                || (ty == &HirType::Optional(Box::new(HirType::F64))
+                                                    && is_uninit_class_field(fields, name)))
                                     }) =>
                                 {
                                     Target::Prop(object, object_type, prop.sym.to_string())
@@ -729,7 +735,8 @@ impl<'a> FnLowerer<'a> {
                 let index_name = format!("__thaw_update_index_{}", self.next_binding);
                 self.next_binding += 1;
                 let array_type = HirType::Array(Box::new(HirType::F64));
-                self.scope.insert(array_name.clone(), array_type.clone());
+                let binding_type = self.keep_bytes_type(&array, array_type.clone())?;
+                self.scope.insert(array_name.clone(), binding_type.clone());
                 self.scope.insert(index_name.clone(), HirType::F64);
                 let array_var = HirExpr::Var(array_name.clone());
                 let index_var = HirExpr::Var(index_name.clone());
@@ -746,7 +753,7 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 return self.wrap_call_argument_bindings(
                     write,
-                    &[(array_name, array_type, array), (index_name, HirType::F64, *index)],
+                    &[(array_name, binding_type, array), (index_name, HirType::F64, *index)],
                 );
             }
             if let Target::Var(name) = target {
@@ -765,6 +772,7 @@ impl<'a> FnLowerer<'a> {
                 let array_name = format!("__thaw_update_array_{}", self.next_binding);
                 self.next_binding += 1;
                 let array_type = HirType::Array(Box::new(HirType::F64));
+                let array_type = self.keep_bytes_type(&array, array_type)?;
                 self.scope.insert(array_name.clone(), array_type.clone());
                 bindings.push((array_name.clone(), array_type, array));
 
