@@ -3194,6 +3194,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-js-infer"
+version = "0.1.0"
+dependencies = [
+ "swc_ecma_visit",
+ "thaw-parser",
+]
+
+[[package]]
 name = "thaw-llvm"
 version = "0.1.0"
 dependencies = [
