@@ -2985,3 +2985,52 @@ fn maybe_uninit_fields_follow_constructor_assignment_paths() {
         assert_eq!(maybe_uninit_of(source), expected, "{source}");
     }
 }
+
+#[test]
+fn abstract_fields_are_laid_out_after_the_concrete_base_fields() {
+    let program = lower(
+        r#"abstract class Base { abstract a: number; c: number = 1; }
+        class Impl extends Base { a: number = 2; d: number = 3; }
+        function main(): number { return new Impl().a; }"#,
+    );
+    let constructor = program
+        .functions
+        .iter()
+        .find(|function| function.name == "__thaw_class_Impl_constructor")
+        .unwrap();
+    let HirType::Object(fields) = &constructor.ret else { panic!("layout") };
+    let names: Vec<_> = fields.iter().skip(1).map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["c", "a", "d"]);
+}
+
+#[test]
+fn bare_constructorless_fields_widen_only_when_the_module_can_observe_them() {
+    let layout = |source: &str| {
+        let program = lower(source);
+        let constructor = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_C_constructor")
+            .unwrap();
+        let HirType::Object(fields) = &constructor.ret else { panic!("layout") };
+        fields[1].1.clone()
+    };
+    assert_eq!(
+        layout("class C { x: number; } function main(): number { return new C().x; }"),
+        HirType::F64
+    );
+    assert_eq!(
+        layout("class C { x: number; } function main(): void { console.log(new C()); }"),
+        HirType::Optional(Box::new(HirType::F64))
+    );
+}
+
+#[test]
+fn untyped_new_map_takes_type_arguments_from_the_annotation() {
+    let module = thaw_parser::parse_typescript(
+        r#"class Z { w!: Map<string, number>; init(): void { this.w = new Map(); } }
+        function main(): void { let m: Map<string, number>; m = new Map(); const z = new Z(); z.init(); }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_ok());
+}
