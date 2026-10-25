@@ -1057,9 +1057,19 @@ fn generate_registry_shims_pass(
             // function, mime's `Mime` instance is a ready-made package
             // export), but hono's `Hono` -- constructed directly via
             // `new Hono()` -- does.
-            // A thaw-js package has no unreferenced-class QuickJS declarations (its used classes, if
-            // any, make it ineligible).
-            for class in pkg.classes.iter().filter(|_| !thaw_js_package) {
+            // A thaw-js package's classes are generated exactly like QuickJS ones, then retargeted at
+            // thaw-js below (instances stay `JsValue` handles into the thaw-js heap).
+            let class_marks = (
+                shim.len(), class_rewrites.len(), class_method_rewrites.len(),
+                callback_instance_rewrites.len(), static_class_method_rewrites.len(),
+                class_setter_rewrites.len(),
+            );
+            let class_targets_before = class_targets.keys().cloned().collect::<std::collections::HashSet<_>>();
+            // (Only the classes the program names: an unreferenced class's multi-arity constructor
+            // dispatcher would pull QuickJS into every routed build.)
+            for class in pkg.classes.iter().filter(|class| {
+                !thaw_js_package || thaw_js_mentions(user_source, &class.name)
+            }) {
                 let mut runtime_class = class.clone();
                 runtime_class.name = format!("{}::{}", pkg.name, class.name);
                 if let Some(arities) = constructor_arities_for_package.get(&class.name).cloned() {
@@ -1166,6 +1176,20 @@ fn generate_registry_shims_pass(
                             symbol,
                             value_type,
                         ));
+                    }
+                }
+            }
+            if thaw_js_package {
+                thaw_js_retarget_classes(
+                    class_marks, &mut shim, &mut class_rewrites, &mut class_method_rewrites,
+                    &mut callback_instance_rewrites, &mut static_class_method_rewrites,
+                    &mut class_setter_rewrites,
+                );
+                for key in class_targets.keys().cloned().collect::<Vec<_>>() {
+                    if !class_targets_before.contains(&key) {
+                        if let Some(target) = class_targets.get_mut(&key) {
+                            *target = target.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
+                        }
                     }
                 }
             }
@@ -1981,7 +2005,18 @@ fn generate_registry_shims_pass(
                 || !value_exports.is_empty())
             {
                 if thaw_js_routing
-                    && !value_exports.iter().any(|(name, ..)| thaw_js_mentions(user_source, name))
+                    && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
+                    && !thaw_js_routed.contains(&pkg.name)
+                {
+                    if let Some((name, ..)) = value_exports.iter().find(|(name, ..)| thaw_js_blocking_value_export(pkg, user_source, name)) {
+                        eprintln!("thaw-js routing: package `{}` stays on QuickJS: value export `{name}`", pkg.name);
+                    }
+                    if !nested_namespace_aliases.is_empty() {
+                        eprintln!("thaw-js routing: package `{}` stays on QuickJS: nested namespace aliases", pkg.name);
+                    }
+                }
+                if thaw_js_routing
+                    && !value_exports.iter().any(|(name, ..)| thaw_js_blocking_value_export(pkg, user_source, name))
                     && nested_namespace_aliases.is_empty()
                     && thaw_js_package_eligible(
                         pkg,

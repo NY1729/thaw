@@ -147,7 +147,11 @@ impl Interp {
                 a::ClassMember::PrivateMethod(_) | a::ClassMember::PrivateProp(_) => {
                     return unsupported("private-name")
                 }
-                a::ClassMember::StaticBlock(_) => return unsupported("static-block"),
+                a::ClassMember::StaticBlock(block) => {
+                    let inner = Scope::new(Some(static_scope.clone()));
+                    hoist_vars(&block.body.stmts, &inner);
+                    self.exec_stmts(&block.body.stmts, &inner)?;
+                }
                 a::ClassMember::AutoAccessor(_) => return unsupported("auto-accessor"),
                 _ => {}
             }
