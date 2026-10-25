@@ -24,7 +24,7 @@ use inkwell::targets::{
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
     AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue,
-    IntValue, PointerValue, StructValue,
+    InstructionOpcode, IntValue, Operand, PointerValue, StructValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -907,9 +907,51 @@ impl<'ctx> HirCompiler<'ctx> {
             (false, None) => self.emit_c_main_entry(),
         }
 
+        self.hoist_static_allocas();
         self.module
             .verify()
             .map_err(|e| format!("module verification failed:\n{e}"))
+    }
+
+    /// An `alloca` outside the entry block grows the native stack on every execution, so one
+    /// emitted inside a loop body leaks a slot per iteration until the stack limit trips. Move
+    /// every fixed-size one to the entry block, where it is allocated once per call.
+    fn hoist_static_allocas(&self) {
+        for function in self.module.get_functions() {
+            let Some(entry) = function.get_first_basic_block() else {
+                continue;
+            };
+            let Some(anchor) = entry.get_first_instruction() else {
+                continue;
+            };
+            // Ahead of the entry's first instruction, so every use is dominated.
+            let builder = self.context.create_builder();
+            builder.position_before(&anchor);
+            for block in function.get_basic_blocks().into_iter().skip(1) {
+                let mut next = block.get_first_instruction();
+                while let Some(instruction) = next {
+                    next = instruction.get_next_instruction();
+                    let fixed = instruction.get_opcode() == InstructionOpcode::Alloca
+                        && instruction
+                            .get_operand(0)
+                            .and_then(|operand| match operand {
+                                Operand::Value(value) => Some(value),
+                                Operand::Block(_) => None,
+                            })
+                            .is_some_and(|size| {
+                                size.is_int_value() && size.into_int_value().is_const()
+                            });
+                    if fixed {
+                        let name = instruction
+                            .get_name()
+                            .and_then(|name| name.to_str().ok())
+                            .map(str::to_owned);
+                        instruction.remove_from_basic_block();
+                        builder.insert_instruction(&instruction, name.as_deref());
+                    }
+                }
+            }
+        }
     }
 
     /// Selects CommonJS (`true`) or ES module (`false`, the default) `process.nextTick` ordering
