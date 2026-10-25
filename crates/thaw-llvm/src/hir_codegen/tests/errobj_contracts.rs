@@ -1,6 +1,6 @@
 // Error values are framed strings, so their own properties live in a runtime side table keyed by the
 // framed pointer (`thaw_error_set_prop` & co). Expected output is real node 22 output
-// (`node --experimental-strip-types`); `error_obj_equal_text_errors_known_bad` pins the one known divergence.
+// (`node --experimental-strip-types`).
 
 #[test]
 fn error_obj_props_roundtrip_in_delete() {
@@ -360,8 +360,8 @@ fn error_obj_capture_stack_trace() {
     );
 }
 
-// Pins today's behavior for the identity work (E2): `===` through throw/catch is true, but two distinct
-// Errors with equal text also compare equal (Node prints `false` there). Flip the second `true` in E2.
+// Error identity (E2): `===` through throw/catch is true, and two distinct Errors with equal text
+// are not strictly equal (`===` compares the Error, not its text).
 #[test]
 fn error_obj_equal_text_errors_known_bad() {
     let source = r#"function main(): void {
@@ -369,12 +369,146 @@ fn error_obj_equal_text_errors_known_bad() {
   try { throw a; } catch (e: any) { console.log(e === a, a === a); }
   const b = new Error("x");
   const c = new Error("x");
-  // Known-bad today: distinct Errors with equal text compare strictly equal (Node: false).
   console.log(b === c, String(b), `${c}`);
 }
 "#;
     assert_eq!(
         compile_and_run(source, "error_obj_equal_text_errors_known_bad"),
-        "true true\ntrue Error: x Error: x\n"
+        "true true\nfalse Error: x Error: x\n"
+    );
+}
+
+#[test]
+fn error_obj_subclass_throw_keys_entries() {
+    let source = r#"class HttpError extends Error {
+  status: number;
+  constructor(m: string, s: number) { super(m); this.name = "HttpError"; this.status = s; }
+}
+class Plain extends Error { code = "C"; extra: number[] = [1]; }
+function main(): void {
+  const h = new HttpError("nf", 404);
+  console.log(Object.keys(h), Object.entries(h), Object.getOwnPropertyNames(h));
+  try { throw h; } catch (e: any) {
+    console.log(e.status, Object.keys(e), Object.entries(e), Object.getOwnPropertyNames(e), Reflect.ownKeys(e));
+    console.log(e.name, e.message, e instanceof HttpError, e === h);
+  }
+  try { throw new Plain("p"); } catch (e: any) { console.log(e.code, e.extra, Object.keys(e), e.name); }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "error_obj_subclass_throw_keys_entries"),
+        "[ 'status', 'name' ] [ [ 'status', 404 ], [ 'name', 'HttpError' ] ] [ 'stack', 'message', 'status', 'name' ]\n404 [ 'status', 'name' ] [ [ 'status', 404 ], [ 'name', 'HttpError' ] ] [ 'stack', 'message', 'status', 'name' ] [ 'stack', 'message', 'status', 'name' ]\nHttpError nf true true\nC [ 1 ] [ 'code', 'extra' ] Error\n"
+    );
+}
+
+#[test]
+fn error_obj_carrier_entries_and_own_names() {
+    let source = r#"function main(): void {
+  const x = new Error("c") as any;
+  x.a = 1;
+  x.s = "q";
+  console.log(Object.entries(x), Object.getOwnPropertyNames(x), Reflect.ownKeys(x));
+  try { throw x; } catch (c: any) {
+    console.log(Object.entries(c), Object.getOwnPropertyNames(c), Reflect.ownKeys(c), Object.keys(c));
+  }
+  try { throw new Error("plain"); } catch (c: any) {
+    console.log(Object.entries(c), Object.getOwnPropertyNames(c), Object.keys(c));
+  }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "error_obj_carrier_entries_and_own_names"),
+        "[ [ 'a', 1 ], [ 's', 'q' ] ] [ 'stack', 'message', 'a', 's' ] [ 'stack', 'message', 'a', 's' ]\n[ [ 'a', 1 ], [ 's', 'q' ] ] [ 'stack', 'message', 'a', 's' ] [ 'stack', 'message', 'a', 's' ] [ 'a', 's' ]\n[] [ 'stack', 'message' ] []\n"
+    );
+}
+
+#[test]
+fn error_obj_compound_and_update_assignments() {
+    let source = r#"function main(): void {
+  const y = new Error("y") as any;
+  y.n = 5; y.n *= 2; y.n -= 1; y.n **= 2;
+  console.log(y.n);
+  y.t = "a"; y.t += 1;
+  console.log(y.t);
+  y.u ??= 3; y.u &&= 4;
+  console.log(y.u);
+  y.k = 1;
+  console.log(y.k++, y.k, ++y.k, y.k--, y.k);
+  const x = new Error("c") as any;
+  x.a = 1; x.s = "q";
+  try { throw x; } catch (c: any) {
+    c.a += 1; c.s += "z"; c.m ??= 5; c.a ||= 9; c.q = 4; c.q++;
+    console.log(c.a, c.s, c.m, c.q, Object.keys(c));
+  }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "error_obj_compound_and_update_assignments"),
+        "81\na1\n4\n1 2 3 3 2\n2 qz 5 5 [ 'a', 's', 'm', 'q' ]\n"
+    );
+}
+
+#[test]
+fn error_obj_console_log_props_and_stack() {
+    let source = r#"function main(): void {
+  const e = new Error("boom") as any;
+  e.stack = "Error: boom\n    at x (y:1:1)";
+  e.code = "E_X";
+  console.log(e);
+  console.log("a", e);
+  console.log({ err: e });
+  console.log([e]);
+  const j = { ...e };
+  console.log(j);
+  try { throw e; } catch (c: any) { console.log(c); console.log(String(c), Object.keys(c)); }
+  const f = new Error("p") as any;
+  f.stack = "Error: p";
+  f.cause = new Error("inner");
+  f.cause.stack = "Error: inner";
+  f.n = 1;
+  console.log(f);
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "error_obj_console_log_props_and_stack"),
+        "Error: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\na Error: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\n{\n  err: Error: boom\n      at x (y:1:1) {\n    code: 'E_X'\n  }\n}\n[\n  Error: boom\n      at x (y:1:1) {\n    code: 'E_X'\n  }\n]\n{ code: 'E_X' }\nError: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\nError: boom [ 'code' ]\n[Error: p] { cause: [Error: inner], n: 1 }\n"
+    );
+}
+
+#[test]
+fn error_obj_pointer_identity_strict_equality() {
+    let source = r#"function main(): void {
+  const a = new Error("x");
+  const b = new Error("x");
+  const c = a;
+  console.log(a === b, a !== b, a === c, a == b, a == c, a != b);
+  console.log(a === (new TypeError("x") as Error), new Error("q") === new Error("q"));
+  console.log("x" === "x", String(a) === String(b), a.message === b.message);
+  const arr = [a, b];
+  console.log(arr[0] === a, arr[1] === a, arr[0] === arr[1], arr.indexOf(b), arr.includes(c), arr.lastIndexOf(a));
+  function id(x: Error): Error { return x; }
+  console.log(id(a) === a, id(a) === b);
+  const sw = (e: Error) => { switch (e) { case a: return "a"; case b: return "b"; default: return "?"; } };
+  console.log(sw(a), sw(b), sw(new Error("x")));
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "error_obj_pointer_identity_strict_equality"),
+        "false true true false true true\nfalse false\ntrue true true\ntrue false false 1 true 0\ntrue false\na b ?\n"
+    );
+}
+
+#[test]
+fn error_obj_caught_pointer_identity() {
+    let source = r#"function main(): void {
+  const a = new Error("x");
+  const b = new Error("x");
+  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }
+  try { throw a; } catch (e) { console.log(e === a, e === b); }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "error_obj_caught_pointer_identity"),
+        "true false false\ntrue false\n"
     );
 }

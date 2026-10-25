@@ -191,13 +191,94 @@ impl<'a> FnLowerer<'a> {
     // A fixed layout can contain a hidden native marker or an ordinary user
     // field with exactly the same name. Query the bound receiver before each
     // read, then append only visible fields to a runtime-length array.
+    /// For a catch carrier holding a thrown Error-family class instance (member 6) whose props were
+    /// registered at the throw: `from_props(<registered JSON text>)`; otherwise `fallback`.
+    fn thrown_error_owner_branch(
+        &mut self,
+        carrier: &HirExpr,
+        members: &[HirType],
+        hidden: bool,
+        fallback: HirExpr,
+        result_type: HirType,
+        from_props: impl FnOnce(HirExpr) -> HirExpr,
+    ) -> HirExpr {
+        let props_name = format!("__thaw_owner_props_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(props_name.clone(), HirType::Str);
+        let props = HirExpr::Var(props_name.clone());
+        let owner = HirExpr::UnionValue(Box::new(carrier.clone()), 6, members.to_vec());
+        let registered = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_owner_props".to_string())),
+            vec![owner, HirExpr::Lit(HirLit::Bool(hidden))],
+        );
+        let is_owner = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), members.to_vec())),
+            Box::new(HirExpr::Lit(HirLit::F64(6.0))),
+        );
+        let none_registered = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(props.clone()),
+            Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+        );
+        let owner_arm = HirExpr::Block(vec![
+            HirStmt::Let(props_name, HirType::Str, registered),
+            HirStmt::Return(Some(HirExpr::Conditional(
+                Box::new(none_registered),
+                Box::new(fallback.clone()),
+                Box::new(from_props(props)),
+                result_type.clone(),
+            ))),
+        ]);
+        HirExpr::Conditional(Box::new(is_owner), Box::new(owner_arm), Box::new(fallback), result_type)
+    }
+
+    /// For an Error-family record: the `name` a class inherits when its constructor never assigns
+    /// one. `message` is never an own enumerable key and `name` is one only when it differs.
+    pub(crate) fn error_family_default_name(fields: &[(Symbol, HirType)]) -> Option<String> {
+        let chain = fields
+            .first()
+            .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))?;
+        // A built-in record (AggregateError, SuppressedError) keeps its existing key listing.
+        let own = chain.split('\u{1f}').next().unwrap_or_default();
+        (!is_error_family_name(own) && chain.split('\u{1f}').any(is_error_family_name)).then(|| {
+            chain
+                .split('\u{1f}')
+                .skip(1)
+                .find(|part| is_error_family_name(part))
+                .unwrap_or("Error")
+                .to_string()
+        })
+    }
+
+    /// `if (name !== default) { push }` for an Error-family record's `name` key.
+    fn error_family_name_statement(
+        &mut self,
+        receiver: &HirExpr,
+        fields: &[(Symbol, HirType)],
+        default_name: String,
+        append: HirExpr,
+    ) -> Result<HirStmt, String> {
+        let name = self.lower_fixed_object_property_read(receiver.clone(), fields, "name")?;
+        Ok(HirStmt::If(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(name),
+                Box::new(HirExpr::Lit(HirLit::Str(default_name))),
+            ),
+            Vec::new(),
+            vec![HirStmt::Expr(append)],
+        ))
+    }
+
     fn lower_visible_fixed_object_sequence(
         &mut self,
         value: HirExpr,
         fields: &[(Symbol, HirType)],
         entries: bool,
     ) -> Result<HirExpr, String> {
-        let ordered = ecmascript_field_order(fields)
+        let default_name = Self::error_family_default_name(fields);
+        let mut ordered = ecmascript_field_order(fields)
             .into_iter()
             .map(|index| {
                 let name = fields[index].0.clone();
@@ -205,8 +286,13 @@ impl<'a> FnLowerer<'a> {
                 Ok((index, name, ty))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        // An Error-family record hides `message` and shows `name` only when assigned (last).
+        let name_entry = default_name.as_ref().and_then(|_| {
+            ordered.retain(|(_, name, _)| name != "message");
+            ordered.iter().position(|(_, name, _)| name == "name").map(|at| ordered.remove(at))
+        });
         let mut types = Vec::new();
-        for (_, _, ty) in &ordered {
+        for (_, _, ty) in ordered.iter().chain(name_entry.iter()) {
             if !types.contains(ty) {
                 types.push(ty.clone());
             }
@@ -237,7 +323,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::ArrayLit(Vec::new()),
         )];
         let mut actions = Vec::new();
-        for (index, field, _) in ordered {
+        let mut name_statement = None;
+        for (index, field, _) in ordered.into_iter().chain(name_entry) {
+            let is_name = default_name.is_some() && field == "name";
             let read = self.lower_fixed_object_property_read(receiver.clone(), fields, &field)?;
             let read = self.coerce_to_declared(&value_type, read)?;
             let item = if entries {
@@ -252,9 +340,16 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_array_push".into())),
                 vec![HirExpr::Var(result_name.clone()), item],
             );
-            actions.push((index, vec![HirStmt::Expr(append)]));
+            if is_name {
+                name_statement = Some(self.error_family_name_statement(
+                    &receiver, fields, default_name.clone().unwrap(), append,
+                )?);
+            } else {
+                actions.push((index, vec![HirStmt::Expr(append)]));
+            }
         }
         statements.extend(self.lower_ordered_fixed_field_statements(receiver, fields, actions)?);
+        statements.extend(name_statement);
         statements.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
         self.wrap_call_argument_bindings(
             HirExpr::Block(statements),
@@ -4157,7 +4252,7 @@ impl<'a> FnLowerer<'a> {
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         if let (true, HirType::Union(members)) =
-                            (property.sym == *"keys" && ty == crate::caught_exception_carrier_type(), &ty)
+                            (ty == crate::caught_exception_carrier_type(), &ty)
                         {
                             // `catch (e: any)`: the active member decides between an Error text
                             // (side-table keys) and a live object snapshot.
@@ -4171,25 +4266,35 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Lit(HirLit::F64(3.0))),
                             );
                             let text = HirExpr::UnionValue(Box::new(var.clone()), 3, members.clone());
+                            let keys_runtime =
+                                if property.sym == *"keys" { "__thaw_json_keys" } else { "__thaw_json_own_keys" };
                             let error_keys = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
+                                Box::new(HirExpr::Var(keys_runtime.to_string())),
                                 vec![HirExpr::Call(
                                     Box::new(HirExpr::Var("JSON.parse".to_string())),
                                     vec![HirExpr::Call(
                                         Box::new(HirExpr::Var("__thaw_error_own_keys".to_string())),
-                                        vec![text, HirExpr::Lit(HirLit::Bool(false))],
+                                        vec![text, HirExpr::Lit(HirLit::Bool(property.sym != *"keys"))],
                                     )],
                                 )],
                             );
                             let live_keys = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
-                                vec![self.caught_carrier_as_json(var)?],
+                                Box::new(HirExpr::Var(keys_runtime.to_string())),
+                                vec![self.caught_carrier_as_json(var.clone())?],
+                            );
+                            let keys_type = HirType::Array(Box::new(if property.sym == *"keys" { HirType::Str } else { HirType::Json }));
+                            let owner_keys = self.thrown_error_owner_branch(
+                                &var, members, property.sym != *"keys", live_keys.clone(), keys_type.clone(),
+                                |props| HirExpr::Call(
+                                    Box::new(HirExpr::Var(keys_runtime.to_string())),
+                                    vec![HirExpr::Call(Box::new(HirExpr::Var("JSON.parse".to_string())), vec![props])],
+                                ),
                             );
                             let result = HirExpr::Conditional(
                                 Box::new(is_text),
                                 Box::new(error_keys),
-                                Box::new(live_keys),
-                                HirType::Array(Box::new(HirType::Str)),
+                                Box::new(owner_keys),
+                                keys_type,
                             );
                             bindings.push((name, ty.clone(), value));
                             return self.wrap_call_argument_bindings(result, &bindings);
@@ -4213,7 +4318,12 @@ impl<'a> FnLowerer<'a> {
                                 "`{label}` currently requires a fixed object, got {ty:?}"
                             ));
                         };
-                        let names = ecmascript_field_order(fields);
+                        let mut names = ecmascript_field_order(fields);
+                        let default_name = Self::error_family_default_name(fields);
+                        let name_index = default_name.as_ref().and_then(|_| {
+                            names.retain(|&index| fields[index].0 != "message");
+                            names.iter().position(|&index| fields[index].0 == "name").map(|at| names.remove(at))
+                        });
                         let name = format!("__thaw_object_keys_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), ty.clone());
@@ -4226,6 +4336,17 @@ impl<'a> FnLowerer<'a> {
                 array_type,
                 HirExpr::ArrayLit(Vec::new()),
                         )];
+                        if default_name.is_some() && property.sym != *"keys" {
+                            for hidden in ["stack", "message"] {
+                                body.push(HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_push".into())),
+                                    vec![
+                                        HirExpr::Var(result_name.clone()),
+                                        HirExpr::Lit(HirLit::Str(hidden.to_string())),
+                                    ],
+                                )));
+                            }
+                        }
             let actions = names
                 .into_iter()
                 .map(|index| {
@@ -4242,6 +4363,19 @@ impl<'a> FnLowerer<'a> {
                 fields,
                 actions,
                         )?);
+                        if let (Some(default_name), Some(_)) = (default_name, name_index) {
+                            let push = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                                vec![
+                                    HirExpr::Var(result_name.clone()),
+                                    HirExpr::Lit(HirLit::Str("name".to_string())),
+                                ],
+                            );
+                            let statement = self.error_family_name_statement(
+                                &HirExpr::Var(name.clone()), fields, default_name, push,
+                            )?;
+                            body.push(statement);
+                        }
                         body.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
                         let result = HirExpr::Block(body);
                         let native_object = HirExpr::Var(name.clone());
@@ -4409,6 +4543,56 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Var("__thaw_json_entries".to_string())),
                                 vec![value],
                             );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        let error_entries = |text: HirExpr| {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_entries".to_string())),
+                                vec![HirExpr::Call(
+                                    Box::new(HirExpr::Var("JSON.parse".to_string())),
+                                    vec![HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_error_entries_json".to_string())),
+                                        vec![text],
+                                    )],
+                                )],
+                            )
+                        };
+                        if ty == HirType::Str {
+                            // An Error value: own enumerable props from the runtime side table.
+                            let result = error_entries(value);
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let (true, HirType::Union(members)) = (ty == crate::caught_exception_carrier_type(), &ty) {
+                            // `catch (e: any)`: an Error text uses the side table, other members the live snapshot.
+                            let name = format!("__thaw_entries_carrier_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            let var = HirExpr::Var(name.clone());
+                            let is_text = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(Box::new(var.clone()), members.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                            );
+                            let text = HirExpr::UnionValue(Box::new(var.clone()), 3, members.clone());
+                            let live_entries = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_entries".to_string())),
+                                vec![self.caught_carrier_as_json(var.clone())?],
+                            );
+                            let entries_type = HirType::Array(Box::new(HirType::Tuple(vec![HirType::Str, HirType::Json])));
+                            let owner_entries = self.thrown_error_owner_branch(
+                                &var, members, false, live_entries.clone(), entries_type.clone(),
+                                |props| HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_entries".to_string())),
+                                    vec![HirExpr::Call(Box::new(HirExpr::Var("JSON.parse".to_string())), vec![props])],
+                                ),
+                            );
+                            let result = HirExpr::Conditional(
+                                Box::new(is_text),
+                                Box::new(error_entries(text)),
+                                Box::new(owner_entries),
+                                entries_type,
+                            );
+                            bindings.push((name, ty.clone(), value));
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         if let HirType::Dictionary(element) = &ty {

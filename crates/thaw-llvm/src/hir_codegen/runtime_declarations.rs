@@ -171,6 +171,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_function("strcmp", strcmp_type, Some(Linkage::External));
         self.module
             .add_function("thaw_string_compare", strcmp_type, Some(Linkage::External));
+        self.module
+            .add_function("thaw_string_strict_equal", strcmp_type, Some(Linkage::External));
         self.module.add_function(
             "thaw_json_strict_equal",
             i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
@@ -1879,6 +1881,26 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_error_own_keys",
             i8_ptr.fn_type(&[i8_ptr.into(), self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_register_owner_props",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_owner_props",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_inspect",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_entries_json",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

@@ -1716,7 +1716,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("error custom property access returned no value".into());
             }
             "__thaw_error_set_prop" | "__thaw_error_has_prop" | "__thaw_error_delete_prop"
-            | "__thaw_error_assign_json" | "__thaw_error_json_stringify" => {
+            | "__thaw_error_assign_json" | "__thaw_error_json_stringify"
+            | "__thaw_error_entries_json" | "__thaw_error_register_owner_props" => {
                 let mut values = Vec::new();
                 for arg in args {
                     values.push(self.compile_expr(arg)?.into());
@@ -1734,9 +1735,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error extras call returned no value".into());
             }
-            "__thaw_error_own_keys" => {
+            "__thaw_error_own_keys" | "__thaw_error_owner_props" => {
                 let [receiver, hidden] = args else {
-                    return Err("__thaw_error_own_keys expects a receiver and a hidden-keys flag".into());
+                    return Err(format!("{name} expects a receiver and a hidden-keys flag"));
                 };
                 let receiver = self.compile_expr(receiver)?;
                 let hidden = self.compile_expr(hidden)?.into_int_value();
@@ -1747,7 +1748,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_error_own_keys").unwrap(),
+                        self.module.get_function(&format!("thaw_{}", name.trim_start_matches("__thaw_"))).unwrap(),
                         &[receiver.into(), hidden.into()],
                         "error_own_keys",
                     )
