@@ -316,11 +316,12 @@ fn late_fields_are_optional_and_inheritance_is_not_modelled() {
         r.iter().find(|f| f.name == "get").unwrap().ret,
         "string | undefined"
     );
-    let s = "class A { constructor(){ this.a = 1; } m(){ return this.a; } } class B extends A { n(){ return this.a; } } \
+    // a base class from outside the package: the instance has fields we cannot see
+    let s = "class A { constructor(){ this.a = 1; } m(){ return this.a; } } class B extends Ext { n(){ return this.a; } } \
              new A().m(); new B().n();";
     let (r, _) = analyze_source(s, Config::default()).unwrap();
     assert_eq!(
-        r.iter().find(|f| f.name == "m").unwrap().reasons[0],
+        r.iter().find(|f| f.name == "n").unwrap().reasons[0],
         Reason::This
     );
 }
@@ -388,4 +389,260 @@ fn literal_types_survive_in_const_and_returns_but_widen_in_variables() {
     let s =
         "function g(k){ if (k === 'a') { const x = k; return x; } return 'b'; } g('a'); g('b');";
     assert_eq!(slot(s, "g", "x"), "\"a\"");
+}
+
+fn with_evidence(pkg: &str, program: &str) -> Config {
+    let mut ev = crate::evidence::Evidence::default();
+    ev.add_program(pkg, program);
+    Config {
+        evidence: Some(std::sync::Arc::new(ev)),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn smoke_program_calls_type_exported_params() {
+    let cfg = with_evidence("pkg", "import { add } from 'pkg'; add(1, 2); add(3);");
+    let r = fnr(
+        "exports.add = function(a, b){ return a + (b || 0); };",
+        cfg,
+        "add",
+    );
+    assert_eq!(r.slots[0].1, "number");
+    assert_eq!(r.slots[1].1, "number | undefined");
+    assert!(r.trust & crate::TRUST_EVIDENCE != 0);
+    // namespace / default-import member calls and README blocks count too
+    let mut ev = crate::evidence::Evidence::default();
+    ev.add_readme(
+        "pkg",
+        "text\n```js\nconst p = require('pkg');\np.greet('x');\n```\n",
+    );
+    let cfg = Config {
+        evidence: Some(std::sync::Arc::new(ev)),
+        ..Default::default()
+    };
+    let r = fnr(
+        "exports.greet = function(n){ return 'hi ' + n; };",
+        cfg,
+        "greet",
+    );
+    assert_eq!(r.slots[0].1, "string");
+}
+
+#[test]
+fn cross_module_calls_in_a_bundle_are_evidence() {
+    let s = r#"module.exports = (function(require){
+var __thaw_bundle_entry_key = "a";
+var __thaw_bundle_factories = {
+  "a": function(module, exports, require){ var u = require('./b'); u.twice(4); },
+  "b": function(module, exports, require){ exports.twice = function(x){ return x * 2; }; }
+};
+var __thaw_bundle_require_maps = { "a": {"./b": "b"}, "b": {} };
+})(globalThis.require);"#;
+    let r = fnr(s, Config::default(), "twice");
+    assert_eq!(r.slots[0].1, "number");
+    assert!(r.trust & crate::TRUST_EVIDENCE != 0);
+}
+
+#[test]
+fn named_function_callbacks_get_element_types() {
+    let s = "function dbl(x){ return x * 2; } var ys = [1,2,3].map(dbl);";
+    let r = fnr(s, Config::default(), "dbl");
+    assert_eq!(r.slots[0].1, "number");
+    assert!(r.closed);
+    // passed to an unknown receiver: parameters are `any`
+    let s = "function g(x){ return x; } mystery.each(g);";
+    assert_eq!(fnr(s, Config::default(), "g").slots[0].1, "any");
+}
+
+#[test]
+fn default_values_are_hint_evidence() {
+    let s = "exports.f = function(a, b = 5){ return a + b; };";
+    let h = fnr(
+        s,
+        Config {
+            hint_params: true,
+            ..Default::default()
+        },
+        "f",
+    );
+    assert_eq!(h.slots[1].1, "number");
+    assert!(h.trust & crate::TRUST_HINT != 0);
+    assert_eq!(fnr(s, Config::default(), "f").slots[1].1, "any");
+}
+
+#[test]
+fn functions_stored_in_objects_and_passed_around_are_followed() {
+    let s = "var m = { add: function(a, b){ return a + b; }, neg: function(x){ return -x; } }; \
+             var r = m.add(1, 2); var q = m.neg(3);";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let add = r.iter().find(|f| f.name == "add").unwrap();
+    assert_eq!(add.slots[0].1, "number");
+    assert_eq!(add.ret, "number");
+    assert!(add.closed);
+    // higher order: closures returned from a function and called later
+    let s = "function compose(f, g){ return function(x){ return f(g(x)); }; } \
+             var h = compose(function(a){ return a + 1; }, function(b){ return b * 2; }); var n = h(3);";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let inner = r
+        .iter()
+        .find(|f| f.slots.iter().any(|s| s.0 == "x"))
+        .unwrap();
+    assert_eq!(inner.slots[0].1, "number");
+    let a = r
+        .iter()
+        .find(|f| f.slots.iter().any(|s| s.0 == "a"))
+        .unwrap();
+    assert_eq!(a.slots[0].1, "number");
+}
+
+#[test]
+fn escaping_function_values_get_any_params() {
+    let s = "on('x', function(e){ return e; });";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    assert_eq!(
+        r.iter()
+            .find(|f| f.slots.iter().any(|s| s.0 == "e"))
+            .unwrap()
+            .slots[0]
+            .1,
+        "any"
+    );
+    // stored in an array that reaches unknown code
+    let s = "var cbs = []; cbs.push(function(z){ return z; }); mystery(cbs);";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    assert_eq!(
+        r.iter()
+            .find(|f| f.slots.iter().any(|s| s.0 == "z"))
+            .unwrap()
+            .slots[0]
+            .1,
+        "any"
+    );
+    // returned from an exported function: called by external code
+    let s = "exports.mk = function(){ return function(y){ return y; }; };";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    assert_eq!(
+        r.iter()
+            .find(|f| f.slots.iter().any(|s| s.0 == "y"))
+            .unwrap()
+            .slots[0]
+            .1,
+        "any"
+    );
+}
+
+#[test]
+fn es_hierarchy_with_super_shares_one_record() {
+    let s = "class A { constructor(x){ this.x = x; } get(){ return this.x; } } \
+             class B extends A { constructor(x, y){ super(x); this.y = y; } sum(){ return this.x + this.y + super.get(); } } \
+             var b = new B(1, 2); var s = b.sum(); var g = b.get();";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let sum = r.iter().find(|f| f.name == "sum").unwrap();
+    assert_eq!(sum.ret, "number");
+    assert!(sum.this_typed);
+    // B's own field is only set by B's constructor: `number | undefined` for the shared record
+    let get = r.iter().find(|f| f.name == "get").unwrap();
+    assert_eq!(get.ret, "number");
+    let ctor_b = r.iter().filter(|f| f.name == "constructor").nth(1).unwrap();
+    assert_eq!(ctor_b.slots[0].1, "number");
+}
+
+#[test]
+fn constructor_function_hierarchy_via_inherits_and_call() {
+    let s =
+        "function Base(n){ this.n = n; } Base.prototype.dbl = function(){ return this.n * 2; }; \
+             function Kid(n, k){ Base.call(this, n); this.k = k; } \
+             Kid.prototype = Object.create(Base.prototype); \
+             Kid.prototype.both = function(){ return this.dbl() + this.k; }; \
+             var kd = new Kid(2, 3); var r = kd.both();";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let both = r.iter().find(|f| f.name == "both").unwrap();
+    assert_eq!(both.ret, "number");
+    assert!(both.this_typed);
+    let dbl = r.iter().find(|f| f.name == "dbl").unwrap();
+    assert_eq!(dbl.ret, "number");
+}
+
+#[test]
+fn instanceof_in_a_hierarchy_does_not_exclude_siblings() {
+    let s = "class A { constructor(){ this.v = 1; } } class B extends A { constructor(){ super(); } } \
+             exports.f = function(x){ if (x instanceof B) { return 1; } var y = x; return y; }; new B();";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let f = r.iter().find(|f| f.name == "f").unwrap();
+    assert_eq!(f.slots.iter().find(|s| s.0 == "y").unwrap().1, "any");
+}
+
+#[test]
+fn node_builtin_modules_are_typed() {
+    let s = "var path = require('path'); var fs = require('node:fs'); var os = require('os'); \
+             function f(a){ var p = path.join(a, 'x'); var t = fs.readFileSync(p, 'utf8'); \
+             var n = process.argv.length; var e = os.EOL; var d = path.parse(p); return t + e + d.base + n; } f('q');";
+    let r = fnr(s, Config::default(), "f");
+    let get = |n: &str| r.slots.iter().find(|s| s.0 == n).unwrap().1.clone();
+    assert_eq!(get("p"), "string");
+    assert_eq!(get("t"), "string");
+    assert_eq!(get("n"), "number");
+    assert_eq!(get("e"), "string");
+    assert_eq!(
+        get("d"),
+        "{ base: string; dir: string; ext: string; name: string; root: string }"
+    );
+    assert_eq!(r.ret, "string");
+    assert!(r.closed);
+}
+
+#[test]
+fn pure_builtin_calls_do_not_make_arguments_escape() {
+    let s = "function f(){ var a = [1]; console.log(a); var b = Math.PI * 2; a.push(2); return a; } f();";
+    let r = fnr(s, Config::default(), "f");
+    assert_eq!(r.slots.iter().find(|s| s.0 == "a").unwrap().1, "number[]");
+    assert_eq!(r.slots.iter().find(|s| s.0 == "b").unwrap().1, "number");
+    // a table miss is an unknown call: arguments escape
+    let s =
+        "var fs = require('fs'); function g(){ var a = [1]; fs.readFile('x', a); return a; } g();";
+    assert_eq!(fnr(s, Config::default(), "g").class, Class::Any);
+    // third-party modules are `any` with their own reason
+    let s = "function h(){ var x = require('left-pad'); return x; } h();";
+    assert_eq!(fnr(s, Config::default(), "h").reasons[0], Reason::Require);
+}
+
+#[test]
+fn trusted_functions_carry_an_entry_guard() {
+    let cfg = with_dts("declare function add(a: number, b?: string): number;");
+    let r = fnr(
+        "exports.add = function(a, b){ return a + (b ? 1 : 0); };",
+        cfg,
+        "add",
+    );
+    let g = r.guard.unwrap();
+    assert!(g.contains("typeof a === 'number'"), "{g}");
+    assert!(
+        g.contains("typeof b === 'string'") && g.contains("b === undefined"),
+        "{g}"
+    );
+    // `this` of a modelled class is guarded by a brand check
+    let s = "class P { constructor(){ this.v = 1; } get(){ return this.v; } } new P().get();";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    assert_eq!(
+        r.iter().find(|f| f.name == "get").unwrap().guard.as_deref(),
+        Some("this instanceof P")
+    );
+    // a provable function needs no guard
+    let r = fnr(
+        "function f(n){ return n + 1; } f(1);",
+        Config::default(),
+        "f",
+    );
+    assert!(r.guard.is_none());
+}
+
+#[test]
+fn reports_serialise_to_json() {
+    let cfg = with_dts("declare function add(a: number): number;");
+    let (r, s) = analyze_source("exports.add = function(a){ return a + 1; };", cfg).unwrap();
+    let j = crate::report_json(&r, &s);
+    assert!(j.contains("\"typed_functions\":[{\"name\":\"add\""), "{j}");
+    assert!(j.contains("\"guard\":\"typeof a === 'number'\""), "{j}");
+    assert!(j.starts_with("{\"summary\":{\"functions\":1,"), "{j}");
 }

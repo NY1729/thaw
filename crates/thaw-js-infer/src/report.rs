@@ -21,8 +21,13 @@ pub struct FnReport {
     pub ret: String,
     /// parameter / return types came from a `.d.ts` signature (trusted contract: needs an entry guard)
     pub dts: bool,
+    /// which parameters came from a trusted source: `TRUST_DTS | TRUST_EVIDENCE | TRUST_HINT`
+    pub trust: u8,
     /// `this` was typed as an instance of a modelled class (needs a brand / field-tag guard at entry)
     pub this_typed: bool,
+    /// JavaScript predicate over the parameters (and `this`) under which the typed signature holds;
+    /// `Some` for every function whose types rest on a trusted contract
+    pub guard: Option<String>,
     pub exprs: usize,
     pub any_exprs: usize,
 }
@@ -48,6 +53,13 @@ pub struct Summary {
     /// functions typed via a modelled `this` / of those, ones that ended up typed
     pub this_matched: usize,
     pub this_typed: usize,
+    /// functions with evidence-typed parameters / of those, ones that ended up typed
+    pub ev_matched: usize,
+    pub ev_typed: usize,
+    /// typed functions that rest on no trusted contract at all
+    pub sound_typed: usize,
+    /// typed functions that carry an entry guard
+    pub guarded: usize,
     /// first `any` reason of `.d.ts`-matched functions that stayed `any`
     pub dts_reason: BTreeMap<Reason, usize>,
 }
@@ -78,6 +90,16 @@ impl An {
                         _ => 3,
                     };
                     if kinds.insert(kind) {
+                        nonnull += 1;
+                    }
+                }
+                Atom::Ns(_) => {
+                    if kinds.insert(5) {
+                        nonnull += 1;
+                    }
+                }
+                Atom::Fn(_) => {
+                    if kinds.insert(4) {
                         nonnull += 1;
                     }
                 }
@@ -129,6 +151,8 @@ impl An {
                         Atom::Num => "number".into(),
                         Atom::Str => "string".into(),
                         Atom::Bool => "boolean".into(),
+                        Atom::Fn(_) => "Function".into(),
+                        Atom::Ns(_) => "NodeModule".into(),
                         Atom::SLit(i) => format!("{:?}", self.lits[i as usize]),
                         Atom::NLit(n) => n.to_string(),
                         Atom::Arr(s) => {
@@ -203,37 +227,102 @@ fn link_classes(st: &mut State) {
             ci.methods.insert(pn, fid);
         }
     }
+    // classes that are only instantiated (`new F()`) or only take part in inheritance
+    let mut extra: Vec<(usize, String)> = st
+        .binds
+        .iter()
+        .filter(|(_, b)| b.new_refs > 0 && b.n_assign == 1 && b.fn_value.is_some())
+        .map(|(k, _)| k.clone())
+        .collect();
+    for (c, p) in st.parents.clone() {
+        extra.push(c);
+        extra.push(p);
+    }
+    for k in extra {
+        let is_es = st.binds.get(&k).is_some_and(|b| b.fn_value.is_none());
+        let ci = st.classes.entry(k).or_default();
+        if is_es {
+            ci.es = true;
+        }
+    }
     let keys: Vec<_> = st.classes.keys().cloned().collect();
-    for k in keys {
-        if !st.classes[&k].es {
+    for k in &keys {
+        if !st.classes[k].es {
             let ctor = st
                 .binds
-                .get(&k)
+                .get(k)
                 .and_then(|b| if b.n_assign == 1 { b.fn_value } else { None });
             match ctor {
-                Some(c) => st.classes.get_mut(&k).unwrap().ctor = Some(c),
+                Some(c) => st.classes.get_mut(k).unwrap().ctor = Some(c),
                 None => {
                     st.complex.insert(k.clone());
                 }
             }
         }
-        if st.complex.contains(&k) {
+    }
+    // a hierarchy is modelled only as a whole
+    loop {
+        let mut changed = false;
+        for (c, p) in st.parents.clone() {
+            let bad = st.complex.contains(&c) || st.complex.contains(&p);
+            if bad {
+                changed |= st.complex.insert(c);
+                changed |= st.complex.insert(p);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for k in &keys {
+        if st.complex.contains(k) {
             continue;
         }
+        let mut root = k.clone();
+        let mut n = 0;
+        while let Some(p) = st.parents.get(&root) {
+            root = p.clone();
+            n += 1;
+            if n > 64 {
+                st.complex.insert(k.clone());
+                break;
+            }
+        }
+        st.family.insert(k.clone(), root);
+    }
+    for k in keys {
+        if st.complex.contains(&k) || !st.family.contains_key(&k) {
+            continue;
+        }
+        let root = st.family[&k].clone();
         let b = &st.binds[&k];
         let escaped = b.refs > b.callee_refs + b.new_refs + b.proto_refs;
         let ci = st.classes.get_mut(&k).unwrap();
         ci.escaped = escaped;
-        let (ctor, methods): (Option<usize>, Vec<usize>) =
-            (ci.ctor, ci.methods.values().copied().collect());
+        if escaped {
+            st.fam_escaped.insert(root.clone());
+        }
+        if b.new_refs > 0 {
+            st.fam_instantiated.insert(root.clone());
+        }
+        *st.fam_size.entry(root.clone()).or_default() += 1;
+        let (ctor, methods): (Option<usize>, Vec<(String, usize)>) = (
+            ci.ctor,
+            ci.methods.iter().map(|(n, f)| (n.clone(), *f)).collect(),
+        );
         if let Some(c) = ctor {
             st.fn_class.insert(c, k.clone());
             if !escaped {
                 st.funcs[c].bind = Some(k.clone());
             }
         }
-        for m in methods {
-            let name = st.funcs[m].prop_name.clone().unwrap_or_default();
+        for (name, m) in methods {
+            st.fam_methods
+                .entry(root.clone())
+                .or_default()
+                .entry(name.clone())
+                .or_default()
+                .push(m);
             if !st.unsafe_methods.contains(&(k.clone(), name)) {
                 st.fn_class.insert(m, k.clone());
             }
@@ -270,6 +359,7 @@ fn run(
             class_keys: vec![],
             pending_proto: false,
             decl_const: false,
+            pending_member: false,
             pending_owner_key: None,
             list: 0,
             next_list: 0,
@@ -294,6 +384,12 @@ fn run(
             );
         }
     }
+    st.bundle = crate::bundle::find(&module);
+    if let Some(b) = &st.bundle {
+        for (k, sp) in &b.factories {
+            st.span_factory.insert(*sp, k.clone());
+        }
+    }
     {
         let mut p = Pre {
             st: &mut st,
@@ -305,6 +401,7 @@ fn run(
             class_keys: vec![],
             pending_proto: false,
             decl_const: false,
+            pending_member: false,
             pending_owner_key: None,
             list: 0,
             next_list: 0,
@@ -323,6 +420,36 @@ fn run(
             && m.iter().all(|x| !x.nested)
             && m[2..].iter().all(|x| x.pos >= m[1].rhs_end);
     }
+    for (fk, name, t) in std::mem::take(&mut st.export_assigns) {
+        let f = match t {
+            ExpTarget::Fn(f) => Some(f),
+            ExpTarget::Bind(k) => {
+                st.binds
+                    .get(&k)
+                    .and_then(|b| if b.n_assign == 1 { b.fn_value } else { None })
+            }
+        };
+        if let Some(f) = f {
+            st.funcs[f].exports.push((fk, name));
+        }
+    }
+    // the bundle runtime calls every factory with its own arguments
+    if let Some(b) = st.bundle.clone() {
+        for (k, sp) in &b.factories {
+            if let Some(&f) = st.by_span.get(sp) {
+                st.funcs[f].exports.push((k.clone(), "<factory>".into()));
+            }
+        }
+    }
+    let named_cbs: Vec<usize> = st
+        .binds
+        .values()
+        .filter(|b| b.n_assign == 1 && b.arg_refs > 0 && b.refs == b.callee_refs + b.arg_refs)
+        .filter_map(|b| b.fn_value)
+        .collect();
+    for f in named_cbs {
+        st.funcs[f].cb_arg = true;
+    }
     let known: Vec<((usize, String), usize)> = st
         .binds
         .iter()
@@ -334,17 +461,44 @@ fn run(
         st.funcs[f].bind = Some(k);
     }
     link_classes(&mut st);
+    // function declarations that are bound once evaluate to their own function value
+    let decls: Vec<((usize, String), usize)> = st
+        .funcs
+        .iter()
+        .enumerate()
+        .flat_map(|(fid, f)| {
+            f.declared
+                .iter()
+                .filter(|(_, k)| **k == DK::Fn)
+                .map(move |(n, _)| (fid, n.clone()))
+        })
+        .filter_map(|k| {
+            let b = st.binds.get(&k)?;
+            (b.n_assign == 1)
+                .then_some(b.fn_value)
+                .flatten()
+                .map(|f| (k, f))
+        })
+        .collect();
+    for (k, f) in decls {
+        st.binds.get_mut(&k).unwrap().ty = Ty::one(Atom::Fn(f as u32));
+    }
     let mut an = An::new(st, cfg);
     an.init_dts();
     let mut passes = 0;
-    while passes < 60 {
+    // stage A runs without deciding `any` for exported functions (call-site evidence may still
+    // arrive); stage B then finalises them
+    while passes < 120 {
         passes += 1;
         an.changed = false;
         an.reset_counts();
         an.init_params();
         module.visit_with(&mut an);
         if !an.changed {
-            break;
+            if an.escape_final {
+                break;
+            }
+            an.escape_final = true;
         }
     }
     Ok((an, passes, cm, module))
@@ -469,6 +623,46 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
                 sum.this_typed += 1;
             }
         }
+        let trusted = an.st.funcs[fid].trust != 0 || (this_ok && an.st.funcs[fid].uses_this);
+        if class != Class::Any && !trusted {
+            sum.sound_typed += 1;
+        }
+        let mut guard = None;
+        if trusted && class != Class::Any && excluded.is_none_or(|r| r == Reason::This) {
+            let mut parts = Vec::new();
+            let mut ok = true;
+            let pnames: Vec<String> = an.st.funcs[fid].params.iter().flatten().cloned().collect();
+            for n in pnames {
+                let t = an.st.binds[&(fid, n.clone())].ty.clone();
+                match an.guard_js(&t, &n, fid, 0) {
+                    Some(g) if g == "true" => {}
+                    Some(g) => parts.push(g),
+                    None => ok = false,
+                }
+            }
+            if this_ok && an.st.funcs[fid].uses_this {
+                let t = an.this_ty(fid);
+                match an.guard_js(&t, "this", fid, 0) {
+                    Some(g) if g == "true" => {}
+                    Some(g) => parts.push(g),
+                    None => ok = false,
+                }
+            }
+            if ok {
+                guard = Some(if parts.is_empty() {
+                    "true".to_string()
+                } else {
+                    parts.join(" && ")
+                });
+                sum.guarded += 1;
+            }
+        }
+        if an.st.funcs[fid].trust & TRUST_EVIDENCE != 0 {
+            sum.ev_matched += 1;
+            if class != Class::Any {
+                sum.ev_typed += 1;
+            }
+        }
         if dts_fn {
             sum.dts_matched += 1;
             if class != Class::Any {
@@ -488,7 +682,9 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
             slots,
             ret: ret_ts,
             dts: dts_fn,
+            trust: an.st.funcs[fid].trust,
             this_typed: this_ok && an.st.funcs[fid].uses_this,
+            guard,
             exprs,
             any_exprs,
         });
@@ -506,7 +702,7 @@ struct Ann<'a> {
     /// (class key, hi of the class name, already-declared property names)
     classes: Vec<((usize, String), u32, Vec<String>)>,
     /// (function, offset of its block body)
-    blocks: Vec<(usize, u32)>,
+    blocks: Vec<(usize, u32, u32)>,
 }
 
 impl<'a> Ann<'a> {
@@ -528,8 +724,8 @@ impl<'a> Ann<'a> {
                     .push((fid, i.id.sym.to_string(), i.span.lo.0, i.span.hi.0));
             }
         }
-        if let Some(lo) = f.block_lo() {
-            self.blocks.push((fid, lo));
+        if let Some((lo, hi)) = f.block_span() {
+            self.blocks.push((fid, lo, hi));
         }
         self.cur.push(fid);
         for p in f.pats() {
@@ -635,12 +831,96 @@ pub fn annotate(src: &str, cfg: Config) -> Result<String, String> {
             // call-site inference alone (an explicit `any` would make it strictly worse)
             return None;
         }
-        Some(if c == Class::Any {
+        let s = if c == Class::Any {
             "any".into()
         } else {
             an.ts(&t, 0)
-        })
+        };
+        // function values are left to the TS pipeline's own inference
+        (!s.contains("Function") && !s.contains("NodeModule")).then_some(s)
     };
+    let want_returns = an.cfg.returns;
+    // guarded dispatchers for functions whose parameter types rest on a trusted contract
+    let mut guarded: HashSet<usize> = HashSet::new();
+    let mut plans: Vec<(usize, usize, String)> = Vec::new();
+    if an.cfg.guards {
+        for (fid, lo, hi) in blocks.iter().copied() {
+            let f = &an.st.funcs[fid];
+            if f.trust == 0
+                || f.async_
+                || f.gen
+                || f.exotic
+                || f.uses_this
+                || f.uses_args
+                || f.uses_eval
+                || f.params.is_empty()
+                || !f.params.iter().all(Option::is_some)
+            {
+                continue;
+            }
+            let names: Vec<String> = f.params.iter().flatten().cloned().collect();
+            let mut guards = Vec::new();
+            let mut clone_params = Vec::new();
+            let mut ok = true;
+            for n in &names {
+                let t = an.st.binds[&(fid, n.clone())].ty.clone();
+                match an.guard_js(&t, n, fid, 0) {
+                    Some(g) if g == "true" => {}
+                    Some(g) => guards.push(g),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+                let (c, _) = an.classify(&t, &mut HashSet::new());
+                let s = if c == Class::Any || t == Ty::Bottom {
+                    "any".to_string()
+                } else {
+                    an.ts(&t, 0)
+                };
+                let s = if s.contains("Function") || s.contains("NodeModule") {
+                    "any".to_string()
+                } else {
+                    s
+                };
+                clone_params.push(format!("{n}: {s}"));
+            }
+            if !ok || guards.is_empty() {
+                continue;
+            }
+            let ret = if want_returns {
+                let mut ret = an.st.funcs[fid].ret.clone();
+                if let (Ty::Any(_), Some(d)) = (&ret, an.dts_ret.get(&fid)) {
+                    ret = d.clone();
+                }
+                let (c, _) = an.classify(&ret, &mut HashSet::new());
+                let s = an.ts(&ret, 0);
+                if ret == Ty::Bottom
+                    || matches!(c, Class::Any | Class::Union | Class::Nullable)
+                    || s.contains("Function")
+                    || s.contains("NodeModule")
+                {
+                    String::new()
+                } else {
+                    format!(": {s}")
+                }
+            } else {
+                String::new()
+            };
+            guarded.insert(fid);
+            plans.push((
+                off(lo),
+                off(hi),
+                format!(
+                    " if ({}) {{ return (function ({}){} ",
+                    guards.join(" && "),
+                    clone_params.join(", "),
+                    ret
+                ) + "\u{0}BODY\u{0}"
+                    + &format!(").call(this, {}); }}", names.join(", ")),
+            ));
+        }
+    }
     // TS needs declared fields for `this.x = ...`: write the inferred instance struct
     for (key, hi, declared) in classes {
         let Some(fields) = an.class_fields(&key) else {
@@ -660,8 +940,10 @@ pub fn annotate(src: &str, cfg: Config) -> Result<String, String> {
     }
     // return types of functions whose result is a single concrete type (the TS pipeline does not
     // infer through method chains such as `v.scale(2).label()`)
-    let want_returns = an.cfg.returns;
-    for (fid, lo) in blocks.into_iter().filter(|_| want_returns) {
+    for (fid, lo, _) in blocks.iter().copied().filter(|_| want_returns) {
+        if guarded.contains(&fid) {
+            continue;
+        }
         let f = &an.st.funcs[fid];
         if f.async_ || f.gen || f.exotic {
             continue;
@@ -673,15 +955,26 @@ pub fn annotate(src: &str, cfg: Config) -> Result<String, String> {
         if ret == Ty::Bottom {
             continue;
         }
+        // TS widens a single literal result (`return 0` is `number`), unions of literals stay
+        if matches!(&ret, Ty::Set(s) if s.len() == 1) {
+            ret = an.widen(&ret);
+        }
         let (c, _) = an.classify_pub(&ret);
         if c == Class::Any || c == Class::Union || c == Class::Nullable {
             continue;
         }
         let t = an.ts_pub(&ret);
-        ins.push((off(lo), format!(": {t} ")));
+        if !t.contains("Function") && !t.contains("NodeModule") {
+            ins.push((off(lo), format!(": {t} ")));
+        }
     }
     for (fid, n, lo, hi) in params {
-        let Some(t) = ty_of(&mut an, fid, &n, true) else {
+        let t = if guarded.contains(&fid) {
+            Some("any".to_string())
+        } else {
+            ty_of(&mut an, fid, &n, true)
+        };
+        let Some(t) = t else {
             continue;
         };
         let before = src[..off(lo)].trim_end();
@@ -701,10 +994,121 @@ pub fn annotate(src: &str, cfg: Config) -> Result<String, String> {
             }
         }
     }
+    let marks: Vec<(usize, usize)> = ins.iter().map(|(p, s)| (*p, s.len())).collect();
     ins.sort_by_key(|x| std::cmp::Reverse(x.0));
     let mut out = src.to_string();
     for (p, s) in ins {
         out.insert_str(p, &s);
     }
+    // phase 2: guarded dispatchers (innermost first); the typed clone copies the edited body
+    let start_of = |p: usize| {
+        p + marks
+            .iter()
+            .filter(|(q, _)| *q <= p)
+            .map(|(_, l)| l)
+            .sum::<usize>()
+    };
+    let end_of = |p: usize| {
+        p + marks
+            .iter()
+            .filter(|(q, _)| *q < p)
+            .map(|(_, l)| l)
+            .sum::<usize>()
+    };
+    plans.sort_by_key(|x| std::cmp::Reverse(x.0));
+    let mut applied: Vec<(usize, usize)> = Vec::new();
+    for (lo, hi, text) in plans {
+        let (s0, e0) = (start_of(lo), end_of(hi));
+        let inner: usize = applied
+            .iter()
+            .filter(|(p, _)| *p >= s0 && *p < e0)
+            .map(|(_, l)| l)
+            .sum();
+        let region = out[s0..e0 + inner].to_string();
+        let text = text.replace("\u{0}BODY\u{0}", &region);
+        out.insert_str(s0 + 1, &text);
+        applied.push((s0 + 1, text.len()));
+    }
     Ok(out)
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+fn json_hist<K: std::fmt::Debug>(m: &BTreeMap<K, usize>) -> String {
+    let items: Vec<String> = m
+        .iter()
+        .map(|(k, v)| format!("{}:{v}", json_str(&format!("{k:?}"))))
+        .collect();
+    format!("{{{}}}", items.join(","))
+}
+
+/// Machine-readable census of one bundle (`thaw inspect`, `inferred.json`).
+pub fn summary_json(s: &Summary) -> String {
+    let c = |k: Class| s.by_class.get(&k).copied().unwrap_or(0);
+    format!(
+        "{{\"functions\":{},\"concrete\":{},\"nullable\":{},\"union\":{},\"any\":{},\"dead\":{},\"closed\":{},\
+         \"sound_typed\":{},\"guarded\":{},\"dts_typed\":{},\"this_typed\":{},\"ev_typed\":{},\
+         \"any_reasons\":{},\"passes\":{}}}",
+        s.functions,
+        c(Class::Concrete),
+        c(Class::Nullable),
+        c(Class::Union),
+        c(Class::Any),
+        c(Class::Dead),
+        s.closed,
+        s.sound_typed,
+        s.guarded,
+        s.dts_typed,
+        s.this_typed,
+        s.ev_typed,
+        json_hist(&s.fn_reason),
+        s.passes
+    )
+}
+
+/// Per-function detail: signature, trust sources and entry guard of every typed function.
+pub fn report_json(fns: &[FnReport], s: &Summary) -> String {
+    let mut items = Vec::new();
+    for f in fns
+        .iter()
+        .filter(|f| !matches!(f.class, Class::Any | Class::Dead))
+    {
+        let slots: Vec<String> = f
+            .slots
+            .iter()
+            .map(|(n, t, _)| format!("[{},{}]", json_str(n), json_str(t)))
+            .collect();
+        items.push(format!(
+            "{{\"name\":{},\"offset\":{},\"class\":{},\"closed\":{},\"trust\":{},\"this_typed\":{},\"slots\":[{}],\"ret\":{},\"guard\":{}}}",
+            json_str(&f.name),
+            f.lo,
+            json_str(&format!("{:?}", f.class)),
+            f.closed,
+            f.trust,
+            f.this_typed,
+            slots.join(","),
+            json_str(&f.ret),
+            f.guard.as_deref().map_or("null".to_string(), json_str)
+        ));
+    }
+    format!(
+        "{{\"summary\":{},\"typed_functions\":[{}]}}",
+        summary_json(s),
+        items.join(",")
+    )
 }

@@ -61,6 +61,7 @@ fn annotated_js_matches_node() {
         "dts_api",
         "classes",
         "narrowing",
+        "hierarchy",
     ] {
         run_case(&thaw, case);
     }

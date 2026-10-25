@@ -20,6 +20,7 @@ thaw-registry = { version = "0.1.0", path = "../thaw-registry" }
 swc_ecma_visit = "29.0.0"
 serde_json = "1"
 thaw-js = { version = "0.1.0", path = "../thaw-js" }
+thaw-js-infer = { version = "0.1.0", path = "../thaw-js-infer" }
 semver = "1"
 
 [features]
