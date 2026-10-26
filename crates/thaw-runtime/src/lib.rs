@@ -103,6 +103,33 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
     }
 }
 
+/// Reports a Promise rejection nobody handled. An Error prints like an uncaught throw; any other
+/// reason also gets Node's `UnhandledPromiseRejection` description (`ERR_UNHANDLED_REJECTION`),
+/// which is what Node prints for it (frames and the source excerpt are not reproducible).
+///
+/// # Safety
+/// `error` must be null or point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_report_unhandled_rejection(error: *const c_char) {
+    unsafe { thaw_runtime_report_uncaught(error) };
+    if error.is_null() {
+        return;
+    }
+    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy();
+    if text.starts_with('\u{1}') || text == "Unhandled opaque Promise rejection" {
+        return;
+    }
+    // V8's no-side-effects string of the reason: objects become `#<Object>`.
+    let reason = if text.starts_with('{') {
+        "#<Object>".to_string()
+    } else {
+        text.into_owned()
+    };
+    eprintln!(
+        "UnhandledPromiseRejection: This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"{reason}\". {{\n  code: 'ERR_UNHANDLED_REJECTION'\n}}"
+    );
+}
+
 /// Copies a terminal exception into owned report text before a listener can
 /// reenter generated code. The public Promise rejection ABI permits opaque
 /// pointers, so only an exact producer-supplied native-text pointer is read.

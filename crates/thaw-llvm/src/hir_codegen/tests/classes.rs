@@ -595,7 +595,7 @@ fn hides_only_registered_class_markers_in_read_only_object_queries() {
     "#;
     assert_eq!(
         compile_and_run(source, "hidden_class_marker_read_only_queries"),
-        "value\nvalue\nvalue\nfalse false false\ntrue\n{\"value\":3}\n2 true\ntrue\ntrue\nmessage,name,errors\nmessage,name,error,suppressed\n"
+        "value\nvalue\nvalue\nfalse false false\ntrue\n{\"value\":3}\n2 true\ntrue\ntrue\n\n\n"
     );
 }
 

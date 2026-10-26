@@ -489,7 +489,17 @@ impl<'ctx> HirCompiler<'ctx> {
         // Snapshot all present own keys before a getter can mutate a later
         // marker. The physical field layout is static; the creation order is
         // per allocation and can differ after a fixed spread or rest copy.
-        if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+        // `JSON.stringify` of an Error subclass lists declared fields in declaration order and `name`
+        // (assigned in the constructor body) last, independent of assignment order.
+        let stringify_error_record = self.encoding_stringify_errors
+            && fields.first().is_some_and(|(marker, _)| {
+                marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|chain| {
+                    chain.split('\u{1f}').any(thaw_hir::is_error_family_name)
+                })
+            });
+        if stringify_error_record
+            || !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))
+        {
             // Only marker visibility/reveal can alter relative physical order.
             // A copied layout with no marker retains its static key order.
             for index in self.visible_object_field_order(fields) {

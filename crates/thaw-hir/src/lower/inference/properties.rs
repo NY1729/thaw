@@ -109,13 +109,45 @@ impl<'a> FnLowerer<'a> {
                     );
                     self.coerce_to_declared(&HirType::Json, constructor)?
                 }
-                Some(helper) => HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_receiver_string".into())),
-                    vec![HirExpr::Call(
-                        Box::new(HirExpr::Var(helper.into())),
-                        vec![HirExpr::UnionValue(Box::new(bound.clone()), 3, elements.to_vec())],
-                    )],
-                ),
+                Some(helper) => {
+                    let text = || HirExpr::UnionValue(Box::new(bound.clone()), 3, elements.to_vec());
+                    let read = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_receiver_string".into())),
+                        vec![HirExpr::Call(Box::new(HirExpr::Var(helper.into())), vec![text()])],
+                    );
+                    if property == "stack" {
+                        // `delete e.stack` leaves no own `stack`: it reads undefined. A plain
+                        // thrown string is not an Error and keeps its derived header.
+                        let deleted = HirExpr::Conditional(
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_is_error".into())),
+                                vec![text()],
+                            )),
+                            Box::new(HirExpr::Conditional(
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_error_has_prop".into())),
+                                    vec![text(), HirExpr::Lit(HirLit::Str("stack".into()))],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                HirType::Bool,
+                            )),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                            HirType::Bool,
+                        );
+                        HirExpr::Conditional(
+                            Box::new(deleted),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                                Vec::new(),
+                            )),
+                            Box::new(read),
+                            HirType::Json,
+                        )
+                    } else {
+                        read
+                    }
+                }
                 None => HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_error_property_json".into())),
                     vec![

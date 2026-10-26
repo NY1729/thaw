@@ -694,6 +694,10 @@ fn effective_name_message(pointer: *const c_char, text: &str) -> (String, String
     let name = with_extras(pointer, |extras| extras.name.clone())
         .unwrap_or_else(|| resolved_error_name(text));
     let message = with_extras(pointer, |extras| extras.message.clone())
+        .or_else(|| {
+            // A deleted own `message` falls back to `Error.prototype.message` (empty).
+            with_extras(pointer, |extras| extras.deleted.iter().any(|key| key == "message").then(String::new))
+        })
         .unwrap_or_else(|| split_error_tag(text).1.to_string());
     (name, message)
 }
@@ -766,7 +770,12 @@ pub unsafe extern "C" fn thaw_error_set_prop(
         extras.deleted.retain(|deleted| *deleted != key);
         let plain = json_text_as_plain(&json);
         if key == HIDDEN_CAUSE_KEY || (key == "cause" && extras.cause.is_some()) {
-            extras.cause = Some(json);
+            // `{ cause: undefined }` still creates the own property: keep Json's undefined sentinel.
+            extras.cause = Some(if json == "undefined" {
+                r#"{"$__thaw_napi_undefined$":true}"#.to_string()
+            } else {
+                json
+            });
             return;
         }
         match key.as_str() {
@@ -906,8 +915,12 @@ pub unsafe extern "C" fn thaw_error_own_keys(error: *const c_char, include_hidde
     }
     let mut keys = Vec::new();
     if include_hidden != 0 {
-        keys.push("stack".to_string());
-        keys.push("message".to_string());
+        let deleted = with_extras(error, |extras| Some(extras.deleted.clone())).unwrap_or_default();
+        for hidden in ["stack", "message"] {
+            if !deleted.iter().any(|key| key == hidden) {
+                keys.push(hidden.to_string());
+            }
+        }
         if split_error_cause(&text).is_some()
             || with_extras(error, |extras| extras.cause.as_ref().map(|_| ())).is_some()
         {

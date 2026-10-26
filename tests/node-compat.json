@@ -2845,6 +2845,48 @@
       "name": "collections limits: union array and string",
       "expect": "matched",
       "source": "function f(x: boolean): number[] | string {\n  if (x) { return [1, 2]; }\n  return \"no\";\n}\nfunction main(): void {\n  const a = f(true);\n  console.log(a, f(false));\n  if (typeof a === \"string\") console.log(\"str\", a); else console.log(\"arr\", a.length, a.indexOf(2), a.map(x => x + 1));\n  if (Array.isArray(a)) console.log(\"is arr\", a.length);\n}\n"
+    },
+    {
+      "name": "AggregateError own keys are hidden like Node",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ag = new AggregateError([1, 2], \"m\", { cause: \"c\" });\n  console.log(Object.keys(ag), Object.getOwnPropertyNames(ag), Object.entries(ag), JSON.stringify(ag));\n  console.log(Object.getOwnPropertyNames(new AggregateError([1], \"m\")), Object.values(ag), Reflect.ownKeys(ag));\n  for (const k in ag) console.log(\"forin\", k);\n  console.log(Object.assign({}, ag), { ...ag });\n}\n"
+    },
+    {
+      "name": "captureStackTrace defines a non-enumerable stack on plain objects",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: any = {};\n  Error.captureStackTrace(o);\n  console.log(typeof o.stack, o.stack.split(\"\\n\")[0], Object.keys(o), JSON.stringify(o));\n  const p: any = { a: 1, name: \"N\", message: \"msg\" };\n  Error.captureStackTrace(p);\n  console.log(p.stack.split(\"\\n\")[0], Object.keys(p), Object.getOwnPropertyNames(p), JSON.stringify(p));\n  console.log(p);\n}\n"
+    },
+    {
+      "name": "string methods on caught error properties",
+      "expect": "matched",
+      "source": "class MyErr extends Error { constructor(m: string) { super(m); this.name = \"MyErr\"; } }\nfunction main(): void {\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    console.log(e.message.toUpperCase(), e.stack.split(\"\\n\")[0], e.message.includes(\"oo\"), e.message.slice(1), e.message.indexOf(\"o\"));\n    console.log(e.name.startsWith(\"Er\"), e.message.replace(\"b\", \"B\"), e.message.trim().length, e.message.split(\"o\"));\n  }\n  try { throw new MyErr(\"boom\"); } catch (e: any) {\n    console.log(e.message.toUpperCase(), e.stack.split(\"\\n\")[0], e.name.startsWith(\"My\"), e.message.slice(1), e.message.indexOf(\"o\"));\n  }\n  const c = new Error(\"outer\", { cause: new Error(\"inner\") });\n  console.log((c.cause as Error).message.toUpperCase(), (c.cause as Error).stack!.split(\"\\n\")[0]);\n}\n"
+    },
+    {
+      "name": "delete stack and in operator on caught errors",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    console.log(\"stack\" in e, \"message\" in e, \"zzz\" in e);\n    delete e.stack;\n    console.log(e.stack, \"stack\" in e, Object.getOwnPropertyNames(e));\n  }\n  const f: any = new Error(\"x\");\n  delete f.message;\n  console.log(f.message === \"\", String(f));\n}\n"
+    },
+    {
+      "name": "JSON.stringify key order of Error subclasses",
+      "expect": "matched",
+      "source": "class A extends Error {\n  code: number;\n  constructor(m: string) { super(m); this.name = \"A\"; this.code = 3; }\n}\nclass B extends Error {\n  code = 4;\n  constructor(m: string) { super(m); this.name = \"B\"; }\n}\nfunction main(): void {\n  console.log(JSON.stringify(new A(\"x\")), Object.keys(new A(\"x\")));\n  console.log(JSON.stringify(new B(\"x\")), Object.keys(new B(\"x\")));\n}\n"
+    },
+    {
+      "name": "cause undefined is an own property",
+      "expect": "matched",
+      "source": "function main(): void {\n  const e = new Error(\"m\", { cause: undefined }) as any;\n  console.log(\"cause\" in e, e.cause, Object.getOwnPropertyNames(e));\n  e.stack = \"Error: m\\n    at x (y:1:1)\";\n  console.log(e);\n  const t = new TypeError(\"t\", { cause: undefined });\n  console.log(Object.getOwnPropertyNames(t), \"cause\" in t);\n}\n"
+    },
+    {
+      "name": "unhandled rejection of a string exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void { Promise.reject(\"plain reason\"); }"
+    },
+    {
+      "name": "timer throw exits 1",
+      "expect": "matched",
+      "exitCode": 1,
+      "source": "function main(): void { setTimeout(() => { throw new Error(\"timer\"); }, 0); }"
     }
   ]
 }
