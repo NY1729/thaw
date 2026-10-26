@@ -247,7 +247,10 @@ fn ecmascript_object_field_order(fields: &[(String, HirType)]) -> Vec<usize> {
     indices.sort_by_key(|(index, array_index)| {
         (array_index.is_none(), array_index.unwrap_or(*index as u32))
     });
-    indices.into_iter().map(|(index, _)| index).collect()
+    thaw_hir::reorder_class_fields_by_definition(
+        fields,
+        indices.into_iter().map(|(index, _)| index).collect(),
+    )
 }
 
 fn object_array_index_key(name: &str) -> Option<u32> {
@@ -1177,7 +1180,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirInitStep::ModuleBoundary { .. } => unreachable!(),
                 _ if !execute => {}
                 HirInitStep::StoreGlobal(name, expression) => {
-                    let value = self.compile_expr(expression)?;
+                    let value = self.compile_expr_named(name, expression)?;
                     let (pointer, _, _) = self.global_variables[name];
                     self.builder
                         .build_store(pointer, value)
@@ -1392,7 +1395,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirInitStep::ModuleBoundary { .. } => unreachable!(),
                     _ if !execute => {}
                     HirInitStep::StoreGlobal(name, expression) => {
-                        let value = self.compile_expr(expression)?;
+                        let value = self.compile_expr_named(name, expression)?;
                         let (pointer, _, _) = self.global_variables[name];
                         self.builder
                             .build_store(pointer, value)

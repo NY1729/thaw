@@ -206,7 +206,48 @@ fn ecmascript_field_order<T>(fields: &[(Symbol, T)]) -> Vec<usize> {
     indices.sort_by_key(|(index, array_index)| {
         (array_index.is_none(), array_index.unwrap_or(*index as u32))
     });
-    indices.into_iter().map(|(index, _)| index).collect()
+    reorder_class_fields_by_definition(fields, indices.into_iter().map(|(index, _)| index).collect())
+}
+
+thread_local! {
+    /// Per class: its own-property creation order as Node defines them (base class
+    /// fields first, then the class's own non-abstract fields in source order).
+    static CLASS_DEFINED_ORDERS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+fn remember_class_defined_order(class: &str, order: Vec<String>) {
+    CLASS_DEFINED_ORDERS.with(|orders| {
+        orders.borrow_mut().insert(class.to_owned(), order);
+    });
+}
+
+fn class_defined_order(class: &str) -> Option<Vec<String>> {
+    CLASS_DEFINED_ORDERS.with(|orders| orders.borrow().get(class).cloned())
+}
+
+/// A class layout keeps abstract fields in their base-class slot, so a subclass that
+/// overrides them in another order prints in a different order than the layout. Refills
+/// the layout positions of the fields the class defines with them in definition order;
+/// every other field keeps its place.
+pub fn reorder_class_fields_by_definition<T>(fields: &[(Symbol, T)], order: Vec<usize>) -> Vec<usize> {
+    let Some(chain) = fields.first().and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}")) else {
+        return order;
+    };
+    let Some(defined) = chain.split('\u{1f}').next().and_then(class_defined_order) else {
+        return order;
+    };
+    // Integer-like keys always come first (in numeric order) and never move.
+    let rank = |index: usize| {
+        array_index_key(&fields[index].0).is_none().then(|| defined.iter().position(|name| *name == fields[index].0)).flatten()
+    };
+    let mut slots: Vec<usize> = (0..order.len()).filter(|&slot| rank(order[slot]).is_some()).collect();
+    let mut listed: Vec<usize> = slots.iter().map(|&slot| order[slot]).collect();
+    listed.sort_by_key(|&index| rank(index));
+    let mut order = order;
+    for (slot, index) in slots.drain(..).zip(listed) {
+        order[slot] = index;
+    }
+    order
 }
 
 fn array_index_key(name: &str) -> Option<u32> {

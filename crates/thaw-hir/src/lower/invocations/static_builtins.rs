@@ -322,7 +322,8 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `Object.values` / `Object.entries` of an `extends Array` instance with own fields: the
-    /// elements, then the own property values, as an `any[]` (the two kinds differ in type).
+    /// elements, then the own property values: typed when the element and all own field types
+    /// agree (`number[]`, `[string, number][]`), else an `any[]`.
     fn lower_array_subclass_sequence(
         &mut self,
         object: HirExpr,
@@ -338,7 +339,24 @@ impl<'a> FnLowerer<'a> {
             return Err("Object.values/entries expects an Array subclass with own fields".into());
         };
         let element = element.as_ref().clone();
-        let json_array = HirType::Array(Box::new(HirType::Json));
+        let mut value_types = vec![element.clone()];
+        for field in &own {
+            let field_type = Self::fixed_object_property_read_type(fields, field)?;
+            if !value_types.contains(&field_type) {
+                value_types.push(field_type);
+            }
+        }
+        // Mixed element / field types cannot share one native element type: those stay `any[]`.
+        let value_type = match value_types.as_slice() {
+            [only] => only.clone(),
+            _ => HirType::Json,
+        };
+        let item_type = if entries && value_type != HirType::Json {
+            HirType::Tuple(vec![HirType::Str, value_type.clone()])
+        } else {
+            value_type.clone()
+        };
+        let json_array = HirType::Array(Box::new(item_type.clone()));
         let id = self.next_binding;
         self.next_binding += 1;
         let (object_name, result_name, base_name, index_name, item_name) = (
@@ -360,12 +378,12 @@ impl<'a> FnLowerer<'a> {
             ))
         };
         let wrap = |this: &mut Self, key: HirExpr, value: HirExpr| -> Result<HirExpr, String> {
-            let value = this.coerce_to_declared(&HirType::Json, value)?;
+            let value = this.coerce_to_declared(&value_type, value)?;
             if !entries {
                 return Ok(value);
             }
-            let key = this.coerce_to_declared(&HirType::Json, key)?;
-            this.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![key, value]))
+            let key = if item_type == HirType::Json { this.coerce_to_declared(&HirType::Json, key)? } else { key };
+            this.coerce_to_declared(&item_type, HirExpr::ArrayLit(vec![key, value]))
         };
         let index_key = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_number_to_string".into())),
@@ -5827,6 +5845,14 @@ impl<'a> FnLowerer<'a> {
                                 // intrinsic the fixed-arity form already
                                 // calls, via a runtime loop instead of a
                                 // compile-time-unrolled argument list.
+                    // Elements that may be `undefined` (sink reads) arrive as `Json`: number-convert them.
+                                let source = if matches!(self.infer_expr_type(&source)?, HirType::Json)
+                                    || self.infer_expr_type(&source)? == HirType::Array(Box::new(HirType::Json))
+                                {
+                                    self.coerce_to_declared(&HirType::Array(Box::new(HirType::F64)), source)?
+                                } else {
+                                    source
+                                };
                     if self.infer_expr_type(&source)? == HirType::Array(Box::new(HirType::F64))
                                     && !matches!(source, HirExpr::ArrayLit(_))
                                 {

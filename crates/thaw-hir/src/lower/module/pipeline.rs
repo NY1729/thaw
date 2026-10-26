@@ -173,6 +173,20 @@ fn class_names_referenced_as_values(
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
+    // The first attempt also keeps `undefined` through returns, initialisers, container
+    // writes and object literals; if that analysis changed anything and the module no
+    // longer lowers, the plain analysis decides.
+    EXTENDED_STORAGE.with(|extended| extended.set(true));
+    EXTENDED_STORAGE_USED.with(|used| used.set(false));
+    let first = lower_module_once(module);
+    EXTENDED_STORAGE.with(|extended| extended.set(false));
+    if first.is_err() && EXTENDED_STORAGE_USED.with(Cell::get) {
+        return lower_module_once(module);
+    }
+    first
+}
+
+fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
@@ -280,6 +294,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
+    let normalized = infer_collection_type_args(&normalized);
     let normalized = normalize_any_async_call_aliases(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
     specialize_named_promise_rejection_callbacks(&normalized)
@@ -1360,6 +1375,34 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     })
                     .transpose()?
                     .unwrap_or_default();
+                let mut params = params;
+                // `Symbol.species` builds `new this.constructor(length)`: on an `extends Array`
+                // class every required parameter besides a numeric first one (and an optional
+                // non-numeric first one) is `any`, because the species call hands it a number /
+                // `undefined`.
+                if matches!(native_base_type(&instance_type), Some(HirType::Array(_))) {
+                    let patterns = constructors
+                        .first()
+                        .map(|constructor| {
+                            constructor.params.iter().map(class_constructor_param_pattern).collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for (index, (param, pattern)) in params.iter_mut().zip(&patterns).enumerate() {
+                        if !matches!(pattern, Pat::Ident(_)) {
+                            continue;
+                        }
+                        match param {
+                            HirType::Optional(payload)
+                                if index == 0 && !matches!(payload.as_ref(), HirType::F64 | HirType::Json) =>
+                            {
+                                **payload = HirType::Json;
+                            }
+                            HirType::Optional(_) | HirType::Json => {}
+                            HirType::F64 if index == 0 => {}
+                            _ => *param = HirType::Json,
+                        }
+                    }
+                }
                 signatures.insert(
                     class_constructor_symbol(&name),
                     FnSignature {

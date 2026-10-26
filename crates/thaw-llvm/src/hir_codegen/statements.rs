@@ -666,7 +666,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.register_stack_promise_slot(slot, name)?;
                     self.compile_and_store_stack_promise_expression(slot, expr)?;
                 } else {
-                    let val = self.compile_expr(expr)?;
+                    let val = self.compile_expr_named(name, expr)?;
                     // A `RecursiveClosure` initializer already allocated the arena cell
                     // the closures inside it captured and stored the value there; keep
                     // that cell as the variable instead of rebinding it to the

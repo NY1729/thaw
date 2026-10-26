@@ -1706,17 +1706,17 @@
       "name": "static builtin results assigned to any keep their typed inputs",
       "expect": "matched",
       "source": "function main(): void {\n    const a: any = Object.fromEntries([[\"a\", 1], [\"b\", 2]]);\n    console.log(JSON.stringify(a));\n    const g: any = Object.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(JSON.stringify(g));\n    const m: any = Map.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(m.size, JSON.stringify(m.get(\"even\")));\n}\n"
-},
+    },
     {
       "name": "nested method call on a class instance built through an any constructor",
       "expect": "matched",
       "source": "class Counter {\n    count: number = 0;\n    increment(): void { this.count = this.count + 1; }\n    touch(): void { this.increment(); }\n}\nfunction main(): void {\n    const value: any = new (Counter as any)();\n    value.touch();\n    value.touch();\n    console.log(value.count);\n}\n"
-},
+    },
     {
       "name": "Object.hasOwn sees a shadowed inherited static field",
       "expect": "matched",
       "source": "class Parent { static value: number = 1; }\nclass Child extends Parent {}\nfunction main(): void {\n    Child.value = 2;\n    console.log(Parent.value, Child.value, Object.hasOwn(Child, \"value\"));\n}\n"
-},
+    },
     {
       "name": "timers: each due timer gets a microtask checkpoint",
       "expect": "matched",
@@ -1731,41 +1731,41 @@
       "name": "generator throw keeps thrown object identity",
       "expect": "matched",
       "source": "function* generator(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const marker: any = { value: 42 };\n  const iterator = generator();\n  iterator.next();\n  const result = iterator.throw(marker);\n  console.log(result.value === marker, result.value.value, result.done);\n}\n"
-},
+    },
     {
       "name": "generator throw passes primitives and undefined",
       "expect": "matched",
       "source": "function* g(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const it = g();\n  it.next();\n  console.log(it.throw(7).value);\n  const it2 = g();\n  it2.next();\n  console.log(it2.throw(\"s\").value);\n  const it3 = g();\n  it3.next();\n  console.log(it3.throw(undefined).value);\n}\n"
-},
+    },
     {
       "name": "yield delegate forwards a thrown string to the inner generator",
       "expect": "matched",
       "source": "function* inner(): Generator<number> {\n  try { yield 1; }\n  catch (error) { console.log(error); yield 2; }\n}\nfunction* outer(): Generator<number> {\n  yield* inner();\n  yield 3;\n}\nfunction main(): void {\n  const iterator = outer();\n  console.log(iterator.next().value);\n  console.log(iterator.throw(\"boom\").value);\n  console.log(iterator.next().value);\n  console.log(iterator.next().done);\n}\n"
-},
-    {
-          "name": "unset process.env variable is undefined",
-          "expect": "matched",
-          "source": "function main(): void {\n  console.log(process.env.E1_UNSET_VAR_X ?? \"3000\");\n  console.log(process.env.E1_UNSET_VAR_X || \"fallback\");\n  console.log(process.env.E1_UNSET_VAR_X === undefined);\n  console.log(typeof process.env.E1_UNSET_VAR_X);\n  process.env.E1_SET_VAR_Y = \"hello\";\n  console.log(process.env.E1_SET_VAR_Y, typeof process.env.E1_SET_VAR_Y);\n  delete process.env.E1_SET_VAR_Y;\n  console.log(process.env.E1_SET_VAR_Y === undefined, process.env.E1_SET_VAR_Y ?? \"gone\");\n  console.log(Number(process.env.E1_UNSET_VAR_X) || 3000);\n  console.log(Object.keys(process.env).includes(\"E1_UNSET_VAR_X\"));\n}\n"
     },
     {
-        "name": "generator resume with no argument makes ?? take the fallback",
-        "expect": "matched",
-        "source": "function* g() {\n  let i = 0;\n  while (i < 3) {\n    const got = yield i;\n    i += got ?? 1;\n  }\n}\nasync function main(): Promise<void> {\n  const it = g();\n  const a = it.next();\n  const b = it.next();\n  const c = it.next();\n  const d = it.next();\n  console.log(a.value, a.done, b.value, b.done, c.value, c.done, d.done);\n}\n"
+      "name": "unset process.env variable is undefined",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(process.env.E1_UNSET_VAR_X ?? \"3000\");\n  console.log(process.env.E1_UNSET_VAR_X || \"fallback\");\n  console.log(process.env.E1_UNSET_VAR_X === undefined);\n  console.log(typeof process.env.E1_UNSET_VAR_X);\n  process.env.E1_SET_VAR_Y = \"hello\";\n  console.log(process.env.E1_SET_VAR_Y, typeof process.env.E1_SET_VAR_Y);\n  delete process.env.E1_SET_VAR_Y;\n  console.log(process.env.E1_SET_VAR_Y === undefined, process.env.E1_SET_VAR_Y ?? \"gone\");\n  console.log(Number(process.env.E1_UNSET_VAR_X) || 3000);\n  console.log(Object.keys(process.env).includes(\"E1_UNSET_VAR_X\"));\n}\n"
     },
     {
-        "name": "class toString, valueOf and toPrimitive drive string conversion in ToPrimitive order",
-        "expect": "matched",
-        "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
+      "name": "generator resume with no argument makes ?? take the fallback",
+      "expect": "matched",
+      "source": "function* g() {\n  let i = 0;\n  while (i < 3) {\n    const got = yield i;\n    i += got ?? 1;\n  }\n}\nasync function main(): Promise<void> {\n  const it = g();\n  const a = it.next();\n  const b = it.next();\n  const c = it.next();\n  const d = it.next();\n  console.log(a.value, a.done, b.value, b.done, c.value, c.done, d.done);\n}\n"
     },
     {
-        "name": "untyped default parameter takes the default type",
-        "expect": "matched",
-        "source": "function f(a: number, b = a * 2) { return a + b }\nfunction s(a: string, sep = \", \") { return a + sep + \"x\" }\nfunction t(flag = true, n = 3 + 4) { return flag ? n : -n }\nclass C { k: number; constructor(x: number, y = x - 1) { this.k = x + y } }\nconst h = (a: number, b = a * 3, c = b + 1) => a + b + c;\nasync function main(): Promise<void> {\n  console.log(f(1), f(1, 5), s(\"a\"), s(\"a\", \"-\"), t(), t(false, 2), new C(4).k, h(2), h(2, 1));\n}\n"
+      "name": "class toString, valueOf and toPrimitive drive string conversion in ToPrimitive order",
+      "expect": "matched",
+      "source": "class P {\n    toString(): string {\n        return \"P!\";\n    }\n}\n\nclass V {\n    valueOf(): number {\n        return 5;\n    }\n    toString(): string {\n        return \"v\";\n    }\n}\n\nclass Q {\n    [Symbol.toPrimitive](hint: string): any {\n        return hint === \"number\" ? 7 : \"Q:\" + hint;\n    }\n}\n\nasync function main(): Promise<void> {\n    const p = new P();\n    console.log(`${p}`, String(p), \"\" + p, p + \"\");\n    const v = new V();\n    console.log(`${v}`, String(v), v + 1);\n    const q = new Q();\n    console.log(`${q}`, String(q), q + \"\", +q);\n}\n"
     },
     {
-        "name": "subclass instance passes where its base class is expected",
-        "expect": "matched",
-        "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"
+      "name": "untyped default parameter takes the default type",
+      "expect": "matched",
+      "source": "function f(a: number, b = a * 2) { return a + b }\nfunction s(a: string, sep = \", \") { return a + sep + \"x\" }\nfunction t(flag = true, n = 3 + 4) { return flag ? n : -n }\nclass C { k: number; constructor(x: number, y = x - 1) { this.k = x + y } }\nconst h = (a: number, b = a * 3, c = b + 1) => a + b + c;\nasync function main(): Promise<void> {\n  console.log(f(1), f(1, 5), s(\"a\"), s(\"a\", \"-\"), t(), t(false, 2), new C(4).k, h(2), h(2, 1));\n}\n"
+    },
+    {
+      "name": "subclass instance passes where its base class is expected",
+      "expect": "matched",
+      "source": "class Base {\n  read(x: Base): number { return 1; }\n}\nclass Child extends Base {}\nasync function main(): Promise<void> {\n  console.log(new Base().read(new Child()));\n}\n"
     },
     {
       "name": "caught Error keeps identity through a callback invoked via any",
@@ -1872,10 +1872,10 @@
       "expect": "matched",
       "source": "class K { x = 3; m(): number { return this.x; } } function main(): void { const o = { x: 7, get(): number { return this.x; } }; const e = o.get; try { console.log(e()); } catch (err) { console.log((err as Error).message); } const km = new K().m; try { console.log(km()); } catch (err) { console.log((err as Error).message); } }"
     },
-{
-          "name": "function length counts leading parameters",
-          "expect": "matched",
-          "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
+    {
+      "name": "function length counts leading parameters",
+      "expect": "matched",
+      "source": "function f(a: number, b: number): void {} function h(a: number = 1, b: number): void {} function r(a: number, ...rest: number[]): void {} function o(a?: number): void {} function z(...r: number[]): void {} function main(): void { console.log(f.length, h.length, r.length, o.length, z.length); }"
     },
     {
       "name": "console.log of an inline array method result",
@@ -1936,8 +1936,7 @@
       "name": "process beforeExit re-arm and exit event",
       "expect": "matched",
       "source": "function main(): void { let n: number = 0; process.on('beforeExit', (code: number): void => { console.log('beforeExit', code, n); if (n++ < 1) setTimeout((): void => console.log('more'), 1); }); process.on('exit', (code: number): void => console.log('exit', code)); console.log('main'); }"
-    }
-,
+    },
     {
       "name": "error constructor name of builtin errors",
       "expect": "matched",
@@ -2736,6 +2735,116 @@
       "name": "Map/Set truthiness",
       "expect": "matched",
       "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>(); const st = new Set<number>();\n  if (m) console.log(\"truthy map\");\n  if (st) console.log(\"truthy set\");\n  if (!m) console.log(\"bad\");\n  console.log(m ? \"y\" : \"n\", st ? 1 : 2, m && \"and\");\n  const arr: number[] = [];\n  if (arr) console.log(\"arr\");\n  console.log(!!m, !st, Boolean(m), m || \"or\");\n}\n"
+    },
+    {
+      "name": "class fields: constructor-less bare fields read undefined",
+      "expect": "matched",
+      "source": "class A { x: number; s: string; b: boolean; }\nclass B extends A { y: number[]; }\nfunction main(): void {\n  const a = new A();\n  console.log(a.x, a.s, a.b, typeof a.x, a.x === undefined);\n  console.log(a);\n  const b = new B();\n  console.log(b);\n  a.x = 3; a.s = \"q\";\n  console.log(a, a.x + 1);\n  console.log(JSON.stringify(new A()));\n}\n"
+    },
+    {
+      "name": "class fields: Map Set Bytes function any nullable fields read undefined",
+      "expect": "matched",
+      "source": "class H {\n  m!: Map<string, number>; st!: Set<number>; by!: Uint8Array; f!: () => number; j!: any; nl!: number | null; ns!: string | null;\n  fill(): void { this.m = new Map(); this.m.set(\"a\", 1); this.st = new Set([1, 2]); this.by = new Uint8Array(2); this.f = () => 7; this.j = { k: 1 }; this.nl = 4; this.ns = \"z\"; }\n}\nclass K {\n  m: Map<string, number>; j: any; nl: number | null;\n  constructor(c: boolean) { if (c) { this.m = new Map(); this.j = 5; this.nl = null; } }\n}\nfunction main(): void {\n  const h = new H();\n  console.log(h.m, h.st, h.by, h.f, h.j, h.nl, h.ns);\n  console.log(h);\n  console.log(h.m === undefined, h.st === undefined, h.by === undefined, h.f === undefined, h.j === undefined, h.nl === undefined, h.nl === null);\n  console.log(typeof h.m, typeof h.f, typeof h.j, typeof h.nl);\n  console.log(JSON.stringify(h), Object.keys(h));\n  h.fill();\n  console.log(h.m, h.st, h.by.length, h.f(), h.j, h.nl, h.ns);\n  console.log(h.m.get(\"a\"), h.st.has(2), h.m.size, h.j.k);\n  const k = new K(false); console.log(k);\n  const k2 = new K(true); console.log(k2);\n}\n"
+    },
+    {
+      "name": "class fields: uninitialised reads through callbacks generics casts",
+      "expect": "matched",
+      "source": "class P { n!: number; s!: string; tags!: string[]; set(n: number, s: string): void { this.n = n; this.s = s; this.tags = [s]; } }\nfunction main(): void {\n  more();\n  const a = [new P(), new P()];\n  a[0].set(3, \"x\"); a[1].set(1, \"yy\");\n  console.log(a.map(x => x.n).reduce((s, v) => s + v, 0));\n  console.log(Math.max(...a.map(x => x.n)));\n  console.log(a.map(x => x.n).join(\",\"));\n  console.log(a.map(x => x.n).filter(v => v > 1));\n  console.log(a.map(x => x.n * 2));\n  console.log(a.map(x => x.s.length));\n  console.log(a.map(x => x.s).sort());\n  console.log(a.map(x => x.n).sort((p, q) => p - q));\n  console.log(a.map(x => x.tags).flat());\n  console.log(a.map(x => x.s).includes(\"x\"), a.map(x => x.n).indexOf(1));\n  const total = a.reduce((acc, x) => acc + x.n, 0);\n  console.log(total);\n  const names = a.map(x => { return x.s; });\n  console.log(names.join(\"-\"), a.map(x => x.s.toUpperCase()));\n  const e = [new P()];\n  console.log(e.map(x => x.n), e.map(x => x.s), e.map(x => x.tags));\n  console.log(a.map(x => x.n).map(v => v + 1));\n}\nclass Q { n!: number; s!: string; o?: number; set(): void { this.n = 5; } }\nfunction id<T>(x: T): T { return x; }\nfunction show(v: number | undefined): void { console.log(v); }\nfunction twice(x: number): number { return x * 2; }\nfunction more(): void {\n  const q = [new Q(), new Q()];\n  console.log(q.map(x => x.n), q.map(x => x.s), q.map(x => x.o));\n  q[0].set();\n  console.log(q.map(x => x.n), q.filter(x => x.n === undefined).length);\n  const p = new Q();\n  console.log(id(p.n), id(p.s), (p.n as number), [p.n, p.s]);\n  show(p.n);\n  console.log(twice(p.n), Math.max(p.n, 1), String(p.n), `${p.s}`);\n}\n\n"
+    },
+    {
+      "name": "class fields: structural parameter is a live view of a widened instance",
+      "expect": "matched",
+      "source": "class P { n!: number; t: string = \"t\"; set(): void { this.n = 5; } }\nfunction bump(v: { n: number }): void { v.n = v.n + 1; v.n += 10; }\nfunction put(v: { n: number }): void { v.n = 42; }\nfunction rd(v: { n: number }): number { return v.n; }\nfunction main(): void {\n  const p = new P();\n  console.log(typeof p.n);\n  put(p);\n  console.log(p.n, p);\n  const q = new P(); q.set();\n  bump(q);\n  console.log(q.n, q);\n  const r = new P();\n  bump(r);\n  console.log(r.n);\n  const lit: { n: number } = p;\n  lit.n = 9; console.log(p.n);\n  p.n = 11; console.log(lit.n);\n}\n"
+    },
+    {
+      "name": "class fields: untyped new Map takes annotation and abstract field order",
+      "expect": "matched",
+      "source": "abstract class Base { abstract a: number; abstract b: string; c: number = 1; }\nclass Impl extends Base { a: number = 2; b: string = \"x\"; d: number = 3; }\nfunction main(): void {\n  console.log(new Impl());\n  const m: Map<string, number> = new Map();\n  let m2: Map<string, number>;\n  m2 = new Map();\n  m2.set(\"a\", 1);\n  let s2: Set<number>;\n  s2 = new Set();\n  s2.add(1);\n  console.log(m, m2, s2);\n  class Z { m: Map<string, number> = new Map(); w!: Map<string, number>; init(): void { this.w = new Map(); this.w.set(\"k\", 2); } }\n  const z = new Z(); z.init(); console.log(z);\n}\n"
+    },
+    {
+      "name": "class fields: uninitialised function and any fields",
+      "expect": "matched",
+      "source": "class A { j: any; f: () => number; nl: string | null; constructor(c: boolean) { if (c) { this.j = { a: 1 }; this.f = () => 2; this.nl = null; } } }\nfunction main(): void {\n  const a = new A(false);\n  console.log(a.j, a.j === undefined, typeof a.f, a.nl, a.nl === null);\n  console.log(a.j ?? \"d\", a.nl ?? \"n\", a.j?.a);\n  try { a.f(); } catch (e) { console.log((e as Error).message, e instanceof TypeError); }\n  const b = new A(true);\n  console.log(b.j, b.f(), b.nl, b.j.a, b.nl === null);\n  console.log(a);\n  console.log(JSON.stringify(a));\n  b.nl = \"set\"; console.log(b.nl.length);\n}\n"
+    },
+    {
+      "name": "class fields limits: bare fields of constructor-less classes",
+      "expect": "matched",
+      "source": "class A { x: number; s: string; }\nclass B { y: number[]; }\nclass C { v: number; w: string; }\nfunction main(): void {\n  const a = new A();\n  console.log(\"hi\", 1 + 2);\n  console.log(a.x === undefined);\n  const b = new B();\n  b.y = [1];\n  console.log(b.y.length);\n  const c = new C();\n  c.v = 2; c.w = \"k\";\n  console.log(c, c.v + 1);\n}\n"
+    },
+    {
+      "name": "class fields limits: undefined through returns, containers and literals",
+      "expect": "matched",
+      "source": "class P { n!: number; s!: string; set(n: number): void { this.n = n; } }\nfunction h(p: P): number { return p.n }\nconst ar = (p: P): number => p.n;\nconst ar2 = (p: P): number => { return p.n; };\nfunction touch(p: P): number { p.n = 5; return p.n; }\nfunction main(): void {\n  const p = new P();\n  console.log(h(p), ar(p), ar2(p));\n  const arr: number[] = [];\n  arr.push(p.n);\n  console.log(arr);\n  const m = new Map<string, number>();\n  m.set(\"k\", p.n);\n  console.log(m);\n  console.log({ n: p.n });\n  const o = { n: p.n, s: p.s };\n  console.log(o);\n  const ps = [new P(), new P()];\n  ps[0].set(3);\n  const mapped = ps.map(x => x.n);\n  console.log(mapped);\n  console.log(Math.max(...mapped));\n  console.log(Math.max(...ps.map(x => x.n)));\n  const v = p.n;\n  console.log(v);\n  let w: number = p.n;\n  console.log(w, typeof w);\n  const z = [p.n, 1];\n  console.log(z);\n  const q = new P();\n  console.log(touch(q), q.n);\n  q.set(9);\n  console.log(h(q), q);\n}\n"
+    },
+    {
+      "name": "class fields limits: abstract override creation order",
+      "expect": "matched",
+      "source": "abstract class Base { abstract a: number; abstract b: string; c: number = 1; show(): number { return this.c + this.a; } }\nclass Impl extends Base { b: string = \"x\"; a: number = 2; d: number = 3; }\nabstract class B2 { abstract p: number; abstract q: number; constructor() { } m(): number { return this.q; } }\nclass I2 extends B2 { q: number = 5; p: number = 6; }\nclass I3 extends I2 { r: number = 7; }\nfunction main(): void {\n  const i = new Impl();\n  console.log(i, i.show(), i.a, i.b);\n  const j = new I2();\n  console.log(j, j.m(), j.p);\n  console.log(JSON.stringify(j), Object.keys(j));\n  const k = new I3();\n  console.log(k, Object.entries(k));\n  for (const key in i) console.log(key);\n}\n"
+    },
+    {
+      "name": "class fields limits: unset number through a structural parameter",
+      "expect": "matched",
+      "source": "class P { n!: number; t: string = \"t\"; }\nfunction rd(v: { n: number }): number { return v.n; }\nfunction pr(v: { n: number }): void { console.log(v.n); }\nfunction pr2(v: { n: number }): void { console.log(v.n, typeof v.n, v.n === undefined); }\nfunction sum(v: { n: number }): number { return v.n + 1; }\nfunction put(v: { n: number }): void { v.n = 42; }\nfunction main(): void {\n  const p = new P();\n  console.log(rd(p));\n  pr(p);\n  pr2(p);\n  console.log(sum(p));\n  const q = new P(); q.n = 3;\n  console.log(rd(q)); pr(q); pr2(q);\n  put(p);\n  console.log(p.n, rd(p));\n}\n"
+    },
+    {
+      "name": "class fields limits: JSON.stringify omits function values",
+      "expect": "matched",
+      "source": "class H { f!: () => number; g!: () => number; arr: number[] = []; o: { k: number } = { k: 1 }; fill(): void { this.f = () => 7; } }\nfunction main(): void {\n  const h = new H(); h.fill();\n  console.log(JSON.stringify(h));\n  console.log(JSON.stringify({ f: () => 1, n: 1 }));\n  console.log(JSON.stringify({ a: [() => 1, () => 2], n: 1 }));\n  console.log(JSON.stringify([function () {}, () => 1]));\n  console.log(JSON.stringify({ a: [() => 1, 2], n: 1 }));\n  console.log(JSON.stringify([function () {}, 1]));\n  console.log(JSON.stringify({ f: h.f }));\n}\n"
+    },
+    {
+      "name": "class fields limits: nested typed arrays and function names",
+      "expect": "matched",
+      "source": "function named(): number { return 1; }\nconst loader = async (): Promise<number> => 2;\nfunction main(): void {\n  const o = { u: new Uint8Array(2), cb: () => 1, f: function () { return 1; }, g: named, h: loader };\n  console.log(o);\n  const callback = () => 2;\n  const o2 = { callback, named, nested: { u: new Uint8Array(3) } };\n  console.log(o2);\n  console.log([new Uint8Array(2), callback, () => 3, named]);\n  const f = function () {};\n  const g = () => {};\n  console.log([f, g, named, loader]);\n  const arr = [() => 1];\n  console.log(arr);\n  const m = new Map([[\"a\", new Uint8Array(1)]]);\n  console.log(m);\n  let asg = () => 0;\n  asg = () => 6;\n  console.log({ asg });\n  const holder: { fn?: () => number } = {};\n  holder.fn = () => 4;\n  console.log(holder);\n  const named2 = function inner(): number { return 1; };\n  console.log({ named2 });\n}\n"
+    },
+    {
+      "name": "class fields limits: class field function names",
+      "expect": "matched",
+      "source": "class K { f = () => 1; g!: () => number; constructor() { this.g = () => 2; } }\nfunction main(): void {\n  console.log(new K());\n}\n"
+    },
+    {
+      "name": "collections limits: species required non numeric ctor",
+      "expect": "matched",
+      "source": "class Tagged extends Array<number> {\n  tag: any;\n  constructor(tag: string) { super(); this.tag = tag; console.log(\"ctor\", typeof tag, tag); }\n}\nfunction main(): void {\n  const t = new Tagged(\"x\"); t.push(1); t.push(2); t.push(3);\n  const m = t.map(x => x * 2);\n  console.log(m, m instanceof Tagged, m.length);\n  const f = t.filter(x => x > 1);\n  console.log(f, f instanceof Tagged);\n  console.log(t.slice(1), t.concat([9]));\n  const sp = t.splice(0, 1);\n  console.log(sp, sp instanceof Tagged);\n  console.log(Tagged.from([5, 6]), Tagged.of(7, 8));\n}\n"
+    },
+    {
+      "name": "collections limits: species multi param optional and chains",
+      "expect": "matched",
+      "source": "class Pair extends Array<number> {\n  label: any;\n  note: any;\n  constructor(label: string, note: string) { super(); this.label = label; this.note = note; console.log(\"pair\", typeof label, label, typeof note, note); }\n}\nclass OptTag extends Array<number> {\n  tag: string;\n  constructor(tag?: string) { super(); this.tag = tag === undefined ? \"none\" : String(tag); }\n}\nclass Base extends Array<number> {\n  who: any;\n  constructor(who: string) { super(); this.who = who; }\n}\nclass Leaf extends Base {}\nfunction main(): void {\n  const p = new Pair(\"a\", \"b\"); p.push(1, 2, 3);\n  console.log(p.filter(x => x > 1));\n  console.log(p.flat());\n  const o = new OptTag(\"t\"); o.push(4, 5);\n  const om = o.map(x => x + 1);\n  console.log(om, om instanceof OptTag);\n  const l = new Leaf(\"leaf\"); l.push(9);\n  const lf = l.slice(0);\n  console.log(lf, lf instanceof Leaf, lf instanceof Base);\n  console.log(Leaf.from([1, 2]), Leaf.of(3));\n  console.log(l.flatMap(x => [x, x]));\n}\n"
+    },
+    {
+      "name": "collections limits: native view of subclass instance",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Reg extends Map<string, number> { n = 1; }\nclass Bag extends Set<number> { }\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  const a: number[] = s;\n  console.log(a, a instanceof Stack, a.length, a.map(x => x + 1));\n  const r = new Reg(); r.set(\"a\", 1);\n  const m: Map<string, number> = r;\n  console.log(m, m instanceof Reg, m.get(\"a\"), m.size);\n  const b = new Bag(); b.add(3);\n  const st: Set<number> = b;\n  console.log(st, st instanceof Bag, st.has(3));\n}\n"
+    },
+    {
+      "name": "collections limits: native view optional chain",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Reg extends Map<string, number> { n = 1; }\nfunction main(): void {\n  const s = new Stack(); s.push(1, 2);\n  const arr: (number[] | null) = s;\n  console.log(arr?.length, arr?.[1], arr?.map(x => x * 2));\n  const r = new Reg(); r.set(\"a\", 1);\n  const m: Map<string, number> | undefined = r;\n  console.log(m?.size, m?.get(\"a\"), m?.has(\"z\"));\n}\n"
+    },
+    {
+      "name": "collections limits: union with map and set basic",
+      "expect": "matched",
+      "source": "function f(x: boolean): Map<string, number> | string {\n  if (x) { const m = new Map<string, number>(); m.set(\"a\", 1); return m; }\n  return \"no\";\n}\nfunction g(x: boolean): Set<number> | number {\n  return x ? new Set([1, 2]) : 5;\n}\nfunction h(x: Map<string, number> | undefined): Map<string, number> {\n  return x ?? new Map<string, number>([[\"z\", 26]]);\n}\nfunction main(): void {\n  const a = f(true), b = f(false);\n  console.log(a, b);\n  if (typeof a === \"string\") console.log(\"str\", a); else console.log(\"map\", a.size, a.get(\"a\"));\n  if (a instanceof Map) console.log(\"is map\", a.size);\n  if (typeof b === \"string\") console.log(\"str\", b.length);\n  console.log(g(true), g(false));\n  const s = g(true);\n  if (s instanceof Set) console.log(s.has(1), s.size);\n  console.log(h(undefined), h(new Map([[\"q\", 1]])));\n  const u: Map<string, number> | string = Math.random() > 2 ? \"x\" : new Map([[\"k\", 2]]);\n  console.log(u, typeof u);\n}\n"
+    },
+    {
+      "name": "collections limits: union collections narrowing",
+      "expect": "matched",
+      "source": "class Reg extends Map<string, number> { n = 1; }\nfunction pick(x: number): Map<string, number> | number[] | string {\n  if (x === 0) return new Map<string, number>([[\"a\", 1]]);\n  if (x === 1) return [1, 2];\n  return \"s\";\n}\nfunction opt(x: Set<number> | null): number { return x ? x.size : -1; }\nfunction main(): void {\n  for (const i of [0, 1, 2]) {\n    const v = pick(i);\n    if (v instanceof Map) console.log(\"map\", v.size, v.get(\"a\"), v.has(\"b\"));\n    else if (Array.isArray(v)) console.log(\"arr\", v.length, v.join(\"-\"));\n    else console.log(\"str\", v.toUpperCase());\n    console.log(v, typeof v);\n  }\n  const s = new Set([1, 2, 3]);\n  const w: Set<number> | string = s;\n  console.log(w, opt(s), opt(null));\n  const r = new Reg(); r.set(\"k\", 1);\n  const m: Map<string, number> | undefined = r;\n  console.log(m, m instanceof Reg);\n  const n = Math.random() > 5 ? \"no\" : (new Map([[1, \"x\"]]) as Map<number, string> | string);\n  if (typeof n !== \"string\") { n.set(2, \"y\"); console.log(n.size, [...n.keys()]); }\n}\n"
+    },
+    {
+      "name": "collections limits: object values entries precise",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Counted extends Array<number> { hits = 3; }\nclass Labeled extends Array<number> { label = \"L\"; }\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  const v = Object.values(s);\n  const sum: number = v.reduce((a, b) => a + b, 0);\n  console.log(v, sum, v.map(x => x * 2));\n  const e = Object.entries(s);\n  console.log(e, e.map(([k, x]) => k + x));\n  const c = new Counted(); c.push(5);\n  const cv = Object.values(c);\n  console.log(cv, cv.map(x => x + 1), Object.entries(c));\n  const l = new Labeled(); l.push(7);\n  const lv = Object.values(l);\n  console.log(lv, lv.map(x => x + 1), lv.length, Object.entries(l).map(([k, x]) => k + \":\" + x));\n  const num: number[] = Object.values(c);\n  console.log(num);\n  more();\n}\nfunction more(): void {\n  const c = new Counted(); c.push(5); c.push(6);\n  const t: [string, number][] = Object.entries(c);\n  const total = t.reduce((a, [, n]) => a + n, 0);\n  const lbl = new Labeled(); lbl.push(1);\n  const lv = Object.values(lbl);\n  const strs = lv.filter(x => typeof x === \"string\");\n  console.log(total, t.length, strs, lv.length);\n}\n"
+    },
+    {
+      "name": "collections limits: object values entries mixed own fields",
+      "expect": "matched",
+      "source": "class Stack extends Array<number> { label = \"L\"; }\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  const v = Object.values(s);\n  console.log(v);\n  const e = Object.entries(s);\n  console.log(e);\n  const x: number = v[0] as number;\n  console.log(Object.keys(s), x);\n}\n"
+    },
+    {
+      "name": "collections limits: union array and string",
+      "expect": "matched",
+      "source": "function f(x: boolean): number[] | string {\n  if (x) { return [1, 2]; }\n  return \"no\";\n}\nfunction main(): void {\n  const a = f(true);\n  console.log(a, f(false));\n  if (typeof a === \"string\") console.log(\"str\", a); else console.log(\"arr\", a.length, a.indexOf(2), a.map(x => x + 1));\n  if (Array.isArray(a)) console.log(\"is arr\", a.length);\n}\n"
     }
   ]
 }
