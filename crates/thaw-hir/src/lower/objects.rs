@@ -3125,6 +3125,14 @@ impl<'a> FnLowerer<'a> {
                             let array_type = HirType::Array(element.clone());
                             return self.lower_array_index(obj, array_type, *element, index);
                         }
+                        // The read is observed as possibly `undefined`: check bounds and holes.
+                        if !tagged
+                            && is_observed_member(member.span)
+                            && matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool | HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_))
+                        {
+                            let array_type = HirType::Array(element.clone());
+                            return self.lower_array_index(obj, array_type, *element, index);
+                        }
                         Ok(HirExpr::TypedIndex(
                             Box::new(obj),
                             Box::new(index),
