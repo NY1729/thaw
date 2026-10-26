@@ -796,6 +796,15 @@
     },
     writable: false, configurable: false,
   });
+  // `Error.captureStackTrace(plainObject)`: V8 defines `stack` non-enumerable.
+  thawGraphDefineProperty(globalThis, '__thaw_host_hide_property', {
+    value: (object, keyJson) => {
+      const key = thawGraphParse(keyJson);
+      thawGraphDefineProperty(object, key, { enumerable: false });
+      return true;
+    },
+    writable: false, configurable: false,
+  });
   const thawGraphDateTime = thawGraphDateConstructor.prototype.getTime;
   const thawGraphArrayBufferLength = thawGraphGetOwnPropertyDescriptor(thawGraphArrayBufferConstructor.prototype, 'byteLength').get;
   const thawGraphIsView = thawGraphArrayBufferConstructor.isView;

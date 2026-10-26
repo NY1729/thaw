@@ -2477,8 +2477,45 @@ fn is_private_slot_key(key: &[u8]) -> bool {
     key.starts_with(b"__thaw_private_")
 }
 
+type HiddenKey = (
+    std::rc::Weak<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>,
+    Vec<u8>,
+);
+
+thread_local! {
+    /// Own properties defined non-enumerable on a Json object (`Error.captureStackTrace`): the
+    /// object (weakly, so a dead one never matches a reused address) and the key.
+    static HIDDEN_KEYS: std::cell::RefCell<Vec<HiddenKey>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn hide_key(object: &SharedObject, key: &[u8]) {
+    HIDDEN_KEYS.with(|hidden| {
+        let mut hidden = hidden.borrow_mut();
+        hidden.retain(|(weak, _)| weak.strong_count() > 0);
+        if !hidden
+            .iter()
+            .any(|(weak, hidden_key)| weak.as_ptr() == Rc::as_ptr(object) && hidden_key == key)
+        {
+            hidden.push((Rc::downgrade(object), key.to_vec()));
+        }
+    });
+}
+
+fn key_is_hidden(object: &SharedObject, key: &[u8]) -> bool {
+    HIDDEN_KEYS.with(|hidden| {
+        let hidden = hidden.borrow();
+        !hidden.is_empty()
+            && hidden.iter().any(|(weak, hidden_key)| {
+                weak.as_ptr() == Rc::as_ptr(object) && weak.strong_count() > 0 && hidden_key == key
+            })
+    })
+}
+
+/// Enumerable own fields in property order (non-enumerable ones are left out).
 fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)> {
-    ordered_object_fields(unsafe { &*fields.get() })
+    let mut entries = ordered_object_fields(unsafe { &*fields.get() });
+    entries.retain(|(key, _)| !key_is_hidden(fields, key));
+    entries
 }
 
 // NOTE: `ordered_json` deliberately does NOT special-case the
@@ -5308,8 +5345,8 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                 extra: Vec::new(),
             }
         }
-        Value::Object(fields) => {
-            let fields = shared_object_ref(fields);
+        Value::Object(shared) => {
+            let fields = shared_object_ref(shared);
             if let Some(items @ Value::Array(_)) = fields.get(b"__thaw_array_items__".as_slice()) {
                 // console.log of an `extends Array` instance: its items plus own properties.
                 let mut node = inspect_node(items, stack);
@@ -5388,7 +5425,9 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                 let entries = ordered_object_fields(fields)
                     .into_iter()
                     .filter(|(key, _)| {
-                        *key != b"__thaw_class__".as_slice() && !is_private_slot_key(key)
+                        *key != b"__thaw_class__".as_slice()
+                            && !is_private_slot_key(key)
+                            && !key_is_hidden(shared, key)
                     })
                     .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
                     .collect();
@@ -6226,7 +6265,26 @@ pub extern "C" fn thaw_json_has(value: *mut Value, key: *const c_char) -> u8 {
         return u8::from(host_property_predicate(lease, &key, 0));
     }
     if let Some(error) = error_ref(value) {
-        return u8::from(error_has_prop(error, &key) || key.as_slice() == b"name");
+        // Framed Errors bypass the ordinary Json prototype walk.
+        return u8::from(
+            error_has_prop(error, &key)
+                || matches!(
+                    key.as_slice(),
+                    b"name"
+                        | b"constructor"
+                        | b"__defineGetter__"
+                        | b"__defineSetter__"
+                        | b"hasOwnProperty"
+                        | b"__lookupGetter__"
+                        | b"__lookupSetter__"
+                        | b"isPrototypeOf"
+                        | b"propertyIsEnumerable"
+                        | b"toLocaleString"
+                        | b"toString"
+                        | b"valueOf"
+                        | b"__proto__"
+                ),
+        );
     }
     let mut current = value.clone();
     let mut seen = HashSet::new();
@@ -6714,6 +6772,12 @@ pub extern "C" fn thaw_json_error_to_string(value: *mut Value) -> *const c_char 
 /// to append), else `undefined`.
 #[no_mangle]
 pub extern "C" fn thaw_json_error_stack(value: *mut Value) -> *mut Value {
+    // `delete error.stack` removed the own property: nothing derives a header afterwards.
+    if let Some(error) = unsafe { value.as_ref() }.and_then(error_ref) {
+        if !error_has_prop(error, b"stack") {
+            return leak(napi_undefined_value());
+        }
+    }
     if let Some(stack) = caught_json_text(value, "stack").filter(|stack| !stack.is_empty()) {
         return leak(Value::String(stack));
     }
@@ -6903,7 +6967,6 @@ fn is_thaw_internal_wrapper(value: &Value) -> bool {
 /// fixed set.
 /// `Error.captureStackTrace(target)` on a plain object: an own `stack` of `name: message` (V8's
 /// `Error.prototype.toString` defaults) plus the generated frame line.
-// ponytail: the property is enumerable (Json objects have no hidden keys), V8's is not.
 #[no_mangle]
 pub extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
     if value.is_null() || error_ref(unsafe { &*value }).is_some() {
@@ -6929,6 +6992,14 @@ pub extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
         to_str(frames)
     };
     object_insert(value, c"stack".as_ptr(), Value::String(header + &frames));
+    // V8 defines `stack` non-enumerable.
+    match unsafe { value.as_ref() } {
+        Some(Value::Object(shared)) => hide_key(shared, b"stack"),
+        Some(Value::Host(lease)) => {
+            host_property_predicate(lease, b"stack", 4);
+        }
+        _ => {}
+    }
     0.0
 }
 

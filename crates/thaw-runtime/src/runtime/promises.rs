@@ -2212,7 +2212,7 @@ pub extern "C" fn thaw_promise_drain_unhandled_result(
         let result = reporter.map(|reporter| reporter(error_ptr));
         let handled = result.as_ref().is_some_and(|result| result.value != 0 && result.error.is_null());
         if !handled {
-            unsafe { thaw_runtime_report_uncaught(unhandled_rejection_report_text(error_ptr, text.is_some())) };
+            unsafe { thaw_runtime_report_unhandled_rejection(unhandled_rejection_report_text(error_ptr, text.is_some())) };
             failed = true;
         }
         if let Some(result) = result {
@@ -2237,7 +2237,7 @@ pub extern "C" fn thaw_promise_drain_unhandled_text_result(
         let result = reporter.map(|reporter| reporter(text.cast()));
         let handled = result.as_ref().is_some_and(|result| result.value != 0 && result.error.is_null());
         if !handled {
-            unsafe { thaw_runtime_report_uncaught(text) };
+            unsafe { thaw_runtime_report_unhandled_rejection(text) };
             failed = true;
         }
         if let Some(result) = result {
@@ -2260,7 +2260,7 @@ pub extern "C" fn thaw_promise_drain_unhandled(
         let error_ptr = text.as_ref().map_or(rejection.error, |text| text.cast_const().cast());
         let handled = reporter.is_some_and(|reporter| reporter(error_ptr) != 0);
         if !handled {
-            unsafe { thaw_runtime_report_uncaught(unhandled_rejection_report_text(error_ptr, text.is_some())) };
+            unsafe { thaw_runtime_report_unhandled_rejection(unhandled_rejection_report_text(error_ptr, text.is_some())) };
             failed = true;
         }
         if let Some(text) = text { unsafe { thaw_arena::destroy_string(text) }; }
