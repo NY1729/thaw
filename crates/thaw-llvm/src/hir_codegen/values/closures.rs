@@ -1472,6 +1472,24 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(closure.into())
     }
 
+    /// Compiles `value` stored under the source name `name`; a function expression there is
+    /// named after it (`const f = () => 1` prints `[Function: f]`).
+    fn compile_expr_named(&mut self, name: &str, value: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        let compiled = self.compile_expr(value)?;
+        let mut inner = value;
+        while let HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) = inner {
+            inner = closure;
+        }
+        if let HirExpr::Lambda(_, _, ret, body) = inner {
+            let display = function_display_name(name);
+            if compiled.is_pointer_value() && !display.starts_with("__thaw") {
+                let kind = named_function_kind(ret, body);
+                self.compile_register_function_label(compiled, &format!("{kind}{display}"))?;
+            }
+        }
+        Ok(compiled)
+    }
+
     /// Registers the `console.log` label (`"<kind><name>"`) of the function `closure` points to.
     fn compile_register_function_label(
         &mut self,
@@ -1750,5 +1768,42 @@ fn function_display_name(symbol: &str) -> String {
     match name.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
         Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => original.to_string(),
         _ => name.to_string(),
+    }
+}
+
+fn named_function_kind(ret: &HirType, body: &HirExpr) -> char {
+    if let HirType::Function(params, result) = ret {
+        if params.len() == 6
+        && matches!(&params[0], HirType::I64)
+        && matches!(&params[1], HirType::Json)
+        && (3..6).all(|index| matches!(&params[index], HirType::Array(_)))
+        {
+            return if matches!(result.as_ref(), HirType::Promise(_)) {
+                'A'
+            } else {
+                'g'
+            };
+        }
+    }
+    if matches!(ret, HirType::Promise(_))
+        && (thaw_hir::hir_expr_contains_await(body) || has_async_resolver(body))
+    {
+        'a'
+    } else {
+        'f'
+    }
+}
+
+fn has_async_resolver(expr: &HirExpr) -> bool {
+    let is_async_promise = |executor: &HirExpr| {
+        matches!(executor, HirExpr::Lambda(_, params, _, _)
+            if params.iter().any(|param| param.name.starts_with("__thaw_async_arrow_resolve_")))
+    };
+    match expr {
+        HirExpr::PromiseNew(executor, _, _, _) => is_async_promise(executor),
+        HirExpr::Block(statements) => statements.iter().any(|statement| {
+            matches!(statement, HirStmt::Return(Some(value)) if has_async_resolver(value))
+        }),
+        _ => false,
     }
 }

@@ -2561,9 +2561,9 @@ impl FnLowerer<'_> {
 }
 
 /// Collects the names JavaScript infers for anonymous function expressions
-/// (NamedEvaluation): declarators, identifier assignments, property definitions,
-/// class fields and parameter/destructuring defaults. Member assignments
-/// (`this.f = () => 1`) infer nothing.
+/// (NamedEvaluation) in property definitions and class fields. Variable declarators and
+/// identifier assignments are named by codegen from the binding (`compile_expr_named`), which
+/// keeps their lowered shape untouched. Member assignments (`this.f = () => 1`) infer nothing.
 #[derive(Default)]
 struct FunctionNames {
     names: HashMap<(u32, u32), String>,
@@ -2615,21 +2615,6 @@ impl FunctionNames {
 }
 
 impl Visit for FunctionNames {
-    fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
-        if let (swc_ecma_ast::Pat::Ident(binding), Some(init)) = (&declarator.name, &declarator.init) {
-            self.name(init, binding.id.sym.to_string());
-        }
-        declarator.visit_children_with(self);
-    }
-    fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
-        use swc_ecma_ast::AssignOp::*;
-        if matches!(assign.op, Assign | AndAssign | OrAssign | NullishAssign) {
-            if let swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Ident(target)) = &assign.left {
-                self.name(&assign.right, target.id.sym.to_string());
-            }
-        }
-        assign.visit_children_with(self);
-    }
     fn visit_key_value_prop(&mut self, property: &swc_ecma_ast::KeyValueProp) {
         if let Some(name) = Self::property_name(&property.key) {
             self.name(&property.value, name);
@@ -2647,12 +2632,6 @@ impl Visit for FunctionNames {
             self.name(value, format!("#{}", property.key.name));
         }
         property.visit_children_with(self);
-    }
-    fn visit_assign_pat(&mut self, pattern: &swc_ecma_ast::AssignPat) {
-        if let swc_ecma_ast::Pat::Ident(binding) = pattern.left.as_ref() {
-            self.name(&pattern.right, binding.id.sym.to_string());
-        }
-        pattern.visit_children_with(self);
     }
 }
 

@@ -1176,7 +1176,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirInitStep::ModuleBoundary { .. } => unreachable!(),
                 _ if !execute => {}
                 HirInitStep::StoreGlobal(name, expression) => {
-                    let value = self.compile_expr(expression)?;
+                    let value = self.compile_expr_named(name, expression)?;
                     let (pointer, _, _) = self.global_variables[name];
                     self.builder
                         .build_store(pointer, value)
@@ -1391,7 +1391,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirInitStep::ModuleBoundary { .. } => unreachable!(),
                     _ if !execute => {}
                     HirInitStep::StoreGlobal(name, expression) => {
-                        let value = self.compile_expr(expression)?;
+                        let value = self.compile_expr_named(name, expression)?;
                         let (pointer, _, _) = self.global_variables[name];
                         self.builder
                             .build_store(pointer, value)
