@@ -25,7 +25,12 @@ pub use closure_analysis::*;
 
 mod lower;
 
+/// Bit pattern of the quiet NaN a class field that was never assigned reads as through a
+/// structural live view (`{ n: number }` over an instance); observed reads turn it into `undefined`.
+pub const UNSET_NUMBER_BITS: u64 = 0x7FF8_0000_0000_5E7D;
+
 pub use lower::{
-    jit_calls_requiring_dynamic_storage, lower_module, lower_module_with_source_map,
-    normalize_top_level_destructuring, set_thaw_js_routed, LowerDiagnostic, SourceRange,
+    hir_expr_contains_await, jit_calls_requiring_dynamic_storage, lower_module,
+    lower_module_with_source_map, normalize_top_level_destructuring,
+    reorder_class_fields_by_definition, set_thaw_js_routed, LowerDiagnostic, SourceRange,
 };

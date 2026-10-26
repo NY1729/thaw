@@ -1058,6 +1058,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
                 }
+                HirType::Function(..) | HirType::CallableFunction(..) if self.console_omit_absent_fields => {
+                    value = self.compile_console_function_sentinel(value.into_pointer_value())?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::Function(params, ret) => {
                     value = self.compile_register_native_callback_from_closure(
                         value.into_pointer_value(),
@@ -1427,6 +1431,19 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// A native byte buffer as its `Buffer.toJSON()` shape, `{ "type": "Buffer", "data": [..] }`.
+    /// A function nested in a `console.log` value: the sentinel the inspector prints as `[Function: name]`.
+    fn compile_console_function_sentinel(
+        &mut self,
+        closure: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_json_function_sentinel").unwrap(),
+            &[closure.into()], "console_function_sentinel",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| "function sentinel returned no value".to_string())
+    }
+
     fn compile_native_bytes_to_json(
         &mut self,
         value: PointerValue<'ctx>,
@@ -1915,6 +1932,10 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::JsValue => {
                 value = self.compile_dynamic_value_placeholder(value)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::Function(..) | HirType::CallableFunction(..) if self.console_omit_absent_fields => {
+                value = self.compile_console_function_sentinel(value.into_pointer_value())?;
                 "thaw_json_array_push_json"
             }
             HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {

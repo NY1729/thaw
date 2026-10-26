@@ -1045,7 +1045,21 @@ impl<'a> FnLowerer<'a> {
                 }
                 let ty = match annotated {
                     Some(ty) => ty,
+                    // A container that receives a sink read keeps `undefined` elements.
+                    None if is_sink_slot(binding.id.span) => widen_sink_type(actual_type.clone()),
                     None => actual_type.clone(),
+                };
+                // A fresh empty `new Map()`/`new Set()` simply takes the widened type.
+                let value = match value {
+                    HirExpr::TypedClosure(inner_type, allocation)
+                        if is_sink_slot(binding.id.span)
+                            && matches!(inner_type, HirType::Map(..) | HirType::Set(_))
+                            && matches!(allocation.as_ref(), HirExpr::Call(callee, args)
+                                if args.is_empty() && matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_map_new")) =>
+                    {
+                        HirExpr::TypedClosure(widen_sink_type(inner_type), allocation)
+                    }
+                    other => other,
                 };
                 // `const a: number[] = stack` / `const m: Map<K, V> | undefined = registry`: the
                 // object stays the subclass instance (it prints, tests `instanceof` and dispatches

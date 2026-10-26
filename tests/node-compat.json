@@ -2626,6 +2626,41 @@
       "source": "class A { j: any; f: () => number; nl: string | null; constructor(c: boolean) { if (c) { this.j = { a: 1 }; this.f = () => 2; this.nl = null; } } }\nfunction main(): void {\n  const a = new A(false);\n  console.log(a.j, a.j === undefined, typeof a.f, a.nl, a.nl === null);\n  console.log(a.j ?? \"d\", a.nl ?? \"n\", a.j?.a);\n  try { a.f(); } catch (e) { console.log((e as Error).message, e instanceof TypeError); }\n  const b = new A(true);\n  console.log(b.j, b.f(), b.nl, b.j.a, b.nl === null);\n  console.log(a);\n  console.log(JSON.stringify(a));\n  b.nl = \"set\"; console.log(b.nl.length);\n}\n"
     },
     {
+      "name": "class fields limits: bare fields of constructor-less classes",
+      "expect": "matched",
+      "source": "class A { x: number; s: string; }\nclass B { y: number[]; }\nclass C { v: number; w: string; }\nfunction main(): void {\n  const a = new A();\n  console.log(\"hi\", 1 + 2);\n  console.log(a.x === undefined);\n  const b = new B();\n  b.y = [1];\n  console.log(b.y.length);\n  const c = new C();\n  c.v = 2; c.w = \"k\";\n  console.log(c, c.v + 1);\n}\n"
+    },
+    {
+      "name": "class fields limits: undefined through returns, containers and literals",
+      "expect": "matched",
+      "source": "class P { n!: number; s!: string; set(n: number): void { this.n = n; } }\nfunction h(p: P): number { return p.n }\nconst ar = (p: P): number => p.n;\nconst ar2 = (p: P): number => { return p.n; };\nfunction touch(p: P): number { p.n = 5; return p.n; }\nfunction main(): void {\n  const p = new P();\n  console.log(h(p), ar(p), ar2(p));\n  const arr: number[] = [];\n  arr.push(p.n);\n  console.log(arr);\n  const m = new Map<string, number>();\n  m.set(\"k\", p.n);\n  console.log(m);\n  console.log({ n: p.n });\n  const o = { n: p.n, s: p.s };\n  console.log(o);\n  const ps = [new P(), new P()];\n  ps[0].set(3);\n  const mapped = ps.map(x => x.n);\n  console.log(mapped);\n  console.log(Math.max(...mapped));\n  console.log(Math.max(...ps.map(x => x.n)));\n  const v = p.n;\n  console.log(v);\n  let w: number = p.n;\n  console.log(w, typeof w);\n  const z = [p.n, 1];\n  console.log(z);\n  const q = new P();\n  console.log(touch(q), q.n);\n  q.set(9);\n  console.log(h(q), q);\n}\n"
+    },
+    {
+      "name": "class fields limits: abstract override creation order",
+      "expect": "matched",
+      "source": "abstract class Base { abstract a: number; abstract b: string; c: number = 1; show(): number { return this.c + this.a; } }\nclass Impl extends Base { b: string = \"x\"; a: number = 2; d: number = 3; }\nabstract class B2 { abstract p: number; abstract q: number; constructor() { } m(): number { return this.q; } }\nclass I2 extends B2 { q: number = 5; p: number = 6; }\nclass I3 extends I2 { r: number = 7; }\nfunction main(): void {\n  const i = new Impl();\n  console.log(i, i.show(), i.a, i.b);\n  const j = new I2();\n  console.log(j, j.m(), j.p);\n  console.log(JSON.stringify(j), Object.keys(j));\n  const k = new I3();\n  console.log(k, Object.entries(k));\n  for (const key in i) console.log(key);\n}\n"
+    },
+    {
+      "name": "class fields limits: unset number through a structural parameter",
+      "expect": "matched",
+      "source": "class P { n!: number; t: string = \"t\"; }\nfunction rd(v: { n: number }): number { return v.n; }\nfunction pr(v: { n: number }): void { console.log(v.n); }\nfunction pr2(v: { n: number }): void { console.log(v.n, typeof v.n, v.n === undefined); }\nfunction sum(v: { n: number }): number { return v.n + 1; }\nfunction put(v: { n: number }): void { v.n = 42; }\nfunction main(): void {\n  const p = new P();\n  console.log(rd(p));\n  pr(p);\n  pr2(p);\n  console.log(sum(p));\n  const q = new P(); q.n = 3;\n  console.log(rd(q)); pr(q); pr2(q);\n  put(p);\n  console.log(p.n, rd(p));\n}\n"
+    },
+    {
+      "name": "class fields limits: JSON.stringify omits function values",
+      "expect": "matched",
+      "source": "class H { f!: () => number; g!: () => number; arr: number[] = []; o: { k: number } = { k: 1 }; fill(): void { this.f = () => 7; } }\nfunction main(): void {\n  const h = new H(); h.fill();\n  console.log(JSON.stringify(h));\n  console.log(JSON.stringify({ f: () => 1, n: 1 }));\n  console.log(JSON.stringify({ a: [() => 1, () => 2], n: 1 }));\n  console.log(JSON.stringify([function () {}, () => 1]));\n  console.log(JSON.stringify({ a: [() => 1, 2], n: 1 }));\n  console.log(JSON.stringify([function () {}, 1]));\n  console.log(JSON.stringify({ f: h.f }));\n}\n"
+    },
+    {
+      "name": "class fields limits: nested typed arrays and function names",
+      "expect": "matched",
+      "source": "function named(): number { return 1; }\nconst loader = async (): Promise<number> => 2;\nfunction main(): void {\n  const o = { u: new Uint8Array(2), cb: () => 1, f: function () { return 1; }, g: named, h: loader };\n  console.log(o);\n  const callback = () => 2;\n  const o2 = { callback, named, nested: { u: new Uint8Array(3) } };\n  console.log(o2);\n  console.log([new Uint8Array(2), callback, () => 3, named]);\n  const f = function () {};\n  const g = () => {};\n  console.log([f, g, named, loader]);\n  const arr = [() => 1];\n  console.log(arr);\n  const m = new Map([[\"a\", new Uint8Array(1)]]);\n  console.log(m);\n  let asg = () => 0;\n  asg = () => 6;\n  console.log({ asg });\n  const holder: { fn?: () => number } = {};\n  holder.fn = () => 4;\n  console.log(holder);\n  const named2 = function inner(): number { return 1; };\n  console.log({ named2 });\n}\n"
+    },
+    {
+      "name": "class fields limits: class field function names",
+      "expect": "matched",
+      "source": "class K { f = () => 1; g!: () => number; constructor() { this.g = () => 2; } }\nfunction main(): void {\n  console.log(new K());\n}\n"
+    },
+    {
       "name": "class extends Array: species result keeps the subclass when elements change",
       "expect": "matched",
       "source": "class Stack extends Array<number> {\n  top(): number { return this[this.length - 1]; }\n}\nclass GStack<T> extends Array<T> {\n  last(): T { return this[this.length - 1]; }\n}\nclass Sized extends Array<number> {\n  tag: string;\n  constructor(tag: string) { super(); this.tag = tag; }\n}\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2); s.push(3);\n  const m = s.map(x => x + \"!\");\n  console.log(m, m instanceof Stack, m.length, Array.isArray(m));\n  const m2 = s.map(x => x * 2);\n  console.log(m2, m2 instanceof Stack, m2.top());\n  const f = s.filter(x => x > 1);\n  console.log(f, f instanceof Stack);\n  console.log(s.slice(1), s.concat([9]), s.slice(1) instanceof Stack);\n  const sp = s.splice(0, 1);\n  console.log(sp, sp instanceof Stack, s);\n}\n"
