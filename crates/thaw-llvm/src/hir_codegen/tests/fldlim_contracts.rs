@@ -174,6 +174,22 @@ function main(): void {
 }
 
 #[test]
+fn fldlim_inferred_non_arrow_function_kinds_keep_their_names() {
+    let source = r##"const syncPromise = function(): Promise<number> { return Promise.resolve(1); };
+const syncNewPromise = function(): Promise<number> { return new Promise<number>((resolve) => resolve(2)); };
+const syncGenerator = function* (): Generator<number> { yield 1; };
+const asyncFunction = async function(): Promise<number> { return 1; };
+const asyncAwaited = async function(): Promise<number> { const value = await Promise.resolve(2); return value; };
+const asyncGenerator = async function* (): AsyncGenerator<number> { yield 1; };
+function main(): void { console.log({ syncPromise, syncNewPromise, syncGenerator, asyncFunction, asyncAwaited, asyncGenerator }); }
+"##;
+    assert_eq!(
+        compile_and_run(source, "fldlim_inferred_non_arrow_function_kinds_keep_their_names"),
+        "{\n  syncPromise: [Function: syncPromise],\n  syncNewPromise: [Function: syncNewPromise],\n  syncGenerator: [GeneratorFunction: syncGenerator],\n  asyncFunction: [AsyncFunction: asyncFunction],\n  asyncAwaited: [AsyncFunction: asyncAwaited],\n  asyncGenerator: [AsyncGeneratorFunction: asyncGenerator]\n}\n"
+    );
+}
+
+#[test]
 fn fldlim_class_field_arrow_names_follow_define_semantics() {
     let source = r##"class K { f = () => 1; g!: () => number; constructor() { this.g = () => 2; } }
 function main(): void {

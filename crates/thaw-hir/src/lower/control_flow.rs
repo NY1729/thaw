@@ -366,6 +366,10 @@ fn contains_await(expr: &HirExpr) -> bool {
     }
 }
 
+pub fn hir_expr_contains_await(expr: &HirExpr) -> bool {
+    contains_await(expr)
+}
+
 fn stmt_contains_await(stmt: &HirStmt) -> bool {
     match stmt {
         HirStmt::Expr(value)

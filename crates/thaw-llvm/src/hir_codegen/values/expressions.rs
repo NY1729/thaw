@@ -204,7 +204,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         return Ok(val);
                     }
                 }
-                let val = self.compile_expr(value)?;
+                let val = self.compile_expr_named(name, value)?;
                 // Compiling the value can promote the variable to an arena cell (a closure
                 // inside it captured the variable), so look the slot up again.
                 let ptr = self.variables.get(name).map(|(cell, _)| *cell).unwrap_or(ptr);
