@@ -1214,7 +1214,7 @@ impl<'a> FnLowerer<'a> {
                     let source_name = format!("__thaw_ordered_spread_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(source_name.clone(), source_type.clone());
-                    let additions = ecmascript_field_order(source_fields).into_iter()
+                    let additions = enumerable_field_order(source_fields).into_iter()
                         .map(|index| {
                             let name = &source_fields[index].0;
                             Ok((name.clone(), self.lower_fixed_object_property_read(
@@ -1320,7 +1320,7 @@ impl<'a> FnLowerer<'a> {
         for (position, step) in steps.iter().enumerate() {
             match step {
                 Step::Spread(_, HirType::Object(fields), _) => {
-                    for index in ecmascript_field_order(fields) {
+                    for index in enumerable_field_order(fields) {
                         let name = &fields[index].0;
                         if !name.starts_with("__thaw_class_identity_\u{1e}") {
                             last_definite.insert(name.clone(), position);
@@ -1346,7 +1346,7 @@ impl<'a> FnLowerer<'a> {
                     body.push(HirStmt::Let(name.clone(), ty.clone(), source));
                     let receiver = HirExpr::Var(name);
                     let mut actions = Vec::new();
-                    for index in ecmascript_field_order(source_fields) {
+                    for index in enumerable_field_order(source_fields) {
                         let field = source_fields[index].0.clone();
                         let read = self.lower_fixed_object_property_read(
                             receiver.clone(), source_fields, &field,
@@ -1621,7 +1621,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         source_values.clone()
                     } else if matches!(spread.expr.as_ref(), Expr::Ident(_)) {
-                        ecmascript_field_order(source_fields)
+                        enumerable_field_order(source_fields)
                             .into_iter()
                             .map(|index| {
                                 let (name, _) = &source_fields[index];
@@ -1639,7 +1639,7 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         let temporary = format!("__thaw_object_spread_{}", self.next_binding);
                         self.next_binding += 1;
-                        let additions = ecmascript_field_order(source_fields)
+                        let additions = enumerable_field_order(source_fields)
                             .into_iter()
                             .map(|index| {
                                 let (name, _) = &source_fields[index];
@@ -1790,7 +1790,7 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(name.clone(), source_type.clone());
                     bindings.push((name.clone(), source_type.clone(), source));
-                    ecmascript_field_order(source_fields)
+                    enumerable_field_order(source_fields)
                         .into_iter()
                         .map(|index| {
                             let (field, _) = &source_fields[index];
@@ -3572,6 +3572,14 @@ impl<'a> FnLowerer<'a> {
                             vec![obj],
                         ))
                     }
+                    HirType::Object(fields)
+                        if prop.sym == *"stack"
+                            && !fields.iter().any(|(name, _)| {
+                                name == "stack" || name == "__thaw_getter_stack"
+                            }) =>
+                    {
+                        self.lower_object_stack_read(obj, fields)
+                    }
                     HirType::Str if prop.sym == *"length" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
@@ -3625,10 +3633,6 @@ impl<'a> FnLowerer<'a> {
                     )),
                     HirType::Str if prop.sym == *"name" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_error_name".to_string())),
-                        vec![obj],
-                    )),
-                    HirType::Str if prop.sym == *"cause" => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_error_cause".to_string())),
                         vec![obj],
                     )),
                     // `SuppressedError`'s two sub-errors, recovered from the

@@ -417,6 +417,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "deleteDynamicProperty"
                         | "hasDynamicProperty"
                         | "__thaw_error_is_error"
+                        | "__thaw_object_stack_set"
+                        | "__thaw_object_stack_has"
                         | "__thaw_error_set_prop"
                         | "__thaw_error_has_prop"
                         | "__thaw_error_delete_prop"

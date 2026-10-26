@@ -21,6 +21,15 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match name {
+            "__thaw_json_stringify_scope" => {
+                let [value] = args else {
+                    return Err("JSON.stringify scope expects one operand".into());
+                };
+                let outer = std::mem::replace(&mut self.encoding_stringify_errors, true);
+                let result = self.compile_expr(value);
+                self.encoding_stringify_errors = outer;
+                return result;
+            }
             "__thaw_json_decode_native_argument" => {
                 let [HirExpr::TypedClosure(target, value)] = args else {
                     return Err("checked native argument requires a target type".into());

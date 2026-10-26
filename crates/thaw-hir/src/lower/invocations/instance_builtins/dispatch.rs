@@ -372,7 +372,15 @@ impl<'a> FnLowerer<'a> {
             Expr::This(_) => true,
             Expr::Paren(paren) => self.json_receiver_candidate(&paren.expr),
             Expr::TsNonNull(assertion) => self.json_receiver_candidate(&assertion.expr),
-            Expr::Member(member) => self.json_receiver_candidate(&member.obj),
+            // A property of a caught `catch (e: any)` value is dynamic (Json), as is a Json value
+            // asserted to a class type: its string methods dispatch on the live value.
+            Expr::Member(member) => {
+                self.json_receiver_candidate(&member.obj)
+                    || self.peek_type_without_lowering(&member.obj).is_some_and(|ty| {
+                        ty == crate::caught_exception_carrier_type()
+                    })
+            }
+            Expr::TsAs(assertion) => self.json_receiver_candidate(&assertion.expr),
             Expr::Call(call) => call_returns_json(call, false),
             Expr::Await(awaited) => match awaited.arg.as_ref() {
                 Expr::Call(call) => call_returns_json(call, true),

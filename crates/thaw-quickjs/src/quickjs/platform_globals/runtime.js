@@ -19,6 +19,13 @@
     if (name !== baseName) {
       thawBootstrapDefineProperty(error, 'name', { value: name, writable: true, configurable: true });
     }
+    // QuickJS records only the frames; V8's `stack` starts with the `Name: message` header.
+    const frames = typeof error.stack === 'string' ? error.stack : '';
+    const header = message === '' ? name : name + ': ' + message;
+    if (!frames.startsWith(header)) {
+      thawBootstrapDefineProperty(error, 'stack', {
+        value: frames === '' ? header : header + '\n' + frames, writable: true, configurable: true });
+    }
     return error;
   };
   const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
@@ -786,6 +793,15 @@
     value: (object, keyJson) => {
       const descriptor = thawGraphReflectGetOwnPropertyDescriptor(object, thawGraphParse(keyJson));
       return descriptor !== undefined && descriptor.enumerable;
+    },
+    writable: false, configurable: false,
+  });
+  // `Error.captureStackTrace(plainObject)`: V8 defines `stack` non-enumerable.
+  thawGraphDefineProperty(globalThis, '__thaw_host_hide_property', {
+    value: (object, keyJson) => {
+      const key = thawGraphParse(keyJson);
+      thawGraphDefineProperty(object, key, { enumerable: false });
+      return true;
     },
     writable: false, configurable: false,
   });
@@ -2894,7 +2910,11 @@
       }
       if (properties !== null && typeof properties === 'object') {
         for (const key in properties) {
-          if (key.charCodeAt(0) !== 0) error[key] = reviveTaggedErrors(properties[key]);
+          if (key === '\u0002cause') {
+            Object.defineProperty(error, 'cause', {
+              value: reviveTaggedErrors(properties[key]),
+              writable: true, configurable: true, enumerable: false });
+          } else if (key.charCodeAt(0) !== 0) error[key] = reviveTaggedErrors(properties[key]);
         }
       }
       return error;
@@ -2927,7 +2947,13 @@
     if (propertiesJson) {
       try {
         const properties = JSON.parse(propertiesJson);
-        for (const key in properties) error[key] = properties[key];
+        for (const key in properties) {
+          if (key === '\u0002cause') {
+            Object.defineProperty(error, 'cause', {
+              value: reviveTaggedErrors(properties[key]),
+              writable: true, configurable: true, enumerable: false });
+          } else error[key] = properties[key];
+        }
       } catch (ignored) {}
     }
     return error;

@@ -223,6 +223,11 @@ impl<'ctx> HirCompiler<'ctx> {
         preserve_undefined: bool,
     ) -> Result<(), String> {
         let visibility_name = &fields[index].0;
+        let stringify_hidden = if self.encoding_stringify_errors {
+            self.stringify_hides_error_field(object, ty, fields, index)?
+        } else {
+            None
+        };
         let hidden = if visibility_name.as_bytes().contains(&0) {
             self.context.bool_type().const_zero()
         } else {
@@ -235,6 +240,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 "native_field_hidden",
             ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                 .ok_or("native field visibility query returned no value")?.into_int_value()
+        };
+        let hidden = match stringify_hidden {
+            Some(extra) => self.builder.build_or(hidden, extra, "stringify_hidden_error_field")
+                .map_err(|error| error.to_string())?,
+            None => hidden,
         };
         let function = self.current_function();
         let visibility_write = self.context.append_basic_block(function, "write_visible_native_field");
@@ -283,6 +293,49 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(visibility_done);
         Ok(())
+    }
+
+    /// `JSON.stringify` of an Error-family record: `message` (and a built-in record's `cause`,
+    /// `errors`, ...) are non-enumerable, and `name` is an own property only once assigned, which
+    /// is approximated as "differs from the inherited family name". `None` when the field shows.
+    fn stringify_hides_error_field(
+        &mut self,
+        object: PointerValue<'ctx>,
+        ty: &HirType,
+        fields: &[(String, HirType)],
+        index: usize,
+    ) -> Result<Option<inkwell::values::IntValue<'ctx>>, String> {
+        let Some(chain) = fields.first().and_then(|(marker, _)| {
+            marker.strip_prefix("__thaw_class_identity_\u{1e}")
+        }) else {
+            return Ok(None);
+        };
+        let Some(default) = chain.split('\u{1f}').find(|part| thaw_hir::is_error_family_name(part)) else {
+            return Ok(None);
+        };
+        let builtin = chain.split('\u{1f}').next().is_some_and(thaw_hir::is_error_family_name);
+        let (name, field_ty) = &fields[index];
+        match name.as_str() {
+            "message" => Ok(Some(self.context.bool_type().const_all_ones())),
+            "cause" | "errors" | "error" | "suppressed" if builtin => {
+                Ok(Some(self.context.bool_type().const_all_ones()))
+            }
+            "name" if *field_ty == HirType::Str => {
+                let value = self.compile_accessor_aware_field_read(object, ty, fields, index)?;
+                let default = self.builder.build_global_string_ptr(default, "stringify_default_error_name")
+                    .map_err(|error| error.to_string())?;
+                let compared = self.builder.build_call(
+                    self.module.get_function("thaw_string_compare").unwrap(),
+                    &[value.into(), default.as_pointer_value().into()],
+                    "stringify_error_name_compare",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("string comparison returned no value")?.into_int_value();
+                self.builder.build_int_compare(
+                    IntPredicate::EQ, compared, self.context.i32_type().const_zero(), "stringify_name_is_default",
+                ).map(Some).map_err(|error| error.to_string())
+            }
+            _ => Ok(None),
+        }
     }
 
     /// A native `Map`/`Set` as the Json wrapper the inspector understands
@@ -339,6 +392,19 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut order = ecmascript_object_field_order(fields);
         // The native collection behind a `Map`/`Set` subclass is not an own property.
         order.retain(|&index| fields[index].0 != "__thaw_base");
+        // An Error subclass assigns `name` in its constructor, after the declared fields.
+        if self.encoding_stringify_errors
+            && fields.first().is_some_and(|(marker, _)| {
+                marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|chain| {
+                    chain.split('\u{1f}').any(thaw_hir::is_error_family_name)
+                })
+            })
+        {
+            if let Some(at) = order.iter().position(|&index| fields[index].0 == "name") {
+                let name = order.remove(at);
+                order.push(name);
+            }
+        }
         if self.console_omit_absent_fields {
             order.retain(|&index| !fields[index].0.starts_with("__thaw_private_"));
         }
@@ -423,7 +489,17 @@ impl<'ctx> HirCompiler<'ctx> {
         // Snapshot all present own keys before a getter can mutate a later
         // marker. The physical field layout is static; the creation order is
         // per allocation and can differ after a fixed spread or rest copy.
-        if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+        // `JSON.stringify` of an Error subclass lists declared fields in declaration order and `name`
+        // (assigned in the constructor body) last, independent of assignment order.
+        let stringify_error_record = self.encoding_stringify_errors
+            && fields.first().is_some_and(|(marker, _)| {
+                marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|chain| {
+                    chain.split('\u{1f}').any(thaw_hir::is_error_family_name)
+                })
+            });
+        if stringify_error_record
+            || !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))
+        {
             // Only marker visibility/reveal can alter relative physical order.
             // A copied layout with no marker retains its static key order.
             for index in self.visible_object_field_order(fields) {

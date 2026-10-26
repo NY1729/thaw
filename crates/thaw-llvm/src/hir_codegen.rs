@@ -435,6 +435,9 @@ pub struct HirCompiler<'ctx> {
     console_omit_absent_fields: bool,
     /// Set while encoding the fields of a class instance for console output.
     encoding_class_instance_fields: bool,
+    /// Set while encoding a `JSON.stringify` argument: an Error-family record then shows only the
+    /// own enumerable properties Node shows (no `message`, `name` only when it was assigned).
+    encoding_stringify_errors: bool,
     arena_variables: HashSet<String>,
     /// Only prepromoted JsValue cells have a pending first-capture retain.
     /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
@@ -810,6 +813,7 @@ impl<'ctx> HirCompiler<'ctx> {
             planning_var_types: std::cell::RefCell::new(HashMap::new()),
             variable_hir_types: HashMap::new(),
             console_omit_absent_fields: false,
+            encoding_stringify_errors: false,
             encoding_class_instance_fields: false,
             arena_variables: HashSet::new(),
             pending_js_capture_claims: HashMap::new(),

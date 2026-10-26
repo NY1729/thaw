@@ -1381,6 +1381,23 @@ impl<'a> FnLowerer<'a> {
                             Vec::new(),
                             vec![HirStmt::Expr(self.error_set_prop_call(&framed, "name", name_json))],
                         ));
+                        // A stack remembered by `Error.captureStackTrace` travels with the throw.
+                        let captured = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_stack_get".to_string())),
+                            vec![
+                                HirExpr::Var(object_binding.clone()),
+                                HirExpr::Lit(HirLit::Str(String::new())),
+                            ],
+                        );
+                        let captured = self.coerce_to_declared(&HirType::Json, captured)?;
+                        statements.push(HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_stack_has".to_string())),
+                                vec![HirExpr::Var(object_binding.clone())],
+                            ),
+                            vec![HirStmt::Expr(self.error_set_prop_call(&framed, "stack", captured))],
+                            Vec::new(),
+                        ));
                         statements.push(HirStmt::Return(Some(HirExpr::Var(framed.clone()))));
                         let result = self.wrap_call_argument_bindings(
                             HirExpr::Block(statements),
@@ -3140,7 +3157,7 @@ impl<'a> FnLowerer<'a> {
     /// operand is an object or function, the only kinds that can be a live
     /// handle with its own `Symbol.toPrimitive`. Plain numbers and strings
     /// fail it and keep the native coercion.
-    pub(super) fn json_operand_is_object_like(
+    pub(crate) fn json_operand_is_object_like(
         &mut self, value: HirExpr, ty: &HirType,
     ) -> Result<HirExpr, String> {
         if *ty == HirType::JsValue {

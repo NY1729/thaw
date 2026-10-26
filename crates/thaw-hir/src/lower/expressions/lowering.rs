@@ -2925,6 +2925,137 @@ impl<'a> FnLowerer<'a> {
                                 result,
                                 &[(key_name, key_type, lhs), (array_name, right_type, rhs)],
                             )?
+                        } else if right_type == crate::caught_exception_carrier_type() {
+                            // Evaluate both operands before ToPropertyKey, and keep framed Errors
+                            // on their original side-table text so deletes remain visible.
+                            let HirType::Union(members) = &right_type else { unreachable!() };
+                            let key_type = self.infer_expr_type(&lhs)?;
+                            let key_value_name = format!("__thaw_in_carrier_key_value_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let carrier_name = format!("__thaw_in_carrier_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(key_value_name.clone(), key_type.clone());
+                            self.scope.insert(carrier_name.clone(), right_type.clone());
+                            let carrier = HirExpr::Var(carrier_name.clone());
+                            let text = HirExpr::UnionValue(
+                                Box::new(carrier.clone()),
+                                3,
+                                members.clone(),
+                            );
+                            let is_text = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), members.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                            );
+                            let is_error_text = HirExpr::Conditional(
+                                Box::new(is_text),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_error_is_error".into())),
+                                    vec![text.clone()],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                HirType::Bool,
+                            );
+                            let error_key = self.coerce_primitive_to_string(HirExpr::Var(key_value_name.clone()))?;
+                            let error_key_name = format!("__thaw_in_error_key_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(error_key_name.clone(), HirType::Str);
+                            let error_has = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_has_prop".into())),
+                                vec![text, HirExpr::Var(error_key_name.clone())],
+                            );
+                            let inherited = [
+                                "name",
+                                "constructor",
+                                "__defineGetter__",
+                                "__defineSetter__",
+                                "hasOwnProperty",
+                                "__lookupGetter__",
+                                "__lookupSetter__",
+                                "isPrototypeOf",
+                                "propertyIsEnumerable",
+                                "toLocaleString",
+                                "toString",
+                                "valueOf",
+                                "__proto__",
+                            ]
+                            .into_iter()
+                            .fold(HirExpr::Lit(HirLit::Bool(false)), |has, name| {
+                                let matches = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::Var(error_key_name.clone())),
+                                    Box::new(HirExpr::Lit(HirLit::Str(name.into()))),
+                                );
+                                HirExpr::Conditional(
+                                    Box::new(has),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                    Box::new(matches),
+                                    HirType::Bool,
+                                )
+                            });
+                            let error_has = HirExpr::Conditional(
+                                Box::new(inherited),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                Box::new(error_has),
+                                HirType::Bool,
+                            );
+                            let error_has = self.wrap_call_argument_bindings(
+                                error_has,
+                                &[(error_key_name, HirType::Str, error_key)],
+                            )?;
+
+                            let json_name = format!("__thaw_in_carrier_json_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let json_key_name = format!("__thaw_in_json_key_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(json_name.clone(), HirType::Json);
+                            self.scope.insert(json_key_name.clone(), HirType::Str);
+                            let json = self.caught_carrier_as_json(carrier)?;
+                            let is_primitive = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_is_primitive_operand".into())),
+                                vec![HirExpr::Var(json_name.clone())],
+                            );
+                            let json_key = self.coerce_primitive_to_string(HirExpr::Var(key_value_name.clone()))?;
+                            let json_has = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_has".into())),
+                                vec![
+                                    HirExpr::Var(json_name.clone()),
+                                    HirExpr::Var(json_key_name.clone()),
+                                ],
+                            );
+                            let json_has = self.wrap_call_argument_bindings(
+                                json_has,
+                                &[(json_key_name, HirType::Str, json_key)],
+                            )?;
+                            let type_error = HirExpr::ThrowValue(
+                                Box::new(HirExpr::Lit(HirLit::Str(
+                                    "\u{1}TypeError\u{1}Cannot use 'in' operator with a primitive value".into(),
+                                ))),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                            );
+                            let json_result = HirExpr::Conditional(
+                                Box::new(is_primitive),
+                                Box::new(type_error),
+                                Box::new(json_has),
+                                HirType::Bool,
+                            );
+                            let json_result = self.wrap_call_argument_bindings(
+                                json_result,
+                                &[(json_name, HirType::Json, json)],
+                            )?;
+                            let result = HirExpr::Conditional(
+                                Box::new(is_error_text),
+                                Box::new(error_has),
+                                Box::new(json_result),
+                                HirType::Bool,
+                            );
+                            self.wrap_call_argument_bindings(
+                                result,
+                                &[
+                                    (key_value_name, key_type, lhs),
+                                    (carrier_name, right_type, rhs),
+                                ],
+                            )?
                         } else if let HirType::Union(elements) = &right_type {
                             let HirExpr::Lit(HirLit::Str(property)) = lhs else {
                                 return Err("`in` on a union requires a string literal key".into());
@@ -3380,6 +3511,52 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_error_delete_prop".into())),
                             vec![object, key],
                         ));
+                    }
+                    if let (HirType::Union(members), true) = (
+                        &object_type,
+                        object_type == crate::caught_exception_carrier_type(),
+                    ) {
+                        // `delete e.k` on a catch binding: a framed error deletes from its side
+                        // table, any other thrown value from its Json view.
+                        let key = match &member.prop {
+                            MemberProp::Ident(property) => {
+                                HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                            }
+                            MemberProp::Computed(computed) => {
+                                let key = self.lower_expr(&computed.expr)?;
+                                self.coerce_primitive_to_string(key)?
+                            }
+                            MemberProp::PrivateName(_) => {
+                                return Err(
+                                    "native `delete` does not support private properties".into()
+                                );
+                            }
+                        };
+                        let name = format!("__thaw_delete_carrier_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), object_type.clone());
+                        let carrier = HirExpr::Var(name.clone());
+                        let is_text = HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), members.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                        );
+                        let from_text = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_delete_prop".into())),
+                            vec![
+                                HirExpr::UnionValue(Box::new(carrier.clone()), 3, members.clone()),
+                                key.clone(),
+                            ],
+                        );
+                        let json = self.caught_carrier_as_json(carrier)?;
+                        let from_json = HirExpr::JsonDelete(Box::new(json), Box::new(key));
+                        let result = HirExpr::Conditional(
+                            Box::new(is_text),
+                            Box::new(from_text),
+                            Box::new(from_json),
+                            HirType::Bool,
+                        );
+                        return self.wrap_call_argument_bindings(result, &[(name, object_type, object)]);
                     }
                     if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         return Err(format!(

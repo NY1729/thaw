@@ -250,6 +250,21 @@ pub fn reorder_class_fields_by_definition<T>(fields: &[(Symbol, T)], order: Vec<
     order
 }
 
+/// Own enumerable fields of a record in property order: a built-in AggregateError/SuppressedError
+/// has none (`message`, `cause`, `errors` are non-enumerable and `name` is inherited).
+fn enumerable_field_order(fields: &[(Symbol, HirType)]) -> Vec<usize> {
+    let builtin_error = fields
+        .first()
+        .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+        .and_then(|chain| chain.split('\u{1f}').next())
+        .is_some_and(|own| matches!(own, "AggregateError" | "SuppressedError"));
+    if builtin_error {
+        Vec::new()
+    } else {
+        ecmascript_field_order(fields)
+    }
+}
+
 fn array_index_key(name: &str) -> Option<u32> {
     let index = name.parse::<u32>().ok()?;
     (index != u32::MAX && index.to_string() == name).then_some(index)
