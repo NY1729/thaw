@@ -532,17 +532,37 @@ pub unsafe extern "C" fn thaw_array_read_ptr(
     element_width: usize,
     index: f64,
 ) -> *const u8 {
+    unsafe { array_read_slot(array, element_width, index) }.unwrap_or(ARRAY_READ_SCRATCH.as_ptr())
+}
+
+#[inline(always)]
+unsafe fn array_read_slot(array: *const u8, element_width: usize, index: f64) -> Option<*const u8> {
     if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
-        return ARRAY_READ_SCRATCH.as_ptr();
+        return None;
     }
-    let Some(length) = (unsafe { native_array_length(array) }) else {
-        return ARRAY_READ_SCRATCH.as_ptr();
-    };
+    let length = unsafe { native_array_length(array) }?;
     let index = index as usize;
     if index >= length {
-        return ARRAY_READ_SCRATCH.as_ptr();
+        return None;
     }
-    unsafe { array.add(8 + index * element_width) }
+    Some(unsafe { array.add(8 + index * element_width) })
+}
+
+/// Two NaN `f64` slots: an out-of-range `number[]` read is `undefined`,
+/// which every numeric consumer coerces to NaN.
+static ARRAY_READ_SCRATCH_NAN: [u64; 2] = [0x7ff8_0000_0000_0000; 2];
+
+#[no_mangle]
+/// `thaw_array_read_ptr` for `number[]`: an out-of-range read yields a NaN slot.
+///
+/// # Safety
+/// Same as `thaw_array_read_ptr`.
+pub unsafe extern "C" fn thaw_array_read_ptr_num(
+    array: *const u8,
+    element_width: usize,
+    index: f64,
+) -> *const u8 {
+    unsafe { array_read_slot(array, element_width, index) }.unwrap_or(ARRAY_READ_SCRATCH_NAN.as_ptr().cast())
 }
 
 #[no_mangle]
