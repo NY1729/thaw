@@ -59,6 +59,10 @@ include!("runtime/native_values/objects.rs");
 include!("runtime/native_values/bytes.rs");
 include!("runtime/abi.rs");
 
+unsafe extern "C" {
+    fn thaw_error_inspect(value: *const c_char) -> *const c_char;
+}
+
 /// Prints an uncaught compiled exception before the process exits
 /// unsuccessfully.
 ///
@@ -87,7 +91,9 @@ include!("runtime/abi.rs");
 #[no_mangle]
 pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
     if !error.is_null() {
-        let rendered = unsafe { thaw_error_to_string(error) };
+        // thaw-std's inspector: the plain `Name: message` line, or Node's nested form when the
+        // error carries own properties or a `cause`.
+        let rendered = unsafe { thaw_error_inspect(error) };
         let text = if rendered.is_null() {
             unsafe { CStr::from_ptr(error) }.to_string_lossy()
         } else {
@@ -95,6 +101,33 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
         };
         eprintln!("Uncaught: {text}");
     }
+}
+
+/// Reports a Promise rejection nobody handled. An Error prints like an uncaught throw; any other
+/// reason also gets Node's `UnhandledPromiseRejection` description (`ERR_UNHANDLED_REJECTION`),
+/// which is what Node prints for it (frames and the source excerpt are not reproducible).
+///
+/// # Safety
+/// `error` must be null or point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_report_unhandled_rejection(error: *const c_char) {
+    unsafe { thaw_runtime_report_uncaught(error) };
+    if error.is_null() {
+        return;
+    }
+    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy();
+    if text.starts_with('\u{1}') || text == "Unhandled opaque Promise rejection" {
+        return;
+    }
+    // V8's no-side-effects string of the reason: objects become `#<Object>`.
+    let reason = if text.starts_with('{') {
+        "#<Object>".to_string()
+    } else {
+        text.into_owned()
+    };
+    eprintln!(
+        "UnhandledPromiseRejection: This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"{reason}\". {{\n  code: 'ERR_UNHANDLED_REJECTION'\n}}"
+    );
 }
 
 /// Copies a terminal exception into owned report text before a listener can
@@ -115,7 +148,10 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
         return std::ptr::null_mut();
     }
     let text: Vec<u8> = if error == native_text || is_detached_report_text(error) {
-        unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
+        // The copy has no identity for the Error side table, so bake the props into its text.
+        unsafe { CStr::from_ptr(thaw_error_with_props(error)) }
+            .to_bytes()
+            .to_vec()
     } else {
         match tag {
             1 => javascript_number_string(f64_value).into_bytes(),

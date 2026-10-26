@@ -711,7 +711,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `__thaw_error_set_prop(error, "key", <encoded text>)` for an already-bound error name.
-    fn error_set_prop_call(&self, error: &str, key: &str, encoded: HirExpr) -> HirExpr {
+    pub(crate) fn error_set_prop_call(&self, error: &str, key: &str, encoded: HirExpr) -> HirExpr {
         HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_error_set_prop".into())),
             vec![
@@ -731,6 +731,26 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         value_type: HirType,
     ) -> Result<HirExpr, String> {
+        if let object_type @ HirType::Object(_) = self.infer_expr_type(&object)? {
+            // A record without a `stack` slot (see `Target::ErrorProp` in `targets.rs`).
+            if value_type != HirType::Str {
+                return Err(format!("`stack` of a record must be assigned a string, got {value_type:?}"));
+            }
+            let object_name = format!("__thaw_stack_assign_object_{}", self.next_binding);
+            self.next_binding += 1;
+            let value_name = format!("__thaw_stack_assign_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(object_name.clone(), object_type.clone());
+            self.scope.insert(value_name.clone(), HirType::Str);
+            let store = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_stack_set".into())),
+                vec![HirExpr::Var(object_name.clone()), HirExpr::Var(value_name.clone())],
+            );
+            return self.wrap_call_argument_bindings(
+                HirExpr::Block(vec![HirStmt::Expr(store), HirStmt::Return(Some(HirExpr::Var(value_name.clone())))]),
+                &[(object_name, object_type, object), (value_name, HirType::Str, value)],
+            );
+        }
         let object_name = format!("__thaw_error_assign_object_{}", self.next_binding);
         self.next_binding += 1;
         let key_name = format!("__thaw_error_assign_key_{}", self.next_binding);

@@ -313,7 +313,12 @@ impl<'a> FnLowerer<'a> {
         let mut entries = Vec::new();
         for index in ecmascript_field_order(fields) {
             let name = &fields[index].0;
-            if name.starts_with("__") || name.starts_with('#') || name == "message" || name == "name" {
+            if name.starts_with("__")
+                || name.starts_with('#')
+                || name == "message"
+                || name == "name"
+                || Self::error_record_hidden_fields(fields).contains(&name.as_str())
+            {
                 continue;
             }
             let read = self.lower_fixed_object_property_read(value.clone(), fields, name)?;
@@ -2786,7 +2791,7 @@ impl<'a> FnLowerer<'a> {
                     let object = self.lower_expr(&for_in.right)?;
                     let object_type = self.infer_expr_type(&object)?;
                     let keys = match &object_type {
-                        HirType::Object(fields) => ecmascript_field_order(fields)
+                        HirType::Object(fields) => enumerable_field_order(fields)
                             .into_iter()
                             .filter(|&index| !fields[index].0.starts_with("__thaw_class_identity_\u{1e}"))
                             .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))

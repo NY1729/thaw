@@ -239,8 +239,11 @@ impl<'a> FnLowerer<'a> {
         let chain = fields
             .first()
             .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))?;
-        // A built-in record (AggregateError, SuppressedError) keeps its existing key listing.
         let own = chain.split('\u{1f}').next().unwrap_or_default();
+        // A built-in record (AggregateError, SuppressedError) names itself.
+        if matches!(own, "AggregateError" | "SuppressedError") {
+            return Some(own.to_string());
+        }
         (!is_error_family_name(own) && chain.split('\u{1f}').any(is_error_family_name)).then(|| {
             chain
                 .split('\u{1f}')
@@ -249,6 +252,19 @@ impl<'a> FnLowerer<'a> {
                 .unwrap_or("Error")
                 .to_string()
         })
+    }
+
+    /// Fields of a built-in Error record that are own but non-enumerable (besides `message`).
+    pub(crate) fn error_record_hidden_fields(fields: &[(Symbol, HirType)]) -> &'static [&'static str] {
+        let chain = fields
+            .first()
+            .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+            .unwrap_or_default();
+        match chain.split('\u{1f}').next().unwrap_or_default() {
+            "AggregateError" => &["cause", "errors"],
+            "SuppressedError" => &["error", "suppressed"],
+            _ => &[],
+        }
     }
 
     /// `if (name !== default) { push }` for an Error-family record's `name` key.
@@ -457,8 +473,9 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         // An Error-family record hides `message` and shows `name` only when assigned (last).
+        let hidden_extra = Self::error_record_hidden_fields(fields);
         let name_entry = default_name.as_ref().and_then(|_| {
-            ordered.retain(|(_, name, _)| name != "message");
+            ordered.retain(|(_, name, _)| name != "message" && !hidden_extra.contains(&name.as_str()));
             ordered.iter().position(|(_, name, _)| name == "name").map(|at| ordered.remove(at))
         });
         let mut types = Vec::new();
@@ -3311,8 +3328,14 @@ impl<'a> FnLowerer<'a> {
                             )
                         } else if matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
                             value
+                        } else if value_type == crate::caught_exception_carrier_type() {
+                            self.caught_carrier_as_json(value)?
                         } else if json_convertible_native_type(&value_type) {
-                            self.wrap_native_value_as_json(value, value_type.clone())?
+                            let wrapped = self.wrap_native_value_as_json(value, value_type.clone())?;
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_stringify_scope".into())),
+                                vec![wrapped],
+                            )
                         } else {
                             return Err(format!(
                                 "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
@@ -4498,9 +4521,14 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         let mut names = ecmascript_field_order(fields);
+                        let hidden_extra = Self::error_record_hidden_fields(fields);
                         let default_name = Self::error_family_default_name(fields);
                         let name_index = default_name.as_ref().and_then(|_| {
-                            names.retain(|&index| fields[index].0 != "message");
+                            names.retain(|&index| {
+                                fields[index].0 != "message"
+                                    && (property.sym != *"keys"
+                                        || !hidden_extra.contains(&fields[index].0.as_str()))
+                            });
                             names.iter().position(|&index| fields[index].0 == "name").map(|at| names.remove(at))
                         });
                         let name = format!("__thaw_object_keys_{}", self.next_binding);
@@ -5057,7 +5085,7 @@ impl<'a> FnLowerer<'a> {
                                         self.next_binding += 1;
                                         self.scope.insert(source_name.clone(), source_type.clone());
                                         statements.push(HirStmt::Let(source_name.clone(), source_type.clone(), source.clone()));
-                                        for index in ecmascript_field_order(fields) {
+                                        for index in enumerable_field_order(fields) {
                                             let (name, field_type) = &fields[index];
                                             if !json_convertible_native_type(field_type) {
                                                 return Err(format!("`Object.assign` onto an Error cannot copy field `{name}` of type {field_type:?}"));
@@ -5073,7 +5101,7 @@ impl<'a> FnLowerer<'a> {
                                                 vec![
                                                     HirExpr::Var(target_name.clone()),
                                                     HirExpr::Lit(HirLit::Str(name.clone())),
-                                                    HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".to_string())), vec![json]),
+                                                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".to_string())), vec![json]),
                                                 ],
                                             )));
                                         }
@@ -5082,7 +5110,7 @@ impl<'a> FnLowerer<'a> {
                                         Box::new(HirExpr::Var("__thaw_error_assign_json".to_string())),
                                         vec![
                                             HirExpr::Var(target_name.clone()),
-                                            HirExpr::Call(Box::new(HirExpr::Var("JSON.stringify".to_string())), vec![source.clone()]),
+                                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".to_string())), vec![source.clone()]),
                                         ],
                                     ))),
                                     other => {
@@ -5101,7 +5129,7 @@ impl<'a> FnLowerer<'a> {
                         if let HirType::Object(target_fields) = &target_type {
                             let fits = |source_type: &HirType| match source_type {
                     HirType::Object(fields) => {
-                        ecmascript_field_order(fields).into_iter().all(|index| {
+                        enumerable_field_order(fields).into_iter().all(|index| {
                                         let (name, ty) = &fields[index];
                                         target_fields.iter().any(|(target_name, target_ty)| {
                                             target_name == name
@@ -5135,7 +5163,7 @@ impl<'a> FnLowerer<'a> {
                                         source_type.clone(),
                                         source.clone(),
                                     ));
-                                    for index in ecmascript_field_order(fields) {
+                                    for index in enumerable_field_order(fields) {
                                         let (name, field_ty) = &fields[index];
                                         let mut value = HirExpr::PropAccess(
                                             Box::new(HirExpr::Var(source_name.clone())),
@@ -5205,7 +5233,7 @@ impl<'a> FnLowerer<'a> {
                                     });
                                     has_getter
                                         && !setter_only
-                                        && ecmascript_field_order(fields).into_iter().all(|index| {
+                                        && enumerable_field_order(fields).into_iter().all(|index| {
                                             let (name, ty) = &fields[index];
                                             !name.starts_with('\u{1f}') && json_convertible_native_type(ty)
                                         })
@@ -5233,7 +5261,7 @@ impl<'a> FnLowerer<'a> {
                                     source_type.clone(),
                                     source.clone(),
                                 ));
-                                for index in ecmascript_field_order(fields) {
+                                for index in enumerable_field_order(fields) {
                                     let (name, field_type) = &fields[index];
                                     let value = self.coerce_to_declared(
                                         &HirType::Json,
@@ -5538,8 +5566,21 @@ impl<'a> FnLowerer<'a> {
                         // frames to capture, so an Error value only fixes its `stack` header (read
                         // once, V8 serializes it lazily), a Json object gets a `stack` string, and
                         // any other target is left unchanged.
-                        let (arguments, bindings) =
-                            self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?;
+                        let (arguments, bindings) = if call.args.iter().any(|argument| argument.spread.is_some()) {
+                            self.lower_native_spread_values(&call.args, "Error.captureStackTrace")?
+                        } else {
+                            // The constructor argument only trims frames; a member read like
+                            // `this.constructor` that cannot be lowered has no effect to keep.
+                            let mut lowered = Vec::new();
+                            for (index, argument) in call.args.iter().enumerate() {
+                                match self.lower_expr(&argument.expr) {
+                                    Ok(value) => lowered.push(value),
+                                    Err(_) if index > 0 && matches!(&*argument.expr, Expr::Member(_)) => {}
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            (lowered, Vec::new())
+                        };
                         let Some(target) = arguments.first().cloned() else {
                             return Err("`Error.captureStackTrace` expects a target object".into());
                         };
@@ -5548,7 +5589,10 @@ impl<'a> FnLowerer<'a> {
                             statements.push(HirStmt::Expr(extra.clone()));
                         }
                         let target_type = self.infer_expr_type(&target)?;
-                        if target_type == HirType::Str {
+                        if let HirType::Object(fields) = &target_type {
+                            let capture = self.lower_object_capture_stack(target, fields)?;
+                            statements.insert(0, HirStmt::Expr(capture));
+                        } else if target_type == HirType::Str {
                             statements.insert(0, HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
                                 vec![target],

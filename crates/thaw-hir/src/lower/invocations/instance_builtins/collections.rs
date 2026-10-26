@@ -88,6 +88,10 @@ impl<'a> FnLowerer<'a> {
                 if matches!(base_type, HirType::JsValue | HirType::Json) {
                     return Some(base_type);
                 }
+                // `error.cause` is `unknown`: a Json value.
+                if base_type == HirType::Str && field.sym == *"cause" {
+                    return Some(HirType::Json);
+                }
                 if let Some(owner) = self.class_instance_accessor_owner(&base_type, field.sym.as_ref()) {
                     if let Some(signature) = self.signatures.get(&class_getter_symbol(&owner, field.sym.as_ref(), false)) {
                         return Some(signature.ret.clone());

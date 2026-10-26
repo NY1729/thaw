@@ -3879,7 +3879,7 @@ pub extern "C" fn thaw_js_release_all_handles() -> u64 {
 }
 
 /// Lossless UTF-16 property key predicate for N-API-backed live JS values.
-/// `operation`: 0 has, 1 own-has, 2 delete.
+/// `operation`: 0 has, 1 own-has, 2 delete, 3 is-enumerable, 4 make non-enumerable.
 #[no_mangle]
 pub extern "C" fn thaw_js_property_predicate_json_key_result(
     handle: u64, key_json: *const c_char, operation: u8,
@@ -3887,9 +3887,9 @@ pub extern "C" fn thaw_js_property_predicate_json_key_result(
     let key_json = to_str(key_json);
     let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
-        if operation == 3 {
+        if operation == 3 || operation == 4 {
             let predicate: Function = ctx.globals()
-                .get("__thaw_host_property_is_enumerable")
+                .get(if operation == 3 { "__thaw_host_property_is_enumerable" } else { "__thaw_host_hide_property" })
                 .map_err(|error| error.to_string())?;
             let result: bool = predicate.call((object, key_json.as_str()))
                 .map_err(|error| match error {
@@ -5782,6 +5782,15 @@ fn describe_exception_with_stack(ctx: &Ctx<'_>) -> String {
     if let Some(obj) = exc.as_object() {
         if let Ok(msg) = obj.get::<_, String>("message") {
             if let Ok(stack) = obj.get::<_, String>("stack") {
+                // A native-created Error's stack starts with V8's `Name: message` header; the
+                // frames of the embedded prelude are not the program's.
+                let name = obj.get::<_, String>("name").unwrap_or_default();
+                let header = if msg.is_empty() { name.clone() } else { format!("{name}: {msg}") };
+                if !name.is_empty() && stack.starts_with(&header) {
+                    let user_lines: Vec<&str> =
+                        stack.lines().filter(|line| !line.contains("(eval_script:")).collect();
+                    return user_lines.join("\n");
+                }
                 if !stack.is_empty() && !stack.ends_with(&msg) {
                     return format!("{msg}\n{stack}");
                 }
