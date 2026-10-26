@@ -224,7 +224,7 @@ impl<'a> FnLowerer<'a> {
         let mut hidden = Vec::new();
         for (name, expected) in declared_fields {
             let read = HirExpr::PropAccess(Box::new(HirExpr::Var(source.clone())), object_type.clone(), name.clone());
-            let read = self.lenient_uninit_read(read)?;
+            let read = self.lenient_uninit_read_as(read, f64::from_bits(crate::UNSET_NUMBER_BITS))?;
             let this_param = HirParam { name: format!("__thaw_live_this_{}", self.next_binding), ty: receiver.clone() };
             self.next_binding += 1;
             let getter = HirExpr::Lambda(vec![capture.clone()], vec![this_param.clone()], expected.clone(), Box::new(read));
@@ -532,6 +532,18 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        // The function-name wrapper is transparent to a callable slot: coerce the closure and
+        // keep its label (other slots wrap the labelled closure like any function value).
+        if matches!(declared, HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)) {
+            if let Some((closure, label)) = split_named_function(&value) {
+                let (closure, label) = (closure.clone(), label.to_owned());
+                let coerced = self.coerce_to_declared(declared, closure)?;
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_named_function".into())),
+                    vec![coerced, HirExpr::Lit(HirLit::Str(label))],
+                ));
+            }
+        }
         // An observed read of a maybe-uninitialised class field arrives with
         // its raw `Optional`; a slot that wants the bare payload unwraps it
         // like `undefined` coerced to `T`.

@@ -3723,6 +3723,18 @@ impl<'a> FnLowerer<'a> {
                         let json_payload = matches!(&read, HirExpr::PropAccess(_, HirType::Object(fields), field)
                             if fields.iter().any(|(name, ty)| name == field
                                 && matches!(ty, HirType::Optional(payload) if payload.as_ref() == &HirType::Json)));
+                        let read = if (is_observed_member(member.span) || is_dynamic_read(member.span))
+                            && matches!(&read, HirExpr::PropAccess(_, HirType::Object(fields), field)
+                                if is_unset_number_field(fields, field))
+                        {
+                            self.unset_aware_number_read(read)?
+                        } else {
+                            read
+                        };
+                        if is_dynamic_read(member.span) && !json_payload {
+                            // A sink that keeps `undefined`: the field's raw value as `Json`.
+                            return self.optional_read_as_json(read);
+                        }
                         if is_observed_member(member.span) && !json_payload {
                             Ok(read)
                         } else {
@@ -4214,7 +4226,51 @@ impl<'a> FnLowerer<'a> {
     /// uninitialised (`is_uninit_class_field`), in a value context: an absent
     /// field reads as NaN (number) or its zero payload, like Node's
     /// `undefined` coerced to the declared type. Other reads pass through.
+    /// A raw (possibly `Optional`) field read as `Json`: `undefined` while absent.
+    fn optional_read_as_json(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&read)?;
+        let HirType::Optional(payload) = &ty else {
+            return self.coerce_to_declared(&HirType::Json, read);
+        };
+        let payload = payload.as_ref().clone();
+        let name = format!("__thaw_sink_read_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let var = HirExpr::Var(name.clone());
+        let present = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::OptionalValue(Box::new(var.clone()), payload.clone()),
+        )?;
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::OptionalIsNone(Box::new(var), payload)),
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+            Box::new(present),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, ty, read)])
+    }
+
+    /// A `number` read that may be the marker NaN of an unset class field: `undefined` then.
+    fn unset_aware_number_read(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        let name = format!("__thaw_unset_number_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::F64);
+        let var = HirExpr::Var(name.clone());
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_is_unset_number".into())), vec![var.clone()])),
+            Box::new(HirExpr::OptionalNone(HirType::F64)),
+            Box::new(HirExpr::OptionalSome(Box::new(var), HirType::F64)),
+            HirType::Optional(Box::new(HirType::F64)),
+        );
+        self.wrap_call_argument_bindings(result, &[(name, HirType::F64, read)])
+    }
+
     fn lenient_uninit_read(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        self.lenient_uninit_read_as(read, f64::NAN)
+    }
+
+    /// `lenient_uninit_read` with `unset` as the number an absent `number` field reads as.
+    fn lenient_uninit_read_as(&mut self, read: HirExpr, unset: f64) -> Result<HirExpr, String> {
         let HirExpr::PropAccess(_, HirType::Object(fields), field) = &read else {
             return Ok(read);
         };
@@ -4273,7 +4329,7 @@ impl<'a> FnLowerer<'a> {
         let var = HirExpr::Var(name.clone());
         let result = HirExpr::Conditional(
             Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::F64)),
-            Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+            Box::new(HirExpr::Lit(HirLit::F64(unset))),
             Box::new(HirExpr::OptionalValue(Box::new(var), HirType::F64)),
             HirType::F64,
         );

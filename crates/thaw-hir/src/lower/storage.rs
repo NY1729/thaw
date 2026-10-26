@@ -18,6 +18,22 @@ struct StoragePlan {
     /// `x` when one of these could expose its `undefined`.
     observed_names: HashSet<String>,
     observes_objects: bool,
+    /// Classes that are instantiated (`new C`) or have an instantiated subclass.
+    instantiated_classes: HashSet<String>,
+    /// Source spans of anonymous function/arrow expressions to the name JavaScript infers
+    /// for them (`const f = () => 1`, `{ cb: function () {} }`, `x = () => 1`, `class { f = () => 1 }`).
+    function_names: HashMap<(u32, u32), String>,
+    /// Whether function names are registered at all: only when the module can print a function.
+    names_functions: bool,
+    /// Member reads of a maybe-uninitialised field whose `undefined` must survive (read as `Json`).
+    dynamic_reads: HashSet<(u32, u32)>,
+    /// Names of fields some class may leave unset.
+    uninit_names: HashSet<String>,
+    /// Variables (and the containers they hold) that receive a sink read: their type widens
+    /// to keep `undefined` (see `widen_sink_type`).
+    sink_slots: HashSet<(u32, u32)>,
+    /// Function results (`(function start, 0)`) that return a sink read: widened the same way.
+    sink_results: HashSet<(u32, u32)>,
     argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     callable_parameters: HashMap<u32, Vec<(u32, u32)>>,
     quickjs_function_value_nodes: HashSet<(u32, u32)>,
@@ -41,8 +57,47 @@ struct StorageCallConnections {
 
 impl StoragePlan {
     fn analyze(module: &Module) -> Result<Self, String> {
-        let mut graph = StorageGraph::default();
+        let mut tables = ValueKinds::default();
+        module.visit_with(&mut tables);
+        let mut observed = ObservedMembers {
+            tables,
+            extended: EXTENDED_STORAGE.with(Cell::get),
+            ..ObservedMembers::default()
+        };
+        module.visit_with(&mut observed);
+        let mut instantiated_classes = HashSet::new();
+        for class in &observed.tables.instantiated {
+            let mut current = Some(class.clone());
+            while let Some(name) = current {
+                if !instantiated_classes.insert(name.clone()) {
+                    break;
+                }
+                current = observed.tables.supers.get(&name).cloned();
+            }
+        }
+        // Reads of a maybe-uninitialised field in a sink that keeps `undefined`
+        // (`return p.n`, `arr.push(p.n)`, ...) are read as `Json`.
+        let mut uninit = UninitNames {
+            names: HashSet::new(),
+            instantiated: &instantiated_classes,
+            observed: &observed,
+        };
+        module.visit_with(&mut uninit);
+        let uninit_names = uninit.names;
+        let uninit_sinks = observed
+            .sinks
+            .iter()
+            .filter(|(_, name)| uninit_names.contains(name))
+            .map(|(span, _)| storage_key(*span))
+            .collect::<HashSet<_>>();
+        if !uninit_sinks.is_empty() {
+            EXTENDED_STORAGE_USED.with(|used| used.set(true));
+        }
+        let mut graph = StorageGraph { uninit_sinks, ..StorageGraph::default() };
         module.visit_with(&mut graph);
+        let graph_uninit_sinks = graph.uninit_sinks.clone();
+        let graph_sink_slots = graph.sink_slots.clone();
+        let graph_sink_results = graph.sink_results.clone();
         let StorageCallConnections {
             jit_calls,
             quickjs_function_value_nodes,
@@ -72,8 +127,8 @@ impl StoragePlan {
                 (start, callable.params.iter().copied().map(storage_key).collect())
             })
             .collect();
-        let mut observed = ObservedMembers::default();
-        module.visit_with(&mut observed);
+        let mut names = FunctionNames::default();
+        module.visit_with(&mut names);
         Ok(Self {
             dynamic,
             source_types: HashMap::new(),
@@ -83,6 +138,13 @@ impl StoragePlan {
             observed_members: observed.members,
             observed_names: observed.names,
             observes_objects: observed.objects,
+            instantiated_classes,
+            function_names: names.names,
+            names_functions: observed.objects,
+            dynamic_reads: graph_uninit_sinks,
+            uninit_names,
+            sink_slots: graph_sink_slots,
+            sink_results: graph_sink_results,
             argument_parameters: graph.argument_parameters,
             callable_parameters,
             quickjs_function_value_nodes,
@@ -166,6 +228,13 @@ struct StorageGraph {
     jit_declarations: HashMap<(u32, u32), Symbol>,
     quickjs_function_declarations: HashMap<(u32, u32), u32>,
     exceptions: Vec<Span>,
+    /// Member reads (`p.n`) of maybe-uninitialised fields in `undefined`-keeping sinks.
+    uninit_sinks: HashSet<(u32, u32)>,
+    /// Function results that return a sink read. Deliberately not part of the dynamic
+    /// propagation: spreading it over call arguments would turn the receiver's class dynamic.
+    sink_results: HashSet<(u32, u32)>,
+    /// Variables (and the arrays/maps they hold) that receive a sink read.
+    sink_slots: HashSet<(u32, u32)>,
 }
 
 impl StorageGraph {
@@ -532,6 +601,17 @@ impl StorageGraph {
         });
     }
 
+    /// `expr` (through parentheses and casts) is a sink read of a maybe-uninitialised field.
+    fn is_uninit_sink(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => self.is_uninit_sink(&paren.expr),
+            Expr::TsAs(cast) => self.is_uninit_sink(&cast.expr),
+            Expr::TsNonNull(cast) => self.is_uninit_sink(&cast.expr),
+            Expr::Member(member) => self.uninit_sinks.contains(&storage_key(member.span)),
+            _ => false,
+        }
+    }
+
     fn expose(&mut self, span: Span) {
         if !span.is_dummy() {
             self.seeds.insert(storage_key(span));
@@ -783,7 +863,10 @@ impl Visit for StorageGraph {
 
     fn visit_member_expr(&mut self, member: &MemberExpr) {
         if self.source_annotation(&Expr::Member(member.clone())).is_some_and(|ty| storage_has_any(&ty)) { self.expose(member.span); }
-        self.link(member.span, member.obj.span());
+        // A sink read produces the value; it must not make its receiver dynamic.
+        if !self.uninit_sinks.contains(&storage_key(member.span)) {
+            self.link(member.span, member.obj.span());
+        }
         member.visit_children_with(self);
     }
 
@@ -791,6 +874,10 @@ impl Visit for StorageGraph {
         self.pattern(&declaration.name);
         if let Some(init) = &declaration.init {
             self.link(declaration.name.span(), init.span());
+            if let (Pat::Ident(binding), true) = (&declaration.name, self.is_uninit_sink(init)) {
+                self.sink_slots.insert(storage_key(binding.id.span));
+                self.sink_slots.insert(storage_key(binding.span()));
+            }
             if let Expr::Call(call) = init.as_ref() {
                 self.call_result_bindings
                     .entry(storage_key(call.span))
@@ -900,7 +987,10 @@ impl Visit for StorageGraph {
             self.pattern(parameter);
 
         }
-        if let ArrowFunctionBody::Expr(body) = arrow.body.as_ref() { self.link_keys((arrow.span.lo.0, 0), storage_key(body.span())); }
+        if let ArrowFunctionBody::Expr(body) = arrow.body.as_ref() {
+            self.link_keys((arrow.span.lo.0, 0), storage_key(body.span()));
+            if self.is_uninit_sink(body) { self.sink_results.insert((arrow.span.lo.0, 0)); }
+        }
         if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_ref() { self.hoist_vars(&body.stmts); }
         arrow.visit_children_with(self);
         self.functions.pop();
@@ -910,6 +1000,9 @@ impl Visit for StorageGraph {
     fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
         if let (Some(&(function, _)), Some(value)) = (self.functions.last(), &statement.arg) {
             self.link_keys((function.lo.0, 0), storage_key(value.span()));
+            if self.is_uninit_sink(value) {
+                self.sink_results.insert((function.lo.0, 0));
+            }
         }
         statement.visit_children_with(self);
     }
@@ -1020,6 +1113,17 @@ impl Visit for StorageGraph {
                         // A static builtin that builds a fresh container from its arguments
                         // (`Object.fromEntries(..)`, `Buffer.from([..])`) does not alias the argument: its result
                         // reaching `any` must not turn the argument literal dynamic.
+                        if matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(method)
+                            if matches!(method.sym.as_ref(), "push" | "unshift" | "add" | "set"))
+                            && call.args.iter().any(|argument| self.is_uninit_sink(&argument.expr))
+                        {
+                            // The receiver's variable holds `undefined`-capable elements.
+                            if let Expr::Ident(receiver) = member.obj.as_ref() {
+                                if let Some((binding, _)) = self.lookup(receiver.sym.as_ref()) {
+                                    self.sink_slots.insert(storage_key(binding));
+                                }
+                            }
+                        }
                         if !self.is_fresh_static_builtin(member) {
                             self.link(span, member.obj.span());
                             for argument in &call.args { self.contain(member.obj.span(), argument.expr.span()); }
@@ -1075,6 +1179,45 @@ impl Visit for StorageGraph {
         }
         expression.visit_children_with(self);
     }
+}
+
+thread_local! {
+    /// Whether this lowering attempt also keeps `undefined` through returns, variable
+    /// initialisers, container writes and object literals (see `lower_module`'s retry).
+    static EXTENDED_STORAGE: Cell<bool> = const { Cell::new(false) };
+    /// Whether the extended analysis changed anything (otherwise a retry would repeat itself).
+    static EXTENDED_STORAGE_USED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A `number` field of a structural (non-class) object that a class may leave unset: a live
+/// view over such an instance reads it as the marker NaN (see `UNSET_NUMBER_BITS`).
+fn is_unset_number_field(fields: &[(Symbol, HirType)], property: &str) -> bool {
+    !matches!(fields.first(), Some((marker, HirType::Bool)) if marker.starts_with("__thaw_class_identity_\u{1e}"))
+        && fields.iter().any(|(name, ty)| name == property && *ty == HirType::F64)
+        && ACTIVE_STORAGE_PLAN.with(|active| active.borrow().uninit_names.contains(property))
+}
+
+/// The type of a slot that receives a sink read (`undefined` survives): scalars become `any`,
+/// containers keep their shape with `any` elements.
+fn widen_sink_type(source: HirType) -> HirType {
+    match source {
+        HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => HirType::Json,
+        HirType::Array(_) => HirType::Array(Box::new(HirType::Json)),
+        HirType::Map(key, _) => HirType::Map(key, Box::new(HirType::Json)),
+        HirType::Set(_) => HirType::Set(Box::new(HirType::Json)),
+        other => other,
+    }
+}
+
+/// A variable declared where a sink read (`arr.push(p.n)`, `const v = p.n`) is stored.
+fn is_sink_slot(span: Span) -> bool {
+    !span.is_dummy()
+        && ACTIVE_STORAGE_PLAN.with(|active| active.borrow().sink_slots.contains(&storage_key(span)))
+}
+
+fn is_dynamic_read(span: Span) -> bool {
+    !span.is_dummy()
+        && ACTIVE_STORAGE_PLAN.with(|active| active.borrow().dynamic_reads.contains(&storage_key(span)))
 }
 
 thread_local! {
@@ -1246,9 +1389,33 @@ struct ObservedMembers {
     members: HashSet<(u32, u32)>,
     names: HashSet<String>,
     objects: bool,
+    tables: ValueKinds,
+    extended: bool,
+    /// Member reads in sinks that keep `undefined` (extended analysis): span and property name.
+    sinks: Vec<(Span, String)>,
 }
 
 impl ObservedMembers {
+    /// A member read whose `undefined` must survive (`return p.n`, `arr.push(p.n)`, ...).
+    fn sink(&mut self, expr: &Expr) {
+        if !self.extended {
+            return;
+        }
+        match expr {
+            Expr::Paren(paren) => self.sink(&paren.expr),
+            Expr::TsAs(cast) => self.sink(&cast.expr),
+            Expr::TsNonNull(cast) => self.sink(&cast.expr),
+            Expr::Member(member) => {
+                if let swc_ecma_ast::MemberProp::Ident(name) = &member.prop {
+                    if !matches!(member.obj.as_ref(), Expr::Ident(object) if matches!(object.sym.as_ref(), "Math" | "Number" | "JSON" | "Object")) {
+                        self.sinks.push((member.span, name.sym.to_string()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn observe(&mut self, expr: &Expr) {
         match expr {
             Expr::Paren(paren) => self.observe(&paren.expr),
@@ -1289,8 +1456,11 @@ impl Visit for ObservedMembers {
     fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
         if let swc_ecma_ast::Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = callee.as_ref() {
+                // Only a call that can be handed a class instance exposes its
+                // `undefined` fields (`console.log(1 + 2)` cannot).
                 if matches!(member.obj.as_ref(), Expr::Ident(ident)
                     if matches!(ident.sym.as_ref(), "console" | "JSON" | "Object"))
+                    && call.args.iter().any(|argument| self.tables.may_carry_object(&argument.expr))
                 {
                     self.objects = true;
                 }
@@ -1298,6 +1468,15 @@ impl Visit for ObservedMembers {
                     for argument in &call.args {
                         self.observe(&argument.expr);
                         self.observe_mapped_members(&argument.expr);
+                    }
+                }
+            }
+            if let Expr::Member(member) = callee.as_ref() {
+                if matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(method)
+                    if matches!(method.sym.as_ref(), "push" | "unshift" | "add" | "set"))
+                {
+                    for argument in &call.args {
+                        self.sink(&argument.expr);
                     }
                 }
             }
@@ -1323,6 +1502,28 @@ impl Visit for ObservedMembers {
             self.observe(expr);
         }
         template.visit_children_with(self);
+    }
+    fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
+        if let Some(value) = &statement.arg {
+            self.sink(value);
+        }
+        statement.visit_children_with(self);
+    }
+    fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+        if let swc_ecma_ast::ArrowFunctionBody::Expr(body) = arrow.body.as_ref() {
+            self.sink(body);
+        }
+        arrow.visit_children_with(self);
+    }
+    fn visit_key_value_prop(&mut self, property: &swc_ecma_ast::KeyValueProp) {
+        self.sink(&property.value);
+        property.visit_children_with(self);
+    }
+    fn visit_array_lit(&mut self, array: &swc_ecma_ast::ArrayLit) {
+        for element in array.elems.iter().flatten().filter(|element| element.spread.is_none()) {
+            self.sink(&element.expr);
+        }
+        array.visit_children_with(self);
     }
     fn visit_if_stmt(&mut self, statement: &swc_ecma_ast::IfStmt) {
         self.observe(&statement.test);
@@ -1356,6 +1557,9 @@ impl Visit for ObservedMembers {
         if let (true, Some(init)) = (annotated, &declarator.init) {
             self.observe(init);
         }
+        if let (swc_ecma_ast::Pat::Ident(_), Some(init)) = (&declarator.name, &declarator.init) {
+            self.sink(init);
+        }
         declarator.visit_children_with(self);
     }
     fn visit_opt_chain_expr(&mut self, chain: &swc_ecma_ast::OptChainExpr) {
@@ -1368,10 +1572,11 @@ impl Visit for ObservedMembers {
 
 /// Whether a constructor-less class's bare `x: T;` must be widened: the module
 /// could print/serialise the instance or read `x` in an observing position.
-fn bare_field_observed(field: &str) -> bool {
+fn bare_field_observed(class: &str, field: &str) -> bool {
     ACTIVE_STORAGE_PLAN.with(|active| {
         let active = active.borrow();
-        active.observes_objects || active.observed_names.contains(field)
+        active.instantiated_classes.contains(class)
+            && (active.observes_objects || active.observed_names.contains(field))
     })
 }
 fn is_observed_member(span: Span) -> bool {
@@ -1492,6 +1697,9 @@ fn remember_storage_source(key: (u32, u32), source: &HirType) {
 }
 fn storage_type(span: Span, source: HirType) -> HirType {
     remember_storage_source(storage_key(span), &source);
+    if is_sink_slot(span) {
+        return widen_sink_type(source);
+    }
     if is_quickjs_function_value(span)
         && matches!(
             &source,
@@ -1683,6 +1891,9 @@ fn storage_parameter_type(pattern: &Pat, source: HirType) -> HirType {
 }
 fn storage_return_type(span: Span, source: HirType) -> HirType {
     remember_storage_source((span.lo.0, 0), &source);
+    if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().sink_results.contains(&(span.lo.0, 0))) {
+        return widen_sink_type(source);
+    }
     if is_quickjs_function_value(span) || is_quickjs_function_value_result_slot(span) {
         return quickjs_reference_slot_type(source);
     }
@@ -2087,6 +2298,8 @@ impl FnLowerer<'_> {
 
     fn validate_storage_source(&mut self, expression: &Expr, expected: &HirType) -> Result<(), String> {
         if matches!(expected, HirType::Json | HirType::JsValue | HirType::Dynamic | HirType::Void) { return Ok(()); }
+        // A sink read of a maybe-uninitialised field is `undefined` until assigned, whatever its declared type.
+        if matches!(peel_parens(expression), Expr::Member(member) if is_dynamic_read(member.span)) { return Ok(()); }
         let (expected_params, expected_return) = match expected {
             HirType::Function(params, ret)
             | HirType::CallableFunction(params, _, _, ret) => (params.as_slice(), ret.as_ref()),
@@ -2344,5 +2557,368 @@ impl FnLowerer<'_> {
             _ => self.coerce_to_declared_aliasing(&HirType::Json, current)?,
         };
         self.wrap_call_argument_bindings(result, &[(name, source.clone(), value)])
+    }
+}
+
+/// Collects the names JavaScript infers for anonymous function expressions
+/// (NamedEvaluation) in property definitions and class fields. Variable declarators and
+/// identifier assignments are named by codegen from the binding (`compile_expr_named`), which
+/// keeps their lowered shape untouched. Member assignments (`this.f = () => 1`) infer nothing.
+#[derive(Default)]
+struct FunctionNames {
+    names: HashMap<(u32, u32), String>,
+}
+
+impl FunctionNames {
+    fn name(&mut self, expr: &Expr, name: String) {
+        // Module flattening renames top-level bindings to `__thawmod<N>_<name>`.
+        let name = match name.strip_prefix("__thawmod").and_then(|rest| rest.split_once('_')) {
+            Some((digits, original)) if digits.bytes().all(|byte| byte.is_ascii_digit()) => original.to_string(),
+            _ => name,
+        };
+        let mut inner = expr;
+        loop {
+            inner = match inner {
+                Expr::Paren(paren) => &paren.expr,
+                Expr::TsAs(cast) => &cast.expr,
+                Expr::TsSatisfies(cast) => &cast.expr,
+                Expr::TsNonNull(cast) => &cast.expr,
+                Expr::TsTypeAssertion(cast) => &cast.expr,
+                _ => break,
+            };
+        }
+        match inner {
+            Expr::Arrow(arrow) => {
+                self.names.insert(storage_key(arrow.span), name);
+            }
+            Expr::Fn(function) if function.ident.is_none() => {
+                self.names.insert(storage_key(function.function.span), name);
+            }
+            _ => {}
+        }
+    }
+
+    fn property_name(key: &swc_ecma_ast::PropName) -> Option<String> {
+        match key {
+            swc_ecma_ast::PropName::Ident(ident) => Some(ident.sym.to_string()),
+            swc_ecma_ast::PropName::Str(text) => Some(text.value.to_string_lossy().into_owned()),
+            swc_ecma_ast::PropName::Num(number) if number.value.fract() == 0.0 && number.value.abs() < 1e15 => {
+                Some(format!("{}", number.value as i64))
+            }
+            swc_ecma_ast::PropName::Computed(computed) => match computed.expr.as_ref() {
+                Expr::Lit(swc_ecma_ast::Lit::Str(text)) => Some(text.value.to_string_lossy().into_owned()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl Visit for FunctionNames {
+    fn visit_key_value_prop(&mut self, property: &swc_ecma_ast::KeyValueProp) {
+        if let Some(name) = Self::property_name(&property.key) {
+            self.name(&property.value, name);
+        }
+        property.visit_children_with(self);
+    }
+    fn visit_class_prop(&mut self, property: &swc_ecma_ast::ClassProp) {
+        if let (Some(name), Some(value)) = (Self::property_name(&property.key), &property.value) {
+            self.name(value, name);
+        }
+        property.visit_children_with(self);
+    }
+    fn visit_private_prop(&mut self, property: &swc_ecma_ast::PrivateProp) {
+        if let Some(value) = &property.value {
+            self.name(value, format!("#{}", property.key.name));
+        }
+        property.visit_children_with(self);
+    }
+}
+
+/// The name a function expression at `span` prints with: its own, else the one JavaScript
+/// infers from the surrounding definition. Only a program that can print a function value
+/// (see `StoragePlan::function_names`) registers names.
+fn function_expression_name(own: Option<&str>, span: Span) -> Option<String> {
+    ACTIVE_STORAGE_PLAN.with(|active| {
+        let active = active.borrow();
+        if !active.names_functions {
+            return None;
+        }
+        own.map(str::to_owned).or_else(|| active.function_names.get(&storage_key(span)).cloned())
+    })
+}
+
+/// Syntactic facts about which names hold only primitives, so printing a primitive
+/// does not count as exposing a class instance.
+#[derive(Default)]
+struct ValueKinds {
+    /// Variables/parameters: `true` while every declaration is primitive-typed.
+    variables: HashMap<String, bool>,
+    /// Properties and methods (class fields, interface members, method returns).
+    properties: HashMap<String, bool>,
+    functions: HashMap<String, bool>,
+    /// Functions returning a function: `true` while every such declaration's inner result is primitive.
+    callable_returns: HashMap<String, bool>,
+    instantiated: HashSet<String>,
+    supers: HashMap<String, String>,
+}
+
+fn primitive_ts_type(ty: &TsType) -> bool {
+    use swc_ecma_ast::TsKeywordTypeKind::*;
+    match ty {
+        TsType::TsKeywordType(keyword) => matches!(
+            keyword.kind,
+            TsNumberKeyword | TsStringKeyword | TsBooleanKeyword | TsBigIntKeyword | TsSymbolKeyword
+                | TsNullKeyword | TsUndefinedKeyword | TsVoidKeyword | TsNeverKeyword
+        ),
+        TsType::TsLitType(_) => true,
+        TsType::TsArrayType(array) => primitive_ts_type(&array.elem_type),
+        TsType::TsParenthesizedType(inner) => primitive_ts_type(&inner.type_ann),
+        TsType::TsUnionOrIntersectionType(swc_ecma_ast::TsUnionOrIntersectionType::TsUnionType(union)) => {
+            union.types.iter().all(|member| primitive_ts_type(member))
+        }
+        _ => false,
+    }
+}
+
+impl ValueKinds {
+    fn note(table: &mut HashMap<String, bool>, name: String, primitive: bool) {
+        let entry = table.entry(name).or_insert(true);
+        *entry = *entry && primitive;
+    }
+
+    /// `Some(primitive result)` for a function type annotation (`(x: number) => number`).
+    fn function_type_result(ty: &TsType) -> Option<bool> {
+        match ty {
+            TsType::TsFnOrConstructorType(swc_ecma_ast::TsFnOrConstructorType::TsFnType(function)) => {
+                Some(primitive_ts_type(&function.type_ann.type_ann))
+            }
+            TsType::TsParenthesizedType(inner) => Self::function_type_result(&inner.type_ann),
+            _ => None,
+        }
+    }
+
+    fn annotated(annotation: Option<&swc_ecma_ast::TsTypeAnn>) -> bool {
+        annotation.is_some_and(|annotation| primitive_ts_type(&annotation.type_ann))
+    }
+
+    fn primitive_literalish(expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => Self::primitive_literalish(&paren.expr),
+            Expr::Lit(_) | Expr::Tpl(_) | Expr::Unary(_) | Expr::Update(_) => true,
+            Expr::Bin(binary) => !matches!(
+                binary.op,
+                swc_ecma_ast::BinaryOp::LogicalOr
+                    | swc_ecma_ast::BinaryOp::LogicalAnd
+                    | swc_ecma_ast::BinaryOp::NullishCoalescing
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether `expr` can evaluate to an object (a class instance, array of them, ...).
+    fn may_carry_object(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => self.may_carry_object(&paren.expr),
+            Expr::TsAs(cast) => self.may_carry_object(&cast.expr),
+            Expr::TsSatisfies(cast) => self.may_carry_object(&cast.expr),
+            Expr::TsNonNull(cast) => self.may_carry_object(&cast.expr),
+            Expr::TsTypeAssertion(cast) => self.may_carry_object(&cast.expr),
+            Expr::Lit(_) | Expr::Tpl(_) | Expr::Unary(_) | Expr::Update(_) | Expr::Arrow(_) | Expr::Fn(_) => false,
+            Expr::Bin(binary) => {
+                matches!(
+                    binary.op,
+                    swc_ecma_ast::BinaryOp::LogicalOr
+                        | swc_ecma_ast::BinaryOp::LogicalAnd
+                        | swc_ecma_ast::BinaryOp::NullishCoalescing
+                ) && (self.may_carry_object(&binary.left) || self.may_carry_object(&binary.right))
+            }
+            Expr::Cond(cond) => self.may_carry_object(&cond.cons) || self.may_carry_object(&cond.alt),
+            Expr::Seq(sequence) => sequence.exprs.last().is_some_and(|last| self.may_carry_object(last)),
+            Expr::Array(array) => array.elems.iter().flatten().any(|element| {
+                element.spread.is_some() || self.may_carry_object(&element.expr)
+            }),
+            Expr::Object(object) => object.props.iter().any(|property| match property {
+                swc_ecma_ast::PropOrSpread::Spread(_) => true,
+                swc_ecma_ast::PropOrSpread::Prop(property) => match property.as_ref() {
+                    swc_ecma_ast::Prop::KeyValue(pair) => self.may_carry_object(&pair.value),
+                    swc_ecma_ast::Prop::Shorthand(ident) => self.variable_may_carry(ident.sym.as_ref()),
+                    _ => true,
+                },
+            }),
+            Expr::Ident(ident) => self.variable_may_carry(ident.sym.as_ref()),
+            Expr::Member(member) => match &member.prop {
+                swc_ecma_ast::MemberProp::Ident(name) => !self.property_is_primitive(name.sym.as_ref()),
+                _ => true,
+            },
+            Expr::Call(call) => match &call.callee {
+                swc_ecma_ast::Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(name) => {
+                        !(matches!(name.sym.as_ref(), "Number" | "String" | "Boolean" | "parseInt" | "parseFloat"
+                            | "isNaN" | "isFinite" | "BigInt")
+                            || self.functions.get(name.sym.as_ref()) == Some(&true))
+                    }
+                    // `makeAdder()(1)`: the function a declaration returns yields a primitive.
+                    Expr::Call(inner) => !matches!(&inner.callee, swc_ecma_ast::Callee::Expr(callee)
+                        if matches!(callee.as_ref(), Expr::Ident(name)
+                            if self.callable_returns.get(name.sym.as_ref()) == Some(&true))),
+                    // `f.call(this, 1)` / `f.apply(this, [1])` of a primitive-returning function.
+                    Expr::Member(member) if matches!((member.obj.as_ref(), &member.prop),
+                        (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(method))
+                            if matches!(method.sym.as_ref(), "call" | "apply")
+                                && self.functions.get(object.sym.as_ref()) == Some(&true)) => false,
+                    Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                        (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(_))
+                            if matches!(object.sym.as_ref(), "Math" | "Number" | "Date")
+                                && !self.variables.contains_key(object.sym.as_ref()) => false,
+                        (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(name))
+                            if object.sym == *"JSON" && name.sym == *"stringify" => false,
+                        (_, swc_ecma_ast::MemberProp::Ident(name)) => {
+                            !(self.functions.get(name.sym.as_ref()) == Some(&true)
+                                || (matches!(name.sym.as_ref(), "toString" | "toFixed" | "toUpperCase" | "toLowerCase"
+                                    | "trim" | "join" | "charAt" | "padStart" | "padEnd" | "repeat" | "substring"
+                                    | "indexOf" | "includes" | "startsWith" | "endsWith" | "has" | "test"
+                                    | "localeCompare" | "toISOString" | "getTime")
+                                    && !self.functions.contains_key(name.sym.as_ref())))
+                        }
+                        _ => true,
+                    },
+                    _ => true,
+                },
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
+    fn variable_may_carry(&self, name: &str) -> bool {
+        name != "undefined" && self.variables.get(name) != Some(&true)
+    }
+
+    fn property_is_primitive(&self, name: &str) -> bool {
+        match self.properties.get(name) {
+            Some(primitive) => *primitive,
+            None => matches!(name, "length" | "size"),
+        }
+    }
+}
+
+impl Visit for ValueKinds {
+    fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+        // Declarations without an annotation are classified by their initializer
+        // in `visit_var_declarator`; parameters/catch bindings with none are unknown.
+        if binding.type_ann.is_some() {
+            Self::note(&mut self.variables, binding.id.sym.to_string(), Self::annotated(binding.type_ann.as_deref()));
+        } else {
+            self.variables.entry(binding.id.sym.to_string()).or_insert(true);
+        }
+        binding.visit_children_with(self);
+    }
+    fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
+        if let swc_ecma_ast::Pat::Ident(binding) = &declarator.name {
+            if binding.type_ann.is_none() {
+                let primitive = declarator.init.as_deref().is_some_and(Self::primitive_literalish);
+                Self::note(&mut self.variables, binding.id.sym.to_string(), primitive);
+            }
+            // A variable holding a function: what calling it yields.
+            let result = match (binding.type_ann.as_deref(), declarator.init.as_deref()) {
+                (Some(annotation), _) => Self::function_type_result(&annotation.type_ann),
+                (None, Some(Expr::Arrow(arrow))) => Some(Self::annotated(arrow.return_type.as_deref())),
+                (None, Some(Expr::Fn(function))) => Some(Self::annotated(function.function.return_type.as_deref())),
+                _ => None,
+            };
+            if let Some(primitive) = result {
+                Self::note(&mut self.functions, binding.id.sym.to_string(), primitive);
+            }
+        }
+        declarator.visit_children_with(self);
+    }
+    fn visit_pat(&mut self, pattern: &swc_ecma_ast::Pat) {
+        // Destructured / rest / for-of bindings are unknown values.
+        match pattern {
+            swc_ecma_ast::Pat::Ident(_) => {}
+            other => {
+                struct Names<'a>(&'a mut HashMap<String, bool>);
+                impl Visit for Names<'_> {
+                    fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+                        ValueKinds::note(self.0, binding.id.sym.to_string(), false);
+                    }
+                }
+                other.visit_with(&mut Names(&mut self.variables));
+            }
+        }
+        pattern.visit_children_with(self);
+    }
+    fn visit_class_prop(&mut self, property: &ClassProp) {
+        if let Ok(name) = class_property_name(&property.key) {
+            let primitive = Self::annotated(property.type_ann.as_deref())
+                || (property.type_ann.is_none() && property.value.as_deref().is_some_and(Self::primitive_literalish));
+            Self::note(&mut self.properties, name, primitive);
+        }
+        property.visit_children_with(self);
+    }
+    fn visit_ts_property_signature(&mut self, signature: &swc_ecma_ast::TsPropertySignature) {
+        if let Expr::Ident(name) = signature.key.as_ref() {
+            Self::note(&mut self.properties, name.sym.to_string(), Self::annotated(signature.type_ann.as_deref()));
+        }
+        signature.visit_children_with(self);
+    }
+    fn visit_class_method(&mut self, method: &swc_ecma_ast::ClassMethod) {
+        if let Ok(name) = class_property_name(&method.key) {
+            Self::note(&mut self.functions, name.clone(), Self::annotated(method.function.return_type.as_deref()));
+            if method.kind != swc_ecma_ast::MethodKind::Method {
+                Self::note(&mut self.properties, name, Self::annotated(method.function.return_type.as_deref()));
+            }
+        }
+        method.visit_children_with(self);
+    }
+    fn visit_fn_decl(&mut self, declaration: &swc_ecma_ast::FnDecl) {
+        Self::note(
+            &mut self.functions,
+            declaration.ident.sym.to_string(),
+            Self::annotated(declaration.function.return_type.as_deref()),
+        );
+        if let Some(primitive) = declaration
+            .function
+            .return_type
+            .as_deref()
+            .and_then(|annotation| Self::function_type_result(&annotation.type_ann))
+        {
+            Self::note(&mut self.callable_returns, declaration.ident.sym.to_string(), primitive);
+        }
+        declaration.visit_children_with(self);
+    }
+    fn visit_class_decl(&mut self, declaration: &ClassDecl) {
+        if let Some(Expr::Ident(base)) = declaration.class.super_class.as_deref() {
+            self.supers.insert(declaration.ident.sym.to_string(), base.sym.to_string());
+        }
+        declaration.visit_children_with(self);
+    }
+    fn visit_new_expr(&mut self, new: &swc_ecma_ast::NewExpr) {
+        if let Expr::Ident(class) = new.callee.as_ref() {
+            self.instantiated.insert(class.sym.to_string());
+        }
+        new.visit_children_with(self);
+    }
+}
+
+/// Field names that some class may leave unset, computed with the same rule the class
+/// layout uses (`maybe_uninit_fields_with`).
+struct UninitNames<'a> {
+    names: HashSet<String>,
+    instantiated: &'a HashSet<String>,
+    observed: &'a ObservedMembers,
+}
+
+impl Visit for UninitNames<'_> {
+    fn visit_class_decl(&mut self, declaration: &ClassDecl) {
+        let class = declaration.ident.sym.to_string();
+        let observed = self.observed;
+        let instantiated = self.instantiated;
+        let fields = maybe_uninit_fields_with(&declaration.class, &|field| {
+            instantiated.contains(&class) && (observed.objects || observed.names.contains(field))
+        });
+        self.names.extend(fields);
+        declaration.visit_children_with(self);
     }
 }

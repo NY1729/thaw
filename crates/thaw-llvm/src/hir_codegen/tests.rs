@@ -751,3 +751,4 @@ include!("tests/collim_contracts.rs");
 include!("tests/bufview_contracts.rs");
 include!("tests/bugfix_contracts.rs");
 include!("tests/fldrest_contracts.rs");
+include!("tests/fldlim_contracts.rs");
