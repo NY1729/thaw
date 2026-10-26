@@ -474,35 +474,6 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    fn compile_console_collection(
-        &mut self,
-        value: PointerValue<'ctx>,
-        ty: &HirType,
-        newline: bool,
-        descriptor: u64,
-    ) -> Result<(), String> {
-        let label = if matches!(ty, HirType::Map(_, _)) {
-            "Map { size: "
-        } else {
-            "Set { size: "
-        };
-        self.compile_console_literal(label, false, "console_collection_label", descriptor)?;
-        let size = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_map_size").unwrap(),
-                &[value.into()],
-                "console_collection_size",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("thaw_map_size returned no value")?
-            .into_float_value();
-        self.compile_console_number(size, false, "console_collection_size", descriptor)?;
-        self.compile_console_literal(" }", newline, "console_collection_end", descriptor)
-    }
-
     fn compile_console_literal(
         &mut self,
         text: &str,
@@ -754,7 +725,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             HirType::Map(_, _) | HirType::Set(_) => {
-                self.compile_console_collection(
+                self.compile_console_structured(
                     value.into_pointer_value(), member, newline, descriptor,
                 )?;
             }

@@ -2729,6 +2729,13 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
                     "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable"
                     | "__thaw_json_is_primitive_operand" => return Ok(HirType::Bool),
+                    "__thaw_is_unset_number" => return Ok(HirType::Bool),
+                    "__thaw_named_function" => {
+                        let Some(closure) = args.first() else {
+                            return Err("named function expects a closure".into());
+                        };
+                        return self.infer_expr_type(closure);
+                    }
                     "__thaw_console_bytes" => return Ok(HirType::Array(Box::new(HirType::F64))),
                     "__thaw_console_typed" => {
                         let [HirExpr::TypedClosure(ty, _)] = args.as_slice() else {

@@ -350,6 +350,8 @@ fn lower_ts_type(
                             | HirType::Array(_)
                             | HirType::Tuple(_)
                             | HirType::Object(_)
+                            | HirType::Map(..)
+                            | HirType::Set(_)
                             | HirType::Promise(_)
                             | HirType::Optional(_)
                             | HirType::Nullable(_)

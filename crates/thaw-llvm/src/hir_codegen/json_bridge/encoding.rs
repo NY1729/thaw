@@ -1108,8 +1108,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_native_collection_to_json(value.into_pointer_value(), field_type, preserve_undefined)?;
                     "thaw_json_object_set_json"
                 }
+                // `JSON.stringify` serialises a Map/Set field as `{}` (no own
+                // enumerable properties).
+                HirType::Map(..) | HirType::Set(_) => {
+                    value = self
+                        .builder
+                        .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "json_empty_collection")
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("thaw_json_object_new returned no value")?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::JsValue => {
                     value = self.compile_dynamic_value_placeholder(value)?;
+                    "thaw_json_object_set_json"
+                }
+                HirType::Function(..) | HirType::CallableFunction(..) if self.console_omit_absent_fields => {
+                    value = self.compile_console_function_sentinel(value.into_pointer_value())?;
                     "thaw_json_object_set_json"
                 }
                 HirType::Function(params, ret) => {
@@ -1481,6 +1497,19 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// A native byte buffer as its `Buffer.toJSON()` shape, `{ "type": "Buffer", "data": [..] }`.
+    /// A function nested in a `console.log` value: the sentinel the inspector prints as `[Function: name]`.
+    fn compile_console_function_sentinel(
+        &mut self,
+        closure: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_json_function_sentinel").unwrap(),
+            &[closure.into()], "console_function_sentinel",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| "function sentinel returned no value".to_string())
+    }
+
     fn compile_native_bytes_to_json(
         &mut self,
         value: PointerValue<'ctx>,
@@ -1969,6 +1998,10 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::JsValue => {
                 value = self.compile_dynamic_value_placeholder(value)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::Function(..) | HirType::CallableFunction(..) if self.console_omit_absent_fields => {
+                value = self.compile_console_function_sentinel(value.into_pointer_value())?;
                 "thaw_json_array_push_json"
             }
             HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {

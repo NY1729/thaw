@@ -2074,7 +2074,16 @@ impl<'a> FnLowerer<'a> {
         let instance = self.interfaces.get(class)?;
         if let HirType::Object(fields) = instance {
             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == property) {
-                return Some(ty.clone());
+                // A widened maybe-uninitialised field is read leniently.
+                return Some(match ty {
+                    HirType::Optional(payload) if is_uninit_class_field(fields, property) => {
+                        payload.as_ref().clone()
+                    }
+                    HirType::Nullish(payload) if is_uninit_class_field(fields, property) => {
+                        HirType::Nullable(payload.clone())
+                    }
+                    other => other.clone(),
+                });
             }
         }
         let getter = class_getter_symbol(class, property, false);
@@ -3714,7 +3723,23 @@ impl<'a> FnLowerer<'a> {
                         // directly.
                         let read =
                             self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())?;
-                        if is_observed_member(member.span) {
+                        // An `any` payload already holds `undefined`: it never needs the raw `Optional`.
+                        let json_payload = matches!(&read, HirExpr::PropAccess(_, HirType::Object(fields), field)
+                            if fields.iter().any(|(name, ty)| name == field
+                                && matches!(ty, HirType::Optional(payload) if payload.as_ref() == &HirType::Json)));
+                        let read = if (is_observed_member(member.span) || is_dynamic_read(member.span))
+                            && matches!(&read, HirExpr::PropAccess(_, HirType::Object(fields), field)
+                                if is_unset_number_field(fields, field))
+                        {
+                            self.unset_aware_number_read(read)?
+                        } else {
+                            read
+                        };
+                        if is_dynamic_read(member.span) && !json_payload {
+                            // A sink that keeps `undefined`: the field's raw value as `Json`.
+                            return self.optional_read_as_json(read);
+                        }
+                        if is_observed_member(member.span) && !json_payload {
                             Ok(read)
                         } else {
                             self.lenient_uninit_read(read)
@@ -3795,6 +3820,52 @@ impl<'a> FnLowerer<'a> {
     fn lower_optional_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         let object = self.lower_expr(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
+        // `view?.length` on an optional `extends Array/Map/Set` instance reads the wrapped collection.
+        let (object, object_type) = match &object_type {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload)
+                if native_base_type(payload).is_some() =>
+            {
+                let base = native_base_type(payload).cloned().expect("checked above");
+                let name = format!("__thaw_optional_view_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), object_type.clone());
+                let held = Box::new(HirExpr::Var(name.clone()));
+                let payload_type = payload.as_ref().clone();
+                let (absent, value, some, none, wrapped) = match &object_type {
+                    HirType::Optional(_) => (
+                        HirExpr::OptionalIsNone(held.clone(), payload_type.clone()),
+                        HirExpr::OptionalValue(held, payload_type.clone()),
+                        HirExpr::OptionalSome as fn(Box<HirExpr>, HirType) -> HirExpr,
+                        HirExpr::OptionalNone(base.clone()),
+                        HirType::Optional(Box::new(base.clone())),
+                    ),
+                    HirType::Nullable(_) => (
+                        HirExpr::NullableIsNone(held.clone(), payload_type.clone()),
+                        HirExpr::NullableValue(held, payload_type.clone()),
+                        HirExpr::NullableSome as fn(Box<HirExpr>, HirType) -> HirExpr,
+                        HirExpr::NullableNone(base.clone()),
+                        HirType::Nullable(Box::new(base.clone())),
+                    ),
+                    _ => (
+                        HirExpr::NullishIsNone(held.clone(), payload_type.clone()),
+                        HirExpr::NullishValue(held, payload_type.clone()),
+                        HirExpr::NullishSome as fn(Box<HirExpr>, HirType) -> HirExpr,
+                        HirExpr::NullishNull(base.clone()),
+                        HirType::Nullish(Box::new(base.clone())),
+                    ),
+                };
+                let projected = HirExpr::PropAccess(Box::new(value), payload_type, NATIVE_BASE_FIELD.to_string());
+                let conditional = HirExpr::Conditional(
+                    Box::new(absent),
+                    Box::new(none),
+                    Box::new(some(Box::new(projected), base)),
+                    wrapped.clone(),
+                );
+                let object = self.wrap_call_argument_bindings(conditional, &[(name, object_type, object)])?;
+                (object, wrapped)
+            }
+            _ => (object, object_type),
+        };
         // A dynamic `any` value (`Json`) short-circuits to `undefined` for
         // a nullish receiver -- read the key directly, without the
         // TypeError guard the non-optional `Json` read now applies.
@@ -3969,6 +4040,14 @@ impl<'a> FnLowerer<'a> {
                 ),
                 _ => return Err("unsupported optional string member".into()),
             },
+            HirType::Map(..) | HirType::Set(_)
+                if matches!(&member.prop, MemberProp::Ident(property) if property.sym == *"size") =>
+            {
+                (
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_size".to_string())), vec![unwrapped]),
+                    HirType::F64,
+                )
+            }
             HirType::Dictionary(element) => {
                 let key = match &member.prop {
                     MemberProp::Ident(property) => {
@@ -4151,18 +4230,99 @@ impl<'a> FnLowerer<'a> {
     /// uninitialised (`is_uninit_class_field`), in a value context: an absent
     /// field reads as NaN (number) or its zero payload, like Node's
     /// `undefined` coerced to the declared type. Other reads pass through.
+    /// A raw (possibly `Optional`) field read as `Json`: `undefined` while absent.
+    fn optional_read_as_json(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&read)?;
+        let HirType::Optional(payload) = &ty else {
+            return self.coerce_to_declared(&HirType::Json, read);
+        };
+        let payload = payload.as_ref().clone();
+        let name = format!("__thaw_sink_read_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let var = HirExpr::Var(name.clone());
+        let present = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::OptionalValue(Box::new(var.clone()), payload.clone()),
+        )?;
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::OptionalIsNone(Box::new(var), payload)),
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+            Box::new(present),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, ty, read)])
+    }
+
+    /// A `number` read that may be the marker NaN of an unset class field: `undefined` then.
+    fn unset_aware_number_read(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        let name = format!("__thaw_unset_number_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::F64);
+        let var = HirExpr::Var(name.clone());
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_is_unset_number".into())), vec![var.clone()])),
+            Box::new(HirExpr::OptionalNone(HirType::F64)),
+            Box::new(HirExpr::OptionalSome(Box::new(var), HirType::F64)),
+            HirType::Optional(Box::new(HirType::F64)),
+        );
+        self.wrap_call_argument_bindings(result, &[(name, HirType::F64, read)])
+    }
+
     fn lenient_uninit_read(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        self.lenient_uninit_read_as(read, f64::NAN)
+    }
+
+    /// `lenient_uninit_read` with `unset` as the number an absent `number` field reads as.
+    fn lenient_uninit_read_as(&mut self, read: HirExpr, unset: f64) -> Result<HirExpr, String> {
         let HirExpr::PropAccess(_, HirType::Object(fields), field) = &read else {
             return Ok(read);
         };
         if !is_uninit_class_field(fields, field) {
             return Ok(read);
         }
-        let Some((_, HirType::Optional(payload))) = fields.iter().find(|(name, _)| name == field)
-        else {
+        let Some((_, widened)) = fields.iter().find(|(name, _)| name == field) else {
+            return Ok(read);
+        };
+        if let HirType::Nullish(payload) = widened {
+            // Widened from `T | null`: the lenient view is the declared
+            // `T | null` with `undefined` folded into `null`.
+            let payload = payload.as_ref().clone();
+            let name = format!("__thaw_uninit_read_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), widened.clone());
+            let var = HirExpr::Var(name.clone());
+            let nullable = HirType::Nullable(Box::new(payload.clone()));
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::NullishIsNone(Box::new(var.clone()), payload.clone())),
+                Box::new(HirExpr::NullableNone(payload.clone())),
+                Box::new(HirExpr::NullableSome(
+                    Box::new(HirExpr::NullishValue(Box::new(var), payload.clone())),
+                    payload,
+                )),
+                nullable,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, widened.clone(), read)]);
+        }
+        let HirType::Optional(payload) = widened else {
             return Ok(read);
         };
         let payload = payload.as_ref().clone();
+        if payload == HirType::Json {
+            // An absent `any` field reads `undefined`, not a null handle.
+            let name = format!("__thaw_uninit_read_{}", self.next_binding);
+            self.next_binding += 1;
+            let optional = HirType::Optional(Box::new(HirType::Json));
+            self.scope.insert(name.clone(), optional.clone());
+            let var = HirExpr::Var(name.clone());
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::Json)),
+                Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+                Box::new(HirExpr::OptionalValue(Box::new(var), HirType::Json)),
+                HirType::Json,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, optional, read)]);
+        }
         if payload != HirType::F64 {
             return Ok(HirExpr::OptionalValue(Box::new(read), payload));
         }
@@ -4173,7 +4333,7 @@ impl<'a> FnLowerer<'a> {
         let var = HirExpr::Var(name.clone());
         let result = HirExpr::Conditional(
             Box::new(HirExpr::OptionalIsNone(Box::new(var.clone()), HirType::F64)),
-            Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+            Box::new(HirExpr::Lit(HirLit::F64(unset))),
             Box::new(HirExpr::OptionalValue(Box::new(var), HirType::F64)),
             HirType::F64,
         );

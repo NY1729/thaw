@@ -204,6 +204,51 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// A structural view of a class instance whose fields are accessors over
+    /// the instance (`get`: current value, `set`: store through to the field).
+    fn live_widened_structural_view(
+        &mut self,
+        value: HirExpr,
+        actual_fields: &[(Symbol, HirType)],
+        declared_fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let object_type = HirType::Object(actual_fields.to_vec());
+        let source = format!("__thaw_live_source_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source.clone(), object_type.clone());
+        let mut receiver_fields = declared_fields.to_vec();
+        receiver_fields.push(("__thaw_object_method_receiver".into(), HirType::Undefined));
+        let receiver = HirType::NonArrowReceiver(Box::new(HirType::Object(receiver_fields)));
+        let capture = HirParam { name: source.clone(), ty: object_type.clone() };
+        let mut visible = Vec::new();
+        let mut hidden = Vec::new();
+        for (name, expected) in declared_fields {
+            let read = HirExpr::PropAccess(Box::new(HirExpr::Var(source.clone())), object_type.clone(), name.clone());
+            let read = self.lenient_uninit_read_as(read, f64::from_bits(crate::UNSET_NUMBER_BITS))?;
+            let this_param = HirParam { name: format!("__thaw_live_this_{}", self.next_binding), ty: receiver.clone() };
+            self.next_binding += 1;
+            let getter = HirExpr::Lambda(vec![capture.clone()], vec![this_param.clone()], expected.clone(), Box::new(read));
+            let stored = actual_fields.iter().find(|(n, _)| n == name).map(|(_, ty)| ty.clone()).unwrap_or_else(|| expected.clone());
+            let new_value = HirParam { name: format!("__thaw_live_value_{}", self.next_binding), ty: expected.clone() };
+            self.next_binding += 1;
+            let mut assigned = HirExpr::Var(new_value.name.clone());
+            if let HirType::Optional(payload) = &stored {
+                assigned = HirExpr::OptionalSome(Box::new(assigned), payload.as_ref().clone());
+            }
+            let store = HirExpr::PropAssign(Box::new(HirExpr::Var(source.clone())), object_type.clone(), name.clone(), Box::new(assigned));
+            let setter = HirExpr::Lambda(
+                vec![capture.clone()], vec![this_param, new_value], HirType::Void,
+                Box::new(HirExpr::Block(vec![HirStmt::Expr(store)])),
+            );
+            visible.push((name.clone(), Self::unreachable_value(expected)?));
+            hidden.push((format!("__thaw_getter_{name}"), getter));
+            hidden.push((format!("__thaw_setter_{name}"), setter));
+        }
+        visible.extend(hidden);
+        let literal = HirExpr::ObjectLit(visible);
+        self.wrap_call_argument_bindings(literal, &[(source, object_type, value)])
+    }
+
     fn retain_full_native_object_projection(
         &mut self, value: HirExpr, fields: &[(Symbol, HirType)], nonprefix: bool,
     ) -> Result<HirExpr, String> {
@@ -487,6 +532,35 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        // The function-name wrapper is transparent to a callable slot: coerce the closure and
+        // keep its label (other slots wrap the labelled closure like any function value).
+        if matches!(declared, HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)) {
+            if let Some((closure, label)) = split_named_function(&value) {
+                let (closure, label) = (closure.clone(), label.to_owned());
+                let coerced = self.coerce_to_declared(declared, closure)?;
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_named_function".into())),
+                    vec![coerced, HirExpr::Lit(HirLit::Str(label))],
+                ));
+            }
+        }
+        // An observed read of a maybe-uninitialised class field arrives with
+        // its raw `Optional`; a slot that wants the bare payload unwraps it
+        // like `undefined` coerced to `T`.
+        if let HirExpr::PropAccess(_, HirType::Object(fields), field) = &value {
+            let widened = fields.iter().find(|(name, _)| name == field).map(|(_, ty)| ty);
+            let wants_payload = match widened {
+                Some(HirType::Optional(payload)) => payload.as_ref() == declared,
+                Some(HirType::Nullish(payload)) => {
+                    matches!(declared, HirType::Nullable(inner) if inner == payload)
+                }
+                _ => false,
+            };
+            if wants_payload && is_uninit_class_field(fields, field) {
+                let value = self.lenient_uninit_read(value)?;
+                return self.coerce_to_declared(declared, value);
+            }
+        }
         if let HirType::NonArrowReceiver(receiver) = declared {
             if let HirExpr::NonArrowThis {
                 payload,
@@ -886,9 +960,16 @@ impl<'a> FnLowerer<'a> {
             }
             let same_fields = declared_fields.iter().all(|(declared, expected)|
                 actual_fields.iter().any(|(name, actual)| name == declared && actual == expected));
-            if same_fields && !matches!(value, HirExpr::ObjectLit(_))
+            // A class instance whose fields are all plain data (no methods,
+            // accessors or nested class instances) passes to a structural
+            // parameter as a live view: reads and writes go to the instance.
+            let plain_class_data = matches!(actual_fields.first(), Some((marker, HirType::Bool))
+                    if marker.starts_with("__thaw_class_identity_\u{1e}"))
                 && Self::fixed_object_supports_live_projection(
-                    &HirType::Object(actual_fields.clone())) {
+                    &HirType::Object(actual_fields[1..].to_vec()));
+            if same_fields && !matches!(value, HirExpr::ObjectLit(_))
+                && (plain_class_data || Self::fixed_object_supports_live_projection(
+                    &HirType::Object(actual_fields.clone()))) {
                 return self.retain_full_native_object_projection(value, &actual_fields, true);
             }
             if let Some(class) = class_name_from_type(&HirType::Object(actual_fields.clone())) {
@@ -909,6 +990,22 @@ impl<'a> FnLowerer<'a> {
                 // own member access (getters run now, so a throwing getter
                 // propagates its original exception to the converting site).
                 let object_type = HirType::Object(actual_fields.clone());
+                // Every declared field is plain class data and some are
+                // widened (`Optional`) because they may be uninitialised: the
+                // structural view is an accessor object over the instance, so
+                // reads see the current value and writes reach the instance.
+                let widened = |name: &String, expected: &HirType| actual_fields.iter().find_map(|(n, actual)| {
+                    (n == name).then(|| match actual {
+                        HirType::Optional(payload) => payload.as_ref() == expected && is_uninit_class_field(&actual_fields, name),
+                        other => other == expected,
+                    })
+                });
+                if declared_fields.iter().all(|(name, expected)| widened(name, expected) == Some(true))
+                    && declared_fields.iter().any(|(name, expected)|
+                        actual_fields.iter().any(|(n, actual)| n == name && actual != expected))
+                {
+                    return self.live_widened_structural_view(value, &actual_fields, declared_fields);
+                }
                 let binding = format!("__thaw_accessor_source_{}", self.next_binding);
                 let mut reads = Vec::with_capacity(declared_fields.len());
                 let mut uses_accessor = false;

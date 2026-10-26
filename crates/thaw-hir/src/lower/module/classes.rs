@@ -204,8 +204,18 @@ fn collect_native_classes<'a>(
             HirType::Bool,
         )];
         fields.extend(inherited_fields);
-        let maybe_uninit = maybe_uninit_fields(&declaration.class);
-        for member in &declaration.class.body {
+        let maybe_uninit = maybe_uninit_fields_with(&declaration.class, &|field| bare_field_observed(name, field));
+        // Abstract fields are laid out after the concrete ones: the abstract
+        // base is never instantiated, and a subclass overriding them keeps
+        // their slot, so instances print `base fields, then overrides` like Node.
+        let concrete = |member: &&ClassMember| !matches!(member, ClassMember::ClassProp(p) if p.is_abstract);
+        let ordered_members = declaration
+            .class
+            .body
+            .iter()
+            .filter(concrete)
+            .chain(declaration.class.body.iter().filter(|member| !concrete(member)));
+        for member in ordered_members {
             let ClassMember::ClassProp(property) = member else {
                 continue;
             };
@@ -429,6 +439,41 @@ fn collect_native_classes<'a>(
                 }
             }
         }
+        // Own-property creation order in Node: the base class's fields, then this class's
+        // own non-abstract fields in source order (abstract ones are erased).
+        let own_fields: Vec<String> = declaration
+            .class
+            .body
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::ClassProp(property) if !property.is_static && !property.is_abstract => {
+                    class_property_name(&property.key).ok()
+                }
+                _ => None,
+            })
+            .chain(declaration.class.body.iter().filter_map(|member| match member {
+                ClassMember::Constructor(constructor) if constructor.body.is_some() => Some(&constructor.params),
+                _ => None,
+            }).flatten().filter_map(|parameter| match parameter {
+                ParamOrTsParamProp::TsParamProp(property) => {
+                    parameter_property_binding(property).ok().map(|binding| binding.id.sym.to_string())
+                }
+                ParamOrTsParamProp::Param(_) => None,
+            }))
+            .collect();
+        let mut defined = match declaration.class.super_class.as_deref() {
+            Some(Expr::Ident(base)) => class_defined_order(base.sym.as_ref()).unwrap_or_else(|| {
+                // `extends Error`-style natives and collections: their inherited slots in layout order.
+                fields.iter().skip(1).map(|(field, _)| field.clone()).filter(|field| !own_fields.contains(field)).collect()
+            }),
+            _ => Vec::new(),
+        };
+        for field in &own_fields {
+            if !defined.contains(field) {
+                defined.push(field.clone());
+            }
+        }
+        remember_class_defined_order(name, defined);
         interfaces.insert(name.to_string(), HirType::Object(fields));
         active.pop();
         resolved.insert(name.to_string());

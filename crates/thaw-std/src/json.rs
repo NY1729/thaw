@@ -2558,7 +2558,7 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
                 .filter(|(key, value)| {
                     !is_private_slot_key(key)
                         && !is_symbol_key_wire(key)
-                        && !is_napi_undefined(value)
+                        && !is_json_undefined(value)
                 })
                 .map(|(key, value)| {
                     let value = if non_finite_number(value).is_some() {
@@ -2574,7 +2574,7 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
             shared_array_ref(items)
                 .iter()
                 .map(|item| {
-                    if is_napi_undefined(item) || non_finite_number(item).is_some() {
+                    if is_json_undefined(item) || non_finite_number(item).is_some() {
                         Value::Null
                     } else {
                         ordered_json_omitting_undefined(item)
@@ -2587,7 +2587,7 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
             Value::shared_object(
                 enumerable_entries(value)
                     .into_iter()
-                    .filter(|(_, value)| !is_napi_undefined(value))
+                    .filter(|(_, value)| !is_json_undefined(value))
                     .map(|(key, value)| (key, ordered_json_omitting_undefined(&value)))
                     .collect(),
             )
@@ -2646,7 +2646,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
                 if HOST_ERROR.with(|error| error.borrow().is_some()) {
                     break;
                 }
-                if !is_napi_undefined(&resolved) {
+                if !is_json_undefined(&resolved) {
                     fields.insert(
                         key.clone(),
                         filtered_json_omitting_undefined(&resolved, keys),
@@ -2664,7 +2664,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
                                 .then(|| map_or_set_wrapper_size(value))
                                 .flatten()
                         })?;
-                    if is_napi_undefined(&resolved) {
+                    if is_json_undefined(&resolved) {
                         return None;
                     }
                     let resolved = if non_finite_number(&resolved).is_some() {
@@ -2680,7 +2680,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
             keys.iter()
                 .filter_map(|key| {
                     let value = shared_object_ref(fields).get(key.as_slice())?;
-                    if is_napi_undefined(value) {
+                    if is_json_undefined(value) {
                         return None;
                     }
                     let value = if non_finite_number(value).is_some() {
@@ -2696,7 +2696,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
             shared_array_ref(items)
                 .iter()
                 .map(|item| {
-                    if is_napi_undefined(item) || non_finite_number(item).is_some() {
+                    if is_json_undefined(item) || non_finite_number(item).is_some() {
                         Value::Null
                     } else {
                         filtered_json_omitting_undefined(item, keys)
@@ -3820,9 +3820,10 @@ fn graph_token_value(token: &Value, nodes: &[Value]) -> Option<Value> {
     let fields = token.as_object()?;
     // `{ u: 1, fn: name }`: a function in a compiled result, which is JSON data (undefined).
     if fields.len() == 2 && fields.get(b"u".as_slice()).and_then(Value::as_f64) == Some(1.0) {
-        return Some(function_sentinel_value(
-            fields.get(b"fn".as_slice())?.as_str()?,
-        ));
+        return Some(function_sentinel_value(&format!(
+            "f{}",
+            fields.get(b"fn".as_slice())?.as_str()?
+        )));
     }
     if fields.len() != 1 {
         return None;
@@ -4375,7 +4376,7 @@ pub extern "C" fn thaw_json_encode_public(value: *mut Value) -> *const c_char {
 pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char {
     begin_stringify();
     let value = unsafe { &*value };
-    if is_napi_undefined(value) {
+    if is_json_undefined(value) {
         return top_level_undefined_string();
     }
     stringify_value(&ordered_json_omitting_undefined(value), &[])
@@ -5088,6 +5089,10 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             .map(|time| unsafe { thaw_date_to_iso_string(time) });
         return Node::Date(text.filter(|text| !text.is_null()).map(to_str));
     }
+    // A host typed array nested in a value prints `Uint8Array(2) [ 0, 0 ]`.
+    if let Some(node) = host_query(lease, 27).and_then(|probe| typed_probe_node(&probe)) {
+        return node;
+    }
     // A host `Map`/`Set` prints like Node's (`Map(1) { 'a' => 1 }`).
     let collection = host_query(lease, 24);
     if matches!(collection.as_deref(), Some("map" | "set"))
@@ -5229,10 +5234,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     use crate::inspect::{Ctor, Node};
     if is_napi_undefined(value) {
         return match sentinel_function_name(value) {
-            Some(name) => Node::Function {
-                name,
-                kind: crate::inspect::FnKind::Function,
-            },
+            Some(label) => function_label_node(&label),
             None => Node::Undefined,
         };
     }
@@ -5625,32 +5627,32 @@ pub extern "C" fn thaw_console_typed_or(
     if probe.is_null() {
         return fallback;
     }
-    let parsed: Option<(String, Vec<crate::inspect::Node>)> =
-        serde_json::from_str::<serde_json::Value>(&to_str(probe))
-            .ok()
-            .and_then(|json| {
-                let name = json.get("n")?.as_str()?.to_string();
-                let items = json
-                    .get("v")?
-                    .as_array()?
-                    .iter()
-                    .map(|item| {
-                        let text = item.as_str()?;
-                        Some(match text.strip_suffix('n') {
-                            Some(digits) => crate::inspect::Node::BigInt(digits.to_string()),
-                            None => crate::inspect::Node::Number(text.parse().ok()?),
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some((name, items))
-            });
-    let Some((name, items)) = parsed else {
+    let Some(node) = typed_probe_node(&to_str(probe)) else {
         return fallback;
     };
     thaw_arena::owned_string(crate::inspect::inspect(
-        &crate::inspect::Node::Typed { name, items },
+        &node,
         &crate::inspect::InspectOptions::default(),
     ))
+}
+
+/// The inspector node for a typed-array probe (`{"n":name,"v":[text, ..]}`).
+fn typed_probe_node(probe: &str) -> Option<crate::inspect::Node> {
+    let json = serde_json::from_str::<serde_json::Value>(probe).ok()?;
+    let name = json.get("n")?.as_str()?.to_string();
+    let items = json
+        .get("v")?
+        .as_array()?
+        .iter()
+        .map(|item| {
+            let text = item.as_str()?;
+            Some(match text.strip_suffix('n') {
+                Some(digits) => crate::inspect::Node::BigInt(digits.to_string()),
+                None => crate::inspect::Node::Number(text.parse().ok()?),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(crate::inspect::Node::Typed { name, items })
 }
 
 #[no_mangle]
@@ -6845,6 +6847,12 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
     }
 }
 
+/// `JSON.stringify` drops `undefined` and function values (`null` inside arrays).
+fn is_json_undefined(value: &Value) -> bool {
+    is_napi_undefined(value)
+        || matches!(value, Value::Host(lease) if host_query(lease, 0).as_deref() == Some("function"))
+}
+
 fn is_napi_undefined(value: &Value) -> bool {
     if is_graph_plain_object(value) {
         return false;
@@ -7208,6 +7216,67 @@ fn napi_undefined_value() -> Value {
         });
     }
     value
+}
+
+/// `[Function: name]` node for a label `"<kind><name>"` (`f` function, `a` async,
+/// `g` generator, `A` async generator; an empty name is anonymous).
+fn function_label_node(label: &str) -> crate::inspect::Node {
+    use crate::inspect::FnKind;
+    let mut chars = label.chars();
+    let kind = match chars.next() {
+        Some('a') => FnKind::Async,
+        Some('g') => FnKind::Generator,
+        Some('A') => FnKind::AsyncGenerator,
+        _ => FnKind::Function,
+    };
+    crate::inspect::Node::Function {
+        name: chars.as_str().to_string(),
+        kind,
+    }
+}
+
+thread_local! {
+    /// Closure entry code pointer -> NUL-terminated label (`"<kind><name>"`, a static
+    /// string owned by the compiled program) registered where the function value is created.
+    static FUNCTION_LABELS: RefCell<std::collections::HashMap<usize, usize>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Names the function whose closure is `closure` (`console.log` prints it as `[Function: name]`).
+///
+/// # Safety
+/// `closure` is a compiled closure (entry code pointer at offset 0); `label` is a
+/// NUL-terminated string that outlives the program.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_function_name_set(closure: *const u8, label: *const c_char) {
+    if closure.is_null() || label.is_null() {
+        return;
+    }
+    let code = unsafe { (closure as *const usize).read() };
+    FUNCTION_LABELS.with(|labels| {
+        labels.borrow_mut().insert(code, label as usize);
+    });
+}
+
+fn closure_function_label(closure: *const u8) -> String {
+    if closure.is_null() {
+        return "f".to_string();
+    }
+    let code = unsafe { (closure as *const usize).read() };
+    FUNCTION_LABELS
+        .with(|labels| labels.borrow().get(&code).copied())
+        .map(|label| {
+            unsafe { std::ffi::CStr::from_ptr(label as *const c_char) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "f".to_string())
+}
+
+/// A function nested in a printed value: the sentinel the inspector renders as its label.
+#[no_mangle]
+pub extern "C" fn thaw_json_function_sentinel(closure: *const u8) -> *mut Value {
+    leak(function_sentinel_value(&closure_function_label(closure)))
 }
 
 fn function_sentinel_value(name: &str) -> Value {

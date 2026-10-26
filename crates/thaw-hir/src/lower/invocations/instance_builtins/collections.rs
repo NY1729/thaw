@@ -27,6 +27,16 @@ impl<'a> FnLowerer<'a> {
         match expr {
             Expr::Ident(ident) => {
                 let resolved = self.resolve_binding(ident.sym.as_ref());
+                // A union narrowed to one native collection member is that collection.
+                if let (Some(HirType::Union(_)), Some((allowed, elements))) =
+                    (self.scope.get(&resolved), self.union_narrowings.get(&resolved))
+                {
+                    if let [index] = allowed.as_slice() {
+                        if matches!(&elements[*index], HirType::Map(..) | HirType::Set(_) | HirType::Array(_)) {
+                            return Some(elements[*index].clone());
+                        }
+                    }
+                }
                 self.narrowings
                     .get(&resolved)
                     .or_else(|| self.nullable_narrowings.get(&resolved))
@@ -90,10 +100,32 @@ impl<'a> FnLowerer<'a> {
                 let HirType::Object(fields) = base_type else {
                     return None;
                 };
-                fields
-                    .into_iter()
+                if is_dynamic_read(member.span)
+                    && (is_uninit_class_field(&fields, field.sym.as_ref())
+                        || is_unset_number_field(&fields, field.sym.as_ref()))
+                {
+                    return Some(HirType::Json);
+                }
+                if is_observed_member(member.span) && is_unset_number_field(&fields, field.sym.as_ref()) {
+                    return Some(HirType::Optional(Box::new(HirType::F64)));
+                }
+                let found = fields
+                    .iter()
                     .find(|(name, _)| name == field.sym.as_ref())
-                    .map(|(_, ty)| ty)
+                    .map(|(_, ty)| ty.clone());
+                // A maybe-uninitialised field read outside an observing
+                // position is lowered leniently (`lenient_uninit_read`): its
+                // value has the declared type, not the widened `Optional`.
+                if is_uninit_class_field(&fields, field.sym.as_ref()) {
+                    match found {
+                        Some(HirType::Optional(payload)) if payload.as_ref() == &HirType::Json => return Some(*payload),
+                        _ if is_observed_member(member.span) => {}
+                        Some(HirType::Optional(payload)) => return Some(*payload),
+                        Some(HirType::Nullish(payload)) => return Some(HirType::Nullable(payload)),
+                        _ => {}
+                    }
+                }
+                found
             }
             // `map.set(k, v).set(k2, v2)`/`set.add(a).add(b)`: `set`/`add`
             // return the receiver itself for chaining, so a call to either
