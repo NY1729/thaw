@@ -683,7 +683,37 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("number toString radix returned no value".into());
             }
             "__thaw_string_length" => {
-                return self.compile_single_arg_call("thaw_string_length", args, "string length")
+                let [value] = args else {
+                    return Err("string length expects one operand".into());
+                };
+                let value = self.compile_expr(value)?.into_pointer_value();
+                let is_null = self
+                    .builder
+                    .build_is_null(value, "string_length_is_undefined")
+                    .map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let error_block = self.context.append_basic_block(function, "string_length_type_error");
+                let continuation = self.context.append_basic_block(function, "string_length_ready");
+                self.builder
+                    .build_conditional_branch(is_null, error_block, continuation)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_block);
+                self.compile_throw_builtin_error(
+                    "TypeError",
+                    "Cannot read properties of undefined (reading 'length')",
+                )?;
+                self.builder.position_at_end(continuation);
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_length").unwrap(),
+                        &[value.into()],
+                        "string_length",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string length returned no value".into());
             }
             "__thaw_string_char_code_at" => {
                 let [value, index] = args else {
