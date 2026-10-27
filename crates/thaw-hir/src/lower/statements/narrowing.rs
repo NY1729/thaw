@@ -1019,6 +1019,160 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
+    fn union_subject_path(&self, expr: &Expr) -> Option<Symbol> {
+        let mut properties: Vec<String> = Vec::new();
+        let mut current = expr;
+        loop {
+            match current {
+                Expr::Ident(identifier) => {
+                    let mut path = self.resolve_binding(identifier.sym.as_ref());
+                    for property in properties.into_iter().rev() {
+                        path.push('.');
+                        path.push_str(&property);
+                    }
+                    return Some(path);
+                }
+                Expr::Paren(value) => current = &value.expr,
+                Expr::TsNonNull(value) => current = &value.expr,
+                Expr::Member(member) => {
+                    properties.push(member_property_name(&member.prop)?);
+                    current = &member.obj;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn union_subject_type(&self, expr: &Expr) -> Option<HirType> {
+        let mut properties: Vec<String> = Vec::new();
+        let mut current = expr;
+        let mut binding = loop {
+            match current {
+                Expr::Ident(identifier) => {
+                    break self
+                        .scope
+                        .get(&self.resolve_binding(identifier.sym.as_ref()))?
+                        .clone();
+                }
+                Expr::Paren(value) => current = &value.expr,
+                Expr::TsNonNull(value) => current = &value.expr,
+                Expr::Member(member) => {
+                    properties.push(member_property_name(&member.prop)?);
+                    current = &member.obj;
+                }
+                _ => return None,
+            }
+        };
+        for property in properties.into_iter().rev() {
+            let HirType::Object(fields) = binding else {
+                return None;
+            };
+            binding = Self::fixed_object_property_read_type(&fields, &property).ok()?;
+        }
+        Some(binding)
+    }
+
+    fn union_subject_elements(&self, expr: &Expr, path: &str) -> Option<Vec<HirType>> {
+        if let Some((_, elements)) = self.union_narrowings.get(path) {
+            return Some(elements.clone());
+        }
+        match self.union_subject_type(expr)? {
+            HirType::Union(elements) => Some(elements),
+            HirType::Optional(payload) => match *payload {
+                HirType::Union(elements) => Some(elements),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn narrow_union_value(
+        &self,
+        path: &str,
+        value: HirExpr,
+        value_type: &HirType,
+    ) -> HirExpr {
+        let Some(([index], elements)) = self
+            .union_narrowings
+            .get(path)
+            .map(|(allowed, elements)| (allowed.as_slice(), elements))
+        else {
+            return value;
+        };
+        if value_type == &HirType::Union(elements.clone()) {
+            return HirExpr::UnionValue(
+                Box::new(value),
+                *index,
+                elements.clone(),
+            );
+        }
+        if value_type == &HirType::Optional(Box::new(HirType::Union(elements.clone()))) {
+            let unwrapped = HirExpr::OptionalValue(
+                Box::new(value),
+                HirType::Union(elements.clone()),
+            );
+            return HirExpr::UnionValue(
+                Box::new(unwrapped),
+                *index,
+                elements.clone(),
+            );
+        }
+        value
+    }
+
+    fn lower_narrowed_fixed_object_property_read(
+        &mut self,
+        object: HirExpr,
+        member: &MemberExpr,
+        fields: &[(Symbol, HirType)],
+        property: &str,
+    ) -> Result<HirExpr, String> {
+        let expression = Expr::Member(member.clone());
+        let Some(path) = self.union_subject_path(&expression) else {
+            return self.lower_fixed_object_property_read(object, fields, property);
+        };
+        if !self.union_narrowings.contains_key(&path) {
+            return self.lower_fixed_object_property_read(object, fields, property);
+        }
+        let value_type = Self::fixed_object_property_read_type(fields, property)?;
+        let value = self.lower_fixed_object_property_read(object, fields, property)?;
+        Ok(self.narrow_union_value(&path, value, &value_type))
+    }
+
+    fn update_union_narrowings_for_write(
+        &mut self,
+        path: &str,
+        target_type: Option<&HirType>,
+        assigned_member: Option<usize>,
+    ) {
+        let invalidated = self
+            .union_narrowings
+            .keys()
+            .filter(|subject| {
+                if subject.as_str() == path || subject.starts_with(&format!("{path}.")) {
+                    return true;
+                }
+                let Some(suffix) = path.strip_prefix(&format!("{subject}.")) else {
+                    return false;
+                };
+                let property = suffix.split('.').next().unwrap_or_default();
+                self.union_discriminants
+                    .get(*subject)
+                    .is_some_and(|properties| properties.contains_key(property))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for subject in invalidated {
+            self.union_narrowings.remove(&subject);
+        }
+        if let (Some(HirType::Union(elements)), Some(index)) = (target_type, assigned_member) {
+            if elements.get(index).is_some() {
+                self.union_narrowings
+                    .insert(path.to_string(), (vec![index], elements.clone()));
+            }
+        }
+    }
+
     /// Returns the optional binding tested by an absence check and the branch
     /// where narrowing applies. Kind 3 keeps null after excluding undefined
     /// from a Nullish payload.
@@ -1165,20 +1319,18 @@ impl<'a> FnLowerer<'a> {
             }
             _ => return None,
         };
-        let (ident, property) = match target {
-            Expr::Ident(ident) => (ident, None),
+        let (subject, property) = match target {
+            Expr::Ident(_) => (target, None),
             Expr::Member(member) => {
-                let Expr::Ident(ident) = member.obj.as_ref() else {
-                    return None;
-                };
-                (ident, Some(member_property_name(&member.prop)?))
+                (
+                    member.obj.as_ref(),
+                    Some(member_property_name(&member.prop)?),
+                )
             }
             _ => return None,
         };
-        let name = self.resolve_binding(ident.sym.as_ref());
-        let HirType::Union(elements) = self.scope.get(&name)? else {
-            return None;
-        };
+        let name = self.union_subject_path(subject)?;
+        let elements = self.union_subject_elements(subject, &name)?;
         let allowed = self
             .union_narrowings
             .get(&name)
@@ -1364,28 +1516,19 @@ impl<'a> FnLowerer<'a> {
             let Expr::Member(member) = value else {
                 return None;
             };
-            let Expr::Ident(identifier) = member.obj.as_ref() else {
-                return None;
-            };
+            let name = self.union_subject_path(&member.obj)?;
+            let elements = self.union_subject_elements(&member.obj, &name)?;
+            let property = member_property_name(&member.prop)?;
             Some((
-                identifier.sym.to_string(),
-                member_property_name(&member.prop)?,
+                name,
+                property,
+                elements,
             ))
         };
         let property_comparison = property_target(&binary.left)
             .zip(literal_value(&binary.right))
             .or_else(|| property_target(&binary.right).zip(literal_value(&binary.left)));
-        if let Some(((identifier, property), literal)) = property_comparison {
-            let name = self.resolve_binding(&identifier);
-            let ty = self.scope.get(&name)?;
-            let elements = match ty {
-                HirType::Union(elements) => elements,
-                HirType::Optional(payload) => match payload.as_ref() {
-                    HirType::Union(elements) => elements,
-                    _ => return None,
-                },
-                _ => return None,
-            };
+        if let Some(((name, property, elements), literal)) = property_comparison {
             let values = self.union_discriminants.get(&name)?.get(&property)?;
             if values.len() != elements.len() {
                 return None;
@@ -1406,7 +1549,7 @@ impl<'a> FnLowerer<'a> {
                         name,
                         matching,
                         allowed,
-                        elements: elements.clone(),
+                        elements,
                     }],
                     equal_when_true,
                     true,
@@ -1515,14 +1658,9 @@ impl<'a> FnLowerer<'a> {
         let Expr::Member(member) = expr else {
             return None;
         };
-        let Expr::Ident(identifier) = member.obj.as_ref() else {
-            return None;
-        };
         let property = member_property_name(&member.prop)?;
-        let name = self.resolve_binding(identifier.sym.as_ref());
-        let HirType::Union(elements) = self.scope.get(&name)? else {
-            return None;
-        };
+        let name = self.union_subject_path(&member.obj)?;
+        let elements = self.union_subject_elements(&member.obj, &name)?;
         let values = self.union_discriminants.get(&name)?.get(&property)?;
         if values.len() != elements.len() {
             return None;

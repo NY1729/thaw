@@ -1479,6 +1479,15 @@ impl<'a> FnLowerer<'a> {
             Target::Var(name) => Some(name.clone()),
             _ => None,
         };
+        let assigned_union_path = match &assign.left {
+            AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
+                let expression = Expr::Member(member.clone());
+                self.union_subject_path(&expression).map(|path| {
+                    (path, self.union_subject_type(&expression))
+                })
+            }
+            _ => None,
+        };
         let assigned_method_value = (assign.op == AssignOp::Assign)
             .then(|| {
                 self.native_instance_method_value(&assign.right)
@@ -2026,7 +2035,28 @@ impl<'a> FnLowerer<'a> {
         } else {
             target
         };
+        let assigned_union_member = assigned_union_path.as_ref().and_then(
+            |(_, target_type)| match (target_type.as_ref(), &value) {
+                (
+                    Some(HirType::Union(elements)),
+                    HirExpr::UnionInject(_, index, injected),
+                ) if elements == injected => Some(*index),
+                _ => None,
+            },
+        );
         let result = self.lower_assignment_target_write_with_guard(target, value, assign.op == AssignOp::Assign)?;
+        if let Some((path, target_type)) = &assigned_union_path {
+            self.update_union_narrowings_for_write(
+                path,
+                target_type.as_ref(),
+                assigned_union_member,
+            );
+        }
+        if let Some(name) = assigned_variable.as_ref() {
+            let nested_prefix = format!("{name}.");
+            self.union_narrowings
+                .retain(|path, _| !path.starts_with(&nested_prefix));
+        }
         if let Some((object, path, value, nested)) = assigned_function_property {
             let metadata = self
                 .object_function_property_discriminants
