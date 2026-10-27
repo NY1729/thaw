@@ -2471,10 +2471,16 @@ impl<'a> FnLowerer<'a> {
                 "setTimeout" | "setInterval" | "setImmediate"
             )
             .then_some(HirType::JsValue);
+            let native_views_from = match callee_name.as_str() {
+                "setTimeout" | "setInterval" => Some(2),
+                "setImmediate" => Some(1),
+                _ => None,
+            };
             let result = self.lower_dynamic_value_call(
                 &binding,
                 &call.args,
                 expected_return_hint.as_ref().or(timer_handle.as_ref()),
+                native_views_from,
             )?;
             return self.wrap_call_argument_bindings(
                 result,
@@ -2527,7 +2533,7 @@ impl<'a> FnLowerer<'a> {
             && !self.scope.contains_key(&callee_name)
             && !self.signatures.contains_key(&callee_name)
         {
-            let values = self.dynamic_call_args_json(&call.args)?;
+            let values = self.dynamic_call_args_json(&call.args, None)?;
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("callDynamic".into())),
                 vec![HirExpr::Lit(HirLit::Str("eval".into())), values],
@@ -2577,6 +2583,7 @@ impl<'a> FnLowerer<'a> {
                 &callee_name,
                 &call.args,
                 expected_return_hint.as_ref(),
+                None,
             );
         }
         // An `any`- (or explicit `unknown`-) annotated callable is stored as

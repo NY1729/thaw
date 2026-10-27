@@ -8,13 +8,18 @@ impl<'a> FnLowerer<'a> {
     fn dynamic_call_args_json(
         &mut self,
         args: &[swc_ecma_ast::ExprOrSpread],
+        native_views_from: Option<usize>,
     ) -> Result<HirExpr, String> {
         if args.iter().any(|argument| argument.spread.is_some()) {
             return Err("dynamic function calls do not support spread arguments".into());
         }
         let values = args
             .iter()
-            .map(|argument| {
+            .enumerate()
+            .map(|(index, argument)| {
+                if native_views_from.is_some_and(|start| index >= start) {
+                    return self.lower_timer_argument_json(&argument.expr);
+                }
                 let value = if let Some(value) =
                     self.ambient_js_export_argument(&argument.expr, argument.spread.is_some())
                 {
@@ -32,10 +37,71 @@ impl<'a> FnLowerer<'a> {
                         )?,
                     }
                 };
+                let timer_callback = native_views_from.is_some()
+                    && index == 0
+                    && matches!(
+                        self.infer_expr_type(&value)?,
+                        HirType::Function(..)
+                            | HirType::CallableFunction(..)
+                            | HirType::FunctionWithThis(..)
+                    );
+                let value = if timer_callback {
+                    // Timer callback arguments need graph handles to keep native collection views live.
+                    let value = self.coerce_to_declared(&HirType::JsValue, value)?;
+                    match value {
+                        HirExpr::Call(callee, args)
+                            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "registerNativeCallback") =>
+                        {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
+                                args,
+                            )
+                        }
+                        other => other,
+                    }
+                } else {
+                    value
+                };
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
         self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))
+    }
+
+    fn lower_timer_argument_json(&mut self, expr: &swc_ecma_ast::Expr) -> Result<HirExpr, String> {
+        if let Some(value) = self.ambient_js_export_argument(expr, false) {
+            return self.coerce_to_declared(&HirType::Json, value);
+        }
+        let value = match expr {
+            swc_ecma_ast::Expr::Arrow(arrow) => self.lower_contextual_arrow(
+                arrow,
+                &vec![HirType::JsValue; arrow.params.len()],
+                None,
+            )?,
+            _ => self.lower_expr(expr)?,
+        };
+        let actual = self.infer_expr_type(&value)?;
+        let is_bytes = self.infer_expr_type_inner(&value)? == HirType::Bytes;
+        // Timer records retain their JS arguments after this call returns. Send native
+        // collections through their existing owner-backed views instead of JSON snapshots.
+        let view = if is_bytes {
+            None
+        } else {
+            match &actual {
+                HirType::Array(element) => self.lower_native_array_as_dynamic_view(value.clone(), element).ok(),
+                HirType::Map(..) | HirType::Set(_) if Self::native_collection_view_supported(&actual) => {
+                    self.lower_native_collection_as_dynamic_view(value.clone(), &actual).ok()
+                }
+                _ => None,
+            }
+        };
+        if let Some(view) = view {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                vec![view],
+            ));
+        }
+        self.coerce_to_declared(&HirType::Json, value)
     }
 
     fn lower_dynamic_value_call_on(
@@ -43,7 +109,7 @@ impl<'a> FnLowerer<'a> {
         callee: HirExpr,
         args: &[swc_ecma_ast::ExprOrSpread],
     ) -> Result<HirExpr, String> {
-        let values = self.dynamic_call_args_json(args)?;
+        let values = self.dynamic_call_args_json(args, None)?;
         Ok(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueHandle".into())),
             vec![callee, values],
@@ -55,8 +121,9 @@ impl<'a> FnLowerer<'a> {
         callee: &str,
         args: &[swc_ecma_ast::ExprOrSpread],
         expected: Option<&HirType>,
+        native_views_from: Option<usize>,
     ) -> Result<HirExpr, String> {
-        let values = self.dynamic_call_args_json(args)?;
+        let values = self.dynamic_call_args_json(args, native_views_from)?;
         Ok(HirExpr::Call(
             Box::new(HirExpr::Var(
                 if matches!(expected, None | Some(HirType::Json | HirType::JsValue | HirType::Dynamic)) {

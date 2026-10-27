@@ -5929,7 +5929,7 @@ impl<'a> FnLowerer<'a> {
                             callee
                         };
                         let args = new_expr.args.as_deref().unwrap_or_default();
-                        let values = self.dynamic_call_args_json(args)?;
+                        let values = self.dynamic_call_args_json(args, None)?;
                         return Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("constructDynamicValue".into())),
                             vec![callee, values],

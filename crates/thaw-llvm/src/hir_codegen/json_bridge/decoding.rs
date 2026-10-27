@@ -829,6 +829,43 @@ impl<'ctx> HirCompiler<'ctx> {
         element: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.compile_validate_native_argument(json, &HirType::Array(Box::new(element.clone())))?;
+        // A native array view passed through a dynamic callback still carries its original owner.
+        // Recover it so typed callback arguments keep the same array handle instead of decoding a copy.
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let layout = format!("array:{element:?}");
+        let (pointer, present) = self.query_native_receiver(json.into_pointer_value(), &layout)?;
+        let function = self.current_function();
+        let native = self.context.append_basic_block(function, "json_native_array_owner");
+        let copy = self.context.append_basic_block(function, "json_native_array_copy");
+        let done = self.context.append_basic_block(function, "json_native_array_ready");
+        self.builder.build_conditional_branch(present, native, copy)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(native);
+        let native = self.builder.build_int_to_ptr(
+            pointer, self.context.ptr_type(AddressSpace::default()), "json_native_array_owner_handle",
+        ).map_err(|error| error.to_string())?;
+        let native_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(copy);
+        let copied = self.compile_json_to_native_array_copy(json, element)?;
+        let copy_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let result = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "json_native_array")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&native, native_end), (&copied, copy_end)]);
+        Ok(result.as_basic_value())
+    }
+
+    fn compile_json_to_native_array_copy(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        element: &HirType,
+    ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let length = self
             .builder
@@ -992,7 +1029,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // `array` is a freshly built raw buffer; wrap it in a handle before
         // treating it as this call's array-typed return value (see
         // `compile_array_wrap`'s doc comment).
-        Ok(self.compile_array_wrap(array)?.into())
+        self.compile_array_wrap(array)
     }
 
     fn compile_json_to_native_tuple(
