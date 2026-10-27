@@ -2221,44 +2221,60 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    /// `s[i]` on a string identifier, where `undefined` is observable (a console
-    /// argument or an `undefined` comparison): `string | undefined`, out of range
-    /// (or a fractional/negative index) reads `undefined`. Other `s[i]` reads stay
-    /// plain `charAt` (out of range reads "") so they keep the bare `string` type.
+    /// String indexing has a possibly-undefined result, even when its value is
+    /// saved before it is observed.
     pub(super) fn lower_string_index_optional(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
         let Expr::Member(member) = expr else { return Ok(None) };
-        let (Expr::Ident(object), MemberProp::Computed(computed)) = (member.obj.as_ref(), &member.prop) else {
-            return Ok(None);
-        };
-        if matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_)))
-            || !matches!(
-                self.scope.get(&self.resolve_binding(object.sym.as_ref())),
-                Some(HirType::Str | HirType::StrLiteral(_))
-            )
-        {
+        let MemberProp::Computed(computed) = &member.prop else { return Ok(None) };
+        if !matches!(member.obj.as_ref(), Expr::Ident(_)) {
             return Ok(None);
         }
+        if !matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Str | HirType::StrLiteral(_))) {
+            return Ok(None);
+        }
+        let receiver = self.lower_member_receiver(&member.obj)?;
         let index = self.lower_expr(&computed.expr)?;
         if self.infer_expr_type(&index)? != HirType::F64 {
             return Ok(None);
         }
-        let receiver = self.lower_expr(&member.obj)?;
-        let name = format!("__thaw_str_index_{}", self.next_binding);
+        self.lower_string_index_optional_from_values(member, receiver, index).map(Some)
+    }
+
+    fn lower_string_index_optional_from_values(
+        &mut self,
+        member: &MemberExpr,
+        receiver: HirExpr,
+        index: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.coerce_to_declared(&HirType::Str, receiver)?;
+        self.expect_type(&HirType::F64, &index, "string index")?;
+        let receiver_name = format!("__thaw_str_index_receiver_{}", self.next_binding);
         self.next_binding += 1;
-        self.scope.insert(name.clone(), HirType::F64);
-        let index_var = || HirExpr::Var(name.clone());
+        let index_name = format!("__thaw_str_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let length_name = format!("__thaw_str_index_length_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), HirType::Str);
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope.insert(length_name.clone(), HirType::F64);
+        let receiver_var = HirExpr::Var(receiver_name.clone());
+        let index_var = HirExpr::Var(index_name.clone());
+        let length_var = HirExpr::Var(length_name.clone());
         let at = self.lower_call(&CallExpr {
             span: member.span,
             ctxt: Default::default(),
             callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
                 span: member.span,
-                obj: member.obj.clone(),
+                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    receiver_name.clone().into(),
+                    member.span,
+                ))),
                 prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("charAt".into(), member.span)),
             }))),
             args: vec![swc_ecma_ast::ExprOrSpread {
                 spread: None,
                 expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
-                    name.clone().into(),
+                    index_name.clone().into(),
                     member.span,
                 ))),
             }],
@@ -2266,35 +2282,132 @@ impl<'a> FnLowerer<'a> {
         })?;
         let lower_bound = HirExpr::BinOp(
             BinOp::GtEq,
-            Box::new(index_var()),
+            Box::new(index_var.clone()),
             Box::new(HirExpr::Lit(HirLit::F64(0.0))),
         );
         let upper_bound = HirExpr::BinOp(
             BinOp::Lt,
-            Box::new(index_var()),
-            Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_string_length".into())),
-                vec![receiver],
-            )),
+            Box::new(index_var.clone()),
+            Box::new(length_var),
         );
         let integral = HirExpr::BinOp(
             BinOp::EqEqEq,
-            Box::new(index_var()),
+            Box::new(index_var.clone()),
             Box::new(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_math_trunc".into())),
-                vec![index_var()],
+                vec![index_var],
             )),
         );
         let in_range = self.lower_logical_expr(lower_bound, upper_bound, true)?;
         let test = self.lower_logical_expr(in_range, integral, true)?;
-        let optional = HirType::Optional(Box::new(HirType::Str));
         let result = HirExpr::Conditional(
             Box::new(test),
             Box::new(HirExpr::OptionalSome(Box::new(at), HirType::Str)),
             Box::new(HirExpr::OptionalNone(HirType::Str)),
-            optional,
+            HirType::Optional(Box::new(HirType::Str)),
         );
-        self.wrap_call_argument_bindings(result, &[(name, HirType::F64, index)]).map(Some)
+        let result = HirExpr::Block(vec![
+            HirStmt::Let(
+                length_name,
+                HirType::F64,
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_length".into())),
+                    vec![receiver_var],
+                ),
+            ),
+            HirStmt::Return(Some(result)),
+        ]);
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (receiver_name, HirType::Str, receiver),
+                (index_name, HirType::F64, index),
+            ],
+        )
+    }
+
+    fn lower_string_key_read(
+        &mut self,
+        member: &MemberExpr,
+        receiver: HirExpr,
+        key: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.coerce_to_declared(&HirType::Str, receiver)?;
+        let key = self.coerce_to_declared(&HirType::Str, key)?;
+        let receiver_name = format!("__thaw_str_key_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_name = format!("__thaw_str_key_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_str_key_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let length_name = format!("__thaw_str_key_length_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), HirType::Str);
+        self.scope.insert(key_name.clone(), HirType::Str);
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope.insert(length_name.clone(), HirType::F64);
+        let receiver_var = HirExpr::Var(receiver_name.clone());
+        let key_var = HirExpr::Var(key_name.clone());
+        let index_var = HirExpr::Var(index_name.clone());
+        let parsed_index = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_to_number".into())),
+            vec![key_var.clone()],
+        );
+        let string_index = self.lower_string_index_optional_from_values(
+            member,
+            receiver_var.clone(),
+            index_var.clone(),
+        )?;
+        let string_index = self.optional_read_as_json(string_index)?;
+        let canonical_index = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(key_var.clone()),
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                vec![index_var],
+            )),
+        );
+        let undefined = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+            Vec::new(),
+        );
+        let string_property = HirExpr::Conditional(
+            Box::new(canonical_index),
+            Box::new(string_index),
+            Box::new(undefined),
+            HirType::Json,
+        );
+        let error_property = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_get_prop".into())),
+            vec![receiver_var.clone(), key_var.clone()],
+        );
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_is_error".into())),
+                vec![receiver_var.clone()],
+            )),
+            Box::new(error_property),
+            Box::new(HirExpr::Block(vec![
+                HirStmt::Let(
+                    length_name,
+                    HirType::F64,
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_length".into())),
+                        vec![receiver_var],
+                    ),
+                ),
+                HirStmt::Return(Some(string_property)),
+            ])),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (receiver_name, HirType::Str, receiver),
+                (key_name, HirType::Str, key),
+                (index_name, HirType::F64, parsed_index),
+            ],
+        )
     }
 
     /// `console.log(record.missing)` must print `undefined` like Node, but a
@@ -3352,38 +3465,15 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.lower_dynamic_value_property_read(obj, key)
                     }
-                    // `s[i]` reads one character, like `s.charAt(i)` (out of range reads "").
-                    HirType::Str | HirType::StrLiteral(_)
-                        if !matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_))) =>
-                    {
-                        // `err[key]` with a string key reads an own property of an Error value.
+                    HirType::Str | HirType::StrLiteral(_) => {
                         let key = self.lower_expr(&computed.expr)?;
-                        if matches!(self.infer_expr_type(&key)?, HirType::Str | HirType::StrLiteral(_)) {
-                            let key = self.coerce_to_declared(&HirType::Str, key)?;
-                            let receiver = self.lower_expr(&member.obj)?;
-                            return Ok(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_error_get_prop".into())),
-                                vec![receiver, key],
-                            ));
+                        match self.infer_expr_type(&key)? {
+                            HirType::F64 => self.lower_string_index_optional_from_values(member, obj, key),
+                            HirType::Str | HirType::StrLiteral(_) => {
+                                self.lower_string_key_read(member, obj, key)
+                            }
+                            other => Err(format!("string index key must be a number or string, got {other:?}")),
                         }
-                        let span = member.span;
-                        self.lower_call(&CallExpr {
-                            span,
-                            ctxt: Default::default(),
-                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                                span,
-                                obj: member.obj.clone(),
-                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
-                                    "charAt".into(),
-                                    span,
-                                )),
-                            }))),
-                            args: vec![swc_ecma_ast::ExprOrSpread {
-                                spread: None,
-                                expr: computed.expr.clone(),
-                            }],
-                            type_args: None,
-                        })
                     }
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
