@@ -4241,6 +4241,25 @@ impl<'a> FnLowerer<'a> {
     /// A raw (possibly `Optional`) field read as `Json`: `undefined` while absent.
     fn optional_read_as_json(&mut self, read: HirExpr) -> Result<HirExpr, String> {
         let ty = self.infer_expr_type(&read)?;
+        if ty == HirType::Str {
+            let name = format!("__thaw_sink_read_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), HirType::Str);
+            let var = HirExpr::Var(name.clone());
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                    vec![var.clone()],
+                )),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_undefined".into())),
+                    Vec::new(),
+                )),
+                Box::new(self.coerce_to_declared(&HirType::Json, var)?),
+                HirType::Json,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, HirType::Str, read)]);
+        }
         let HirType::Optional(payload) = &ty else {
             return self.coerce_to_declared(&HirType::Json, read);
         };
