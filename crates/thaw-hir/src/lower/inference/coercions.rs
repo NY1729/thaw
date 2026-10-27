@@ -561,6 +561,22 @@ impl<'a> FnLowerer<'a> {
                 return self.coerce_to_declared(declared, value);
             }
         }
+        // Keep an indexed read's bounds check when its destination can represent undefined.
+        let value = match value {
+            HirExpr::TypedIndex(array, index, element)
+                if matches!(element, HirType::F64 | HirType::Str | HirType::Bool | HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_))
+                    && (matches!(declared, HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Json | HirType::JsValue | HirType::Dynamic)
+                        || matches!(declared, HirType::Union(members) if members.contains(&HirType::Undefined))) =>
+            {
+                let array_type = self.infer_expr_type(&array)?;
+                if matches!(&array_type, HirType::Array(inner) if **inner == element) {
+                    self.lower_array_index(*array, array_type, element, *index)?
+                } else {
+                    HirExpr::TypedIndex(array, index, element)
+                }
+            }
+            value => value,
+        };
         if let HirType::NonArrowReceiver(receiver) = declared {
             if let HirExpr::NonArrowThis {
                 payload,
