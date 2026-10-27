@@ -466,6 +466,121 @@ fn narrows_object_unions_by_literal_discriminants() {
 }
 
 #[test]
+fn narrows_discriminated_union_methods_for_local_and_nested_paths() {
+    let source = r#"
+        type V =
+            { kind: "number"; value: number } |
+            { kind: "text"; value: string };
+        type Holder = { payload: V };
+        const topLevel: Holder = { payload: { kind: "text", value: "global" } };
+        if (topLevel.payload.kind === "text") {
+            console.log(topLevel.payload.value.toUpperCase());
+        } else {
+            console.log(String(topLevel.payload.value + 1));
+        }
+        function local(item: V): string {
+            if (item.kind === "number") return String(item.value + 1);
+            return item.value.toUpperCase();
+        }
+        function localValue(): string {
+            const item: V = { kind: "text", value: "local" };
+            if (item.kind === "number") return String(item.value + 1);
+            return item.value.toUpperCase();
+        }
+        function nested(item: Holder): string {
+            if (item.payload.kind === "number") return String(item.payload.value + 1);
+            return item.payload.value.toUpperCase();
+        }
+        function inverted(item: Holder): string {
+            if (item.payload.kind !== "text") return String(item.payload.value + 2);
+            return item.payload.value.toUpperCase();
+        }
+        function earlyReturn(item: Holder): string {
+            if (item.payload.kind === "text") return item.payload.value.toUpperCase();
+            return String(item.payload.value + 3);
+        }
+        function replaceNested(item: Holder): string {
+            if (item.payload.kind === "number") {
+                item.payload = { kind: "text", value: "changed" };
+                return item.payload.value.toUpperCase();
+            }
+            return item.payload.value.toUpperCase();
+        }
+        let payloadReads = 0;
+        const accessor: Holder = {
+            get payload(): V {
+                payloadReads++;
+                return { kind: "text", value: "getter" };
+            }
+        };
+        function readAccessor(item: Holder): string {
+            if (item.payload.kind === "text") return item.payload.value.toUpperCase();
+            return "other";
+        }
+        function main(): void {
+            console.log(local({ kind: "number", value: 4 }));
+            console.log(local({ kind: "text", value: "ok" }));
+            console.log(localValue());
+            console.log(nested({ payload: { kind: "number", value: 4 } }));
+            console.log(nested({ payload: { kind: "text", value: "ok" } }));
+            console.log(inverted({ payload: { kind: "number", value: 4 } }));
+            console.log(inverted({ payload: { kind: "text", value: "ok" } }));
+            console.log(earlyReturn({ payload: { kind: "number", value: 4 } }));
+            console.log(earlyReturn({ payload: { kind: "text", value: "ok" } }));
+            console.log(replaceNested({ payload: { kind: "number", value: 4 } }));
+            console.log(replaceNested({ payload: { kind: "text", value: "ok" } }));
+            console.log(readAccessor(accessor), payloadReads);
+        }
+    "#;
+    let stale_branch = r#"
+        type V = { kind: "number"; value: number } | { kind: "text"; value: string };
+        type Holder = { payload: V };
+        function stale(item: Holder): string {
+            if (item.payload.kind === "number") item.payload.value + 1;
+            return item.payload.value.toUpperCase();
+        }
+    "#;
+    let stale_discriminant_write = r#"
+        type V = { kind: "number"; value: number } | { kind: "text"; value: string };
+        type Holder = { payload: V };
+        function stale(item: Holder): string {
+            if (item.payload.kind === "number") {
+                item.payload.kind = "text";
+                return item.payload.value.toUpperCase();
+            }
+            return "other";
+        }
+    "#;
+    // The lowerer needs more than Rust's small test-worker stack for nested member paths.
+    let (output, stale_branch_error, stale_write_error) = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let stale_branch_error = thaw_hir::lower_module(
+                &thaw_parser::parse_typescript(stale_branch).unwrap(),
+            )
+            .unwrap_err();
+            let stale_write_error = thaw_hir::lower_module(
+                &thaw_parser::parse_typescript(stale_discriminant_write).unwrap(),
+            )
+            .unwrap_err();
+            (
+                compile_and_run(source, "discriminated_union_nested_method_narrowing"),
+                stale_branch_error,
+                stale_write_error,
+            )
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(
+        output,
+        "GLOBAL\n5\nOK\nLOCAL\n5\nOK\n6\nOK\n7\nOK\nCHANGED\nOK\nGETTER 2\n"
+    );
+    assert!(stale_branch_error.contains("Union"), "{stale_branch_error}");
+    assert!(stale_write_error.contains("Union"), "{stale_write_error}");
+}
+
+#[test]
 fn destructures_object_unions_with_nested_fields_defaults_and_rest() {
     let source = r#"
         type Event =

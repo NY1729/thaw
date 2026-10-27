@@ -269,6 +269,92 @@ fn object_union_discriminants(
     by_property
 }
 
+fn nested_object_union_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> HashMap<Symbol, UnionDiscriminants> {
+    fn collect(
+        ty: &TsType,
+        generic: &GenericInterfaces<'_>,
+        prefix: &str,
+        visiting: &mut HashSet<Symbol>,
+        result: &mut HashMap<Symbol, UnionDiscriminants>,
+    ) {
+        let raw = strip_parenthesized_ts_type(ty);
+        let resolved = resolve_plain_alias_type(raw, generic).unwrap_or(raw);
+        let TsType::TsTypeLit(object) = resolved else {
+            return;
+        };
+        let alias = match raw {
+            TsType::TsTypeRef(reference) => match &reference.type_name {
+                swc_ecma_ast::TsEntityName::Ident(name)
+                    if generic.plain_aliases.contains_key(name.sym.as_ref()) =>
+                {
+                    Some(name.sym.to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if alias.as_ref().is_some_and(|name| !visiting.insert(name.clone())) {
+            return;
+        }
+        for member in &object.members {
+            let TsTypeElement::TsPropertySignature(property) = member else {
+                continue;
+            };
+            let name = match property.key.as_ref() {
+                Expr::Ident(name) => name.sym.to_string(),
+                Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
+                _ => continue,
+            };
+            let Some(annotation) = &property.type_ann else {
+                continue;
+            };
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}.{name}")
+            };
+            let nested = object_union_discriminants(&annotation.type_ann, generic);
+            if !nested.is_empty() {
+                result.insert(path.clone(), nested);
+            } else {
+                let child = strip_parenthesized_ts_type(&annotation.type_ann);
+                if matches!(
+                    resolve_plain_alias_type(child, generic).unwrap_or(child),
+                    TsType::TsTypeLit(_)
+                ) {
+                    collect(&annotation.type_ann, generic, &path, visiting, result);
+                }
+            }
+        }
+        if let Some(alias) = alias {
+            visiting.remove(&alias);
+        }
+    }
+
+    let mut result = HashMap::new();
+    collect(ty, generic, "", &mut HashSet::new(), &mut result);
+    result
+}
+
+impl<'a> FnLowerer<'a> {
+    fn register_object_union_discriminants(&mut self, name: &str, ty: &TsType) {
+        let discriminants = object_union_discriminants(ty, self.generic_interfaces);
+        if !discriminants.is_empty() {
+            self.union_discriminants
+                .insert(name.to_string(), discriminants);
+        }
+        for (path, discriminants) in
+            nested_object_union_discriminants(ty, self.generic_interfaces)
+        {
+            self.union_discriminants
+                .insert(format!("{name}.{path}"), discriminants);
+        }
+    }
+}
+
 fn array_element_union_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
