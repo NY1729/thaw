@@ -18,6 +18,50 @@ fn typinggaps_string_index_undefined_contract() {
 }
 
 #[test]
+fn typinggaps_saved_string_index_preserves_undefined() {
+    let source = r##"function main(): void {
+  const s = "abc"[99];
+  console.log(s === undefined, typeof s, String(s));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "typinggaps_saved_string_index_preserves_undefined"),
+        "true undefined undefined\n"
+    );
+}
+
+#[test]
+fn typinggaps_string_index_value_flow_contract() {
+    let source = r##"function missing(): string | undefined { return "abc"[99]; }
+function base(): string { console.log("base"); return "abc"; }
+function index(): number { console.log("index"); return 99; }
+function main(): void {
+  const text = "abc";
+  const absentConst = text[99];
+  let absentLet = text[text.length];
+  const returned = missing();
+  console.log("const", absentConst === undefined, typeof absentConst, String(absentConst));
+  console.log("let", absentLet === undefined, typeof absentLet, absentLet ?? "fallback", absentLet?.length);
+  console.log("convert", String(text[99]), "prefix:" + text[99], "prefix:" + absentConst);
+  console.log("return", returned === undefined, typeof returned, String(returned));
+  absentLet = text[1];
+  console.log("assigned", absentLet, typeof absentLet);
+  const dynamicKey: string = "1";
+  console.log("keys", text[0], text["1"], text[dynamicKey], text[3] === undefined,
+    text["99"] === undefined, text["01"] === undefined, text[-1] === undefined,
+    text[1.5] === undefined, ""[0] === undefined);
+  console.log("charAt", text.charAt(99) === "", text.charAt(99));
+  const once = base()[index()];
+  console.log("once", once === undefined);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "typinggaps_string_index_value_flow_contract"),
+        "const true undefined undefined\nlet true undefined fallback undefined\nconvert undefined prefix:undefined prefix:undefined\nreturn true undefined undefined\nassigned b string\nkeys a b b true true true true true true\ncharAt true \nbase\nindex\nonce true\n"
+    );
+}
+
+#[test]
 fn typinggaps_number_of_numeric_union_comparator_contract() {
     let source = r##"function main(): void {
   const xs: (number | string)[] = [3, "1", 2];
