@@ -3778,6 +3778,19 @@ impl<'a> FnLowerer<'a> {
                         if template.is_some() {
                             return Ok(HirExpr::Lit(HirLit::Str("function".into())));
                         }
+                        if operand_type == HirType::Str {
+                            let parameter = format!("__thaw_typeof_string_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(parameter.clone(), HirType::Str);
+                            let observed = self.function_observable_typeof(
+                                HirExpr::Var(parameter.clone()),
+                                &HirType::Str,
+                            )?;
+                            return self.wrap_call_argument_bindings(
+                                observed,
+                                &[(parameter, HirType::Str, value)],
+                            );
+                        }
                         if Self::contains_function_value(&operand_type) {
                             let name =
                                 format!("__thaw_typeof_function_tagged_{}", self.next_binding);
