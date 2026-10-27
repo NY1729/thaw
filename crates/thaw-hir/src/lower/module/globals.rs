@@ -90,6 +90,9 @@ fn lower_top_level_initializers(
                     };
                     let name = binding.id.sym.to_string();
                     let expected = global_types[&name].clone();
+                    if let Some(annotation) = &binding.type_ann {
+                        lowerer.register_object_union_discriminants(&name, &annotation.type_ann);
+                    }
                     let init_expr = declarator
                         .init
                         .as_deref()

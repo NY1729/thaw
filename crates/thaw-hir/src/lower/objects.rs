@@ -3819,8 +3819,16 @@ impl<'a> FnLowerer<'a> {
                         // receiver as its leading argument), a lone setter
                         // reads `undefined`, and an ordinary data field reads
                         // directly.
-                        let read =
-                            self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())?;
+                        let read = if self.union_narrowings.is_empty() {
+                            self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())?
+                        } else {
+                            self.lower_narrowed_fixed_object_property_read(
+                                obj,
+                                member,
+                                fields,
+                                prop.sym.as_ref(),
+                            )?
+                        };
                         // An `any` payload already holds `undefined`: it never needs the raw `Optional`.
                         let json_payload = matches!(&read, HirExpr::PropAccess(_, HirType::Object(fields), field)
                             if fields.iter().any(|(name, ty)| name == field
