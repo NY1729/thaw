@@ -1932,13 +1932,7 @@ fn lower_generic_instance(
             _ => None,
         };
         if let Some(annotation) = annotation {
-            let discriminants =
-                object_union_discriminants(&annotation.type_ann, generic_interfaces);
-            if !discriminants.is_empty() {
-                lowerer
-                    .union_discriminants
-                    .insert(param.name.clone(), discriminants);
-            }
+            lowerer.register_object_union_discriminants(&param.name, &annotation.type_ann);
             let element_discriminants =
                 array_element_union_discriminants(&annotation.type_ann, generic_interfaces);
             if !element_discriminants.is_empty() {

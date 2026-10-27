@@ -1182,12 +1182,7 @@ impl<'a> FnLowerer<'a> {
                     self.propagate_destructured_union_alias(&source, &hir_name);
                 }
                 if let Some(annotation) = &binding.type_ann {
-                    let discriminants =
-                        object_union_discriminants(&annotation.type_ann, self.generic_interfaces);
-                    if !discriminants.is_empty() {
-                        self.union_discriminants
-                            .insert(hir_name.clone(), discriminants);
-                    }
+                    self.register_object_union_discriminants(&hir_name, &annotation.type_ann);
                     let element_discriminants = array_element_union_discriminants(
                         &annotation.type_ann,
                         self.generic_interfaces,
