@@ -754,3 +754,5 @@ include!("tests/fldrest_contracts.rs");
 include!("tests/fldlim_contracts.rs");
 include!("tests/errrest_contracts.rs");
 include!("tests/errrest2_contracts.rs");
+
+include!("tests/oobread_contracts.rs");

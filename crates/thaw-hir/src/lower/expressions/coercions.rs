@@ -971,6 +971,11 @@ impl<'a> FnLowerer<'a> {
         // value instead of falling back to `y` (real trigger: `const m:
         // any = null; m ?? "default"` returning `null`, not
         // `"default"`).
+        if lhs_type == HirType::JsValue {
+            // A live handle (`new Uint8Array(n)[i]`): test its dynamic snapshot.
+            let lhs = self.coerce_to_declared(&HirType::Json, lhs)?;
+            return self.lower_nullish_coalescing(lhs, rhs);
+        }
         if lhs_type == HirType::Json {
             let rhs = self.coerce_to_declared(&HirType::Json, rhs)?;
             let name = format!("__thaw_nullish_json_left_{}", self.next_binding);

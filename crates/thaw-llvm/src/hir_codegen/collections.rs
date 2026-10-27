@@ -791,10 +791,15 @@ impl<'ctx> HirCompiler<'ctx> {
         // `lower_array_index`'s HIR-level presence/bounds check for a
         // "conservative" parameter) reads a zeroed scratch slot instead of
         // memory outside the array's own arena allocation.
+        let read_fn = if matches!(self.expr_hir_type(array), Some(HirType::Array(element)) if *element == HirType::F64) {
+            "thaw_array_read_ptr_num"
+        } else {
+            "thaw_array_read_ptr"
+        };
         let element = self
             .builder
             .build_call(
-                self.module.get_function("thaw_array_read_ptr").unwrap(),
+                self.module.get_function(read_fn).unwrap(),
                 &[
                     arr_ptr.into(),
                     i64_type.const_int(element_bytes, false).into(),

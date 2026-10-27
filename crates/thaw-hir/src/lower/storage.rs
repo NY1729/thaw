@@ -65,6 +65,7 @@ impl StoragePlan {
             ..ObservedMembers::default()
         };
         module.visit_with(&mut observed);
+        observed.resolve_flows();
         let mut instantiated_classes = HashSet::new();
         for class in &observed.tables.instantiated {
             let mut current = Some(class.clone());
@@ -1393,6 +1394,9 @@ struct ObservedMembers {
     extended: bool,
     /// Member reads in sinks that keep `undefined` (extended analysis): span and property name.
     sinks: Vec<(Span, String)>,
+    idents: HashSet<String>,
+    flows: Vec<(String, (u32, u32))>,
+    in_target: bool,
 }
 
 impl ObservedMembers {
@@ -1425,7 +1429,62 @@ impl ObservedMembers {
                     self.names.insert(name.sym.to_string());
                 }
             }
+            Expr::Ident(ident) => {
+                self.idents.insert(ident.sym.to_string());
+            }
             _ => {}
+        }
+    }
+
+    fn observe_return_flow(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Paren(paren) => self.observe_return_flow(&paren.expr),
+            Expr::Ident(ident) => {
+                self.idents.insert(ident.sym.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    fn observe_array_index(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Paren(paren) => self.observe_array_index(&paren.expr),
+            Expr::Member(member) if matches!(member.prop, swc_ecma_ast::MemberProp::Computed(_)) => {
+                self.members.insert(storage_key(member.span));
+            }
+            _ => {}
+        }
+    }
+
+    fn flow(&mut self, name: &str, init: &Expr) {
+        match init {
+            Expr::Paren(paren) => self.flow(name, &paren.expr),
+            Expr::Member(member)
+                if matches!(member.prop, swc_ecma_ast::MemberProp::Computed(_))
+                    && Self::stable_index_receiver(&member.obj) =>
+            {
+                self.flows.push((name.to_owned(), storage_key(member.span)));
+            }
+            _ => {}
+        }
+    }
+
+    fn stable_index_receiver(expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => Self::stable_index_receiver(&paren.expr),
+            Expr::TsAs(cast) => Self::stable_index_receiver(&cast.expr),
+            Expr::TsNonNull(cast) => Self::stable_index_receiver(&cast.expr),
+            Expr::Await(_) | Expr::Call(_) | Expr::New(_) => false,
+            Expr::Member(member) => Self::stable_index_receiver(&member.obj),
+            _ => true,
+        }
+    }
+
+    fn resolve_flows(&mut self) {
+        for (name, span) in self.flows.drain(..) {
+            if self.idents.contains(&name) {
+                self.members.insert(span);
+            }
         }
     }
 
@@ -1495,7 +1554,39 @@ impl Visit for ObservedMembers {
                 }
             }
         }
-        call.visit_children_with(self);
+        let outer = std::mem::replace(
+            &mut self.in_target,
+            matches!(&call.callee, swc_ecma_ast::Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Member(_))),
+        );
+        call.callee.visit_with(self);
+        self.in_target = outer;
+        call.args.visit_with(self);
+    }
+    fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+        if let (swc_ecma_ast::AssignOp::Assign, swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Ident(name))) =
+            (assign.op, &assign.left)
+        {
+            self.flow(name.id.sym.as_ref(), &assign.right);
+        }
+        let outer = std::mem::replace(&mut self.in_target, true);
+        assign.left.visit_with(self);
+        self.in_target = outer;
+        assign.right.visit_with(self);
+    }
+    fn visit_update_expr(&mut self, update: &swc_ecma_ast::UpdateExpr) {
+        let outer = std::mem::replace(&mut self.in_target, true);
+        update.arg.visit_with(self);
+        self.in_target = outer;
+    }
+    fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+        if !self.in_target {
+            if let Expr::Member(inner) = member.obj.as_ref() {
+                if matches!(inner.prop, swc_ecma_ast::MemberProp::Computed(_)) {
+                    self.members.insert(storage_key(inner.span));
+                }
+            }
+        }
+        member.visit_children_with(self);
     }
     fn visit_tpl(&mut self, template: &swc_ecma_ast::Tpl) {
         for expr in &template.exprs {
@@ -1505,21 +1596,35 @@ impl Visit for ObservedMembers {
     }
     fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
         if let Some(value) = &statement.arg {
+            self.observe_return_flow(value);
             self.sink(value);
         }
         statement.visit_children_with(self);
     }
     fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
         if let swc_ecma_ast::ArrowFunctionBody::Expr(body) = arrow.body.as_ref() {
+            self.observe_return_flow(body);
             self.sink(body);
         }
         arrow.visit_children_with(self);
     }
     fn visit_key_value_prop(&mut self, property: &swc_ecma_ast::KeyValueProp) {
+        self.observe_array_index(&property.value);
         self.sink(&property.value);
         property.visit_children_with(self);
     }
     fn visit_array_lit(&mut self, array: &swc_ecma_ast::ArrayLit) {
+        let indexed_read = |element: &Option<swc_ecma_ast::ExprOrSpread>| {
+            element.as_ref().is_some_and(|element| {
+                element.spread.is_none()
+                    && matches!(element.expr.as_ref(), Expr::Member(member) if matches!(member.prop, swc_ecma_ast::MemberProp::Computed(_)))
+            })
+        };
+        if array.elems.iter().all(indexed_read) {
+            for element in array.elems.iter().flatten() {
+                self.observe(&element.expr);
+            }
+        }
         for element in array.elems.iter().flatten().filter(|element| element.spread.is_none()) {
             self.sink(&element.expr);
         }
@@ -1542,9 +1647,14 @@ impl Visit for ObservedMembers {
     }
     fn visit_bin_expr(&mut self, binary: &swc_ecma_ast::BinExpr) {
         use swc_ecma_ast::BinaryOp::*;
-        if matches!(binary.op, Add | EqEq | NotEq | EqEqEq | NotEqEq | NullishCoalescing) {
-            self.observe(&binary.left);
-            self.observe(&binary.right);
+        if matches!(binary.op, Add | EqEq | NotEq | EqEqEq | NotEqEq | NullishCoalescing | LogicalAnd | LogicalOr) {
+            let text = |expr: &Expr| matches!(expr, Expr::Lit(swc_ecma_ast::Lit::Str(_)) | Expr::Tpl(_));
+            let numeric_add = binary.op == Add && !text(&binary.left) && !text(&binary.right);
+            for operand in [&binary.left, &binary.right] {
+                if !(numeric_add && matches!(operand.as_ref(), Expr::Ident(_))) {
+                    self.observe(operand);
+                }
+            }
         }
         binary.visit_children_with(self);
     }
@@ -1557,7 +1667,8 @@ impl Visit for ObservedMembers {
         if let (true, Some(init)) = (annotated, &declarator.init) {
             self.observe(init);
         }
-        if let (swc_ecma_ast::Pat::Ident(_), Some(init)) = (&declarator.name, &declarator.init) {
+        if let (swc_ecma_ast::Pat::Ident(name), Some(init)) = (&declarator.name, &declarator.init) {
+            self.flow(name.id.sym.as_ref(), init);
             self.sink(init);
         }
         declarator.visit_children_with(self);
