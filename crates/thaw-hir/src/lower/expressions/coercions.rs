@@ -111,6 +111,9 @@ impl<'a> FnLowerer<'a> {
             Box::new(test), Box::new(yes), Box::new(no), HirType::Str,
         );
         Ok(match ty {
+            HirType::Str => choose(
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_string_is_null".into())), vec![value]),
+                string("undefined"), string("string")),
             HirType::Function(_, _) | HirType::CallableFunction(..) => choose(
                 Self::function_pointer_is_undefined(value, ty), string("undefined"), string("function")),
             HirType::Void => string("undefined"),

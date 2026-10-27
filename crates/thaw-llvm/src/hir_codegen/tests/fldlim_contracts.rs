@@ -120,6 +120,82 @@ function main(): void {
 }
 
 #[test]
+fn fldlim_uninitialized_string_field_length_throws_type_error() {
+    let source = r##"class C { value: string; }
+function check(x: { value: string }, label: string): void {
+  try { console.log(label, x.value.length); }
+  catch (e: any) { console.log(label, e instanceof TypeError); }
+}
+function main(): void {
+  const c = new C();
+  try { console.log("direct", c.value.length); }
+  catch (e: any) { console.log("direct", e instanceof TypeError); }
+  check(c, "structural");
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "fldlim_uninitialized_string_field_length_throws_type_error"),
+        "direct true\nstructural true\n"
+    );
+}
+
+#[test]
+fn fldlim_uninitialized_string_field_converts_as_undefined() {
+    let source = r##"class C { value: string; }
+function check(x: { value: string }): void {
+  console.log("inline", x.value === undefined, typeof x.value, x.value);
+  console.log("converted", "prefix:" + x.value, String(x.value));
+  const value = x.value;
+  console.log("saved", value === undefined, typeof value, value, "prefix:" + value, String(value));
+}
+function main(): void {
+  const c = new C();
+  const direct = c.value;
+  console.log("direct", direct === undefined, typeof c.value, typeof direct, direct);
+  console.log("direct string", "direct:" + direct, String(direct));
+  check(c);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "fldlim_uninitialized_string_field_converts_as_undefined"),
+        "direct true undefined undefined undefined\ndirect string direct:undefined undefined\ninline true undefined undefined\nconverted prefix:undefined undefined\nsaved true undefined undefined prefix:undefined undefined\n"
+    );
+}
+
+#[test]
+fn fldlim_structural_uninitialized_string_concat_does_not_crash() {
+    let source = r##"class C { value: string; }
+function show(x: { value: string }): void { console.log("prefix:" + x.value); }
+function main(): void { show(new C()); }
+"##;
+    assert_eq!(
+        compile_and_run(source, "fldlim_structural_uninitialized_string_concat_does_not_crash"),
+        "prefix:undefined\n"
+    );
+}
+
+#[test]
+fn fldlim_structural_string_field_write_and_initialized_values_stay_live() {
+    let source = r##"class C { value: string; }
+class Empty { value: string = ""; }
+class Optional { value?: string; }
+function set(x: { value: string }): void { x.value = "changed"; }
+function main(): void {
+  const c = new C(); set(c);
+  console.log(c.value, c.value.length);
+  const empty = new Empty();
+  console.log(empty.value === "", typeof empty.value, empty.value.length);
+  const optional = new Optional();
+  console.log(optional.value === undefined, typeof optional.value);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "fldlim_structural_string_field_write_and_initialized_values_stay_live"),
+        "changed 7\ntrue string 0\ntrue undefined\n"
+    );
+}
+
+#[test]
 fn fldlim_json_stringify_omits_function_values() {
     let source = r##"class H { f!: () => number; g!: () => number; arr: number[] = []; o: { k: number } = { k: 1 }; fill(): void { this.f = () => 7; } }
 function main(): void {

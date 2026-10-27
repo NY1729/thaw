@@ -465,7 +465,7 @@ pub unsafe extern "C" fn thaw_error_suppressed(message: *const c_char) -> *const
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const c_char {
     if message.is_null() {
-        return std::ptr::null();
+        return arena_c_string("undefined").map_or(std::ptr::null(), |value| value.cast());
     }
     // Hot path (`+`/template operands): untagged strings return after one byte check.
     if unsafe { *message } != ERROR_TAG_MARKER as c_char {
@@ -1317,6 +1317,13 @@ mod error_native_tests {
         unsafe { CStr::from_ptr(result) }
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn to_string_converts_the_unset_string_sentinel_to_undefined() {
+        let result = unsafe { thaw_error_to_string(std::ptr::null()) };
+        assert!(!result.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), b"undefined");
     }
 
     fn call_stack(message: &str) -> String {
