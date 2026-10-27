@@ -31,3 +31,89 @@ function main(): void {
         "true true 5\n"
     );
 }
+
+#[test]
+fn anyclasses_contract_timer_native_collection_arguments_keep_identity() {
+    let source = r##"function main(): void {
+  const a = [1];
+  const m = new Map<string, number>([["x", 1]]);
+  let evaluationOrder = "";
+  function arrayArgument(): number[] { evaluationOrder += "a"; return a; }
+  function mapArgument(): Map<string, number> { evaluationOrder += "m"; return m; }
+  setTimeout((first: any, second: any) => {
+    console.log("evaluation", evaluationOrder, first === a, second === m);
+  }, 1, arrayArgument(), mapArgument());
+  setTimeout((value: any, repeated: any) => {
+    console.log("array before", value === a, repeated === a, a[0]);
+    value[0] = 9;
+    console.log("array after", a[0]);
+  }, 1, a, a);
+  setTimeout((value: any) => {
+    console.log("array timer2", value === a, value[0]);
+  }, 1, a);
+  setTimeout((value: any) => {
+    console.log("map before", value === m, m.get("x"));
+    value.set("x", 9);
+    console.log("map after", m.get("x"));
+  }, 1, m);
+  a[0] = 2;
+  m.set("x", 2);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "anyclasses_contract_timer_native_collection_arguments_keep_identity"),
+        "evaluation am true true\narray before true true 2\narray after 9\narray timer2 true 9\nmap before true 2\nmap after 9\n"
+    );
+}
+
+#[test]
+fn anyclasses_contract_typed_timer_native_collection_arguments_keep_identity() {
+    let source = r##"function register(): void {
+  const a = [1];
+  const m = new Map<string, number>([["x", 1]]);
+  const s = new Set<number>(); s.add(1);
+  function namedArrayCallback(value: number[]): void {
+    console.log("array named", value === a, value[0]);
+  }
+  setTimeout((value: number[]) => {
+    console.log("array", value === a, a[0]);
+    value[0] = 9;
+    console.log("array after", a[0]);
+  }, 1, a);
+  setTimeout(namedArrayCallback, 1, a);
+  setTimeout((value: Map<string, number>) => {
+    console.log("map", value === m, m.get("x"));
+    value.set("x", 9);
+    console.log("map after", m.get("x"));
+  }, 1, m);
+  setTimeout((value: Set<number>) => {
+    console.log("set", value === s, s.has(2));
+    value.add(9);
+    console.log("set after", s.has(9));
+  }, 1, s);
+  a[0] = 2;
+  m.set("x", 2);
+  s.add(2);
+}
+function main(): void { register(); }
+"##;
+    assert_eq!(
+        compile_and_run(source, "anyclasses_contract_typed_timer_native_collection_arguments_keep_identity"),
+        "array true 2\narray after 9\narray named true 9\nmap true 2\nmap after 9\nset true true\nset after true\n"
+    );
+}
+
+#[test]
+fn anyclasses_contract_timer_primitive_arguments_keep_conversion() {
+    let source = r##"async function main(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout((left, right) => {
+    console.log(String(left) + ":" + String(right));
+    resolve();
+  }, 1, "x", 2));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "anyclasses_contract_timer_primitive_arguments_keep_conversion"),
+        "x:2\n"
+    );
+}
