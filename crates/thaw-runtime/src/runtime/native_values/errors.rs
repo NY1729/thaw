@@ -599,6 +599,8 @@ struct ErrorExtras {
     stack_user: bool,
     /// Deleted own `message`/`stack`/`cause`/`code`/`name`.
     deleted: Vec<String>,
+    /// Code addresses of the call stack at construction (innermost first), see `capture_frames`.
+    frames: Vec<usize>,
 }
 
 impl ErrorExtras {
@@ -1225,7 +1227,7 @@ unsafe fn stack_text(error: *const c_char, frames: bool) -> String {
     if assigned {
         return cached.unwrap_or_default();
     }
-    let frames = if frames { stack_frames() } else { "" };
+    let frames = if frames { stack_frames(error) } else { String::new() };
     format!("{}{}", unsafe { stack_header(error, cached) }, frames)
 }
 
@@ -1257,15 +1259,22 @@ pub extern "C" fn thaw_error_set_stack_trace_limit(limit: f64) -> f64 {
     limit
 }
 
-/// The frame lines of a generated `stack`. Compiled code has no call-stack frames to walk (and
-/// file paths could not match Node's anyway), so a stack has one fixed frame of V8's anonymous
-/// shape while `Error.stackTraceLimit` allows at least one.
-// ponytail: one synthetic frame; real frames need compiler-emitted unwind tables.
-fn stack_frames() -> &'static str {
-    if thaw_error_stack_trace_limit() >= 1.0 {
-        "\n    at <anonymous>"
+/// The frame lines of a generated `stack`: the frames captured when `error` was constructed
+/// (`thaw_error_capture_frames`), else one fixed frame of V8's anonymous shape, while
+/// `Error.stackTraceLimit` allows at least one.
+// ponytail: function name + entry file only (HIR has no spans for line:col), and a frame
+// inlined by LLVM or reached through frame-pointer-less runtime code is not shown.
+fn stack_frames(error: *const c_char) -> String {
+    let limit = thaw_error_stack_trace_limit();
+    if limit < 1.0 {
+        return String::new();
+    }
+    let pcs = with_extras(error, |extras| Some(extras.frames.clone())).unwrap_or_default();
+    let lines = render_frames(&pcs, limit as usize);
+    if lines.is_empty() {
+        "\n    at <anonymous>".to_string()
     } else {
-        ""
+        lines
     }
 }
 
@@ -1273,7 +1282,140 @@ fn stack_frames() -> &'static str {
 /// on a plain object.
 #[no_mangle]
 pub extern "C" fn thaw_error_stack_frames() -> *const c_char {
-    arena_c_string(stack_frames()).map_or(std::ptr::null(), |value| value.cast())
+    let lines = if thaw_error_stack_trace_limit() >= 1.0 { "\n    at <anonymous>" } else { "" };
+    arena_c_string(lines).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// Compiler-emitted table of the program's functions (`thaw_register_fn_table`).
+struct FnTable {
+    /// `(entry address, display name)` sorted by address; an empty name is anonymous.
+    entries: Vec<(usize, String)>,
+    /// Bounds of the section holding every compiled function.
+    lo: usize,
+    hi: usize,
+    file: String,
+}
+
+static FN_TABLE: std::sync::OnceLock<FnTable> = std::sync::OnceLock::new();
+
+#[repr(C)]
+pub struct FnEntry {
+    function: *const u8,
+    name: *const c_char,
+}
+
+/// Registers the compiled functions' names; called once at process start by generated code.
+///
+/// # Safety
+/// `entries` must point to `count` valid entries; `file` and every name must be NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_register_fn_table(
+    entries: *const FnEntry,
+    count: usize,
+    lo: *const u8,
+    hi: *const u8,
+    file: *const c_char,
+) {
+    let text = |pointer: *const c_char| unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
+    let mut entries: Vec<(usize, String)> = (0..count)
+        .map(|index| {
+            let entry = unsafe { &*entries.add(index) };
+            (entry.function as usize, text(entry.name))
+        })
+        .collect();
+    entries.sort_by_key(|entry| entry.0);
+    let _ = FN_TABLE.set(FnTable { entries, lo: lo as usize, hi: hi as usize, file: text(file) });
+}
+
+/// `[low, high)` of the calling thread's stack, cached per thread; `(0, 0)` where unknown.
+fn stack_bounds() -> (usize, usize) {
+    thread_local! {
+        static BOUNDS: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+    }
+    BOUNDS.with(|slot| {
+        slot.get().unwrap_or_else(|| {
+            let bounds = query_stack_bounds();
+            slot.set(Some(bounds));
+            bounds
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn query_stack_bounds() -> (usize, usize) {
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return (0, 0);
+        }
+        let (mut base, mut size) = (std::ptr::null_mut(), 0usize);
+        let ok = libc::pthread_attr_getstack(&attr, &mut base, &mut size) == 0;
+        libc::pthread_attr_destroy(&mut attr);
+        if ok { (base as usize, base as usize + size) } else { (0, 0) }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn query_stack_bounds() -> (usize, usize) {
+    (0, 0)
+}
+
+/// Records the call stack of the function that just built `error`, for `err.stack`: `current` is
+/// that function's entry and `frame` its frame pointer; callers are found by following the saved
+/// frame-pointer chain of compiled code (every compiled function keeps one). Best effort: the
+/// walk stops at the first record that is not on this thread's stack or does not move up.
+///
+/// # Safety
+/// `error` must be null or NUL-terminated; `frame` must be null or the caller's frame pointer.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_capture_frames(error: *const c_char, frame: *const usize, current: *const u8) {
+    let limit = thaw_error_stack_trace_limit();
+    if error.is_null() || current.is_null() || limit < 1.0 || FN_TABLE.get().is_none() {
+        return;
+    }
+    let limit = (limit as usize).min(200);
+    let mut pcs = vec![current as usize];
+    let (low, high) = stack_bounds();
+    let mut frame = frame as usize;
+    while pcs.len() < limit && frame.is_multiple_of(8) && frame >= low && frame + 16 <= high {
+        let (next, ra) = unsafe { (*(frame as *const usize), *((frame + 8) as *const usize)) };
+        pcs.push(ra.wrapping_sub(1));
+        if next <= frame {
+            break;
+        }
+        frame = next;
+    }
+    thaw_arena::register_metadata_reset_hook(prune_error_extras);
+    let key = extras_key(error);
+    ERROR_EXTRAS.with(|table| extras_entry(&mut table.borrow_mut(), key).frames = pcs);
+}
+
+/// `\n    at name (file)` lines for the program functions among `pcs`, at most `limit`.
+fn render_frames(pcs: &[usize], limit: usize) -> String {
+    let Some(table) = FN_TABLE.get() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let mut shown = 0;
+    for &pc in pcs {
+        if shown == limit {
+            break;
+        }
+        if pc < table.lo || pc >= table.hi {
+            continue;
+        }
+        let index = table.entries.partition_point(|entry| entry.0 <= pc);
+        let Some((_, name)) = index.checked_sub(1).map(|index| &table.entries[index]) else {
+            continue;
+        };
+        shown += 1;
+        if name.is_empty() {
+            out.push_str(&format!("\n    at {}", table.file));
+        } else {
+            out.push_str(&format!("\n    at {name} ({})", table.file));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
