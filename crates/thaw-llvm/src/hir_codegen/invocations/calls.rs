@@ -304,6 +304,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_register_function_label(closure, label)?;
                 return Ok(closure);
             }
+            // Transparent: remembers which `Map`/`Set`/`Array` subclass a collection belongs to
+            // once it is handed on as the plain base type (console.log keeps the class name).
+            "__thaw_native_subclass_mark" => {
+                let [base, name] = args else {
+                    return Err("subclass mark expects a collection and a class name".into());
+                };
+                let base = self.compile_expr(base)?;
+                let name = self.compile_expr(name)?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_native_subclass_mark").unwrap(),
+                    &[base.into(), name.into()], "native_subclass_mark",
+                ).map_err(|error| error.to_string())?;
+                return Ok(base);
+            }
             "__thaw_object_order_begin" => {
                 let [object] = args else {
                     return Err("object order initialization expects one object".into());
@@ -1671,11 +1685,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let name = self.compile_expr(name)?;
                 let message = self.compile_expr(message)?;
-                return self.builder.build_call(
+                let framed = self.builder.build_call(
                     self.module.get_function("thaw_error_frame").unwrap(),
                     &[name.into(), message.into()], "error_frame",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                    .ok_or("error frame returned no value".into());
+                    .ok_or("error frame returned no value")?;
+                self.emit_stack_capture(framed.into_pointer_value())?;
+                return Ok(framed);
             }
             "__thaw_error_suppress" => {
                 let [error, suppressed, message] = args else {

@@ -383,8 +383,41 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_object_set_native_with_undefined(
             object, key.as_pointer_value(), entries, &HirType::Json, preserve_undefined, true,
         )?;
+        // A subclass instance handed on as its plain base type keeps its class name in console.log.
+        if self.console_omit_absent_fields {
+            self.compile_console_subclass_name(collection, object)?;
+        }
         self.mark_fresh_owned_json_result(object)?;
         Ok(object)
+    }
+
+    /// Tags the console wrapper `object` with the subclass name remembered for `collection`.
+    fn compile_console_subclass_name(
+        &mut self,
+        collection: PointerValue<'ctx>,
+        object: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        let name = self.builder.build_call(
+            self.module.get_function("thaw_native_subclass_name").unwrap(),
+            &[collection.into()], "native_subclass_name",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("subclass name query returned no value")?.into_pointer_value();
+        let known = self.builder.build_is_not_null(name, "native_subclass_known")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let write = self.context.append_basic_block(function, "write_subclass_name");
+        let done = self.context.append_basic_block(function, "subclass_name_done");
+        self.builder.build_conditional_branch(known, write, done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(write);
+        let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_object_set_string").unwrap(),
+            &[object.into(), key.as_pointer_value().into(), name.into()], "set_console_class",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
     }
 
     /// Field order for encoding; console output hides `#private` slots like Node does.
@@ -606,6 +639,45 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.position_at_end(done);
         }
         }
+        // `q.stack = text` on a record with no `stack` slot lives in the runtime side table
+        // (see `thaw_object_stack_assign`); an assigned one is an own enumerable key.
+        let error_family_record = fields.first().is_some_and(|(marker, _)| {
+            marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|chain| {
+                chain.split('\u{1f}').any(thaw_hir::is_error_family_name)
+            })
+        });
+        if date_identity.is_none()
+            && !error_family_record
+            && !fields.iter().any(|(name, _)| matches!(name.as_str(), "stack" | "__thaw_getter_stack" | "__thaw_setter_stack"))
+        {
+            let function = self.current_function();
+            let write = self.context.append_basic_block(function, "write_assigned_stack");
+            let done = self.context.append_basic_block(function, "assigned_stack_done");
+            let visible = self.builder.build_call(
+                self.module.get_function("thaw_object_stack_visible").unwrap(),
+                &[object.into()], "assigned_stack_visible",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("stack visibility query returned no value")?.into_int_value();
+            self.builder.build_conditional_branch(visible, write, done)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(write);
+            let key = self.builder.build_global_string_ptr("stack", "assigned_stack_key")
+                .map_err(|error| error.to_string())?;
+            let empty = self.builder.build_global_string_ptr("", "assigned_stack_empty")
+                .map_err(|error| error.to_string())?;
+            let text = self.builder.build_call(
+                self.module.get_function("thaw_object_stack_get").unwrap(),
+                &[object.into(), empty.as_pointer_value().into()], "assigned_stack_text",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("stack text query returned no value")?;
+            self.builder.build_call(
+                self.module.get_function("thaw_json_object_set_string").unwrap(),
+                &[json.into(), key.as_pointer_value().into(), text.into()],
+                "set_assigned_stack",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(done);
+        }
         if let Some(identity) = date_identity {
             // One native Date keeps one Json twin while that twin is alive,
             // so `a === a` and shared Date nodes survive the conversion.
@@ -639,11 +711,35 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 let name = self.builder.build_global_string_ptr(class, "console_class_name")
                     .map_err(|error| error.to_string())?;
+                // The static type only says the record has the class's layout. A copy made by
+                // `{ ...instance }` carries the hidden marker but was never allocated as an
+                // instance, so it prints as a plain object.
+                let named = if is_regexp {
+                    None
+                } else {
+                    let identity = self.builder.build_call(
+                        self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                        &[object.into(), name.as_pointer_value().into()],
+                        "console_has_class_identity",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("class identity query returned no value")?.into_int_value();
+                    let function = self.current_function();
+                    let write = self.context.append_basic_block(function, "write_console_class");
+                    let done = self.context.append_basic_block(function, "console_class_done");
+                    self.builder.build_conditional_branch(identity, write, done)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(write);
+                    Some(done)
+                };
                 self.builder.build_call(
                     self.module.get_function("thaw_json_object_set_string").unwrap(),
                     &[json.into(), key.as_pointer_value().into(), name.as_pointer_value().into()],
                     "set_console_class",
                 ).map_err(|error| error.to_string())?;
+                if let Some(done) = named {
+                    self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(done);
+                }
             }
         }
         // Carries `object`'s own frozen/sealed/non-extensible state (if

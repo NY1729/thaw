@@ -107,6 +107,9 @@ impl<'ctx> HirCompiler<'ctx> {
             // `thaw_json_typeof` returns a pointer into the runtime's own rodata; comparing it with a
             // literal must be by content (pointer identity only held when the linker merged both).
             HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_json_typeof") => Some(HirType::Str),
+            HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_native_subclass_mark") => {
+                args.first().and_then(|base| self.expr_hir_type(base))
+            }
             HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_named_function") => {
                 args.first().and_then(|closure| self.expr_hir_type(closure))
             }
