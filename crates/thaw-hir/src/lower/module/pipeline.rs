@@ -1,4 +1,7 @@
 thread_local! {
+    /// Whether the program deletes a `stack` property anywhere (`delete e.stack`). Only then does a
+    /// typed Error's `.stack` read become `string | undefined`; every other program keeps `string`.
+    static PROGRAM_DELETES_STACK: Cell<bool> = const { Cell::new(false) };
     /// Maps a decorated class's own identity marker field name (the
     /// `__thaw_class_identity_<chain>` field every native class carries
     /// as `fields[0]`, see `module/classes.rs`'s `resolve_layout`) to the
@@ -190,6 +193,7 @@ fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
+    PROGRAM_DELETES_STACK.with(|flag| flag.set(module_deletes_stack(module)));
     let normalized = normalize_module_for_lowering(module)?;
     let mut program = lower_normalized_module(&normalized)?;
     // `HirType::Bytes` is a lowering-time distinction only; nothing past
@@ -2785,4 +2789,28 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         functions: specialized,
         extern_functions,
     })
+}
+
+/// Whether `module` contains a `delete <expr>.stack`.
+fn module_deletes_stack(module: &Module) -> bool {
+    struct Finder(bool);
+    impl Visit for Finder {
+        fn visit_unary_expr(&mut self, unary: &swc_ecma_ast::UnaryExpr) {
+            if unary.op == swc_ecma_ast::UnaryOp::Delete {
+                let mut target = unary.arg.as_ref();
+                while let Expr::Paren(inner) = target {
+                    target = inner.expr.as_ref();
+                }
+                if let Expr::Member(member) = target {
+                    self.0 |= matches!(&member.prop, MemberProp::Ident(name) if name.sym == *"stack")
+                        || matches!(&member.prop, MemberProp::Computed(computed)
+                            if matches!(computed.expr.as_ref(), Expr::Lit(swc_ecma_ast::Lit::Str(text)) if text.value == *"stack"));
+                }
+            }
+            unary.visit_children_with(self);
+        }
+    }
+    let mut finder = Finder(false);
+    module.visit_with(&mut finder);
+    finder.0
 }
