@@ -29,6 +29,12 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
 /// `thaw completeness`.
 fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
     const EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    // Node reference runs only: a slow `node` start (CPU-starved runner) gets one fresh
+    // process with a longer limit. The Thaw binary is never retried.
+    const NODE_REFERENCE_TIMEOUTS: [std::time::Duration; 2] = [
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(30),
+    ];
     let document: serde_json::Value = serde_json::from_slice(
         &std::fs::read(path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
@@ -87,11 +93,29 @@ fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
         let node_source = case_dir.join(node_name);
         std::fs::write(&node_source, format!("{node_head}{source}\n{node_tail}\n"))
             .map_err(|error| error.to_string())?;
-        let node = command_output_with_timeout(
-            Command::new("node").arg(&node_source).args(&arguments),
-            EXECUTION_TIMEOUT,
-        )
-            .map_err(|error| format!("failed to run Node.js: {error}"))?;
+        let node = match run_node_reference(
+            name,
+            || {
+                let mut command = Command::new("node");
+                command.arg(&node_source).args(&arguments);
+                command
+            },
+            &NODE_REFERENCE_TIMEOUTS,
+        ) {
+            Ok(output) => output,
+            Err(NodeReferenceError::TimedOut(detail)) => {
+                reference_errors += 1;
+                results.push(serde_json::json!({
+                    "name": name,
+                    "expected": expected,
+                    "actual": "reference-error",
+                    "classification": "reference-error",
+                    "detail": detail,
+                }));
+                continue;
+            }
+            Err(NodeReferenceError::Failed(error)) => return Err(error),
+        };
         if expected != "failed"
             && ((!node.status.success()
                 && node.status.code().map(i64::from) != expected_exit_code)
@@ -202,6 +226,37 @@ fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
         "referenceErrors": reference_errors,
         "results": results,
     }))
+}
+
+enum NodeReferenceError {
+    /// Every attempt timed out; recorded as a `reference-error` for the case.
+    TimedOut(String),
+    /// Spawn or I/O failure; aborts the manifest as before.
+    Failed(String),
+}
+
+/// Runs the Node reference for `case_name` with one fresh process per timeout in `timeouts`.
+/// Only a timeout is retried; any other failure is returned immediately.
+fn run_node_reference(
+    case_name: &str,
+    mut command: impl FnMut() -> Command,
+    timeouts: &[std::time::Duration],
+) -> Result<std::process::Output, NodeReferenceError> {
+    let mut last_timeout = String::new();
+    for &timeout in timeouts {
+        match command_output_with_timeout(&mut command(), timeout) {
+            Ok(output) => return Ok(output),
+            Err(error) if error.starts_with("timed out") => last_timeout = error,
+            Err(error) => {
+                return Err(NodeReferenceError::Failed(format!(
+                    "case `{case_name}`: failed to run Node.js: {error}"
+                )));
+            }
+        }
+    }
+    Err(NodeReferenceError::TimedOut(format!(
+        "case `{case_name}`: failed to run Node.js: {last_timeout}"
+    )))
 }
 
 fn command_output_with_timeout(
@@ -328,6 +383,52 @@ fn capture_pipe(
             .lock()
             .map_err(|_| std::io::Error::other("output capture lock poisoned"))?
             .extend_from_slice(&chunk[..count]);
+    }
+}
+
+#[cfg(test)]
+mod node_reference_tests {
+    use super::{NodeReferenceError, run_node_reference};
+    use std::cell::Cell;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn slow_reference_names_case_and_retries_exactly_once() {
+        let attempts = Cell::new(0);
+        let outcome = run_node_reference(
+            "slow case",
+            || {
+                attempts.set(attempts.get() + 1);
+                let mut command = Command::new("sleep");
+                command.arg("2");
+                command
+            },
+            &[Duration::from_millis(100), Duration::from_millis(100)],
+        );
+        assert_eq!(attempts.get(), 2);
+        match outcome {
+            Err(NodeReferenceError::TimedOut(detail)) => assert!(
+                detail.starts_with("case `slow case`: failed to run Node.js: timed out"),
+                "{detail}"
+            ),
+            _ => panic!("expected a timeout reference error"),
+        }
+    }
+
+    #[test]
+    fn successful_reference_is_not_retried() {
+        let attempts = Cell::new(0);
+        let outcome = run_node_reference(
+            "fast case",
+            || {
+                attempts.set(attempts.get() + 1);
+                Command::new("true")
+            },
+            &[Duration::from_secs(5), Duration::from_secs(5)],
+        );
+        assert_eq!(attempts.get(), 1);
+        assert!(outcome.is_ok());
     }
 }
 
