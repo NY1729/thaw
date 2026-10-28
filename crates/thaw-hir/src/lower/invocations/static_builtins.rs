@@ -3370,6 +3370,20 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Var("__thaw_json_stringify_scope".into())),
                                 vec![wrapped],
                             )
+                        } else if matches!(
+                            value_type,
+                            HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
+                        ) {
+                            // `JSON.stringify(fn)` is `undefined`: evaluate the operand, then serialize `undefined`.
+                            let undefined = HirExpr::Block(vec![
+                                HirStmt::Expr(value),
+                                HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))),
+                            ]);
+                            let wrapped = self.wrap_native_value_as_json(undefined, HirType::Undefined)?;
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_stringify_scope".into())),
+                                vec![wrapped],
+                            )
                         } else {
                             return Err(format!(
                                 "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
@@ -4617,6 +4631,18 @@ impl<'a> FnLowerer<'a> {
                 fields,
                 actions,
                         )?);
+                        if default_name.is_none() && !fields.iter().any(|(field, _)| field == "stack") {
+                            // A side-table `stack` (captured: hidden, assigned: enumerable) is an own key.
+                            let probe = if property.sym == *"keys" { "__thaw_object_stack_visible" } else { "__thaw_object_stack_has" };
+                            body.push(HirStmt::If(
+                                HirExpr::Call(Box::new(HirExpr::Var(probe.into())), vec![HirExpr::Var(name.clone())]),
+                                vec![HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_push".into())),
+                                    vec![HirExpr::Var(result_name.clone()), HirExpr::Lit(HirLit::Str("stack".to_string()))],
+                                ))],
+                                Vec::new(),
+                            ));
+                        }
                         if let (Some(default_name), Some(_)) = (default_name, name_index) {
                             let push = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_array_push".into())),

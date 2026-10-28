@@ -1560,7 +1560,32 @@ fn match_generic_actuals(
     Ok(inferred)
 }
 
+/// An opaque contextual expected type (`any`/`JsValue`, e.g. a nested `format(addDays(d, 1), ..)`
+/// whose parameter takes any date-like value) says nothing about the result type: when using it
+/// breaks the call, retry without it so the parameter falls back to its default or bound. A concrete
+/// expected type that conflicts with the bound stays an error.
 fn finalize_inferred_generic_type_tuple(
+    signature: &FnSignature,
+    inferred: HashMap<Symbol, HirType>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    expected_return: Option<&HirType>,
+) -> Result<Vec<HirType>, String> {
+    let opaque = matches!(expected_return, Some(HirType::Json | HirType::JsValue | HirType::Dynamic));
+    let first = finalize_inferred_generic_type_tuple_with(
+        signature,
+        inferred.clone(),
+        interfaces,
+        generic_interfaces,
+        expected_return,
+    );
+    if first.is_err() && opaque {
+        return finalize_inferred_generic_type_tuple_with(signature, inferred, interfaces, generic_interfaces, None);
+    }
+    first
+}
+
+fn finalize_inferred_generic_type_tuple_with(
     signature: &FnSignature,
     mut inferred: HashMap<Symbol, HirType>,
     interfaces: &HashMap<Symbol, HirType>,
