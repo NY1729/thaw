@@ -1942,6 +1942,28 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "charCodeAt index")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_intl_compare" | "__thaw_intl_number" | "__thaw_intl_date" => {
+                        let (expected, result): (&[HirType], HirType) = match name.as_str() {
+                            "__thaw_intl_compare" => (
+                                &[HirType::Str, HirType::Str, HirType::Str, HirType::Str],
+                                HirType::F64,
+                            ),
+                            "__thaw_intl_number" => {
+                                (&[HirType::F64, HirType::Str, HirType::Str], HirType::Str)
+                            }
+                            _ => (
+                                &[HirType::F64, HirType::Str, HirType::Str, HirType::F64],
+                                HirType::Str,
+                            ),
+                        };
+                        if args.len() != expected.len() {
+                            return Err(format!("{name} expects {} operands", expected.len()));
+                        }
+                        for (argument, ty) in args.iter().zip(expected) {
+                            self.expect_type(ty, argument, "locale operand")?;
+                        }
+                        return Ok(result);
+                    }
                     "__thaw_string_locale_compare" => {
                         let [receiver, other] = args.as_slice() else {
                             return Err("string localeCompare expects two operands".into());
