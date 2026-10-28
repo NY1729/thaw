@@ -219,12 +219,13 @@ fn aot_clones_match_node_and_beat_the_quickjs_calls() {
             direct: &["isPrime"],
             guarded: &[],
         },
-        // an array result (a fresh `number[]` built by the clone), a different package family
+        // `numericSort` sorts: the cost heuristic keeps it a QuickJS call (its clone measured 0.2x),
+        // the output must still match Node
         Case {
             name: "simple-statistics-array",
             package: "simple-statistics",
             local: false,
-            direct: &["numericSort"],
+            direct: &[],
             guarded: &[],
         },
         // arrays built by the clone (a result array is fresh); `same` (returns its argument) is not cloned

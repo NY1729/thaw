@@ -1260,6 +1260,13 @@ fn text_with_edits(src: &str, lo: usize, hi: usize, edits: &[(usize, usize, Stri
 /// Clones for every exported function of `src` whose parameters and result are plain
 /// numbers / strings / booleans according to the `.d.ts` in `cfg` and that is self-contained.
 /// `prefix` namespaces the generated function names.
+/// The code sorts (`xs.sort(..)`, `.toSorted(..)`): the cost heuristic of [`extract_clones`].
+fn is_sorting(text: &str) -> bool {
+    [".sort(", ".sort (", ".toSorted("]
+        .iter()
+        .any(|p| text.contains(p))
+}
+
 pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClone>, String> {
     let cfg_reserved: HashSet<String> = cfg
         .reserved_names
@@ -1464,6 +1471,18 @@ pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClo
         };
         if !b.resolve_function(c.fid) {
             why!("not-self-contained {:?}", c.exports);
+            continue;
+        }
+        // cost: a clone that sorts runs a comparator closure per comparison inside the typed code, which
+        // measured 0.2x of the QuickJS call (simple-statistics `numericSort`): keep the dynamic call
+        let slow = std::iter::once(c.fid)
+            .chain(b.helpers.iter().copied())
+            .any(|h| {
+                let hf = &an.st.funcs[h];
+                is_sorting(&src[off(hf.lo)..off(hf.hi)])
+            });
+        if slow {
+            why!("slow-clone sort {:?}", c.exports);
             continue;
         }
         if c.in_bounds {
