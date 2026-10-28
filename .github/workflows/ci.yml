@@ -10,6 +10,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Observed runs take 55-75 minutes; a hang fails with its logs instead of
+    # running for the 6-hour default.
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16-alpine
@@ -25,19 +28,31 @@ jobs:
           --health-retries 10
     env:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
       - name: Free disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           df -h /
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
       - name: Cache runtime static libraries
         uses: actions/cache@v4
         with:
@@ -52,15 +67,35 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
       - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
         run: |
-          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
-          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
-          rm /tmp/llvm.tar.xz
-          echo /opt/llvm-22/bin >> "$GITHUB_PATH"
-          echo LD_LIBRARY_PATH=/opt/llvm-22/lib >> "$GITHUB_ENV"
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Install Rust components
         run: rustup component add rustfmt clippy
       - name: Check formatting
@@ -99,6 +134,27 @@ jobs:
           name: acceptance-metrics
           path: target/acceptance/*.json
           if-no-files-found: ignore
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
 
   engine-tests:
     strategy:
@@ -107,19 +163,32 @@ jobs:
         crate: [thaw-llvm, thaw-cli]
         shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
+    # Observed shards take 15-26 minutes.
+    timeout-minutes: 75
     env:
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
-      LD_LIBRARY_PATH: /opt/llvm-22/lib
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
       - name: Free disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
       - name: Cache runtime static libraries
         uses: actions/cache@v4
         with:
@@ -134,12 +203,35 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
       - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
         run: |
-          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
-          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Test ${{ matrix.crate }} (shard ${{ matrix.shard }} of 4)
         env:
           CRATE: ${{ matrix.crate }}
@@ -163,6 +255,27 @@ jobs:
           done
           echo "Running ${#selected[@]} of ${#tests[@]} $CRATE tests"
           cargo test -p "$CRATE" -- --exact --test-threads=1 "${selected[@]}"
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
 
   npm-integration:
     strategy:
@@ -170,9 +283,10 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
+    # Observed shards take 15-39 minutes. A single lost shard ran 53 minutes
+    # with no log before this cap existed.
+    timeout-minutes: 75
     env:
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
-      LD_LIBRARY_PATH: /opt/llvm-22/lib
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -181,10 +295,23 @@ jobs:
       THAW_SOAK_SECONDS: "30"
     steps:
       - uses: actions/checkout@v4
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
       - name: Free disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
       - name: Cache runtime static libraries
         uses: actions/cache@v4
         with:
@@ -199,16 +326,50 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
+      - name: Cache npm packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('crates/thaw-cli/src/tests/**') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
       - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
         run: |
-          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
-          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Test real web applications and packages (shard ${{ matrix.shard }})
         env:
           SHARD: ${{ matrix.shard }}
         run: |
+          # Each test gets its own 20-minute cap (the job cap bounds the whole
+          # shard). Output is also kept in the diagnostics folder, so a lost
+          # or killed shard still leaves its log behind.
+          set -o pipefail
           listing=$(cargo test -p thaw-cli registry_add -- --list) || exit 1
           mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
           if (( ${#tests[@]} == 0 )); then
@@ -218,13 +379,36 @@ jobs:
           index=0
           for test in "${tests[@]}"; do
             if [[ "$test" != *postgres* ]] && (( index % 4 == SHARD )); then
-              cargo test -p thaw-cli "$test" -- --exact --test-threads=1 --nocapture
+              timeout --kill-after=30s 20m cargo test -p thaw-cli "$test" -- --exact --test-threads=1 --nocapture 2>&1 |
+                tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
             fi
             index=$((index + 1))
           done
           if (( SHARD == 0 )); then
-            cargo test -p thaw-cli tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture
+            timeout --kill-after=30s 20m cargo test -p thaw-cli tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture 2>&1 |
+              tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
           fi
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
 
   runtime-comparison:
     strategy:
@@ -239,25 +423,57 @@ jobs:
             llvm_sha256: 805efad2bb91cb4967fa569e0881d10c0f69c04461cf671cccbae19f547acc34
             architecture: arm64
     runs-on: ${{ matrix.runner }}
+    # Observed runs take 14-17 minutes.
+    timeout-minutes: 45
     env:
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
       CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev time
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-${{ matrix.llvm_sha256 }}
       - name: Install LLVM 22
         env:
           LLVM_ASSET: ${{ matrix.llvm_asset }}
           LLVM_SHA256: ${{ matrix.llvm_sha256 }}
         run: |
-          curl -L "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET" -o /tmp/llvm.tar.xz
-          echo "$LLVM_SHA256  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
-          echo /opt/llvm-22/bin >> "$GITHUB_PATH"
-          echo LD_LIBRARY_PATH=/opt/llvm-22/lib >> "$GITHUB_ENV"
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
       - name: Compare Node, Bun, and Thaw
         run: |
@@ -272,3 +488,24 @@ jobs:
         with:
           name: runtime-${{ matrix.architecture }}
           path: runtime-${{ matrix.architecture }}.json
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore

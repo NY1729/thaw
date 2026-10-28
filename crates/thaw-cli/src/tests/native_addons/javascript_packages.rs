@@ -1286,8 +1286,13 @@ function main(): void {
 /// having the fetch polyfill's own source note that it uses Brotli
 /// decompression in plain text.
 #[test]
-fn registry_add_fetches_over_http_and_https_with_real_ky_when_enabled() {
-    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+fn registry_add_fetches_over_http_and_https_with_real_ky_live_example_com_when_enabled() {
+    // Live variant: needs the public internet and example.com (which returns
+    // intermittent 503s), so it only runs when THAW_RUN_LIVE_NETWORK=1 is set
+    // explicitly. CI does not set it; the hermetic test below covers the path.
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1")
+        || std::env::var("THAW_RUN_LIVE_NETWORK").as_deref() != Ok("1")
+    {
         return;
     }
     let dir = std::env::temp_dir().join(format!("thaw-cli-auto-ky-{}", std::process::id()));
@@ -1334,6 +1339,187 @@ async function main(): Promise<void> {{
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     server.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\n42\ntrue\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Brotli encoding of a small `Example Domain` page, produced once with the
+/// `brotli` CLI so the hermetic test below needs no compression crate.
+const EXAMPLE_BROTLI_BODY: &[u8] = &[
+    0x1f, 0x69, 0x00, 0x10, 0x1c, 0xa9, 0x51, 0x9f, 0x3b, 0xe6, 0xd2, 0x87, 0x07, 0xad, 0xc2, 0xc8,
+    0x2a, 0xa6, 0xcc, 0x29, 0x17, 0x38, 0x14, 0x26, 0x98, 0x78, 0x0b, 0xf0, 0x78, 0x0f, 0xb8, 0x14,
+    0xa3, 0x95, 0xf6, 0x6a, 0x8d, 0x45, 0x0e, 0x29, 0xa5, 0x01, 0xc2, 0x12, 0x75, 0x0b, 0xda, 0xc5,
+    0x3d, 0xf5, 0x4c, 0x1e,
+];
+
+/// Serves one HTTPS request on loopback, using a fresh self-signed certificate
+/// for `localhost` and `127.0.0.1`, and answers it with `EXAMPLE_BROTLI_BODY`.
+/// Returns the port, the certificate PEM (the CA the client must trust) and the
+/// server thread.
+fn serve_brotli_https_once(dir: &std::path::Path) -> (u16, String, std::thread::JoinHandle<()>) {
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+    let key_pem = dir.join("key.pem");
+    let cert_pem = dir.join("cert.pem");
+    let key_der = dir.join("key.der");
+    let cert_der = dir.join("cert.der");
+    assert!(Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyEncipherment",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
+            "-keyout",
+        ])
+        .arg(&key_pem)
+        .arg("-out")
+        .arg(&cert_pem)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("openssl")
+        .args(["x509", "-in"])
+        .arg(&cert_pem)
+        .args(["-outform", "DER", "-out"])
+        .arg(&cert_der)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("openssl")
+        .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+        .arg(&key_pem)
+        .args(["-outform", "DER", "-out"])
+        .arg(&key_der)
+        .status()
+        .unwrap()
+        .success());
+
+    let certificate = CertificateDer::from(std::fs::read(&cert_der).unwrap());
+    let private_key = PrivatePkcs8KeyDer::from(std::fs::read(&key_der).unwrap()).into();
+    let config = std::sync::Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut stream = StreamOwned::new(ServerConnection::new(config).unwrap(), socket);
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: br\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            EXAMPLE_BROTLI_BODY.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(EXAMPLE_BROTLI_BODY).unwrap();
+        stream.conn.send_close_notify();
+        stream.flush().unwrap();
+    });
+    (port, std::fs::read_to_string(&cert_pem).unwrap(), server)
+}
+
+/// Hermetic replacement for the live `https://example.com/` check: the same
+/// ky + fetch-shim build, with the HTTPS leg served from loopback. A local
+/// TLS server with a generated certificate answers with a Brotli-encoded body,
+/// and the compiled program trusts that certificate through the `ca` option, so
+/// the TLS handshake and Brotli decoding are still exercised without the
+/// public internet. The live variant is `..._live_example_com_when_enabled`.
+#[test]
+fn registry_add_fetches_over_http_and_https_with_real_ky_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-ky-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ky@2.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = conn.read(&mut buf).unwrap();
+        let body = r#"{"ok":true,"n":42}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        conn.write_all(response.as_bytes()).unwrap();
+    });
+
+    let (https_port, ca_pem, https_server) = serve_brotli_https_once(&dir);
+    let ca_literal = serde_json::to_string(&ca_pem).unwrap();
+    std::fs::write(
+        &source,
+        format!(
+            r#"import ky from "ky";
+import * as https from "node:https";
+import * as zlib from "node:zlib";
+async function main(): Promise<void> {{
+    const data: {{ ok: boolean; n: number }} = await ky.get("http://127.0.0.1:{port}/data.json").json();
+    console.log(data.ok);
+    console.log(data.n);
+    // HTTPS leg: a loopback TLS server with a Brotli-encoded body, trusted
+    // through the `ca` option (the live example.com check is separate).
+    // Bytes are carried as a hex string so no Buffer crosses the closure
+    // (Thaw cannot yet `Buffer.concat` closure-collected chunks).
+    let body: string = "";
+    await new Promise<void>((resolve, reject): void => {{
+        const request = https.get({{ hostname: "127.0.0.1", port: {https_port}, path: "/", ca: {ca_literal} }}, (response: any): void => {{
+            response.on("data", (chunk: Buffer): void => {{ body += chunk.toString("hex"); }});
+            response.on("end", (): void => {{ resolve(); }});
+        }});
+        request.on("error", reject);
+    }});
+    const compressed: Buffer = Buffer.from(String(body), "hex");
+    const text: string = zlib.brotliDecompressSync(compressed).toString();
+    console.log(text.length > 0);
+    console.log(text.includes("Example Domain"));
+}}"#
+        ),
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["ky".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    server.join().unwrap();
+    https_server.join().unwrap();
     assert!(
         result.status.success(),
         "{}",
