@@ -758,3 +758,4 @@ include!("tests/errrest2_contracts.rs");
 include!("tests/oobread_contracts.rs");
 include!("tests/bufu8_contracts.rs");
 include!("tests/lim3_contracts.rs");
+include!("tests/library_mode.rs");
