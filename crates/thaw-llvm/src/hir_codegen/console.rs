@@ -485,6 +485,39 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_console_text(text, newline, name, descriptor)
     }
 
+    /// A plain array, or the `extends Array` wrapper when the array was handed on from a subclass.
+    fn compile_console_array_maybe_subclass(
+        &mut self,
+        array: PointerValue<'ctx>,
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let name = self.builder.build_call(
+            self.module.get_function("thaw_native_subclass_name").unwrap(),
+            &[array.into()], "array_subclass_name",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("subclass name query returned no value")?.into_pointer_value();
+        let known = self.builder.build_is_not_null(name, "array_subclass_known")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let wrapped = self.context.append_basic_block(function, "array_subclass_wrapped");
+        let plain = self.context.append_basic_block(function, "array_subclass_plain");
+        let done = self.context.append_basic_block(function, "array_subclass_done");
+        let slot = self.builder.build_alloca(self.context.ptr_type(inkwell::AddressSpace::default()), "array_console_slot")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(known, wrapped, plain).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(wrapped);
+        let json = self.compile_native_collection_to_json(array, &HirType::Array(Box::new(element.clone())), true)?;
+        self.builder.build_store(slot, json).map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(plain);
+        let json = self.compile_native_array_to_json_with_undefined(array, element, true)?;
+        self.builder.build_store(slot, json).map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        self.builder.build_load(self.context.ptr_type(inkwell::AddressSpace::default()), slot, "array_console_json")
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_console_structured(
         &mut self,
         value: PointerValue<'ctx>,
@@ -516,7 +549,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json | HirType::Dictionary(_) => Ok(value.into()),
             // `undefined` is kept as the napi-undefined sentinel (not folded into `null`) so the
             // inspector can print it like Node does.
-            HirType::Array(element) => self.compile_native_array_to_json_with_undefined(value, element, true),
+            HirType::Array(element) => self.compile_console_array_maybe_subclass(value, element),
             HirType::Bytes => {
                 let widened = self.compile_bytes_widened_handle(value)?;
                 self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)

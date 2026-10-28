@@ -2030,6 +2030,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_native_subclass_mark",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_native_subclass_name",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_object_stack_visible",
             self.context.bool_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

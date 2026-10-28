@@ -2756,6 +2756,12 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable"
                     | "__thaw_json_is_primitive_operand" => return Ok(HirType::Bool),
                     "__thaw_is_unset_number" => return Ok(HirType::Bool),
+                    "__thaw_native_subclass_mark" => {
+                        let Some(base) = args.first() else {
+                            return Err("subclass mark expects a collection".into());
+                        };
+                        return self.infer_expr_type(base);
+                    }
                     "__thaw_named_function" => {
                         let Some(closure) = args.first() else {
                             return Err("named function expects a closure".into());

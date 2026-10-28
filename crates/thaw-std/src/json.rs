@@ -6778,8 +6778,24 @@ pub extern "C" fn thaw_json_error_stack(value: *mut Value) -> *mut Value {
             return leak(napi_undefined_value());
         }
     }
+    // `e.stack = x; delete e.stack` on a promoted caught Error leaves no own `stack`.
+    if let Some(Value::Object(shared)) = unsafe { value.as_ref() } {
+        if !shared_object_ref(shared).contains_key(b"stack".as_slice()) && stack_was_deleted(shared)
+        {
+            return leak(napi_undefined_value());
+        }
+    }
     if let Some(stack) = caught_json_text(value, "stack").filter(|stack| !stack.is_empty()) {
         return leak(Value::String(stack));
+    }
+    // A live JS Error whose own `stack` is gone (`delete e.stack`) reads `undefined`.
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        if host_query(lease, 22).as_deref() == Some("1") {
+            let stack = thaw_json_get(value, c"stack".as_ptr());
+            if is_napi_undefined(unsafe { &*stack }) {
+                return leak(napi_undefined_value());
+            }
+        }
     }
     if caught_json_text(value, "name").is_none() && caught_json_text(value, "message").is_none() {
         return leak(napi_undefined_value());
@@ -9854,9 +9870,44 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
         // `lower_dictionary_object_rest`, which builds its rest object
         // by deleting the destructured keys from a full copy). Use the
         // order-preserving removal instead.
-        fields.shift_remove(&key);
+        if fields.shift_remove(&key).is_some() && key.as_slice() == b"stack" {
+            if let Value::Object(shared) = value {
+                note_stack_deleted(shared);
+            }
+        }
     }
     1
+}
+
+type WeakSharedObject = std::rc::Weak<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>;
+
+thread_local! {
+    /// Json objects whose own `stack` was deleted (`delete e.stack` on a promoted caught Error):
+    /// the object, weakly, so a dead one never matches a reused address.
+    static DELETED_STACKS: std::cell::RefCell<Vec<WeakSharedObject>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn note_stack_deleted(object: &SharedObject) {
+    DELETED_STACKS.with(|deleted| {
+        let mut deleted = deleted.borrow_mut();
+        deleted.retain(|weak| weak.strong_count() > 0);
+        if !deleted
+            .iter()
+            .any(|weak| weak.as_ptr() == Rc::as_ptr(object))
+        {
+            deleted.push(Rc::downgrade(object));
+        }
+    });
+}
+
+fn stack_was_deleted(object: &SharedObject) -> bool {
+    DELETED_STACKS.with(|deleted| {
+        deleted
+            .borrow()
+            .iter()
+            .any(|weak| weak.as_ptr() == Rc::as_ptr(object) && weak.strong_count() > 0)
+    })
 }
 
 #[no_mangle]
