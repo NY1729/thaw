@@ -227,7 +227,8 @@ pub struct AotClone {
     /// the TypeScript function that implements the clone
     pub fn_name: String,
     pub params: Vec<CTy>,
-    pub ret: Prim,
+    /// a primitive or an array of primitives (fresh: nothing aliased from the caller)
+    pub ret: CTy,
     /// self-contained TypeScript (helpers, constants and `function <fn_name>(...)`)
     pub ts: String,
 }
@@ -317,6 +318,14 @@ fn cty_of(an: &mut An, t: &Ty) -> Option<CTy> {
             Some(CTy::Obj(fields))
         }
         _ => None,
+    }
+}
+
+/// A clone result type: a primitive or an array of primitives.
+fn ret_cty(an: &mut An, t: &Ty) -> Option<CTy> {
+    match cty_of(an, t)? {
+        r @ (CTy::Prim(_) | CTy::Arr(_)) => Some(r),
+        CTy::Obj(_) => None,
     }
 }
 
@@ -1209,7 +1218,7 @@ impl Builder<'_> {
 }
 
 /// `function name(...) {` -> `function name(...): ret {` unless a result type is already there.
-fn with_declared_result(ts: &str, fname: &str, ret: Prim) -> String {
+fn with_declared_result(ts: &str, fname: &str, ret: &str) -> String {
     let head = format!("function {fname}(");
     let Some(start) = ts.find(&head) else {
         return ts.to_string();
@@ -1232,7 +1241,7 @@ fn with_declared_result(ts: &str, fname: &str, ret: Prim) -> String {
     if ts[end..].trim_start().starts_with(':') {
         return ts.to_string();
     }
-    format!("{}: {}{}", &ts[..end], ret.ts(), &ts[end..])
+    format!("{}: {}{}", &ts[..end], ret, &ts[end..])
 }
 
 fn text_with_edits(src: &str, lo: usize, hi: usize, edits: &[(usize, usize, String)]) -> String {
@@ -1269,7 +1278,7 @@ pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClo
         fid: usize,
         exports: Vec<String>,
         params: Vec<(String, CTy)>,
-        ret: Prim,
+        ret: CTy,
         in_bounds: bool,
         /// functions whose element reads were checked
         visited: HashSet<usize>,
@@ -1284,10 +1293,18 @@ pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClo
             .map(|(_, n)| n.clone())
             .collect();
         // `module.exports = clamp` is `import clamp from ...`: the declaration knows it as `clamp`
-        if let Some(n) = &f.prop_name {
+        let declared = match f.prop_name.as_deref() {
+            // `module.exports = (a) => ..`: the declaration names the default value
+            Some("exports") | None => an.cfg.dts.as_ref().and_then(|d| d.default_name.clone()),
+            Some(n) => Some(n.to_string()),
+        };
+        if let Some(n) = &declared {
             if !exports.is_empty() && !exports.contains(n) {
                 exports.push(n.clone());
             }
+        }
+        if !exports.is_empty() && f.trust & TRUST_DTS == 0 {
+            why!("no-dts-contract {:?} name={:?}", exports, f.prop_name);
         }
         if exports.is_empty()
             || f.trust & TRUST_DTS == 0
@@ -1369,15 +1386,27 @@ pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClo
         // the contract's result type wins: the inferred one can be wider than the truth
         let mut ret = fret;
         if let Some(d) = an.dts_ret.get(&fid).cloned() {
-            if prim_of(&an.widen(&d)).is_some() {
+            let w = an.widen(&d);
+            if ret_cty(&mut an, &w).is_some() {
                 ret = d;
             }
         }
         let ret = an.widen(&ret);
-        let Some(ret) = prim_of(&ret) else {
+        let Some(ret) = ret_cty(&mut an, &ret) else {
             why!("ret-type {:?} {}", exports, an.ts_pub(&ret));
             continue;
         };
+        if matches!(ret, CTy::Arr(_)) && containers.is_empty() {
+            // a result array is built here: every element read in the body must be provably in bounds
+            let none = HashSet::new();
+            match readonly_ok(&an, &module, fid, &none, &none, 3, &mut visited) {
+                Some((total, proven)) if total == proven => in_bounds = true,
+                other => {
+                    why!("unbounded-result-array {:?} {:?}", exports, other);
+                    continue;
+                }
+            }
+        }
         cands.push(Cand {
             fid,
             exports,
@@ -1514,12 +1543,12 @@ pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClo
             .filter(|l| !l.contains("__thaw_export("))
             .collect::<Vec<_>>()
             .join("\n");
-        let ts = with_declared_result(&ts, &fname, c.ret);
+        let ts = with_declared_result(&ts, &fname, &c.ret.ts());
         out.push(AotClone {
             exports: c.exports,
             fn_name: fname,
             params: c.params.iter().map(|(_, p)| p.clone()).collect(),
-            ret: c.ret,
+            ret: c.ret.clone(),
             ts,
         });
     }

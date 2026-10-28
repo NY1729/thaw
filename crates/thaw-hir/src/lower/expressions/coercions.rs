@@ -1226,6 +1226,13 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        // A `Buffer` stringifies as its UTF-8 decoding (`Buffer.prototype.toString`).
+        if self.infer_expr_type_inner(&value)? == HirType::Bytes {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_to_string".to_string())),
+                vec![value, HirExpr::Lit(HirLit::Str("utf8".to_string()))],
+            ));
+        }
         match self.infer_expr_type(&value)? {
             HirType::Str => Ok(value),
             HirType::StrLiteral(_) => Ok(HirExpr::TypedClosure(HirType::Str, Box::new(value))),
@@ -3969,6 +3976,9 @@ impl<'a> FnLowerer<'a> {
         lhs: HirExpr,
         rhs: HirExpr,
     ) -> Result<HirExpr, String> {
+        // A `Buffer` operand concatenates as its UTF-8 text (`Buffer.prototype.toString`).
+        let lhs = self.bytes_operand_as_text(lhs)?;
+        let rhs = self.bytes_operand_as_text(rhs)?;
         // The value of each operand precedes *both* ToPrimitive calls. In
         // particular, a left Symbol.toPrimitive hook must not run before a
         // right-hand call expression has completed.

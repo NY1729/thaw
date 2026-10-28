@@ -2062,6 +2062,7 @@ impl<'a> FnLowerer<'a> {
                             .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?,
                     };
                     values = self.project_native_base(values)?;
+                    values = self.bytes_to_f64_array(values)?;
                     let mut values_type = self.infer_expr_type(&values)?;
                     let array_holes_possible =
                         self.expression_may_be_sparse_array(&for_of.right);
