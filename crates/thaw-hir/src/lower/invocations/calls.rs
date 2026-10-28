@@ -3553,6 +3553,7 @@ impl<'a> FnLowerer<'a> {
             }
 
             value = self.project_native_base(value)?;
+            value = self.bytes_to_f64_array(value)?;
             let mut source_type = self.infer_expr_type(&value)?;
             let rest_element = signature
                 .as_ref()

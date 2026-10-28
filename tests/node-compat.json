@@ -1,6 +1,26 @@
 {
   "cases": [
     {
+      "name": "lim3 new property on a caught class instance",
+      "expect": "matched",
+      "source": "class C { a: number = 1; } function main(): void { try { throw new C(); } catch (e: any) { e.extra = 5; console.log(e.extra, Object.keys(e)); } const r: any = new C(); r.more = 6; r.a = 9; console.log(r.more, r.a, Object.keys(r)); }"
+    },
+    {
+      "name": "lim3 captured stack on a class instance is non-enumerable own",
+      "expect": "matched",
+      "source": "class Q { v: number = 1; } function main(): void { const q = new Q(); Error.captureStackTrace(q); console.log(Object.keys(q), Object.getOwnPropertyNames(q), JSON.stringify(q), typeof (q as any).stack); }"
+    },
+    {
+      "name": "lim3 array subclass through annotated binding",
+      "expect": "matched",
+      "source": "class MyArr extends Array<number> { tag: string; constructor(n: number) { super(); this.tag = n as any; } } function show(a: MyArr): void { console.log(a); } function main(): void { const a = new MyArr(3); a.push(1); const b: MyArr = a; console.log(b === a, b.length, b[0]); b.push(7); console.log(a.length); show(a); }"
+    },
+    {
+      "name": "lim3 class field inference and JSON.stringify of a function",
+      "expect": "matched",
+      "source": "class X { x = new Uint8Array(2); y = function () {}; } function f(): void {} function main(): void { const o = new X(); console.log(o.x.length, typeof o.y, o.y()); console.log(JSON.stringify(f), JSON.stringify(function () {})); }"
+    },
+    {
       "name": "catch binding capture leaves later comparison intact",
       "expect": "matched",
       "source": "function main(): void { const a = 'x'; const b = 'y'; try {} catch (e: any) { console.log(e === b); } console.log(a === b); try {} catch (e: any) { const f = () => b; console.log(f()); } console.log(a === b, b); }"
@@ -2902,6 +2922,21 @@
       "name": "typed array out-of-range reads: other elements",
       "expect": "matched",
       "source": "function f(a: string[]): string { const x = a[0]; return x === undefined ? \"none\" : x; }\nfunction g(a: boolean[]): string { const x = a[0]; if (x === undefined) return \"none\"; return String(x); }\nclass Stack extends Array<number> {}\nclass Box {\n  items: number[] = [1, 2];\n  get(k: number): number | undefined { return this.items[k]; }\n  has(k: number): boolean { return this.items[k] !== undefined; }\n}\nfunction main(): void {\n  const ss: string[] = [\"a\", \"b\"];\n  console.log(ss[5], ss[0], typeof ss[5], ss[5] === undefined, ss[5] ?? \"dflt\", `${ss[5]}`, ss[5] + \"x\", ss[5]?.length);\n  const bs: boolean[] = [true, false];\n  console.log(bs[5], bs[0], typeof bs[5], bs[5] === undefined, bs[5] ?? false);\n  const os: { a: number }[] = [{ a: 1 }, { a: 2 }];\n  console.log(os[5], typeof os[5], os[5] === undefined, os[5]?.a, os[5]?.a ?? 3);\n  try { console.log(os[5].a); } catch (err) { console.log((err as Error).constructor.name); }\n  const nn: number[][] = [[1], [2, 3]];\n  console.log(nn[5], nn[0][3], nn[1][5], nn[5] === undefined, nn[5]?.length);\n  const mm: (number | undefined)[] = [1, undefined, 3];\n  console.log(mm[1], mm[5], mm[0], mm[1] === undefined, mm[5] === undefined, mm[5] ?? 0, mm[1] ?? 0);\n  const sparse: number[] = []; sparse.length = 2;\n  const explicit: (number | undefined)[] = [undefined];\n  console.log(sparse[0], sparse[0] === undefined, explicit[0], explicit[0] === undefined);\n  const subclass = new Stack(); subclass.push(7);\n  console.log(subclass[4], subclass[4] === undefined, subclass[0]);\n  const anyArray: any = [5];\n  console.log(anyArray[4], anyArray[4] === undefined, anyArray[0]);\n  const bytes = new Uint8Array([1, 2, 3]);\n  console.log(bytes[5], bytes[1], typeof bytes[5], bytes[5] === undefined, bytes[5] ?? 9, bytes[1] ?? 9);\n  const buf = Buffer.from(\"abc\");\n  console.log(buf[9], buf[0], buf[9] ?? 8);\n  const sv = ss[5]; console.log(sv === undefined ? \"U\" : sv);\n  const bv = bs[5]; console.log(bv === undefined ? \"U\" : String(bv));\n  const ov = os[5]; console.log(ov === undefined ? \"U\" : ov.a);\n  console.log(f([]), f([\"z\"]), g([]), g([false]));\n  const t: [number, string] = [1, \"a\"];\n  console.log(t[0], t[1]);\n  const bx = new Box();\n  console.log(bx.get(0), bx.get(5), bx.has(1), bx.has(9));\n  const grid: number[][] = [[1, 2], [3]];\n  let tot = 0;\n  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) { const v = grid[r]?.[c]; tot += v ?? 0; }\n  console.log(tot);\n}\n"
+    },
+    {
+      "name": "buffer u8 views share memory through buffer, byteOffset and typed array",
+      "expect": "matched",
+      "source": "function main(): void {\n  const b = Buffer.alloc(8);\n  b.writeUInt32BE(0x01020304, 0);\n  console.log(b.buffer.byteLength, b.byteOffset, b.byteLength, b.length);\n  const s = b.subarray(2, 6);\n  console.log(s.byteOffset, s.byteLength, s.buffer.byteLength);\n  const u = new Uint8Array(b.buffer, 4, 3);\n  u[0] = 200;\n  console.log(b[4], u.length, u.byteOffset, u.byteLength);\n  b[5] = 77;\n  console.log(u[1]);\n  const f = Buffer.from(b.buffer, 2, 4);\n  f[0] = 9;\n  console.log(b.toString(\"hex\"), f.length, f.byteOffset);\n  const ab = b.buffer;\n  const copy = ab.slice(1, 5);\n  copy[0] = 255;\n  console.log(b[1], copy.byteLength);\n  const dup = Buffer.from(b);\n  dup[0] = 66;\n  console.log(b[0], dup[0], dup.byteOffset >= 0);\n  const u8 = Uint8Array.from([1, 2, 3, 4]);\n  const u8s = u8.slice(1, 3);\n  u8s[0] = 99;\n  const u8v = u8.subarray(1, 3);\n  u8v[1] = 55;\n  console.log(u8[1], u8[2], u8s[0], u8s.length);\n  const bs = b.slice(0, 2);\n  bs[0] = 11;\n  console.log(b[0]);\n}\n"
+    },
+    {
+      "name": "buffer u8 views see fs readSync, randomFillSync and zlib results",
+      "expect": "matched",
+      "source": "import * as fs from \"node:fs\";\nimport * as crypto from \"node:crypto\";\nimport * as zlib from \"node:zlib\";\nfunction main(): void {\n  const dir = \"/tmp/thaw-bufu8-natives\";\n  fs.mkdirSync(dir, { recursive: true });\n  fs.writeFileSync(dir + \"/a\", \"hello world\");\n  const big = Buffer.alloc(16);\n  const view = big.subarray(4, 12);\n  const fd = fs.openSync(dir + \"/a\", \"r\");\n  const n = fs.readSync(fd, view, 0, 5, 6);\n  fs.closeSync(fd);\n  console.log(n, big.toString(\"hex\"), view.toString(\"hex\"));\n  const tail = big.subarray(12);\n  crypto.randomFillSync(tail);\n  console.log(big.subarray(0, 12).toString(\"hex\"), tail.length);\n  const packed = zlib.gzipSync(Buffer.from(\"abcabcabc\"));\n  const out = zlib.gunzipSync(packed);\n  const out2 = out.subarray(3);\n  console.log(out.toString(), out2.toString(), out2.byteOffset - out.byteOffset);\n  const digest = crypto.createHash(\"sha1\").update(big.subarray(4, 9)).digest(\"hex\");\n  console.log(digest);\n  fs.rmSync(dir, { recursive: true });\n}\n"
+    },
+    {
+      "name": "buffer u8 element wrap-around and generic array methods on views",
+      "expect": "matched",
+      "source": "function sumOf(v: Buffer): number {\n  let s = 0;\n  for (let i = 0; i < v.length; i++) s += v[i];\n  return s;\n}\nfunction main(): void {\n  const b = Buffer.alloc(8);\n  b[0] = 300;\n  b[1] = -1;\n  b[2] = 1.9;\n  b[3] = NaN;\n  b[4] = 256;\n  b[5] = Infinity;\n  b[6] = -0.5;\n  console.log(b.toString(\"hex\"), b[8], b[-1], b[1.5]);\n  const v = b.subarray(1, 6);\n  console.log([...v], v.map((x) => x * 2).join(\",\"), v.filter((x) => x > 0).length, v.reduce((a, x) => a + x, 0));\n  let it = 0;\n  for (const x of v) it += x;\n  console.log(it, sumOf(v), sumOf(b.subarray(2)), JSON.stringify(v), v.includes(255), v.indexOf(1), v.join(\"-\"));\n  const over = Buffer.from([1, 2, 3, 4, 5, 6]);\n  over.copy(over, 2, 0, 4);\n  console.log(over.toString(\"hex\"));\n  const sh = Buffer.from([1, 2, 3, 4, 5, 6]);\n  sh.subarray(0, 4).copy(sh.subarray(2));\n  console.log(sh.toString(\"hex\"));\n  const rs = Buffer.from([9, 8, 7, 6, 5]);\n  const rv = rs.subarray(1, 4);\n  rv.reverse();\n  rv.sort();\n  console.log(rs.toString(\"hex\"), rv.fill(1, 1).toString(\"hex\"), rs.toString(\"hex\"));\n  const a1 = Buffer.from(\"abc\");\n  const a2 = Buffer.from(\"xabcx\").subarray(1, 4);\n  console.log(a1.equals(a2), Buffer.concat([a1, a2.subarray(1)]).toString(), a2.toString(), Buffer.isBuffer(a2));\n  console.log(a2, [a2, a1], { v: a2 });\n  const big = new Uint8Array(0);\n  console.log(big.length);\n}\n"
     }
   ]
 }
