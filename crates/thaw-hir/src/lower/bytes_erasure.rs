@@ -13,7 +13,72 @@
 // `include!`d into `lower.rs`, so it shares that module's imports.
 
 
+thread_local! {
+    // Names (variables, parameters, globals) declared `Bytes`, and functions returning
+    // `Bytes`, as seen so far in the traversal; the indexing fixups below read them.
+    static BYTES_NAMES: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();
+    static BYTES_FUNCTIONS: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();
+}
+
+fn note_bytes_name(name: &str, ty: &HirType) {
+    BYTES_NAMES.with(|names| {
+        if *ty == HirType::Bytes {
+            names.borrow_mut().insert(name.to_string());
+        } else {
+            names.borrow_mut().remove(name);
+        }
+    });
+}
+
+/// Whether `expr` (not yet erased) is a byte buffer, from declared types alone.
+fn is_bytes_expr(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Var(name) => BYTES_NAMES.with(|names| names.borrow().contains(name)),
+        HirExpr::PropAccess(_, HirType::Object(fields), field) => {
+            fields.iter().any(|(name, ty)| name == field && *ty == HirType::Bytes)
+        }
+        HirExpr::TypedIndex(_, _, ty)
+        | HirExpr::Conditional(_, _, _, ty)
+        | HirExpr::OptionalValue(_, ty)
+        | HirExpr::NullableValue(_, ty)
+        | HirExpr::NullishValue(_, ty)
+        | HirExpr::JsonAsNative(_, ty) => *ty == HirType::Bytes,
+        HirExpr::UnionValue(_, index, types) => types.get(*index) == Some(&HirType::Bytes),
+        HirExpr::DynamicCall(sig, _) => sig.ret == HirType::Bytes,
+        HirExpr::FunctionCallWithThis(_, _, _, _, ret) => *ret == HirType::Bytes,
+        HirExpr::EvalThen(_, second) => is_bytes_expr(second),
+        HirExpr::Block(stmts) => matches!(stmts.last(), Some(HirStmt::Return(Some(value))) if is_bytes_expr(value)),
+        HirExpr::Call(callee, _) => match callee.as_ref() {
+            HirExpr::Var(name) => {
+                matches!(
+                    name.as_str(),
+                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
+                        | "__thaw_bytes_from_array" | "__thaw_bytes_concat" | "__thaw_bytes_slice"
+                        | "__thaw_bytes_subarray" | "__thaw_bytes_clone" | "__thaw_bytes_as_u8"
+                        | "__thaw_bytes_narrow_list" | "__thaw_bytes_buffer"
+                        | "__thaw_bytes_from_buffer_like"
+                ) || BYTES_FUNCTIONS.with(|names| names.borrow().contains(name))
+            }
+            HirExpr::Lambda(_, _, ret, _) => *ret == HirType::Bytes,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn erase_bytes(program: &mut HirProgram) {
+    BYTES_NAMES.with(|names| names.borrow_mut().clear());
+    BYTES_FUNCTIONS.with(|names| {
+        *names.borrow_mut() = program
+            .functions
+            .iter()
+            .filter(|function| function.ret == HirType::Bytes)
+            .map(|function| function.name.to_string())
+            .collect();
+    });
+    for global in &program.globals {
+        note_bytes_name(&global.name, &global.ty);
+    }
     for global in &mut program.globals {
         erase_global(global);
     }
@@ -46,6 +111,7 @@ fn erase_function(function: &mut HirFunction) {
 }
 
 fn erase_param(param: &mut HirParam) {
+    note_bytes_name(&param.name, &param.ty);
     erase_ty(&mut param.ty);
 }
 
@@ -205,9 +271,10 @@ fn erase_stmt(stmt: &mut HirStmt) {
                 erase_expr(value);
             }
         }
-        HirStmt::Let(_, ty, value) => {
-            erase_ty(ty);
+        HirStmt::Let(name, ty, value) => {
             erase_expr(value);
+            note_bytes_name(name, ty);
+            erase_ty(ty);
         }
         HirStmt::If(cond, then_body, else_body) => {
             erase_expr(cond);
@@ -236,6 +303,70 @@ fn erase_exprs(exprs: &mut [HirExpr]) {
     }
 }
 
+// The rewrites below live in their own never-inlined functions: `erase_expr` recurses
+// once per HIR nesting level, so its stack frame must stay small.
+
+/// `buffer[i]` / `buffer[i] = v` on a byte buffer: the bounds-checked view accessors.
+#[inline(never)]
+fn erase_bytes_element_access(expr: &mut HirExpr) {
+    let taken = std::mem::replace(expr, HirExpr::Lit(HirLit::Undefined));
+    *expr = match taken {
+        HirExpr::Index(mut object, mut index) | HirExpr::TypedIndex(mut object, mut index, _) => {
+            erase_expr(&mut object);
+            erase_expr(&mut index);
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_get_safe".into())), vec![*object, *index])
+        }
+        HirExpr::IndexAssign(mut object, mut index, mut value) => {
+            erase_expr(&mut object);
+            erase_expr(&mut index);
+            erase_expr(&mut value);
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_set_safe".into())),
+                vec![*object, *index, *value],
+            )
+        }
+        other => other,
+    };
+}
+
+/// A dynamic value decodes into an `f64`-slot array; a `Buffer` is then narrowed into a
+/// byte view record.
+#[inline(never)]
+fn erase_json_as_native(expr: &mut HirExpr) {
+    let HirExpr::JsonAsNative(value, ty) = expr else {
+        return;
+    };
+    erase_expr(value);
+    let narrow = *ty == HirType::Bytes;
+    erase_ty(ty);
+    if narrow {
+        let decoded = std::mem::replace(expr, HirExpr::Lit(HirLit::Undefined));
+        *expr = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![decoded]);
+    }
+}
+
+/// Native C code reads `f64`-slot arrays: a `Buffer` argument is widened, a `Buffer`
+/// result narrowed.
+#[inline(never)]
+fn erase_ffi_call(expr: &mut HirExpr) {
+    let HirExpr::FfiCall(sig, args) = expr else {
+        return;
+    };
+    for (argument, ty) in args.iter_mut().zip(&sig.params) {
+        if *ty == HirType::Bytes {
+            let value = std::mem::replace(argument, HirExpr::Lit(HirLit::Undefined));
+            *argument = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_to_array".into())), vec![value]);
+        }
+    }
+    let narrow = sig.ret == HirType::Bytes;
+    erase_ffi(sig);
+    erase_exprs(args);
+    if narrow {
+        let call = std::mem::replace(expr, HirExpr::Lit(HirLit::Undefined));
+        *expr = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![call]);
+    }
+}
+
 fn erase_expr(expr: &mut HirExpr) {
     match expr {
         HirExpr::Lit(_)
@@ -243,6 +374,7 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::EnvVar(_)
         | HirExpr::PostfixUpdate(_, _) => {}
 
+        HirExpr::Index(left, _) if is_bytes_expr(left) => erase_bytes_element_access(expr),
         HirExpr::BinOp(_, left, right)
         | HirExpr::EvalThen(left, right)
         | HirExpr::Index(left, right)
@@ -275,11 +407,12 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::NullishIsUndefined(value, ty)
         | HirExpr::NullishIsNone(value, ty)
         | HirExpr::NullishValue(value, ty)
-        | HirExpr::AwaitPromise(value, ty)
-        | HirExpr::JsonAsNative(value, ty) => {
+        | HirExpr::AwaitPromise(value, ty) => {
             erase_expr(value);
             erase_ty(ty);
         }
+
+        HirExpr::JsonAsNative(..) => erase_json_as_native(expr),
 
         HirExpr::OptionalNone(ty)
         | HirExpr::NullableNone(ty)
@@ -414,10 +547,7 @@ fn erase_expr(expr: &mut HirExpr) {
         }
         HirExpr::Block(stmts) => erase_stmts(stmts),
 
-        HirExpr::FfiCall(sig, args) => {
-            erase_ffi(sig);
-            erase_exprs(args);
-        }
+        HirExpr::FfiCall(..) => erase_ffi_call(expr),
         HirExpr::DynamicCall(sig, args) => {
             erase_dyn(sig);
             erase_exprs(args);
@@ -427,11 +557,15 @@ fn erase_expr(expr: &mut HirExpr) {
 
         HirExpr::ArrayLit(items) => erase_exprs(items),
 
+        HirExpr::TypedIndex(object, _, ty) if *ty == HirType::F64 && is_bytes_expr(object) => {
+            erase_bytes_element_access(expr)
+        }
         HirExpr::TypedIndex(object, index, ty) => {
             erase_expr(object);
             erase_expr(index);
             erase_ty(ty);
         }
+        HirExpr::IndexAssign(object, _, _) if is_bytes_expr(object) => erase_bytes_element_access(expr),
         HirExpr::IndexAssign(object, index, value) => {
             erase_expr(object);
             erase_expr(index);
@@ -469,11 +603,12 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_expr(value);
         }
         HirExpr::JsonGet(object, _) => erase_expr(object),
+        // The Json encoder widens a `Bytes` value itself, so the marker stays.
         HirExpr::JsonSet(object, key, value, ty, _) => {
             erase_expr(object);
             erase_expr(key);
             erase_expr(value);
-            erase_ty(ty);
+            erase_dynamic_ty(ty);
         }
         HirExpr::JsonIndexSet(object, key, value) => {
             erase_expr(object);

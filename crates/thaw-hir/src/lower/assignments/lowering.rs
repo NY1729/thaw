@@ -313,15 +313,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(value_name.clone()),
         );
         let zero = HirExpr::Lit(HirLit::F64(0.0));
-        let write = HirStmt::Expr(HirExpr::IndexAssign(
-            Box::new(array_var.clone()),
-            Box::new(index_var.clone()),
-            Box::new(value_var.clone()),
-        ));
-        // Keep any `subarray`/`slice` view of this buffer coherent.
-        let sync = HirStmt::Expr(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_bytes_sync".into())),
-            vec![array_var.clone(), index_var.clone(), HirExpr::Lit(HirLit::F64(1.0))],
+        let write = HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_set".into())),
+            vec![array_var.clone(), index_var.clone(), value_var.clone()],
         ));
         let is_int = HirExpr::BinOp(
             BinOp::EqEqEq,
@@ -342,7 +336,7 @@ impl<'a> FnLowerer<'a> {
                 is_int,
                 vec![HirStmt::If(
                     non_negative,
-                    vec![HirStmt::If(in_len, vec![write, sync], Vec::new())],
+                    vec![HirStmt::If(in_len, vec![write], Vec::new())],
                     Vec::new(),
                 )],
                 Vec::new(),

@@ -105,6 +105,8 @@ impl<'a> FnLowerer<'a> {
             let entries_type = self.infer_expr_type(&entries)?;
             return self.lower_binding_pattern_impl(pattern, entries, &entries_type, statements, immutable);
         }
+        // `const [a, b] = buffer`: the elements are read from a widened copy.
+        let value = if matches!(pattern, Pat::Array(_)) { self.bytes_to_f64_array(value)? } else { value };
         let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             self.bind_destructure_source_once(value, ty, statements)
         } else {
