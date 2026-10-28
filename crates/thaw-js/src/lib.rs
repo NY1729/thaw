@@ -40,6 +40,14 @@ mod proxy;
 pub mod scan;
 mod typed;
 mod url;
+#[path = "web/abort.rs"]
+mod web_abort;
+#[path = "web/dom_exception.rs"]
+mod web_dom_exception;
+#[path = "web/event_target.rs"]
+mod web_event_target;
+#[path = "web/text_codec.rs"]
+mod web_text_codec;
 
 /// Feature names (as reported by [`scan`] and [`Ctl::Unsupported`]) the evaluator runs.
 pub const SUPPORTED_FEATURES: &[&str] = &[
@@ -650,6 +658,10 @@ impl Interp {
         it.install_array_iteration();
         it.install_typed();
         it.install_buffer();
+        web_dom_exception::install(&mut it);
+        web_text_codec::install(&mut it);
+        web_event_target::install(&mut it);
+        web_abort::install(&mut it);
         it.install_url();
         it.run(extras::EXTRAS_LATE)
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));

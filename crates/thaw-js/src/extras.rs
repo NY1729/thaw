@@ -448,8 +448,10 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     var seen = new Map();
     function clone(v) {
       if (typeof v === 'function' || typeof v === 'symbol') {
-        var e = new Error((typeof v === 'function' ? String(v) : String(v.toString())) + ' could not be cloned.');
-        e.name = 'DataCloneError';
+        var msg = (typeof v === 'function' ? String(v) : String(v.toString())) + ' could not be cloned.';
+        var e;
+        if (typeof DOMException === 'function') e = new DOMException(msg, 'DataCloneError');
+        else { e = new Error(msg); e.name = 'DataCloneError'; }
         throw e;
       }
       if (typeof v !== 'object' || v === null) return v;
