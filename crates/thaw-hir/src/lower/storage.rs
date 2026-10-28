@@ -2246,7 +2246,8 @@ impl FnLowerer<'_> {
         physical: &HirExpr,
         preserve_class_physical: bool,
     ) -> Result<HirType, String> {
-        let physical_type = self.infer_expr_type(physical)?;
+        // Keep `Bytes`: the instance's `T` must be a buffer, matching the call-site specialization.
+        let physical_type = self.infer_expr_type_inner(physical)?;
         if preserve_class_physical && contains_native_class(&physical_type) {
             return Ok(physical_type);
         }

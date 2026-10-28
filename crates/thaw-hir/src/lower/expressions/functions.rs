@@ -417,7 +417,8 @@ impl<'a> FnLowerer<'a> {
                     if sparse_mapping_result && declared_return.is_none() && !arrow.is_async {
                         expression = lowerer.lower_array_index_operand(expression)?;
                     }
-                    let mut inferred = lowerer.infer_expr_type(&expression)?;
+                    // Keep `Bytes`: an arrow returning a buffer must hand the buffer type to its caller.
+                    let mut inferred = lowerer.infer_expr_type_inner(&expression)?;
                     if arrow.is_async {
                         if let HirExpr::AwaitPromise(promise, resolved) = expression {
                             expression = *promise;
@@ -488,7 +489,7 @@ impl<'a> FnLowerer<'a> {
                         }
                     } else if let Some(expected) = &declared_return {
                         expression = lowerer.coerce_to_declared(expected, expression)?;
-                        inferred = lowerer.infer_expr_type(&expression)?;
+                        inferred = lowerer.infer_expr_type_inner(&expression)?;
                     }
                     let body = if prefix.is_empty() {
                         expression
@@ -1442,7 +1443,7 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         expression
                     };
-                    let inferred = lowerer.infer_expr_type(&expression)?;
+                    let inferred = lowerer.infer_expr_type_inner(&expression)?;
                     // A tuple literal infers as an array; `expect_type` knows it satisfies the tuple.
                     let inferred = match expected_return {
                         Some(expected)
