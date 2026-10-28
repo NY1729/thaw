@@ -1497,14 +1497,17 @@ async function main(): Promise<void> {{
     console.log(data.n);
     // HTTPS leg: a loopback TLS server with a Brotli-encoded body, trusted
     // through the `ca` option (the live example.com check is separate).
-    const compressed: Buffer = await new Promise<Buffer>((resolve, reject) => {{
-        const request = https.get({{ hostname: "127.0.0.1", port: {https_port}, path: "/", ca: {ca_literal} }}, (response) => {{
-            const chunks: Buffer[] = [];
-            response.on("data", (chunk: Buffer) => chunks.push(chunk));
-            response.on("end", () => resolve(Buffer.concat(chunks)));
+    // Bytes are carried as a hex string so no Buffer crosses the closure
+    // (Thaw cannot yet `Buffer.concat` closure-collected chunks).
+    let body: string = "";
+    await new Promise<void>((resolve, reject): void => {{
+        const request = https.get({{ hostname: "127.0.0.1", port: {https_port}, path: "/", ca: {ca_literal} }}, (response: any): void => {{
+            response.on("data", (chunk: Buffer): void => {{ body += chunk.toString("hex"); }});
+            response.on("end", (): void => {{ resolve(); }});
         }});
         request.on("error", reject);
     }});
+    const compressed: Buffer = Buffer.from(String(body), "hex");
     const text: string = zlib.brotliDecompressSync(compressed).toString();
     console.log(text.length > 0);
     console.log(text.includes("Example Domain"));
