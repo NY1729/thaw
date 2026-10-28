@@ -598,6 +598,9 @@ impl An {
                         (Site::Obj(_), Key::Name(n)) if PROTO_NAMES.contains(&n.as_str()) => {
                             Ty::Any(Reason::Proto)
                         }
+                        (Site::Obj(_), Key::Name(n)) if self.proto_extra_of(s, n) => {
+                            Ty::Any(Reason::Proto)
+                        }
                         (Site::Obj(m), Key::Name(n)) => {
                             let own = m.get(n).cloned();
                             let methods = self.fam_candidates(s, n);
@@ -643,7 +646,9 @@ impl An {
                     _ => self.kill(s, Reason::DynamicKey),
                 },
                 Atom::Obj(s) => match key {
-                    Key::Name(n) if !PROTO_NAMES.contains(&n.as_str()) => {
+                    Key::Name(n)
+                        if !PROTO_NAMES.contains(&n.as_str()) && !self.proto_extra_of(s, n) =>
+                    {
                         self.site_field_flow(s, n, v, !self.def_write)
                     }
                     Key::Name(_) => self.kill(s, Reason::Proto),
@@ -739,6 +744,29 @@ impl An {
             "BigInt" => Ty::Any(Reason::BigInt),
             "require" => Ty::Any(Reason::Require),
             "eval" => Ty::Any(Reason::Eval),
+            // the timer runs the callback later with the extra arguments (none for a microtask)
+            "queueMicrotask" | "setTimeout" | "setImmediate" | "setInterval" if matches!(args.first(), Some((Ty::Set(a), false)) if !a.is_empty() && a.iter().all(|x| matches!(x, Atom::Fn(_)))) =>
+            {
+                let skip = if name == "queueMicrotask" || name == "setImmediate" {
+                    1
+                } else {
+                    2
+                };
+                let cb = args[0].0.clone();
+                let rest: Vec<(Ty, bool)> = args.iter().skip(skip).cloned().collect();
+                if rest.iter().any(|r| r.1) {
+                    return self.unknown_call(args, Reason::UnknownGlobal);
+                }
+                self.call_value(&cb, &rest, None);
+                for (t, _) in args.iter().skip(1) {
+                    self.taint_as(t, Reason::UnknownGlobal);
+                }
+                if name == "queueMicrotask" {
+                    Ty::undef()
+                } else {
+                    Ty::Any(Reason::Builtin)
+                }
+            }
             _ => self.unknown_call(args, Reason::UnknownGlobal),
         }
     }
@@ -757,6 +785,12 @@ impl An {
                 Some((t, false)) => t.clone(),
                 _ => return None,
             },
+            ("Object", "create") if matches!(args, [(t, false)] if *t == Ty::one(Atom::Null)) => {
+                // a prototype-less dictionary: reads of absent names are `undefined`
+                let s = self.site((key, 15), Site::Obj(Default::default()));
+                Ty::one(Atom::Obj(s))
+            }
+            ("JSON", "parse") => Ty::Any(Reason::Builtin),
             ("Object", "isFrozen" | "isSealed" | "isExtensible" | "hasOwn" | "is") => Ty::bool(),
             ("Object", "getOwnPropertyNames") => {
                 let s = self.site((key, 14), Site::Arr(Ty::str()));
@@ -1102,6 +1136,20 @@ impl An {
                 }
             }
         })
+    }
+
+    /// `n` was added to the prototype of the class that owns `site` by `defineProperty` / a literal
+    fn proto_extra_of(&self, site: usize, n: &str) -> bool {
+        if self.st.proto_extra.is_empty() {
+            return false;
+        }
+        let Some(root) = self.site_class.get(&site) else {
+            return false;
+        };
+        self.st
+            .proto_extra
+            .iter()
+            .any(|(k, m)| m == n && self.family_root(k) == *root)
     }
 
     fn find_ro(&mut self, s: usize) -> usize {
@@ -1990,7 +2038,17 @@ impl An {
             if f.iife || f.bind.is_some() {
                 continue;
             }
-            let Some(name) = f.prop_name.clone() else {
+            // an anonymous function exported as the module's default value (`module.exports = (a) => ..`)
+            // is the declaration that `export =` / `export default` names
+            let anon_default = if matches!(f.prop_name.as_deref(), None | Some("exports"))
+                && f.owner.is_none()
+                && f.exports.iter().any(|(_, n)| n == "<default>")
+            {
+                idx.default_name.clone()
+            } else {
+                None
+            };
+            let Some(name) = anon_default.or_else(|| f.prop_name.clone()) else {
                 continue;
             };
             let sigs: Vec<crate::dts::Sig> = idx
@@ -2310,6 +2368,31 @@ impl Visit for An {
         );
     }
     fn visit_throw_stmt(&mut self, n: &a::ThrowStmt) {
+        // `throw new TypeError(msg)`: a fresh built-in error handed straight to the unwinder; it is
+        // never a value of the program, only its arguments are
+        if let a::Expr::New(ne) = strip(&n.arg) {
+            if let a::Expr::Ident(i) = strip(&ne.callee) {
+                let fid = *self.cur.last().unwrap();
+                if self.st.resolve(fid, &i.sym).is_none()
+                    && matches!(
+                        &*i.sym,
+                        "Error"
+                            | "TypeError"
+                            | "RangeError"
+                            | "SyntaxError"
+                            | "ReferenceError"
+                            | "EvalError"
+                            | "URIError"
+                    )
+                {
+                    for x in ne.args.iter().flatten() {
+                        let t = self.ty(&x.expr);
+                        self.taint_as(&t, Reason::New);
+                    }
+                    return;
+                }
+            }
+        }
         let t = self.ty(&n.arg);
         self.taint_as(&t, Reason::Catch);
     }
@@ -2354,6 +2437,67 @@ impl Visit for An {
                     None => {}
                 }
             }
+            (p, Some(e)) if destructure_simple(p) => {
+                // `const { a, b: c = 1 } = obj` / `const [x, y] = arr`: plain reads of known shapes
+                let t = self.ty(e);
+                let arr_only = matches!(&t, Ty::Set(s) if !s.is_empty() && s.iter().all(|x| matches!(x, Atom::Arr(_))));
+                match p {
+                    a::Pat::Object(o) => {
+                        for pr in &o.props {
+                            let (key, name, dflt) = match pr {
+                                a::ObjectPatProp::Assign(ap) => (
+                                    ap.key.sym.to_string(),
+                                    ap.key.sym.to_string(),
+                                    ap.value.as_deref(),
+                                ),
+                                a::ObjectPatProp::KeyValue(kv) => {
+                                    let key = match &kv.key {
+                                        a::PropName::Ident(i) => i.sym.to_string(),
+                                        a::PropName::Str(s) => {
+                                            s.value.as_str().unwrap_or("\u{fffd}").to_string()
+                                        }
+                                        _ => unreachable!(),
+                                    };
+                                    let (nm, d) = match &*kv.value {
+                                        a::Pat::Ident(b) => (b.id.sym.to_string(), None),
+                                        a::Pat::Assign(ap) => match &*ap.left {
+                                            a::Pat::Ident(b) => {
+                                                (b.id.sym.to_string(), Some(&*ap.right))
+                                            }
+                                            _ => unreachable!(),
+                                        },
+                                        _ => unreachable!(),
+                                    };
+                                    (key, nm, d)
+                                }
+                                _ => unreachable!(),
+                            };
+                            let r = self.member_read(&t, &Key::Name(key));
+                            let r = self.with_default(r, dflt);
+                            self.flow_name(&name, &r);
+                        }
+                    }
+                    a::Pat::Array(ar) if arr_only => {
+                        for el in ar.elems.iter().flatten() {
+                            let (name, d) = match el {
+                                a::Pat::Ident(b) => (b.id.sym.to_string(), None),
+                                a::Pat::Assign(ap) => match &*ap.left {
+                                    a::Pat::Ident(b) => (b.id.sym.to_string(), Some(&*ap.right)),
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            };
+                            let r = self.member_read(&t, &Key::Num);
+                            let r = self.with_default(r, d);
+                            self.flow_name(&name, &r);
+                        }
+                    }
+                    _ => {
+                        self.taint_as(&t, Reason::Destructure);
+                        self.flow_any_pat(p, Reason::Destructure);
+                    }
+                }
+            }
             (p, init) => {
                 if let Some(e) = init {
                     let t = self.ty(e);
@@ -2395,6 +2539,24 @@ impl Visit for An {
 }
 
 impl An {
+    /// `r` with `undefined` replaced by the type of the default (`const { a = 5 } = o`).
+    fn with_default(&mut self, r: Ty, dflt: Option<&a::Expr>) -> Ty {
+        let Some(d) = dflt else { return r };
+        let dt = self.ty(d);
+        let kept = match r {
+            Ty::Set(s) => {
+                let v: Vec<Atom> = s.into_iter().filter(|x| *x != Atom::Undef).collect();
+                if v.is_empty() {
+                    Ty::Bottom
+                } else {
+                    Ty::Set(v)
+                }
+            }
+            o => o,
+        };
+        self.join(&kept, &dt)
+    }
+
     fn head(&mut self, h: &a::ForHead, t: Ty) {
         let mut ids: Vec<String> = Vec::new();
         match h {
@@ -2418,5 +2580,27 @@ impl An {
         for i in ids {
             self.flow_name(&i, &t);
         }
+    }
+}
+
+/// A destructuring pattern of plain identifiers (with defaults): `{ a, b: c = 1 }`, `[x, y = 2]`.
+fn destructure_simple(p: &a::Pat) -> bool {
+    fn leaf(p: &a::Pat) -> bool {
+        match p {
+            a::Pat::Ident(_) => true,
+            a::Pat::Assign(ap) => matches!(&*ap.left, a::Pat::Ident(_)),
+            _ => false,
+        }
+    }
+    match p {
+        a::Pat::Object(o) => o.props.iter().all(|pr| match pr {
+            a::ObjectPatProp::Assign(_) => true,
+            a::ObjectPatProp::KeyValue(kv) => {
+                matches!(&kv.key, a::PropName::Ident(_) | a::PropName::Str(_)) && leaf(&kv.value)
+            }
+            _ => false,
+        }),
+        a::Pat::Array(ar) => ar.elems.iter().flatten().all(leaf),
+        _ => false,
     }
 }
