@@ -49,7 +49,7 @@ pub unsafe extern "C" fn thaw_rt_init(config: *const ThawConfig) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn thaw_rt_shutdown() {
-    let _ = INIT_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    let _ = INIT_COUNT.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 #[cfg(test)]
