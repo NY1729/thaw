@@ -1,4 +1,244 @@
 impl<'a> FnLowerer<'a> {
+    /// `value` as a byte-buffer record: a `Buffer` passes through, a `number[]`
+    /// is narrowed (copied) first.
+    fn as_bytes_value(&self, value: HirExpr) -> Result<HirExpr, String> {
+        Ok(if self.infer_expr_type_inner(&value)? == HirType::Bytes {
+            value
+        } else {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![value])
+        })
+    }
+
+    /// `project_native_base` for a spread source, also widening a `Buffer`. A separate,
+    /// never-inlined function so `lower_expr` (deeply recursive) keeps its stack frame.
+    #[inline(never)]
+    fn project_native_base_widening_bytes(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let value = self.project_native_base(value)?;
+        self.bytes_to_f64_array(value)
+    }
+
+    /// Whether `new <class>(args)` is `new Uint8Array(buf.buffer, byteOffset, length?)` over a
+    /// native `ArrayBuffer` view (a native view sharing the memory).
+    #[inline(never)]
+    fn is_buffer_view_constructor(
+        &mut self,
+        class: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<bool, String> {
+        if class != "Uint8Array" || !(2..=3).contains(&args.len()) {
+            return Ok(false);
+        }
+        let source = self.lower_expr(&args[0].expr)?;
+        Ok(self.infer_expr_type_inner(&source)? == HirType::Bytes)
+    }
+
+    #[inline(never)]
+    fn lower_buffer_view_constructor(
+        &mut self,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<HirExpr, String> {
+        let source = self.lower_expr(&args[0].expr)?;
+        let offset = self.lower_expr(&args[1].expr)?;
+        let offset = self.coerce_primitive_to_number(offset)?;
+        let length = match args.get(2) {
+            Some(argument) => {
+                let length = self.lower_expr(&argument.expr)?;
+                self.coerce_primitive_to_number(length)?
+            }
+            None => HirExpr::Lit(HirLit::F64(f64::NAN)),
+        };
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_from_buffer_like".to_string())),
+            vec![source, offset, length, HirExpr::Lit(HirLit::F64(0.0))],
+        ))
+    }
+
+    /// A `Buffer` operand of `+` as its UTF-8 text; any other operand unchanged.
+    #[inline(never)]
+    fn bytes_operand_as_text(&self, value: HirExpr) -> Result<HirExpr, String> {
+        Ok(if self.infer_expr_type_inner(&value)? == HirType::Bytes {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_to_string".into())),
+                vec![value, HirExpr::Lit(HirLit::Str("utf8".into()))],
+            )
+        } else {
+            value
+        })
+    }
+
+    /// `value` as an `f64`-slot array: a `Buffer` is widened (copied), any other
+    /// array passes through.
+    fn bytes_to_f64_array(&self, value: HirExpr) -> Result<HirExpr, String> {
+        Ok(if self.infer_expr_type_inner(&value)? == HirType::Bytes {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_to_array".into())), vec![value])
+        } else {
+            value
+        })
+    }
+
+    /// Whether `expr` is a byte buffer, judged without lowering it: a binding or property
+    /// typed `Bytes`, a `Buffer.from(..)`-style constructor call, or a `subarray`/`slice` of one.
+    fn expr_is_bytes_syntax(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => self.expr_is_bytes_syntax(&paren.expr),
+            Expr::TsNonNull(assertion) => self.expr_is_bytes_syntax(&assertion.expr),
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else { return false };
+                let Expr::Member(member) = callee.as_ref() else { return false };
+                let MemberProp::Ident(property) = &member.prop else { return false };
+                match member.obj.as_ref() {
+                    Expr::Ident(object) if object.sym == *"Buffer" => matches!(
+                        property.sym.as_ref(),
+                        "from" | "alloc" | "allocUnsafe" | "allocUnsafeSlow" | "concat"
+                    ),
+                    Expr::Ident(object) if object.sym == *"Uint8Array" => {
+                        matches!(property.sym.as_ref(), "from" | "fromHex" | "fromBase64")
+                    }
+                    object => {
+                        matches!(
+                            property.sym.as_ref(),
+                            "subarray" | "slice" | "map" | "filter" | "toSorted" | "toReversed"
+                                | "with" | "fill" | "reverse" | "sort" | "copyWithin"
+                        ) && self.expr_is_bytes_syntax(object)
+                    }
+                }
+            }
+            other => self.peek_type_without_lowering(other) == Some(HirType::Bytes),
+        }
+    }
+
+    /// A generic `Array.prototype` method on a `Buffer` receiver: the method runs on a
+    /// widened `number[]` copy, and a mutator (`fill`/`reverse`/`sort`/`copyWithin`)
+    /// narrows the copy back into the buffer, which is also the call's value.
+    fn lower_bytes_generic_array_method(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let name = property.sym.as_ref();
+        if !matches!(
+            name,
+            "map" | "filter" | "forEach" | "reduce" | "reduceRight" | "some" | "every" | "find"
+                | "findIndex" | "findLast" | "findLastIndex" | "join" | "at" | "flat" | "flatMap"
+                | "fill" | "reverse" | "sort" | "toSorted" | "toReversed" | "copyWithin"
+                | "entries" | "keys" | "values" | "with" | "toSpliced"
+        ) || !self.expr_is_bytes_syntax(&member.obj)
+        {
+            return Ok(None);
+        }
+        let receiver = self.lower_required_member_receiver(&member.obj, name)?;
+        if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+            return Ok(None);
+        }
+        if name == "fill" {
+            return Ok(Some(self.lower_native_bytes_fill(receiver, call)?));
+        }
+        // `reverse()` and a comparator-less `sort()` (numeric on a typed array) run in place.
+        if (name == "reverse" || name == "sort") && call.args.is_empty() {
+            let mut bindings = Vec::new();
+            let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+            let order = if name == "reverse" { 0.0 } else { 1.0 };
+            let result = HirExpr::Block(vec![
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_reorder".into())),
+                    vec![receiver.clone(), HirExpr::Lit(HirLit::F64(order))],
+                )),
+                HirStmt::Return(Some(receiver)),
+            ]);
+            return Ok(Some(self.wrap_call_argument_bindings(result, &bindings)?));
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let (bytes_name, array_name) = (
+            format!("__thaw_bytes_generic_receiver_{id}"),
+            format!("__thaw_bytes_generic_array_{id}"),
+        );
+        let array_type = HirType::Array(Box::new(HirType::F64));
+        self.scope.insert(bytes_name.clone(), HirType::Bytes);
+        self.scope.insert(array_name.clone(), array_type.clone());
+        let mut synthetic_member = member.clone();
+        *synthetic_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+            array_name.clone().into(),
+            member.span,
+        ));
+        let mut synthetic_call = call.clone();
+        synthetic_call.callee = Callee::Expr(Box::new(Expr::Member(synthetic_member.clone())));
+        let result = self.lower_native_instance_builtin(&synthetic_member, property, &synthetic_call)?;
+        let widened = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_to_array".into())),
+            vec![HirExpr::Var(bytes_name.clone())],
+        );
+        let bindings = [
+            (bytes_name.clone(), HirType::Bytes, receiver),
+            (array_name.clone(), array_type, widened),
+        ];
+        // `map` / `filter` / `toSorted` / `toReversed` / `with` give a buffer back, with the
+        // elements wrapped modulo 256.
+        let result = if matches!(name, "map" | "filter" | "toSorted" | "toReversed" | "with")
+            && self.infer_expr_type(&result)? == HirType::Array(Box::new(HirType::F64))
+        {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![result])
+        } else {
+            result
+        };
+        let result = if matches!(name, "fill" | "reverse" | "sort" | "copyWithin") {
+            HirExpr::Block(vec![
+                HirStmt::Expr(result),
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_store_array".into())),
+                    vec![HirExpr::Var(bytes_name.clone()), HirExpr::Var(array_name)],
+                )),
+                HirStmt::Return(Some(HirExpr::Var(bytes_name))),
+            ])
+        } else {
+            result
+        };
+        Ok(Some(self.wrap_call_argument_bindings(result, &bindings)?))
+    }
+
+    /// `buf.fill(value, start?, end?)` / `buf.fill(string, encoding)`: the value is encoded
+    /// to a byte pattern that the runtime repeats over the range, in place.
+    fn lower_native_bytes_fill(&mut self, receiver: HirExpr, call: &CallExpr) -> Result<HirExpr, String> {
+        let (arguments, mut bindings) = self.lower_native_spread_values(&call.args, "Buffer.fill")?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        let value = arguments.first().cloned().ok_or("`Buffer.prototype.fill` expects a value")?;
+        let number = |lowerer: &mut Self, index: usize, default: f64| -> Result<HirExpr, String> {
+            match arguments.get(index) {
+                Some(value) => lowerer.coerce_primitive_to_number(value.clone()),
+                None => Ok(HirExpr::Lit(HirLit::F64(default))),
+            }
+        };
+        let encoding_second = arguments.get(1).map(|value| self.infer_expr_type(value)).transpose()? == Some(HirType::Str);
+        let (start, end, encoding) = if encoding_second {
+            (HirExpr::Lit(HirLit::F64(0.0)), HirExpr::Lit(HirLit::F64(f64::INFINITY)), arguments.get(1).cloned())
+        } else {
+            (number(self, 1, 0.0)?, number(self, 2, f64::INFINITY)?, arguments.get(3).cloned())
+        };
+        let pattern = match self.infer_expr_type(&value)? {
+            HirType::Str => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_from_string".into())),
+                vec![value, encoding.unwrap_or_else(|| HirExpr::Lit(HirLit::Str("utf8".into())))],
+            ),
+            HirType::Array(element) if *element == HirType::F64 => self.as_bytes_value(value)?,
+            _ => {
+                let number = self.coerce_primitive_to_number(value)?;
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_from_array".into())),
+                    vec![HirExpr::ArrayLit(vec![number])],
+                )
+            }
+        };
+        let result = HirExpr::Block(vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_fill".into())),
+                vec![receiver.clone(), pattern, start, end],
+            )),
+            HirStmt::Return(Some(receiver)),
+        ]);
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// Binds `expr` once as an `f64` local so range checks and the access share it.
     fn bind_bytes_number(
         &mut self,
@@ -414,6 +654,7 @@ impl<'a> FnLowerer<'a> {
             &target,
             "`.copy()` target",
         )?;
+        let target = self.as_bytes_value(target)?;
         let offset = |lowerer: &mut Self, index: usize, default: f64| -> Result<HirExpr, String> {
             match arguments.get(index) {
                 Some(value) => lowerer.coerce_primitive_to_number(value.clone()),
@@ -449,6 +690,7 @@ impl<'a> FnLowerer<'a> {
             _ => return Err("native `.set()` expects a source and an optional offset".into()),
         };
         let offset = self.coerce_primitive_to_number(offset)?;
+        let source = self.as_bytes_value(source)?;
         // Source and offset are read twice (range check, then copy): bind both once.
         let source_type = self.infer_expr_type(&source)?;
         let source_name = format!("__thaw_bytes_set_source_{}", self.next_binding);
@@ -537,8 +779,11 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
                 vec![needle, HirExpr::Lit(HirLit::Str("utf8".to_string()))],
             ),
-            HirType::F64 => HirExpr::ArrayLit(vec![needle]),
-            HirType::Array(inner) if **inner == HirType::F64 => needle,
+            HirType::F64 => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_from_array".into())),
+                vec![HirExpr::ArrayLit(vec![needle])],
+            ),
+            HirType::Array(inner) if **inner == HirType::F64 => self.as_bytes_value(needle)?,
             other => {
                 return Err(format!(
                     "`Buffer.prototype.{method}` needle must be a string, a byte buffer, or a number (got {other:?})"

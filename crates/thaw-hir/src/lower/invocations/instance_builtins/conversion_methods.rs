@@ -273,6 +273,7 @@ impl<'a> FnLowerer<'a> {
                         &other,
                         "`.equals()` argument",
                     )?;
+                    let other = self.as_bytes_value(other)?;
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_bytes_equals".to_string())),
                         vec![receiver, other],
@@ -330,7 +331,7 @@ impl<'a> FnLowerer<'a> {
                             let start = self.coerce_primitive_to_number(arguments[1].clone())?;
                             let end = self.number_format_end_or_infinity(arguments.get(2))?;
                             let range = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_bytes_slice".to_string())),
+                                Box::new(HirExpr::Var("__thaw_bytes_subarray".to_string())),
                                 vec![receiver, start, end],
                             );
                             let result = HirExpr::Call(
