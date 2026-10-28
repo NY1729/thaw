@@ -474,6 +474,11 @@ impl Interp {
             has(self, "get")?,
             has(self, "set")?,
         );
+        // globals are scope bindings: a defined data property must be visible as an identifier
+        if let (Kind::Global, Some(v)) = (&*o.kind.borrow(), &value) {
+            self.global
+                .declare(key, v.clone(), writable.as_ref().is_some_and(Value::truthy));
+        }
         let existing = o.position(key);
         // array index / length writes go through the element storage
         if value.is_some() {

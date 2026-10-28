@@ -1,0 +1,12 @@
+1 ["1","3"] true true null  x y
+a=Z&c=+x+y&d=%C3%A9%26%3D 3
+[["a","Z"],["c"," x y"],["d","é&="]] ["a","c","d"] ["Z"," x y","é&="]
+[object URLSearchParams Iterator] {"value":["a","Z"],"done":false}
+x=1&y=2
+k=v&k=w
+m=n
+x1true,y2true
+z=1 [object URLSearchParams]
+http://h/p?x=1&y=2
+m 1
+n 2
