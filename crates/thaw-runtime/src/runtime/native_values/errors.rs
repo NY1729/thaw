@@ -1142,6 +1142,9 @@ thread_local! {
     /// Own `stack` of a record that has no `stack` slot (an Error-family class instance after
     /// `Error.captureStackTrace`, or any class instance captured into): owner pointer -> text.
     static OBJECT_STACKS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+    /// Owners whose side-table `stack` was assigned (enumerable) rather than captured (hidden).
+    static OBJECT_STACK_VISIBLE: RefCell<std::collections::HashSet<usize>> =
+        RefCell::new(std::collections::HashSet::new());
 }
 
 /// `Error.captureStackTrace(owner)` for a record: remembers `text` as the owner's `stack`.
@@ -1157,6 +1160,25 @@ pub unsafe extern "C" fn thaw_object_stack_set(owner: *const u8, text: *const c_
     let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
     OBJECT_STACKS.with(|table| table.borrow_mut().insert(owner as usize, text));
     true
+}
+
+/// `owner.stack = text` on a record without a `stack` slot: like `thaw_object_stack_set`, but the
+/// property is enumerable (`Error.captureStackTrace` defines a hidden one).
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_object_stack_assign(owner: *const u8, text: *const c_char) -> bool {
+    if !unsafe { thaw_object_stack_set(owner, text) } {
+        return false;
+    }
+    OBJECT_STACK_VISIBLE.with(|table| table.borrow_mut().insert(owner as usize));
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_object_stack_visible(owner: *const u8) -> bool {
+    OBJECT_STACK_VISIBLE.with(|table| table.borrow().contains(&(owner as usize)))
 }
 
 #[no_mangle]
@@ -1177,6 +1199,14 @@ pub unsafe extern "C" fn thaw_object_stack_get(owner: *const u8, fallback: *cons
 }
 
 fn prune_object_stacks(tracing: bool) {
+    OBJECT_STACK_VISIBLE.with(|table| {
+        let mut table = table.borrow_mut();
+        if tracing {
+            table.retain(|pointer| !thaw_arena::was_reclaimed(*pointer));
+        } else {
+            table.clear();
+        }
+    });
     OBJECT_STACKS.with(|table| {
         let mut table = table.borrow_mut();
         if tracing {
