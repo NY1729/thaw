@@ -318,7 +318,121 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         let symbol = Self::llvm_symbol_for(&func.name);
-        Ok(self.module.add_function(&symbol, fn_type, Some(Linkage::Internal)))
+        let function = self.module.add_function(&symbol, fn_type, Some(Linkage::Internal));
+        self.mark_for_stack_frames(function);
+        Ok(function)
+    }
+
+    /// Makes `function` visible to `Error.stack`: it keeps a frame pointer (so the runtime can walk
+    /// the call chain) and lives in `STACK_FRAME_SECTION` (so a return address is attributed to
+    /// compiled code only). Linux only; elsewhere errors keep the single anonymous frame.
+    fn mark_for_stack_frames(&self, function: FunctionValue<'ctx>) {
+        if cfg!(target_os = "linux") {
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_string_attribute("frame-pointer", "all"),
+            );
+            function.set_section(Some(STACK_FRAME_SECTION));
+        }
+    }
+
+    fn in_stack_frame_section(function: FunctionValue<'ctx>) -> bool {
+        function.get_section().is_some_and(|section| section.to_bytes() == STACK_FRAME_SECTION.as_bytes())
+    }
+
+    /// After `new Error`-style construction: records the current call stack for `err.stack`.
+    fn emit_stack_capture(&self, framed: PointerValue<'ctx>) -> Result<(), String> {
+        let Some(current) = self.builder.get_insert_block().and_then(|block| block.get_parent()) else {
+            return Ok(());
+        };
+        if !Self::in_stack_frame_section(current) {
+            return Ok(());
+        }
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let frameaddress = self.module.get_function("llvm.frameaddress.p0").unwrap_or_else(|| {
+            self.module.add_function(
+                "llvm.frameaddress.p0",
+                pointer.fn_type(&[self.context.i32_type().into()], false),
+                None,
+            )
+        });
+        let frame = self
+            .builder
+            .build_call(frameaddress, &[self.context.i32_type().const_zero().into()], "frame")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("frameaddress returned no value")?;
+        let capture = self.module.get_function("thaw_error_capture_frames").unwrap();
+        self.builder
+            .build_call(
+                capture,
+                &[framed.into(), frame.into(), current.as_global_value().as_pointer_value().into()],
+                "capture_frames",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// At process start: hands the runtime the names of the compiled functions.
+    fn emit_stack_table_registration(&self) -> Result<(), String> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let entries = self
+            .module
+            .get_functions()
+            .filter(|function| Self::in_stack_frame_section(*function) && function.count_basic_blocks() > 0)
+            .map(|function| {
+                let symbol = function.get_name().to_string_lossy().into_owned();
+                // Bundled modules prefix their functions `__thawmod<N>_`.
+                let symbol = symbol
+                    .strip_prefix("__thawmod")
+                    .and_then(|rest| rest.split_once('_'))
+                    .filter(|(index, _)| index.bytes().all(|byte| byte.is_ascii_digit()))
+                    .map_or(symbol.as_str(), |(_, name)| name);
+                let name = symbol
+                    .strip_prefix("__thaw_user_")
+                    .or_else(|| symbol.strip_prefix("thaw_user_"))
+                    .unwrap_or(symbol);
+                // Compiler-made functions (lambdas, shims) are anonymous like V8's.
+                let name = if name.starts_with("__") || name.starts_with("thaw_") { "" } else { name };
+                let name = self.builder.build_global_string_ptr(name, "stack_fn_name").map_err(|e| e.to_string())?;
+                Ok(self.context.const_struct(
+                    &[function.as_global_value().as_pointer_value().into(), name.as_pointer_value().into()],
+                    false,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let entry_type = self.context.struct_type(&[pointer.into(), pointer.into()], false);
+        let table = self.module.add_global(entry_type.array_type(entries.len() as u32), None, "thaw_stack_table");
+        table.set_constant(true);
+        table.set_linkage(Linkage::Internal);
+        table.set_initializer(&entry_type.const_array(&entries));
+        let bound = |name| {
+            let global = self.module.get_global(name).unwrap_or_else(|| {
+                self.module.add_global(self.context.i8_type(), None, name)
+            });
+            global.as_pointer_value()
+        };
+        let file = self.builder.build_global_string_ptr(&self.module.get_name().to_string_lossy(), "stack_file")
+            .map_err(|e| e.to_string())?;
+        let register = self.module.get_function("thaw_register_fn_table").unwrap();
+        self.builder
+            .build_call(
+                register,
+                &[
+                    table.as_pointer_value().into(),
+                    self.context.i64_type().const_int(entries.len() as u64, false).into(),
+                    bound(concat!("__start_", "thaw_user_fns")).into(),
+                    bound(concat!("__stop_", "thaw_user_fns")).into(),
+                    file.as_pointer_value().into(),
+                ],
+                "register_stack_table",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Declares an ambient (`declare function`) signature as an `extern

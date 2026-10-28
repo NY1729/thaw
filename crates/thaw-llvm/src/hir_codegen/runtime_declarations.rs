@@ -1975,6 +1975,19 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_error_capture_frames",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_register_fn_table",
+            self.context.void_type().fn_type(
+                &[i8_ptr.into(), self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_error_stack_trace_limit",
             self.context.f64_type().fn_type(&[], false),
             Some(Linkage::External),
@@ -2014,6 +2027,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_object_stack_assign",
             self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_native_subclass_mark",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_native_subclass_name",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
