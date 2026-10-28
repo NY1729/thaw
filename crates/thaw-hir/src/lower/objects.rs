@@ -3561,6 +3561,11 @@ impl<'a> FnLowerer<'a> {
                 };
                 let (obj, obj_ty) =
                     self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref(), self.receiver_requires_narrowing(&member.obj))?;
+                // An unwrapped optional buffer (`arr[i]` of a `Buffer[]`) reads its properties as an array.
+                let obj_ty = match obj_ty {
+                    HirType::Bytes => HirType::Array(Box::new(HirType::F64)),
+                    other => other,
+                };
                 // Raw catch-bound strings can carry the legacy
                 // `\u{5}<json>` property bag. Structured caught values must
                 // continue to union-property lowering, where the active

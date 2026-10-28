@@ -1346,7 +1346,7 @@ impl<'a> FnLowerer<'a> {
                     HirType::Tuple(
                         elements
                             .iter()
-                            .map(|element| self.infer_expr_type(element))
+                            .map(|element| self.infer_expr_type_inner(element))
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 } else {
