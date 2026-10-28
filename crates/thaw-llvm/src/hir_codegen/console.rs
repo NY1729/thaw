@@ -425,7 +425,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // `undefined` is kept as the napi-undefined sentinel (not folded into `null`) so the
             // inspector can print it like Node does.
             HirType::Array(element) => self.compile_native_array_to_json_with_undefined(value, element, true),
-            HirType::Bytes => self.compile_native_array_to_json_with_undefined(value, &HirType::F64, true),
+            HirType::Bytes => {
+                let widened = self.compile_bytes_widened_handle(value)?;
+                self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)
+            }
             HirType::Tuple(elements) => self.compile_native_tuple_to_json_with_undefined(value, elements, true),
             HirType::Object(_) => self.compile_native_object_to_json_with_undefined(value, ty, true),
             HirType::Map(..) | HirType::Set(_) => self.compile_native_collection_to_json(value, ty, true),
