@@ -1,0 +1,10 @@
+1 true false true false
+true true false
+true
+TypeError
+Symbol(Symbol.iterator) x true a
+str [object TT] true 42 str str
+[ 1, 'a', 'b' ]
+[ 'x' ] 1 true {"x":2}
+symbol Symbol(Symbol.asyncIterator) Symbol(Symbol.species)
+false

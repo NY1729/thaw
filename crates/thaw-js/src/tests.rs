@@ -135,13 +135,9 @@ fn strings_and_math_builtins() {
 
 #[test]
 fn unsupported_constructs_name_the_feature() {
-    assert_eq!(one("function* g(){}"), "unsupported: generator");
-    assert_eq!(one("var r = 10n"), "unsupported: bigint");
-    assert_eq!(
-        one("function f(){ return new.target }  f()"),
-        "unsupported: new.target"
-    );
-    assert_eq!(one("class A { #p = 1 }"), "unsupported: private-name");
+    // generators, BigInt, `new.target` and private names are implemented (tests/differential/lang)
+    assert_eq!(one("var m = import.meta"), "unsupported: import.meta");
+    assert_eq!(one("var r = import('x')"), "unsupported: import()");
     assert_eq!(one("import x from 'y'"), "unsupported: esm-syntax");
 }
 
@@ -300,12 +296,9 @@ fn package_host_loads_modules_and_exchanges_plain_data() {
 #[test]
 fn package_host_reports_unsupported_constructs_by_name() {
     use crate::host::{HostError, Package};
-    let bundle = MINI.replace(
-        "exports.VERSION = '1.0';",
-        "exports.VERSION = (function* () {});",
-    );
+    let bundle = MINI.replace("exports.VERSION = '1.0';", "exports.VERSION = import('x');");
     match Package::load(&bundle) {
-        Err(HostError::Unsupported(f)) => assert_eq!(f, "generator"),
+        Err(HostError::Unsupported(f)) => assert_eq!(f, "import()"),
         other => panic!("{:?}", other.err()),
     }
 }
@@ -947,11 +940,13 @@ fn static_blocks_and_the_scan_features() {
         .unwrap();
     assert!(r.is_clean(), "{:?}", r.blockers);
     // not implemented: the scan must say so (the evaluator would stop at load time)
-    let r = crate::scan::scan_bundle(&with("class C { #x = 1; } exports.n = 10n;"))
-        .ok()
-        .unwrap();
+    let r = crate::scan::scan_bundle(&with(
+        "class C { x = 1; } exports.u = import.meta.url; exports.n = require('fs');",
+    ))
+    .ok()
+    .unwrap();
     let names: Vec<&str> = r.blockers.keys().map(String::as_str).collect();
-    assert_eq!(names, ["bigint", "private-name"]);
+    assert_eq!(names, ["import.meta", "require:fs"]);
 }
 
 // ----- user iterators are pulled lazily and closed on early exit (expected text recorded from Node 22) -----
@@ -969,4 +964,56 @@ fn user_iterators_are_pulled_lazily_and_closed_on_early_exit() {
     ))
     .unwrap();
     assert_eq!(run(&src).join("\n") + "\n", want);
+}
+
+#[test]
+fn scan_accepts_generators_bigint_private_names_and_new_target() {
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "class C { #p = 1n; get p() { return this.#p; } static *items() { yield new.target; } } \
+         exports.V = async function* () { yield* [C.items()]; for await (const x of []) {} };",
+    );
+    let r = crate::scan::scan_bundle(&bundle).ok().unwrap();
+    assert!(r.is_clean(), "{:?}", r.blockers);
+}
+
+#[test]
+fn evaluator_runs_generators_bigint_and_private_names() {
+    assert_eq!(
+        one("function* g() { const x = yield 1; yield x * 2; } var it = g(); console.log(it.next().value, it.next(21).value, it.next().done)"),
+        "1 42 true"
+    );
+    assert_eq!(
+        one("console.log(2n ** 64n, typeof 1n, 7n / 2n, BigInt('0x10') + 1n)"),
+        "18446744073709551616n bigint 3n 17n"
+    );
+    assert_eq!(
+        one("class A { #x = 2; static #n = 3; get v() { return this.#x * A.#n; } static has(o) { return #x in o; } } console.log(new A().v, A.has(new A()), A.has({}))"),
+        "6 true false"
+    );
+    assert_eq!(
+        one("function F() { return new.target === F } console.log(new F() instanceof F, F())"),
+        "true false"
+    );
+    assert_eq!(
+        one("var p = new Proxy({}, { get: (t, k) => 'got ' + String(k) }); console.log(p.a)"),
+        "got a"
+    );
+}
+
+#[test]
+fn large_maps_and_sets_agree_with_linear_semantics() {
+    let src = "var m = new Map(), s = new Set();
+        for (var i = 0; i < 200; i++) { m.set('k' + i, i); s.add(i % 50); m.set(i, 'n' + i); }
+        m.set(NaN, 'nan'); m.set(-0, 'zero'); s.add(NaN); s.add(NaN); s.add(-0); s.add(0);
+        var del = m.delete('k7'), miss = m.delete('nope');
+        console.log(m.size, s.size, m.get('k8'), m.get(NaN), m.get(0), m.has('k7'), m.has(199), del, miss, s.has(NaN), s.has(49), s.has(50));
+        s.delete(3); m.set('k8', 'again');
+        console.log(s.has(3), s.size, m.get('k8'), [...m.keys()].slice(0, 3).join(), [...s].slice(0, 4).join());
+        var o = {}, a = {}; m.set(o, 1); m.set(a, 2); m.set(1n, 'big'); m.set(1, 'num');
+        console.log(m.get(o), m.get(a), m.get({}), m.get(1n), m.get(1), m.get('1'));";
+    assert_eq!(
+        one(src),
+        "400 51 8 nan zero false true true false true true false|false 50 again k0,0,k1 0,1,2,4|1 2 undefined big num undefined"
+    );
 }
