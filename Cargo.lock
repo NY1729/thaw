@@ -3188,6 +3188,8 @@ name = "thaw-js"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "num-bigint",
+ "num-traits",
  "regress",
  "swc_ecma_visit",
  "thaw-arena",

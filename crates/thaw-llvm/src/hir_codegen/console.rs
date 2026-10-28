@@ -25,10 +25,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i32_type().const_int(0, false).into())
     }
 
-    fn compile_console_assert(
-        &mut self,
-        args: &[HirExpr],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    fn compile_console_assert(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let mut values = args
             .iter()
             .map(|arg| Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)))
@@ -39,8 +36,12 @@ impl<'ctx> HirCompiler<'ctx> {
             values.remove(0).1.into_int_value()
         };
         let function = self.current_function();
-        let failed = self.context.append_basic_block(function, "console_assert_failed");
-        let done = self.context.append_basic_block(function, "console_assert_done");
+        let failed = self
+            .context
+            .append_basic_block(function, "console_assert_failed");
+        let done = self
+            .context
+            .append_basic_block(function, "console_assert_done");
         self.builder
             .build_conditional_branch(condition, done, failed)
             .map_err(|error| error.to_string())?;
@@ -91,9 +92,20 @@ impl<'ctx> HirCompiler<'ctx> {
         // `util.format`, so the whole argument list goes through one runtime formatter.
         if values.len() > 1
             && matches!(values[0].0, Some(HirType::Str))
-            && values.iter().all(|(ty, _)| matches!(ty,
-                Some(HirType::Str | HirType::F64 | HirType::Bool | HirType::Json
-                    | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_))))
+            && values.iter().all(|(ty, _)| {
+                matches!(
+                    ty,
+                    Some(
+                        HirType::Str
+                            | HirType::F64
+                            | HirType::Bool
+                            | HirType::Json
+                            | HirType::Array(_)
+                            | HirType::Tuple(_)
+                            | HirType::Object(_)
+                    )
+                )
+            })
         {
             return self.compile_console_format(values, descriptor);
         }
@@ -122,33 +134,60 @@ impl<'ctx> HirCompiler<'ctx> {
         values: Vec<(Option<HirType>, BasicValueEnum<'ctx>)>,
         descriptor: u64,
     ) -> Result<(), String> {
-        let call = |this: &mut Self, name: &str, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>]| {
-            this.builder.build_call(this.module.get_function(name).unwrap(), args, name)
+        let call = |this: &mut Self,
+                    name: &str,
+                    args: &[inkwell::values::BasicMetadataValueEnum<'ctx>]| {
+            this.builder
+                .build_call(this.module.get_function(name).unwrap(), args, name)
                 .map_err(|error| error.to_string())
         };
         call(self, "thaw_json_typed_decode_scope_begin", &[])?;
-        let failed = self.context.append_basic_block(self.current_function(), "console_format_failed");
+        let failed = self
+            .context
+            .append_basic_block(self.current_function(), "console_format_failed");
         self.push_catch_target(failed);
         let omit_before = std::mem::replace(&mut self.console_omit_absent_fields, true);
-        let array = call(self, "thaw_json_array_new", &[])?.try_as_basic_value().basic().unwrap();
+        let array = call(self, "thaw_json_array_new", &[])?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
         let mut pushed = Ok(());
         for (ty, value) in values {
-            pushed = self.compile_json_array_push_native_with_undefined(array, value, &ty.unwrap(), true);
-            if pushed.is_err() { break; }
+            pushed = self.compile_json_array_push_native_with_undefined(
+                array,
+                value,
+                &ty.unwrap(),
+                true,
+            );
+            if pushed.is_err() {
+                break;
+            }
         }
         self.console_omit_absent_fields = omit_before;
         self.pop_catch_target();
         pushed?;
-        call(self, "thaw_json_typed_decode_scope_end", &[self.context.i8_type().const_zero().into()])?;
+        call(
+            self,
+            "thaw_json_typed_decode_scope_end",
+            &[self.context.i8_type().const_zero().into()],
+        )?;
         let text = call(self, "thaw_console_format", &[array.into()])?
-            .try_as_basic_value().basic().unwrap().into_pointer_value();
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
         self.compile_console_text(text, true, "console_format", descriptor)?;
         call(self, "thaw_json_destroy", &[array.into()])?;
-        let done = self.builder.get_insert_block().ok_or("console log lost its success block")?;
+        let done = self
+            .builder
+            .get_insert_block()
+            .ok_or("console log lost its success block")?;
         self.builder.position_at_end(failed);
         self.compile_discard_typed_decode_scope()?;
         self.branch_on_pending_exception()?;
-        self.builder.build_unreachable().map_err(|error| error.to_string())?;
+        self.builder
+            .build_unreachable()
+            .map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
         self.flush_console()
     }
@@ -170,9 +209,21 @@ impl<'ctx> HirCompiler<'ctx> {
         descriptor: u64,
     ) -> Result<(), String> {
         if let Some(HirType::Optional(payload)) = hir_type {
-            self.compile_console_tagged(value.into_struct_value(), &payload, "undefined", newline, descriptor)?;
+            self.compile_console_tagged(
+                value.into_struct_value(),
+                &payload,
+                "undefined",
+                newline,
+                descriptor,
+            )?;
         } else if let Some(HirType::Nullable(payload)) = hir_type {
-            self.compile_console_tagged(value.into_struct_value(), &payload, "null", newline, descriptor)?;
+            self.compile_console_tagged(
+                value.into_struct_value(),
+                &payload,
+                "null",
+                newline,
+                descriptor,
+            )?;
         } else if let Some(HirType::Nullish(payload)) = hir_type {
             self.compile_console_nullish(value.into_struct_value(), &payload, newline, descriptor)?;
         } else if let Some(HirType::Union(elements)) = hir_type {
@@ -191,11 +242,17 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_console_structured(value.into_pointer_value(), &ty, newline, descriptor)?;
         } else if matches!(hir_type, Some(HirType::WeakMap(_, _))) {
             self.compile_console_literal(
-                "WeakMap { <items unknown> }", newline, "console_weak_map", descriptor,
+                "WeakMap { <items unknown> }",
+                newline,
+                "console_weak_map",
+                descriptor,
             )?;
         } else if matches!(hir_type, Some(HirType::WeakSet(_))) {
             self.compile_console_literal(
-                "WeakSet { <items unknown> }", newline, "console_weak_set", descriptor,
+                "WeakSet { <items unknown> }",
+                newline,
+                "console_weak_set",
+                descriptor,
             )?;
         } else if matches!(
             hir_type,
@@ -219,7 +276,9 @@ impl<'ctx> HirCompiler<'ctx> {
             let rendered = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_i64_to_bigint_string").unwrap(),
+                    self.module
+                        .get_function("thaw_i64_to_bigint_string")
+                        .unwrap(),
                     &[value.into()],
                     "console_i64",
                 )
@@ -258,7 +317,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_global_string_ptr("undefined", "undefined_value")
                 .map_err(|error| error.to_string())?;
-            self.compile_console_text(undefined.as_pointer_value(), newline, "undefined_value", descriptor)?;
+            self.compile_console_text(
+                undefined.as_pointer_value(),
+                newline,
+                "undefined_value",
+                descriptor,
+            )?;
         } else if hir_type == Some(HirType::Null) {
             let null = self
                 .builder
@@ -362,10 +426,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_string_to_display returned no value")?
             .into_pointer_value();
         self.builder
-            .build_call(self.module.get_function("thaw_console_write").unwrap(), &[
-                value.into(), self.context.i32_type().const_int(descriptor, false).into(),
-                self.context.bool_type().const_int(newline as u64, false).into(),
-            ], name)
+            .build_call(
+                self.module.get_function("thaw_console_write").unwrap(),
+                &[
+                    value.into(),
+                    self.context.i32_type().const_int(descriptor, false).into(),
+                    self.context
+                        .bool_type()
+                        .const_int(newline as u64, false)
+                        .into(),
+                ],
+                name,
+            )
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -444,21 +516,33 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<(), String> {
         let generated = !matches!(ty, HirType::Json | HirType::Dictionary(_));
         let rollback = if generated {
-            self.builder.build_call(
-                self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
-                &[], "begin_console_json_scope",
-            ).map_err(|error| error.to_string())?;
-            let failed = self.context.append_basic_block(self.current_function(), "console_marshal_failed");
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_typed_decode_scope_begin")
+                        .unwrap(),
+                    &[],
+                    "begin_console_json_scope",
+                )
+                .map_err(|error| error.to_string())?;
+            let failed = self
+                .context
+                .append_basic_block(self.current_function(), "console_marshal_failed");
             self.push_catch_target(failed);
             Some(failed)
-        } else { None };
+        } else {
+            None
+        };
         let omit_before = std::mem::replace(&mut self.console_omit_absent_fields, true);
         let json_result = match ty {
             HirType::Json | HirType::Dictionary(_) => Ok(value.into()),
             // `undefined` is kept as the napi-undefined sentinel (not folded into `null`) so the
             // inspector can print it like Node does.
             HirType::Array(element) => self.compile_console_array_maybe_subclass(value, element),
-            HirType::Bytes => self.compile_native_array_to_json_with_undefined(value, &HirType::F64, true),
+            HirType::Bytes => {
+                let widened = self.compile_bytes_widened_handle(value)?;
+                self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)
+            }
             HirType::Tuple(elements) => self.compile_native_tuple_to_json_with_undefined(value, elements, true),
             HirType::Object(_) => self.compile_native_object_to_json_with_undefined(value, ty, true),
             HirType::Map(..) | HirType::Set(_) => self.compile_native_collection_to_json(value, ty, true),
@@ -470,38 +554,67 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let json = json_result?;
         if generated {
-            self.builder.build_call(
-                self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
-                &[self.context.i8_type().const_zero().into()], "finish_console_json_scope",
-            ).map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_typed_decode_scope_end")
+                        .unwrap(),
+                    &[self.context.i8_type().const_zero().into()],
+                    "finish_console_json_scope",
+                )
+                .map_err(|error| error.to_string())?;
         }
         // Typed values are inspected like Node's console.log (util.inspect rules), not
         // JSON-stringified: every converted shape goes through the faithful formatter.
-        let text = self.builder.build_call(
-            self.module.get_function(if *ty == HirType::Bytes { "thaw_json_buffer_inspect" } else { "thaw_json_console_string" }).unwrap(),
-            &[json.into()], "console_json_format",
-        ).map_err(|error| error.to_string())?
-            .try_as_basic_value().basic()
-            .ok_or("JSON console formatter returned no value")?.into_pointer_value();
+        let text = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function(if *ty == HirType::Bytes {
+                        "thaw_json_buffer_inspect"
+                    } else {
+                        "thaw_json_console_string"
+                    })
+                    .unwrap(),
+                &[json.into()],
+                "console_json_format",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("JSON console formatter returned no value")?
+            .into_pointer_value();
         if generated {
-            self.builder.build_call(
-                self.module.get_function("thaw_json_destroy").unwrap(),
-                &[json.into()], "destroy_console_json_root",
-            ).map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[json.into()],
+                    "destroy_console_json_root",
+                )
+                .map_err(|error| error.to_string())?;
         }
-        let text = self.compile_check_json_host_error(text.into(), Some("thaw_cstring_destroy"))?
+        let text = self
+            .compile_check_json_host_error(text.into(), Some("thaw_cstring_destroy"))?
             .into_pointer_value();
         self.compile_console_text(text, newline, "console_structured", descriptor)?;
-        self.builder.build_call(
-            self.module.get_function("thaw_cstring_destroy").unwrap(),
-            &[text.into()], "destroy_console_json_format",
-        ).map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[text.into()],
+                "destroy_console_json_format",
+            )
+            .map_err(|error| error.to_string())?;
         if let Some(failed) = rollback {
-            let done = self.builder.get_insert_block().ok_or("console log lost its success block")?;
+            let done = self
+                .builder
+                .get_insert_block()
+                .ok_or("console log lost its success block")?;
             self.builder.position_at_end(failed);
             self.compile_discard_typed_decode_scope()?;
             self.branch_on_pending_exception()?;
-            self.builder.build_unreachable().map_err(|error| error.to_string())?;
+            self.builder
+                .build_unreachable()
+                .map_err(|error| error.to_string())?;
             self.builder.position_at_end(done);
         }
         Ok(())
@@ -527,10 +640,75 @@ impl<'ctx> HirCompiler<'ctx> {
         newline: bool,
         descriptor: u64,
     ) -> Result<(), String> {
+        // A plain array/object is inspected like a native `Json` value (Node's util.inspect rules);
+        // everything else keeps its `String(value)` text.
+        let function = self.current_function();
+        let plain_block = self
+            .context
+            .append_basic_block(function, "console_js_plain");
+        let text_block = self.context.append_basic_block(function, "console_js_text");
+        let done_block = self.context.append_basic_block(function, "console_js_done");
+        let plain = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_handle_is_plain_data")
+                    .unwrap(),
+                &[handle.into()],
+                "console_js_plain_probe",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_handle_is_plain_data returned no value")?
+            .into_int_value();
+        let is_plain = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                plain,
+                self.context.i8_type().const_zero(),
+                "console_js_is_plain",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_plain, plain_block, text_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(plain_block);
+        let json = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_from_borrowed_handle")
+                    .unwrap(),
+                &[handle.into()],
+                "console_js_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("live JSON conversion returned no value")?;
+        let json = self
+            .compile_check_json_host_error(json, Some("thaw_json_destroy"))?
+            .into_pointer_value();
+        self.compile_console_structured(json, &HirType::Json, newline, descriptor)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[json.into()],
+                "console_js_json_destroy",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(text_block);
         let text = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_handle_to_console_string").unwrap(),
+                self.module
+                    .get_function("thaw_js_handle_to_console_string")
+                    .unwrap(),
                 &[handle.into()],
                 "console_js_value",
             )
@@ -542,7 +720,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let probe = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_handle_typed_array_probe").unwrap(),
+                self.module
+                    .get_function("thaw_js_handle_typed_array_probe")
+                    .unwrap(),
                 &[handle.into()],
                 "console_js_typed_probe",
             )
@@ -562,7 +742,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_console_typed_or returned no value")?
             .into_pointer_value();
-        self.compile_console_text(text, newline, "console_js_value", descriptor)
+        self.compile_console_text(text, newline, "console_js_value", descriptor)?;
+        self.builder
+            .build_unconditional_branch(done_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done_block);
+        Ok(())
     }
 
     fn compile_console_union(
@@ -618,7 +803,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.position_at_end(matched);
             let member_value = self.unpack_union_payload(payload, member)?;
             self.compile_console_union_member(
-                member_value, member, is_caught_carrier, newline, descriptor,
+                member_value,
+                member,
+                is_caught_carrier,
+                newline,
+                descriptor,
             )?;
             self.builder
                 .build_unconditional_branch(merge)
@@ -698,7 +887,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             // Same path as a bare I64 (`123n`); catch carriers can hold bigint members.
-            HirType::I64 => self.compile_console_arg(Some(HirType::I64), value, newline, descriptor)?,
+            HirType::I64 => {
+                self.compile_console_arg(Some(HirType::I64), value, newline, descriptor)?
+            }
             HirType::Undefined => {
                 let undefined = self
                     .builder
@@ -727,9 +918,13 @@ impl<'ctx> HirCompiler<'ctx> {
             // fields to walk; print its describer/projection as Json like Node prints it.
             HirType::Object(fields) if fields.is_empty() => {
                 let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                let slot = self.builder.build_alloca(ptr_ty, "console_caught_owner_slot")
+                let slot = self
+                    .builder
+                    .build_alloca(ptr_ty, "console_caught_owner_slot")
                     .map_err(|error| error.to_string())?;
-                self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
                 let name = "__thaw_console_caught_owner".to_string();
                 self.variables.insert(name.clone(), (slot, ptr_ty.into()));
                 self.variable_hir_types.insert(name.clone(), member.clone());
@@ -737,13 +932,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     thaw_hir::HirExpr::Var(name),
                 ))?;
                 self.compile_console_structured(
-                    json.into_pointer_value(), &HirType::Json, newline, descriptor,
+                    json.into_pointer_value(),
+                    &HirType::Json,
+                    newline,
+                    descriptor,
                 )?;
             }
             HirType::Json if is_caught_carrier => {
-                self.compile_console_caught_json(
-                    value.into_pointer_value(), newline, descriptor,
-                )?;
+                self.compile_console_caught_json(value.into_pointer_value(), newline, descriptor)?;
             }
             HirType::Object(_)
             | HirType::Json
@@ -759,14 +955,23 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Map(_, _) | HirType::Set(_) => {
                 self.compile_console_structured(
-                    value.into_pointer_value(), member, newline, descriptor,
+                    value.into_pointer_value(),
+                    member,
+                    newline,
+                    descriptor,
                 )?;
             }
             HirType::WeakMap(_, _) => self.compile_console_literal(
-                "WeakMap { <items unknown> }", newline, "console_union_weak_map", descriptor,
+                "WeakMap { <items unknown> }",
+                newline,
+                "console_union_weak_map",
+                descriptor,
             )?,
             HirType::WeakSet(_) => self.compile_console_literal(
-                "WeakSet { <items unknown> }", newline, "console_union_weak_set", descriptor,
+                "WeakSet { <items unknown> }",
+                newline,
+                "console_union_weak_set",
+                descriptor,
             )?,
             HirType::Function(_, _) | HirType::CallableFunction(..) => self
                 .compile_console_literal(
@@ -784,9 +989,11 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::JsValue => {
                 self.compile_console_js_value(value.into_int_value(), newline, descriptor)?
             }
-            HirType::NativeException => {
-                self.compile_console_native_exception(value.into_pointer_value(), newline, descriptor)?
-            }
+            HirType::NativeException => self.compile_console_native_exception(
+                value.into_pointer_value(),
+                newline,
+                descriptor,
+            )?,
             other => return Err(format!("console.log cannot print union member {other:?}")),
         }
         Ok(())
@@ -801,7 +1008,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let is_error = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_is_host_error_family").unwrap(),
+                self.module
+                    .get_function("thaw_json_is_host_error_family")
+                    .unwrap(),
                 &[json.into()],
                 "console_caught_error_family",
             )
@@ -809,12 +1018,20 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("host Error-family query returned no value")?;
-        let is_error = self.compile_check_json_host_error(is_error, None)?.into_int_value();
+        let is_error = self
+            .compile_check_json_host_error(is_error, None)?
+            .into_int_value();
 
         let function = self.current_function();
-        let render = self.context.append_basic_block(function, "console_caught_error_message");
-        let inspect = self.context.append_basic_block(function, "console_caught_json_value");
-        let merge = self.context.append_basic_block(function, "console_caught_json_done");
+        let render = self
+            .context
+            .append_basic_block(function, "console_caught_error_message");
+        let inspect = self
+            .context
+            .append_basic_block(function, "console_caught_json_value");
+        let merge = self
+            .context
+            .append_basic_block(function, "console_caught_json_done");
         let is_error = self
             .builder
             .build_int_compare(
@@ -864,9 +1081,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 "destroy_console_caught_message",
             )
             .map_err(|error| error.to_string())?;
-        let text = self.compile_check_json_host_error(text.into(), Some("thaw_cstring_destroy"))?
+        let text = self
+            .compile_check_json_host_error(text.into(), Some("thaw_cstring_destroy"))?
             .into_pointer_value();
-        self.compile_console_text(text, newline, "console_caught_error_message_write", descriptor)?;
+        self.compile_console_text(
+            text,
+            newline,
+            "console_caught_error_message_write",
+            descriptor,
+        )?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_cstring_destroy").unwrap(),
@@ -912,7 +1135,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let tag = self
             .builder
             .build_call(
-                self.module.get_function("thaw_exception_native_tag").unwrap(),
+                self.module
+                    .get_function("thaw_exception_native_tag")
+                    .unwrap(),
                 &[descriptor_ptr.into()],
                 "console_native_exception_tag",
             )
@@ -922,26 +1147,47 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("native exception tag returned no value")?
             .into_int_value();
         let function = self.current_function();
-        let merge = self.context.append_basic_block(function, "console_native_exception_done");
-        let fallback = self.context.append_basic_block(function, "console_native_exception_other");
+        let merge = self
+            .context
+            .append_basic_block(function, "console_native_exception_done");
+        let fallback = self
+            .context
+            .append_basic_block(function, "console_native_exception_other");
         let cases = LABELS
             .iter()
-            .map(|(code, _)| (self.context.i64_type().const_int(*code, false),
-                self.context.append_basic_block(function, "console_native_exception_case")))
+            .map(|(code, _)| {
+                (
+                    self.context.i64_type().const_int(*code, false),
+                    self.context
+                        .append_basic_block(function, "console_native_exception_case"),
+                )
+            })
             .collect::<Vec<_>>();
         self.builder
             .build_switch(tag, fallback, &cases)
             .map_err(|error| error.to_string())?;
         for ((_, block), (_, label)) in cases.iter().zip(LABELS) {
             self.builder.position_at_end(*block);
-            self.compile_console_literal(label, newline, "console_native_exception_label", descriptor)?;
-            self.builder.build_unconditional_branch(merge).map_err(|error| error.to_string())?;
+            self.compile_console_literal(
+                label,
+                newline,
+                "console_native_exception_label",
+                descriptor,
+            )?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
         }
         self.builder.position_at_end(fallback);
         self.compile_console_literal(
-            "[native exception]", newline, "console_native_exception_unknown", descriptor,
+            "[native exception]",
+            newline,
+            "console_native_exception_unknown",
+            descriptor,
         )?;
-        self.builder.build_unconditional_branch(merge).map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
         self.builder.position_at_end(merge);
         Ok(())
     }
@@ -1055,10 +1301,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
             }
             HirType::Union(elements) => {
-                self.compile_console_union(payload.into_struct_value(), elements, newline, descriptor)?;
+                self.compile_console_union(
+                    payload.into_struct_value(),
+                    elements,
+                    newline,
+                    descriptor,
+                )?;
             }
             HirType::Nullish(inner) => {
-                self.compile_console_nullish(payload.into_struct_value(), inner, newline, descriptor)?;
+                self.compile_console_nullish(
+                    payload.into_struct_value(),
+                    inner,
+                    newline,
+                    descriptor,
+                )?;
             }
             HirType::Object(_)
             | HirType::Json
@@ -1181,5 +1437,4 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(merge_block);
         Ok(())
     }
-
 }

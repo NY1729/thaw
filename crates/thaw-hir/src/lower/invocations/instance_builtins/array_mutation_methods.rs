@@ -1076,7 +1076,7 @@ impl<'a> FnLowerer<'a> {
                         bindings.push((name, HirType::F64, index));
                     }
                     let intrinsic = if receiver_is_bytes {
-                        "__thaw_bytes_view"
+                        if is_subarray { "__thaw_bytes_subarray" } else { "__thaw_bytes_slice" }
                     } else {
                         "__thaw_array_slice"
                     };
@@ -1698,10 +1698,6 @@ impl<'a> FnLowerer<'a> {
                     // path -- it's already an element match.)
                     if matches!(property.sym.as_ref(), "indexOf" | "includes" | "lastIndexOf")
                         && self.infer_expr_type_inner(&receiver)? == HirType::Bytes
-                        && !matches!(
-                            self.infer_expr_type(&arguments[0])?,
-                            HirType::F64
-                        )
                     {
                         return self.lower_native_bytes_search(
                             receiver,

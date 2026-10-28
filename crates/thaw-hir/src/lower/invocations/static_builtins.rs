@@ -680,6 +680,12 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         value_type: HirType,
     ) -> Result<HirExpr, String> {
+        // The caller's type is usually the `Bytes`-erased one; the un-erased type
+        // keeps a `Buffer` encoding as `{ type: "Buffer", data }` and widens it.
+        let value_type = match self.infer_expr_type_inner(&value) {
+            Ok(inner) if inner != value_type && bytes_layout_eq(&inner, &value_type) => inner,
+            _ => value_type,
+        };
         let value_name = format!("__thaw_json_wrap_value_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(value_name.clone(), value_type.clone());
@@ -2720,7 +2726,9 @@ impl<'a> FnLowerer<'a> {
                                     ],
                                 ),
                                 HirType::Bytes => fill.clone(),
-                                HirType::Array(ref element) if **element == HirType::F64 => fill.clone(),
+                                HirType::Array(ref element) if **element == HirType::F64 => {
+                                    self.as_bytes_value(fill.clone())?
+                                }
                                 _ => {
                                     let number = self.coerce_primitive_to_number(fill.clone())?;
                                     HirExpr::Call(
@@ -2751,6 +2759,25 @@ impl<'a> FnLowerer<'a> {
                             .clone();
                         let source_type = self.infer_expr_type(&source)?;
                         if matches!(&source_type, HirType::Array(elem) if **elem == HirType::F64) {
+                            if self.infer_expr_type_inner(&source)? == HirType::Bytes {
+                                // `Buffer.from(arrayBuffer, byteOffset?, length?)` shares the
+                                // `ArrayBuffer`'s memory; `Buffer.from(buffer)` copies.
+                                let mut operands = vec![source];
+                                for position in 1..=2 {
+                                    operands.push(match arguments.get(position) {
+                                        Some(value) => self.coerce_primitive_to_number(value.clone())?,
+                                        None => HirExpr::Lit(HirLit::F64(f64::NAN)),
+                                    });
+                                }
+                                operands.push(HirExpr::Lit(HirLit::F64(1.0)));
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_bytes_from_buffer_like".to_string())),
+                                        operands,
+                                    ),
+                                    &bindings,
+                                );
+                            }
                             return self.wrap_call_argument_bindings(
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_bytes_from_array".to_string())),
@@ -2790,11 +2817,12 @@ impl<'a> FnLowerer<'a> {
                             }
                             .to_string(),
                         ));
+                        let decoded = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
+                            vec![source, encoding],
+                        );
                         return self.wrap_call_argument_bindings(
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
-                                vec![source, encoding],
-                            ),
+                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_as_u8".to_string())), vec![decoded]),
                             &bindings,
                         );
                     }
@@ -2814,11 +2842,17 @@ impl<'a> FnLowerer<'a> {
                                 "`Uint8Array.from` expects an array source, got {source_type:?}"
                             ));
                         }
+                        let intrinsic = if self.infer_expr_type_inner(source)? == HirType::Bytes {
+                            "__thaw_bytes_clone"
+                        } else {
+                            "__thaw_bytes_from_array"
+                        };
+                        let copy = HirExpr::Call(
+                            Box::new(HirExpr::Var(intrinsic.to_string())),
+                            vec![source.clone()],
+                        );
                         return self.wrap_call_argument_bindings(
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_bytes_from_array".to_string())),
-                                vec![source.clone()],
-                            ),
+                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_as_u8".to_string())), vec![copy]),
                             &bindings,
                         );
                     }
@@ -3688,6 +3722,7 @@ impl<'a> FnLowerer<'a> {
                             let mut value = self.lower_expr(&argument.expr)?;
                             if argument.spread.is_some() {
                                 value = self.project_native_base(value)?;
+                                value = self.bytes_to_f64_array(value)?;
                                 // Same snapshot conversion array-literal spreads
                                 // (`[...str]`/`[...map]`/`[...set]`) already use.
                                 let mut spread_source_type = self.infer_expr_type(&value)?;
@@ -3844,6 +3879,7 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             self.lower_expr(&call.args[0].expr)?
                         };
+                        source = self.bytes_to_f64_array(source)?;
                         let mut source_type = self.infer_expr_type(&source)?;
                         if let HirType::Union(members) = &source_type {
                 if members
@@ -4336,6 +4372,16 @@ impl<'a> FnLowerer<'a> {
                             return Err("`Array.isArray` expects exactly one argument".into());
                         };
                         let value = self.lower_primitive_array_operand(value.clone())?;
+                        // A `Buffer` / `Uint8Array` is not an Array.
+                        if self.infer_expr_type_inner(&value)? == HirType::Bytes {
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::EvalThen(
+                                    Box::new(value),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                ),
+                                &bindings,
+                            );
+                        }
                         let ty = self.infer_expr_type(&value)?;
                         if let HirType::Union(elements) = &ty {
                             let matching = elements
@@ -4421,6 +4467,7 @@ impl<'a> FnLowerer<'a> {
                             value = self.project_native_base(value)?;
                             ty = base;
                         }
+                        value = self.bytes_to_f64_array(value)?;
                         if let HirType::Union(members) = &ty {
                 if members
                     .iter()
@@ -4694,6 +4741,7 @@ impl<'a> FnLowerer<'a> {
                             value = self.project_native_base(value)?;
                             ty = base;
                         }
+                        value = self.bytes_to_f64_array(value)?;
                         if let HirType::Array(element) = &ty {
                             let element = element.as_ref().clone();
                             let result = self.lower_array_filter(
@@ -4860,6 +4908,7 @@ impl<'a> FnLowerer<'a> {
                             value = self.project_native_base(value)?;
                             ty = base;
                         }
+                        value = self.bytes_to_f64_array(value)?;
                         if let HirType::Array(element) = &ty {
                             let receiver_name = format!("__thaw_array_entries_source_{}", self.next_binding);
                             self.next_binding += 1;
@@ -5882,6 +5931,7 @@ impl<'a> FnLowerer<'a> {
                             if argument.spread.is_some() {
                                 let source = self.lower_expr(&argument.expr)?;
                                 let source = self.project_native_base(source)?;
+                                let source = self.bytes_to_f64_array(source)?;
                                 // A single spread of a runtime-length
                                 // `number[]` (not an array literal or
                                 // tuple, both already handled below by
