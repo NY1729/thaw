@@ -1,0 +1,37 @@
+s1 c**abcabc--a+b+cx xxx
+s2 bcddeefa982
+s3 [-1,-1,2,"SS","abc"]
+s4 [2,"a1b3","b",[1,3],"x12",true,true,true]
+s5 ["a%20b","A","a%20b%26%C3%A9","é","http://x/a%20b",true]
+s6 ["Symbol(q)","null","1,2,3","[object Object]","",["a","b"],"ABC"]
+a1 [3,[1,2,3,4],[1,2,2,4],[1,2,3],[3,2,1],[1,9,3],[1,4],2,1]
+a2 [[0,2,4],[7,8],[0,0,0],[4,5,3,4,5],false,true,-1,2,"3-2-1"]
+a3 [[1,"x","y",5],"1/10/5",true,[0,1],[0,1,2],[1,10,5,1,2],[10],[1,"x","y",5]]
+a4 [[4,1],2,true,true,[1,4],[4,1],["a","b","c"],["aa","bb"],[[1,2]],["h","é","é"],[1,2]]
+a5 [[1,2,3],[1,0,0],2,[3,"3z"],{"o":[1,3],"e":[2]}]
+a6 ["function","J","1,2,3","",",,1",-1]
+o1 [[["a",1]],{"a":1},{"0":"x","1":"y","a":1},["0","1","length"],false,true,["a","b"]]
+o2 [["own","inh"],true,false,1,true,true,false]
+o3 [{"a":{"value":1,"writable":true,"enumerable":true,"configurable":true},"b":{"enumerable":true,"configurable":true}},[["value",1],["writable",true],["enumerable",true],["configurable",true]],"{\"x\":1}",true,"[object Null]","[object Array]","[object Object]",true,false]
+o4 [["1","2","x","-1"],"{\"1\":\"a\",\"2\":\"b\",\"x\":\"x\",\"-1\":\"neg\"}",["p"],6,2]
+j1 ["{\n  \"a\": [\n    1,\n    {\n      \"b\": 2\n    }\n  ],\n  \"c\": \"x\"\n}","[null,null,null]","{\"d\":\"1970-01-01T00:00:00.000Z\",\"n\":null,\"i\":null}","\"é \\\"\\n\"","{\"a\":1}","{\n--\"a\": 2,\n--\"b\": [\n----2,\n----3\n--]\n}","\"tj\"","true"]
+j2 [{"a":[1,2,{"b":null}],"c":1000,"d":"é"},[2,4],1,"x",1]
+j3 THROW SyntaxError Expected property name or '}' in JSON at position 1 (line 1 
+j4 THROW SyntaxError Unexpected token ']', "[1,]" is not valid JSON
+j5 THROW TypeError Converting circular structure to JSON
+    --> starting at ob
+n1 ["1234.57","0.0000012","11111111","73","1e+21","1.2e+2",31,12,0,null,3.14,8,31,35,"-2","3","1.00",0.30000000000000004,0.3333333333333333,5e-7,123456789012345680000,0,[0],true]
+n2 [-1,-1,3,5,3,5.5,31,0,0,3,null,null,0,0.7853981633974483,true,true,false,9007199254740991,"25","1,234,567.891"]
+d1 ["2020-02-29T12:30:45.123Z",1582979445123,6,"2020-02-29T12:30:45.123Z",1582934400000,1582970400000,0,1582979445000,null,"Invalid Date","Sat, 29 Feb 2020 12:30:45 GMT",946684800000,"number"]
+d2 [2,2,"Mon Mar 02 2020 10:20:30 GMT-0500 (Eastern Standard Time)","Mon Mar 02 2020","3/2/2020","10:20:30 AM","3/2/2020, 10:20:30 AM",300,31622399999,true,0,true]
+r1 THROW SyntaxError Invalid regular expression: /[/: Unterminated character clas
+r2 [[true,2,false,0,true],"a[bbbac]c","$$$",true,true,true,"aa","xx","abab","a",null,"/a/g","\\/"]
+m1 ["object","function","function","function","function","object","function","function","function",1,"string",[1],"Cannot read properties of null (reading 'x')","undefinedVar is not defined"]
+m2 ["n",null,"a",0,512,1,-1,null,-2147483648,1,4294967295,10,"52",7,"[object Object]",6,1,null,2,"object","function","function",true,true,false,false,true,true,true,true,true]
+m3 [5,7,9,8,1000,5,15,0.5,255,1000,"object","undefined"]
+m4 [[0,1,2],120,"try",["f"],[1,2,[]],3,2,"foo","","Q"]
+m5 ["P5",true,true,"Q","P5","[object QQ]","Q","function",true,"{\"x\":5}",["x"]]
+m6 ["n",[[1,"a"],[null,"n"]],2,[2,4,6],true,1,[1,null],1,"[object Map]",[[1,[1,3]],[0,[2]]],[1,2,3]]
+m7 [{"0":1,"1":2,"2":44},{"0":0,"1":0},[2,4],-56,2,"6869",2,"hi"]
+m8 [true,"RangeError","RangeError: r","[object Error]","N: M",[true,true,"MyE: boom"]]
+m9 [null,true,true,"1,10,9","a,b","false,true","e,z,é","e,é,z","1,234.5","0.12"]

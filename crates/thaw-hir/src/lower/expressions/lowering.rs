@@ -4309,7 +4309,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let mut value = self.lower_expr(&element.expr)?;
                     if element.spread.is_some() {
-                        value = self.project_native_base(value)?;
+                        value = self.project_native_base_widening_bytes(value)?;
                         // A string/`Map`/`Set` spread source iterates the
                         // same way `for...of` already does for each --
                         // snapshot to an array up front via the exact same
@@ -4795,6 +4795,9 @@ impl<'a> FnLowerer<'a> {
                                 "`new {}()` does not support spread arguments",
                                 class.sym
                             ));
+                        }
+                        if self.is_buffer_view_constructor(class.sym.as_ref(), args)? {
+                            return self.lower_buffer_view_constructor(args);
                         }
                         let values = args
                             .iter()

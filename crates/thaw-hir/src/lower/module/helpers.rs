@@ -346,6 +346,21 @@ fn infer_class_field_literal_type(expr: &Expr) -> Option<HirType> {
         Expr::Lit(Lit::Str(_)) => Some(HirType::Str),
         Expr::Lit(Lit::Bool(_)) => Some(HirType::Bool),
         Expr::Paren(parenthesized) => infer_class_field_literal_type(&parenthesized.expr),
+        // `x = new Uint8Array(n)`
+        Expr::New(construction) if construction.callee.as_ident().is_some_and(|class| class.sym == "Uint8Array") => {
+            Some(HirType::Bytes)
+        }
+        // `f = function () {}`: no parameters, no declared result, an empty body.
+        Expr::Fn(function)
+            if function.function.params.is_empty()
+                && function.function.type_params.is_none()
+                && function.function.return_type.is_none()
+                && !function.function.is_async
+                && !function.function.is_generator
+                && function.function.body.as_ref().is_some_and(|body| body.stmts.is_empty()) =>
+        {
+            Some(HirType::Function(Vec::new(), Box::new(HirType::Void)))
+        }
         Expr::Array(array) => {
             let elements = array
                 .elems

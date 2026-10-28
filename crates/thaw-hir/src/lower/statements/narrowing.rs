@@ -822,6 +822,10 @@ impl<'a> FnLowerer<'a> {
         if bare {
             return Err("function mixes value-returning and bare `return` statements".into());
         }
+        // A body that only returns byte buffers returns a `Bytes` (not its erased `number[]`).
+        if values.iter().all(|value| self.infer_expr_type_inner(value).is_ok_and(|ty| ty == HirType::Bytes)) {
+            return Ok(HirType::Bytes);
+        }
         let mut members = Vec::new();
         for value in &values {
             let ty = self.infer_expr_type(value)?;

@@ -1365,6 +1365,12 @@ impl<'a> FnLowerer<'a> {
             } else {
                 (value, ty)
             };
+            // `const [a, b] = buffer`: the elements are read from a widened copy.
+            let value = if matches!(&decl.name, Pat::Array(_)) {
+                self.bytes_to_f64_array(value)?
+            } else {
+                value
+            };
             let destructurable_union = matches!(
                 &ty,
                 HirType::Union(elements)
