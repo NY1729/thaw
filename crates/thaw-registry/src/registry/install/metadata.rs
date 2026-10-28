@@ -1,18 +1,115 @@
+/// Pauses between `npm install` attempts; one entry per retry, so the
+/// total is `len() + 1` attempts (a flaky registry connection gets 3 tries).
+const NPM_INSTALL_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+];
+
+/// stderr markers of a transient network failure. A resolution error (for
+/// example E404 or ETARGET) is never retried.
+const NPM_TRANSIENT_MARKERS: [&str; 5] = [
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "E503",
+    "503 Service Unavailable",
+];
+
 fn npm_install(scratch: &Path, package: &str) -> Result<(), String> {
-    let output = Command::new("npm")
-        .arg("install")
-        .arg("--prefix")
-        .arg(scratch)
-        .args(["--no-audit", "--no-fund", "--ignore-scripts", package])
-        .output()
-        .map_err(|e| format!("failed to invoke `npm` (is Node.js/npm installed?): {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "`npm install {package}` failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    npm_install_with(Path::new("npm"), scratch, package, &NPM_INSTALL_RETRY_DELAYS)
+}
+
+fn npm_install_with(
+    npm: &Path,
+    scratch: &Path,
+    package: &str,
+    retry_delays: &[std::time::Duration],
+) -> Result<(), String> {
+    let mut retries = 0;
+    loop {
+        let output = Command::new(npm)
+            .arg("install")
+            .arg("--prefix")
+            .arg(scratch)
+            // npm's default of 2 fetch retries is too few for a flaky registry
+            // connection; the loop below adds the bounded outer attempts.
+            .args([
+                "--fetch-retries=5",
+                "--fetch-retry-mintimeout=2000",
+                "--fetch-retry-maxtimeout=20000",
+            ])
+            .args(["--no-audit", "--no-fund", "--ignore-scripts", package])
+            .output()
+            .map_err(|e| format!("failed to invoke `npm` (is Node.js/npm installed?): {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let transient = NPM_TRANSIENT_MARKERS
+            .iter()
+            .any(|marker| stderr.contains(marker));
+        if !transient || retries == retry_delays.len() {
+            return Err(format!("`npm install {package}` failed:\n{stderr}"));
+        }
+        std::thread::sleep(retry_delays[retries]);
+        retries += 1;
     }
-    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod npm_install_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Writes a fake `npm` whose first `failures` runs print `stderr` and
+    /// exit 1, then succeed. Every run appends a line to `calls.log`.
+    fn fake_npm(name: &str, failures: usize, stderr: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("thaw-npm-retry-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.log");
+        let script = dir.join("npm");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho call >> '{calls}'\nif [ \"$(wc -l < '{calls}')\" -le {failures} ]; then echo '{stderr}' >&2; exit 1; fi\nexit 0\n",
+                calls = calls.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        (script, calls)
+    }
+
+    fn call_count(calls: &Path) -> usize {
+        fs::read_to_string(calls).map_or(0, |text| text.lines().count())
+    }
+
+    const NO_WAIT: [std::time::Duration; 2] = [std::time::Duration::ZERO; 2];
+
+    #[test]
+    fn transient_network_failures_are_retried_until_success() {
+        let (npm, calls) = fake_npm("transient", 2, "npm error code ECONNRESET");
+        npm_install_with(&npm, Path::new("unused"), "left-pad", &NO_WAIT).unwrap();
+        assert_eq!(call_count(&calls), 3);
+    }
+
+    #[test]
+    fn transient_failures_stop_after_the_bounded_attempts() {
+        let (npm, calls) = fake_npm("exhausted", 1000, "npm error code ETIMEDOUT");
+        let error = npm_install_with(&npm, Path::new("unused"), "left-pad", &NO_WAIT).unwrap_err();
+        assert_eq!(call_count(&calls), NPM_INSTALL_RETRY_DELAYS.len() + 1);
+        assert!(error.contains("ETIMEDOUT"), "{error}");
+    }
+
+    #[test]
+    fn resolution_errors_are_not_retried() {
+        let (npm, calls) = fake_npm("resolution", 1000, "npm error code E404");
+        let error = npm_install_with(&npm, Path::new("unused"), "no-such-pkg", &NO_WAIT).unwrap_err();
+        assert_eq!(call_count(&calls), 1);
+        assert!(error.contains("E404"), "{error}");
+    }
 }
 
 fn read_manifest(package_dir: &Path) -> Result<serde_json::Value, String> {
