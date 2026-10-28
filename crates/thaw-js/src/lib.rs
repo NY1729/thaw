@@ -250,12 +250,12 @@ pub(crate) struct FxHasher(u64);
 impl std::hash::Hasher for FxHasher {
     fn write(&mut self, bytes: &[u8]) {
         const K: u64 = 0x517c_c1b7_2722_0a95;
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            let w = u64::from_le_bytes(c.try_into().unwrap_or([0; 8]));
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        for c in chunks {
+            let w = u64::from_le_bytes(*c);
             self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(K);
         }
-        for &b in chunks.remainder() {
+        for &b in remainder {
             self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(K);
         }
     }
