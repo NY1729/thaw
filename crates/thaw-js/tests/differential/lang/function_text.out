@@ -1,0 +1,8 @@
+function plain(a, b) { return a + b; }
+(x) => x * 2
+class K { m(a) { return a; } static s() {} }
+m(a) { return a; } | meth(a) { return a; }
+async function af() {} | function* gf() { yield 1; }
+true false function max() { [native code] }
+function Object() { [native code] } function Map() { [native code] } function Symbol() { [native code] }
+class A {} function push() { [native code] }

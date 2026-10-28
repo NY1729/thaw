@@ -132,8 +132,14 @@ impl Package {
     /// Parse `bundle_js` (registry `bundle.js`) and evaluate its entry module.
     pub fn load(bundle_js: &str) -> Result<Package, HostError> {
         let parts = parse_bundle(bundle_js).map_err(HostError::Bundle)?;
+        if let Some(problem) = parts.esm_problems.iter().next() {
+            return Err(HostError::Unsupported((*problem).to_string()));
+        }
         let mut interp = Box::new(Interp::new());
         interp.run_id += 1; // factory spans come from this one parse
+        interp
+            .sources
+            .insert(interp.run_id, std::rc::Rc::from(parts.source.as_str()));
         let entry = parts.entry.clone();
         let mut factories = HashMap::new();
         for (key, func) in &parts.factories {
@@ -721,6 +727,7 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
         Value::Bool(b) => Native::Bool(*b),
         Value::Number(n) => Native::Number(*n),
         Value::Str(s) => Native::Str(s.to_string()),
+        Value::BigInt(_) => return Err(HostError::NotPlainData("bigint".into())),
         Value::Object(o) => {
             if v.is_callable() {
                 return Err(HostError::NotPlainData("function".into()));
@@ -803,15 +810,10 @@ impl Native {
         }
     }
 
-    /// Parse JSON text through the evaluator's own `JSON.parse`.
+    /// Parse JSON text (the grammar and error messages of the evaluator's `JSON.parse`, without
+    /// building an interpreter: the typed-call ABI parses its arguments on every call).
     pub fn from_json(text: &str) -> Result<Native, HostError> {
-        let mut it = Interp::new();
-        let mut quoted = String::new();
-        crate::builtins::json_quote(text, &mut quoted);
-        match it.run(&format!("JSON.parse({quoted})")) {
-            Ok(v) => from_value(&mut it, &v, 0),
-            Err(c) => Err(classify(&mut it, c)),
-        }
+        crate::json::parse_native(text).map_err(|m| HostError::Thrown(format!("SyntaxError: {m}")))
     }
 }
 
@@ -973,6 +975,9 @@ pub extern "C" fn thaw_tjs_register(name: *const c_char, bundle: *const c_char) 
     let (Some(name), Some(src)) = (cstr(name), cstr(bundle)) else {
         return 0;
     };
+    if std::env::var_os("THAW_JS_TRACE").is_some() {
+        eprintln!("thaw-js: loading package `{name}`");
+    }
     match Package::load(&src) {
         Ok(p) => {
             PACKAGES.with(|ps| {
