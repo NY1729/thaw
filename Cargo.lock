@@ -3129,6 +3129,7 @@ dependencies = [
  "inkwell",
  "semver",
  "serde_json",
+ "sha2",
  "swc_ecma_visit",
  "thaw-bridge",
  "thaw-hir",
@@ -3314,6 +3315,17 @@ dependencies = [
  "thaw-parser",
  "thaw-quickjs",
  "ureq",
+]
+
+[[package]]
+name = "thaw-rt-dylib"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "thaw-arena",
+ "thaw-jit",
+ "thaw-runtime",
+ "thaw-std",
 ]
 
 [[package]]

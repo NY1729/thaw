@@ -1431,3 +1431,109 @@ impl<'ctx> HirCompiler<'ctx> {
 
 
 }
+
+impl<'ctx> HirCompiler<'ctx> {
+    /// Library entry points (see `set_library_mode`). Each wrapper runs the module initializers
+    /// once, then calls the compiled function. The stack-overflow limit stays 0 (the guard is
+    /// inert): a library cannot know the caller's stack, and a wrong limit would raise false
+    /// overflows. ponytail: deep recursion in a library function faults instead of throwing.
+    fn emit_library_exports(&mut self, program: &HirProgram) -> Result<(), String> {
+        let f64_type = self.context.f64_type();
+        let bool_type = self.context.bool_type();
+        let ready = self.module.add_global(bool_type, None, "__thaw_lib_ready");
+        ready.set_linkage(Linkage::Internal);
+        ready.set_initializer(&bool_type.const_zero());
+        let enter = self.module.add_function(
+            "__thaw_lib_enter",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(enter, "entry");
+        let init = self.context.append_basic_block(enter, "init");
+        let done = self.context.append_basic_block(enter, "done");
+        self.builder.position_at_end(entry);
+        let was_ready = self
+            .builder
+            .build_load(bool_type, ready.as_pointer_value(), "ready")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        self.builder.build_conditional_branch(was_ready, done, init).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(init);
+        self.builder
+            .build_store(ready.as_pointer_value(), bool_type.const_int(1, false))
+            .map_err(|e| e.to_string())?;
+        for symbol in [NATIVE_MODULE_INIT_SYMBOL, MODULE_INIT_SYMBOL, TOP_LEVEL_INIT_SYMBOL] {
+            if let Some(init_fn) = self.module.get_function(symbol) {
+                self.builder.build_call(init_fn, &[], "lib_init").map_err(|e| e.to_string())?;
+            }
+        }
+        self.builder.build_unconditional_branch(done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(done);
+        self.builder.build_return(None).map_err(|e| e.to_string())?;
+
+        for export in self.library_exports.clone() {
+            // The entry module's functions are renamed `__thawmod0_<name>` once it has imports.
+            let mangled = format!("__thawmod0_{}", export.hir_name);
+            let function = program
+                .functions
+                .iter()
+                .find(|function| function.name == export.hir_name || function.name == mangled)
+                .ok_or_else(|| {
+                    let names = program.functions.iter().map(|f| f.name.as_str()).take(40).collect::<Vec<_>>();
+                    format!("library export `{}` was not found among {names:?}", export.hir_name)
+                })?;
+            if function.ret != HirType::F64
+                || function.params.iter().any(|param| param.ty != HirType::F64)
+            {
+                return Err(format!(
+                    "library export `{}` is not a scalar f64 function ({:?} -> {:?})",
+                    export.hir_name,
+                    function.params.iter().map(|param| &param.ty).collect::<Vec<_>>(),
+                    function.ret
+                ));
+            }
+            let target = self
+                .module
+                .get_function(&Self::llvm_symbol_for(&function.name))
+                .ok_or_else(|| format!("library export `{}` was not compiled", export.hir_name))?;
+            if export.c_symbol == function.name {
+                target.as_global_value().set_name(&format!("{}.impl", export.c_symbol));
+            }
+            let params = vec![f64_type.into(); function.params.len()];
+            let wrapper = self.module.add_function(
+                &export.c_symbol,
+                f64_type.fn_type(&params, false),
+                Some(Linkage::External),
+            );
+            let block = self.context.append_basic_block(wrapper, "entry");
+            self.builder.position_at_end(block);
+            self.builder.build_call(enter, &[], "enter").map_err(|e| e.to_string())?;
+            let args: Vec<BasicMetadataValueEnum> = wrapper.get_param_iter().map(Into::into).collect();
+            let result = self
+                .builder
+                .build_call(target, &args, "call")
+                .map_err(|e| e.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("library export returned no value")?;
+            self.builder.build_return(Some(&result)).map_err(|e| e.to_string())?;
+        }
+
+        // Everything the program defines stays private to the library.
+        let keep: Vec<&str> = self.library_exports.iter().map(|e| e.c_symbol.as_str()).collect();
+        for function in self.module.get_functions() {
+            let name = function.get_name().to_string_lossy().into_owned();
+            if function.count_basic_blocks() > 0 && !keep.contains(&name.as_str()) {
+                function.set_linkage(Linkage::Internal);
+            }
+        }
+        for global in self.module.get_globals() {
+            if global.get_initializer().is_some()
+                && global.get_name().to_string_lossy() != LIBRARY_METADATA_SYMBOL
+            {
+                global.set_linkage(Linkage::Internal);
+            }
+        }
+        Ok(())
+    }
+}
