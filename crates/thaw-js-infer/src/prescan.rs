@@ -37,6 +37,8 @@ pub struct FnInfo {
     /// simple identifier params in order (`None` = pattern / rest)
     pub params: Vec<Option<String>>,
     pub defaults: Vec<bool>,
+    /// primitive literal default of each parameter: 0 none, 1 number, 2 string, 3 boolean
+    pub default_lit: Vec<u8>,
     pub async_: bool,
     pub gen: bool,
     pub arrow: bool,
@@ -212,6 +214,8 @@ pub fn strip(mut e: &a::Expr) -> &a::Expr {
 pub const TRUST_DTS: u8 = 1;
 pub const TRUST_EVIDENCE: u8 = 2;
 pub const TRUST_HINT: u8 = 4;
+pub const TRUST_JSDOC: u8 = 8;
+pub const TRUST_DEFAULT: u8 = 16;
 
 pub enum ExpTarget {
     Fn(usize),
@@ -374,6 +378,21 @@ impl<'s> Pre<'s> {
                 };
                 info.params.push(simple);
                 info.defaults.push(dflt);
+                info.default_lit.push(match p {
+                    a::Pat::Assign(asg) => match &*asg.right {
+                        a::Expr::Lit(a::Lit::Num(_)) => 1,
+                        a::Expr::Unary(u)
+                            if u.op == a::UnaryOp::Minus
+                                && matches!(&*u.arg, a::Expr::Lit(a::Lit::Num(_))) =>
+                        {
+                            1
+                        }
+                        a::Expr::Lit(a::Lit::Str(_)) => 2,
+                        a::Expr::Lit(a::Lit::Bool(_)) => 3,
+                        _ => 0,
+                    },
+                    _ => 0,
+                });
                 let mut ids = Vec::new();
                 pat_idents(p, &mut ids);
                 for n in ids {

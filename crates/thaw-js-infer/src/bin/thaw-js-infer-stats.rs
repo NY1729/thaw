@@ -16,6 +16,8 @@ fn main() {
             "--returns" => cfg.returns = true,
             "--guards" => cfg.guards = true,
             "--clones" => clones = true,
+            "--jsdoc" => cfg.jsdoc = true,
+            "--defaults" => cfg.default_contract = true,
             a if a.starts_with("--dts=") => {
                 let t = std::fs::read_to_string(&a["--dts=".len()..]).unwrap();
                 cfg.dts = Some(std::sync::Arc::new(
