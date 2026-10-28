@@ -6,6 +6,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let user_main = self.module.get_function(USER_MAIN_SYMBOL);
 
         let (main_fn, entry) = self.new_c_main();
+        self.builder.position_at_end(entry);
+        self.emit_stack_table_registration().unwrap();
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
         // Live JS handles reaching a graph encoder or reader on the main thread
@@ -543,6 +545,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 .add_function("thaw_runtime_run", run_type, Some(Linkage::External));
 
         let (main_fn, entry) = self.new_c_main();
+        self.builder.position_at_end(entry);
+        self.emit_stack_table_registration()?;
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
         let pointer = self.context.ptr_type(AddressSpace::default());

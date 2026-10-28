@@ -724,6 +724,7 @@ include!("tests/hirdiv_contracts.rs");
 include!("tests/conlog_contracts.rs");
 include!("tests/bytes_range_contracts.rs");
 include!("tests/bufferlit_contracts.rs");
+include!("tests/buf_erase_contracts.rs");
 include!("tests/newtarget_contracts.rs");
 
 include!("tests/fnlen_contracts.rs");
@@ -758,3 +759,5 @@ include!("tests/errrest2_contracts.rs");
 include!("tests/oobread_contracts.rs");
 include!("tests/bufu8_contracts.rs");
 include!("tests/lim3_contracts.rs");
+include!("tests/lim4_contracts.rs");
+include!("tests/errframes_contracts.rs");
