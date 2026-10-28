@@ -1,6 +1,26 @@
 {
   "cases": [
     {
+      "name": "lim3 new property on a caught class instance",
+      "expect": "matched",
+      "source": "class C { a: number = 1; } function main(): void { try { throw new C(); } catch (e: any) { e.extra = 5; console.log(e.extra, Object.keys(e)); } const r: any = new C(); r.more = 6; r.a = 9; console.log(r.more, r.a, Object.keys(r)); }"
+    },
+    {
+      "name": "lim3 captured stack on a class instance is non-enumerable own",
+      "expect": "matched",
+      "source": "class Q { v: number = 1; } function main(): void { const q = new Q(); Error.captureStackTrace(q); console.log(Object.keys(q), Object.getOwnPropertyNames(q), JSON.stringify(q), typeof (q as any).stack); }"
+    },
+    {
+      "name": "lim3 array subclass through annotated binding",
+      "expect": "matched",
+      "source": "class MyArr extends Array<number> { tag: string; constructor(n: number) { super(); this.tag = n as any; } } function show(a: MyArr): void { console.log(a); } function main(): void { const a = new MyArr(3); a.push(1); const b: MyArr = a; console.log(b === a, b.length, b[0]); b.push(7); console.log(a.length); show(a); }"
+    },
+    {
+      "name": "lim3 class field inference and JSON.stringify of a function",
+      "expect": "matched",
+      "source": "class X { x = new Uint8Array(2); y = function () {}; } function f(): void {} function main(): void { const o = new X(); console.log(o.x.length, typeof o.y, o.y()); console.log(JSON.stringify(f), JSON.stringify(function () {})); }"
+    },
+    {
       "name": "catch binding capture leaves later comparison intact",
       "expect": "matched",
       "source": "function main(): void { const a = 'x'; const b = 'y'; try {} catch (e: any) { console.log(e === b); } console.log(a === b); try {} catch (e: any) { const f = () => b; console.log(f()); } console.log(a === b, b); }"
