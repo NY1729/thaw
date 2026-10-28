@@ -57,6 +57,8 @@ struct ExplicitFfiField {
 /// `main` so we can wrap it in a proper `i32 main(void)` C entry point
 /// rather than exposing a `void`-returning function as the process entry.
 const USER_MAIN_SYMBOL: &str = "thaw_user_main";
+/// Section holding every compiled function (the linker brackets it with `__start_`/`__stop_`).
+const STACK_FRAME_SECTION: &str = "thaw_user_fns";
 /// Magic function name a registry-generated shim can define (see
 /// thaw-bridge's `generate_module_init` and thaw-cli's `--use`) to run
 /// code once before user code -- currently just `loadScript` calls for
