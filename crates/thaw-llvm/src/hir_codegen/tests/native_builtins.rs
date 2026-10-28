@@ -8510,7 +8510,7 @@ fn compiles_locale_string_methods() {
     "#;
     assert_eq!(
         compile_and_run(source, "locale_string_methods"),
-        "ABC\nabc\nx\n1234.5\n1,2,3\ntrue\ntrue\ntrue\ntrue\n"
+        "ABC\nabc\nx\n1,234.5\n1,2,3\ntrue\ntrue\ntrue\ntrue\n"
     );
 }
 
