@@ -351,7 +351,7 @@ fn console_log_prints_a_fixed_label_for_each_caught_native_exception_tag() {
     for label in [
         "Symbol()", "[ <items unknown> ]", "<Buffer>", "Map { <items unknown> }",
         "WeakMap { <items unknown> }", "Set { <items unknown> }", "WeakSet { <items unknown> }",
-        "[Function]", "Promise { <pending> }", "[native exception]",
+        "[Function (anonymous)]", "Promise { <pending> }", "[native exception]",
     ] {
         assert!(ir.contains(label), "missing label {label:?}:\n{ir}");
     }
