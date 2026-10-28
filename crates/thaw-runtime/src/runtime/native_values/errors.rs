@@ -1200,6 +1200,43 @@ pub unsafe extern "C" fn thaw_object_stack_get(owner: *const u8, fallback: *cons
     }
 }
 
+thread_local! {
+    /// Native `Map`/`Set`/`Array` allocation -> name of the subclass it was handed on from.
+    static NATIVE_SUBCLASS_NAMES: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+}
+
+/// Remembers that the native collection `base` backs an instance of class `name`.
+///
+/// # Safety
+/// `name` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_native_subclass_mark(base: *const u8, name: *const c_char) {
+    if base.is_null() || name.is_null() {
+        return;
+    }
+    thaw_arena::register_metadata_reset_hook(prune_native_subclass_names);
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    NATIVE_SUBCLASS_NAMES.with(|table| table.borrow_mut().insert(base as usize, name));
+}
+
+/// The subclass name remembered for `base`, or null.
+#[no_mangle]
+pub extern "C" fn thaw_native_subclass_name(base: *const u8) -> *const c_char {
+    let name = NATIVE_SUBCLASS_NAMES.with(|table| table.borrow().get(&(base as usize)).cloned());
+    name.and_then(|name| arena_c_string(&name)).map_or(std::ptr::null(), |value| value.cast())
+}
+
+fn prune_native_subclass_names(tracing: bool) {
+    NATIVE_SUBCLASS_NAMES.with(|table| {
+        let mut table = table.borrow_mut();
+        if tracing {
+            table.retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer));
+        } else {
+            table.clear();
+        }
+    });
+}
+
 fn prune_object_stacks(tracing: bool) {
     OBJECT_STACK_VISIBLE.with(|table| {
         let mut table = table.borrow_mut();

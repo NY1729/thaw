@@ -464,6 +464,22 @@ const TYPED_PRELUDE: &str = r#"
   }
   var AP = Array.prototype;
   var TP = Object.getPrototypeOf(Uint8Array.prototype);
+  // Real accessors, so `Reflect.apply(getter, view, [])` brand-checks like V8 (the evaluator also
+  // serves these keys directly on the object, so plain reads never reach them).
+  var TAG = Symbol.toStringTag;
+  function acc(o, k, f) { Object.defineProperty(o, k, { get: f, enumerable: false, configurable: true }); }
+  var isTA = function (v) { return ArrayBuffer.isView(v) && !(typeof DataView === 'function' && v instanceof DataView); };
+  ['buffer', 'byteOffset', 'byteLength', 'length'].forEach(function (k) {
+    acc(TP, k, { [k]: function () {
+      if (!isTA(this)) throw new TypeError('Receiver is not a typed array');
+      return this[k];
+    } }[k]);
+  });
+  acc(TP, TAG, function () { return isTA(this) ? this.constructor.name : undefined; });
+  acc(ArrayBuffer.prototype, 'byteLength', function () {
+    if (!(this instanceof ArrayBuffer)) throw new TypeError('Receiver is not an ArrayBuffer');
+    return this.byteLength;
+  });
   ['forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'fill', 'at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
     if (AP[n]) def(TP, n, AP[n]);
   });

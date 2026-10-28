@@ -1,0 +1,11 @@
+const t = new EventTarget();
+const e = new Event('ping', { bubbles: true, cancelable: true });
+console.log(e.type, e.bubbles, e.cancelable, e.composed, e.defaultPrevented, e.target, e.currentTarget);
+const seen = [];
+t.addEventListener('ping', function (ev) { seen.push(['a', ev.type, ev.target === t, ev.currentTarget === t]); });
+t.addEventListener('ping', { handleEvent(ev) { seen.push(['obj', ev.type]); } });
+t.addEventListener('ping', ev => { ev.preventDefault(); seen.push(['c']); });
+t.addEventListener('ping', function () { seen.push(['dup-skipped?']); });
+const ret = t.dispatchEvent(e);
+console.log(JSON.stringify(seen));
+console.log(ret, e.defaultPrevented, e.currentTarget, e.target === t);

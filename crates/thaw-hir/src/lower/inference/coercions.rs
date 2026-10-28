@@ -664,7 +664,20 @@ impl<'a> FnLowerer<'a> {
                         other => other == base,
                     };
                     if accepted {
+                        let class = match &actual {
+                            HirType::Object(fields) => fields.first().and_then(|(marker, _)| {
+                                marker.strip_prefix("__thaw_class_identity_\u{1e}")
+                                    .and_then(|chain| chain.split('\u{1f}').next())
+                            }),
+                            _ => None,
+                        }.map(str::to_string);
                         value = self.project_native_base(value)?;
+                        if let Some(class) = class {
+                            value = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_native_subclass_mark".into())),
+                                vec![value, HirExpr::Lit(HirLit::Str(class))],
+                            );
+                        }
                     }
                 }
             }
