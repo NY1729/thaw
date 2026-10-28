@@ -201,6 +201,17 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    /// A function value as Node prints it: its registered `[Function: name]` label.
+    fn compile_console_function(
+        &mut self,
+        closure: BasicValueEnum<'ctx>,
+        newline: bool,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        let sentinel = self.compile_console_function_sentinel(closure.into_pointer_value())?;
+        self.compile_console_structured(sentinel.into_pointer_value(), &HirType::Json, newline, descriptor)
+    }
+
     fn compile_console_arg(
         &mut self,
         hir_type: Option<HirType>,
@@ -258,7 +269,7 @@ impl<'ctx> HirCompiler<'ctx> {
             hir_type,
             Some(HirType::Function(_, _) | HirType::CallableFunction(..))
         ) {
-            self.compile_console_literal("[Function]", newline, "console_function", descriptor)?;
+            self.compile_console_function(value, newline, descriptor)?;
         } else if matches!(hir_type, Some(HirType::Promise(_))) {
             self.compile_console_literal(
                 "Promise { <pending> }",
@@ -973,13 +984,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_union_weak_set",
                 descriptor,
             )?,
-            HirType::Function(_, _) | HirType::CallableFunction(..) => self
-                .compile_console_literal(
-                    "[Function]",
-                    newline,
-                    "console_union_function",
-                    descriptor,
-                )?,
+            HirType::Function(_, _) | HirType::CallableFunction(..) => {
+                self.compile_console_function(value, newline, descriptor)?
+            }
             HirType::Promise(_) => self.compile_console_literal(
                 "Promise { <pending> }",
                 newline,
@@ -1129,7 +1136,7 @@ impl<'ctx> HirCompiler<'ctx> {
             (25, "Set { <items unknown> }"),
             (26, "WeakSet { <items unknown> }"),
             (27, "[ <items unknown> ]"),
-            (28, "[Function]"),
+            (28, "[Function (anonymous)]"),
             (29, "Promise { <pending> }"),
         ];
         let tag = self
@@ -1328,13 +1335,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     descriptor,
                 )?;
             }
-            HirType::Function(_, _) | HirType::CallableFunction(..) => self
-                .compile_console_literal(
-                    "[Function]",
-                    newline,
-                    "console_optional_function",
-                    descriptor,
-                )?,
+            HirType::Function(_, _) | HirType::CallableFunction(..) => {
+                self.compile_console_function(payload, newline, descriptor)?
+            }
             HirType::Promise(_) => self.compile_console_literal(
                 "Promise { <pending> }",
                 newline,
