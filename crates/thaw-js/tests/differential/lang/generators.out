@@ -1,0 +1,17 @@
+got b
+cleanup
+{ value: 1, done: false } { value: 2, done: false } { value: 9, done: true } { value: undefined, done: true }
+[ 'a', 'b', 'r', 1, 2 ]
+[ 1, 2, 3 ] 3
+1 [ 2, 3 ]
+0
+ret
+ret
+0
+[ 10, 20 ] [ 's' ]
+[ 1 ]
+caught boom
+{ value: 'c', done: false } { value: undefined, done: true }
+function [object Generator] true
+0,1,1,2,3,5,8,13,21,34
+{ value: [ 1, 2 ], done: false } [ 1, 2 ]
