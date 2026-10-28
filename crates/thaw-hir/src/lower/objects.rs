@@ -3616,11 +3616,13 @@ impl<'a> FnLowerer<'a> {
                 }
                 match &obj_ty {
                     HirType::Array(_)
-                        if matches!(prop.sym.as_ref(), "byteLength" | "byteOffset")
+                        if matches!(prop.sym.as_ref(), "byteLength" | "byteOffset" | "buffer")
                             && self.infer_expr_type_inner(&obj)? == HirType::Bytes =>
                     {
                         Ok(if prop.sym == *"byteLength" {
                             HirExpr::ArrayLen(Box::new(obj))
+                        } else if prop.sym == *"buffer" {
+                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_buffer".into())), vec![obj])
                         } else {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_bytes_byte_offset".into())),

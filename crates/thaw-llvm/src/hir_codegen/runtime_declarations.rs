@@ -1393,21 +1393,43 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
-        // Shared Buffer views: (parent, child, start), (buffer, start, count)
-        // and (buffer) -> byteOffset.
+        // Shared Buffer views: (buffer) -> byteOffset / backing-store size,
+        // (buffer, start, end) -> a view (or copy) record, widen / narrow
+        // between a view record and an `f64`-slot array buffer.
+        for name in ["thaw_bytes_byte_offset", "thaw_bytes_store_length"] {
+            self.module.add_function(name, f64_type.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        for name in ["thaw_bytes_subarray", "thaw_bytes_slice", "thaw_bytes_slice_copy"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
-            "thaw_bytes_link",
-            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
+            "thaw_bytes_reorder",
+            self.context.void_type().fn_type(&[i8_ptr.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_bytes_sync",
-            self.context.void_type().fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            "thaw_bytes_fill",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_bytes_byte_offset",
-            f64_type.fn_type(&[i8_ptr.into()], false),
+            "thaw_bytes_from_buffer_like",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_bytes_to_array", "thaw_bytes_widen_list", "thaw_bytes_narrow_list",
+            "thaw_bytes_as_u8", "thaw_bytes_clone", "thaw_bytes_buffer",
+        ] {
+            self.module.add_function(name, i8_ptr.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_bytes_store_array",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         // `buf.indexOf(needle, from)` -- haystack + needle buffers, a
@@ -1890,6 +1912,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_object_stack_set",
             self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_stack_assign",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_stack_visible",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

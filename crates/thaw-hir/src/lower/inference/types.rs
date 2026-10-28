@@ -285,6 +285,17 @@ fn type_contains_bytes(ty: &HirType) -> bool {
 
 /// `Bytes` and `Array(F64)` share one physical layout (the separate identity is only for
 /// method dispatch); types are layout-equal when equal after erasing `Bytes`.
+/// Result type of the array-shaped `__thaw_bytes_*` conversions (a free, never-inlined
+/// function so `infer_expr_type_inner`, which recurses deeply, keeps its stack frame).
+#[inline(never)]
+fn bytes_array_intrinsic_type(name: &str) -> HirType {
+    match name {
+        "__thaw_bytes_widen_list" => HirType::Array(Box::new(HirType::Array(Box::new(HirType::F64)))),
+        "__thaw_bytes_narrow_list" => HirType::Array(Box::new(HirType::Bytes)),
+        _ => HirType::Array(Box::new(HirType::F64)),
+    }
+}
+
 fn bytes_layout_eq(a: &HirType, b: &HirType) -> bool {
     a == b
         || ((type_contains_bytes(a) || type_contains_bytes(b)) && {
@@ -1086,9 +1097,19 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bytes_write"
                     | "__thaw_bytes_write_i64"
                     | "__thaw_bytes_copy"
-                    | "__thaw_bytes_sync"
+                    | "__thaw_bytes_get"
+                    | "__thaw_bytes_set"
+                    | "__thaw_bytes_get_safe"
+                    | "__thaw_bytes_set_safe"
+                    | "__thaw_bytes_store_array"
+                    | "__thaw_bytes_fill"
+                    | "__thaw_bytes_reorder"
+                    | "__thaw_bytes_store_length"
                     | "__thaw_bytes_byte_offset"
                     | "__thaw_bytes_index_of" => return Ok(HirType::F64),
+                    "__thaw_bytes_to_array" | "__thaw_bytes_widen_list" | "__thaw_bytes_narrow_list" => {
+                        return Ok(bytes_array_intrinsic_type(name.as_str()))
+                    }
                     "__thaw_bytes_set_from_string" => {
                         return Ok(HirType::Object(vec![
                             ("read".to_string(), HirType::F64),
@@ -1100,7 +1121,11 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
                     | "__thaw_bytes_from_array" | "__thaw_bytes_concat"
                     | "__thaw_bytes_slice"
-                    | "__thaw_bytes_view" => {
+                    | "__thaw_bytes_as_u8"
+                    | "__thaw_bytes_clone"
+                    | "__thaw_bytes_buffer"
+                    | "__thaw_bytes_from_buffer_like"
+                    | "__thaw_bytes_subarray" => {
                         // `Bytes`, not `Array(F64)`, so a chained
                         // `Buffer.from(...).toString("hex")` decodes.
                         // `infer_expr_type` normalizes it away for every
@@ -1634,7 +1659,8 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "error property name")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_object_stack_set" | "__thaw_object_stack_has" | "__thaw_object_stack_get" => {
+                    "__thaw_object_stack_set" | "__thaw_object_stack_has" | "__thaw_object_stack_get"
+                    | "__thaw_object_stack_assign" | "__thaw_object_stack_visible" => {
                         // The owner is any record; the other operands are strings.
                         for operand in args.iter().skip(1) {
                             self.expect_type(&HirType::Str, operand, "stack text")?;
