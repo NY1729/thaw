@@ -26,8 +26,9 @@ impl<'a> FnLowerer<'a> {
     fn contains_function_value(ty: &HirType) -> bool {
         match ty {
             HirType::Function(_, _) | HirType::CallableFunction(..) => true,
-            HirType::Optional(value) | HirType::Nullable(value) | HirType::Nullish(value) =>
-                Self::contains_function_value(value),
+            HirType::Optional(value) | HirType::Nullable(value) | HirType::Nullish(value) => {
+                Self::contains_function_value(value)
+            }
             HirType::Union(values) => values.iter().any(Self::contains_function_value),
             _ => false,
         }
@@ -36,7 +37,8 @@ impl<'a> FnLowerer<'a> {
     fn contains_tagged_reference_value(ty: &HirType) -> bool {
         match ty {
             HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
-                Self::strict_reference_type(payload) || Self::contains_tagged_reference_value(payload)
+                Self::strict_reference_type(payload)
+                    || Self::contains_tagged_reference_value(payload)
             }
             HirType::Union(values) => values.iter().any(Self::contains_tagged_reference_value),
             _ => false,
@@ -52,24 +54,33 @@ impl<'a> FnLowerer<'a> {
     // itself be absent, while present native references still compare by identity.
     pub(crate) fn function_observable_absence(&mut self, value: HirExpr, ty: &HirType) -> HirExpr {
         let number = |n| HirExpr::Lit(HirLit::F64(n));
-        let choose = |test, yes, no| HirExpr::Conditional(
-            Box::new(test), Box::new(yes), Box::new(no), HirType::F64,
-        );
+        let choose = |test, yes, no| {
+            HirExpr::Conditional(Box::new(test), Box::new(yes), Box::new(no), HirType::F64)
+        };
         match ty {
             HirType::Function(_, _) | HirType::CallableFunction(..) => choose(
-                Self::function_pointer_is_undefined(value, ty), number(1.0), number(0.0)),
+                Self::function_pointer_is_undefined(value, ty),
+                number(1.0),
+                number(0.0),
+            ),
             HirType::Undefined | HirType::Void => number(1.0),
             HirType::Null => number(2.0),
             HirType::Optional(payload) => choose(
                 HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
                 number(1.0),
                 self.function_observable_absence(
-                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload)),
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                ),
+            ),
             HirType::Nullable(payload) => choose(
                 HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone()),
                 number(2.0),
                 self.function_observable_absence(
-                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload)),
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                ),
+            ),
             HirType::Nullish(payload) => choose(
                 HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone()),
                 number(1.0),
@@ -77,83 +88,142 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone()),
                     number(2.0),
                     self.function_observable_absence(
-                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload),
-                )),
+                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()),
+                        payload,
+                    ),
+                ),
+            ),
             HirType::Union(elements) => {
                 let mut result = number(0.0);
                 for (index, member) in elements.iter().enumerate().rev() {
                     result = choose(
-                        HirExpr::BinOp(BinOp::EqEqEq,
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
                             Box::new(HirExpr::UnionTag(Box::new(value.clone()), elements.clone())),
-                            Box::new(number(index as f64))),
+                            Box::new(number(index as f64)),
+                        ),
                         self.function_observable_absence(
-                            HirExpr::UnionValue(Box::new(value.clone()), index, elements.clone()), member),
+                            HirExpr::UnionValue(Box::new(value.clone()), index, elements.clone()),
+                            member,
+                        ),
                         result,
                     );
                 }
                 result
             }
             HirType::Json | HirType::Dictionary(_) => choose(
-                HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
-                    vec![value.clone()]), number(1.0),
-                choose(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_null".into())),
-                    vec![value]), number(2.0), number(0.0))),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                    vec![value.clone()],
+                ),
+                number(1.0),
+                choose(
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                        vec![value],
+                    ),
+                    number(2.0),
+                    number(0.0),
+                ),
+            ),
             HirType::JsValue => choose(
-                self.dynamic_value_is_undefined(value.clone()), number(1.0),
-                choose(self.dynamic_value_is_null(value), number(2.0), number(0.0))),
+                self.dynamic_value_is_undefined(value.clone()),
+                number(1.0),
+                choose(self.dynamic_value_is_null(value), number(2.0), number(0.0)),
+            ),
             _ => number(0.0),
         }
     }
 
-    fn function_observable_typeof(&mut self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+    fn function_observable_typeof(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
         let string = |name: &str| HirExpr::Lit(HirLit::Str(name.into()));
-        let choose = |test, yes, no| HirExpr::Conditional(
-            Box::new(test), Box::new(yes), Box::new(no), HirType::Str,
-        );
+        let choose = |test, yes, no| {
+            HirExpr::Conditional(Box::new(test), Box::new(yes), Box::new(no), HirType::Str)
+        };
         Ok(match ty {
             HirType::Str => choose(
-                HirExpr::Call(Box::new(HirExpr::Var("__thaw_string_is_null".into())), vec![value]),
-                string("undefined"), string("string")),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                    vec![value],
+                ),
+                string("undefined"),
+                string("string"),
+            ),
             HirType::Function(_, _) | HirType::CallableFunction(..) => choose(
-                Self::function_pointer_is_undefined(value, ty), string("undefined"), string("function")),
+                Self::function_pointer_is_undefined(value, ty),
+                string("undefined"),
+                string("function"),
+            ),
             HirType::Void => string("undefined"),
             HirType::Optional(payload) => choose(
                 HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
-                string("undefined"), self.function_observable_typeof(
-                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload)?),
+                string("undefined"),
+                self.function_observable_typeof(
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                )?,
+            ),
             HirType::Nullable(payload) => choose(
                 HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone()),
-                string("object"), self.function_observable_typeof(
-                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload)?),
+                string("object"),
+                self.function_observable_typeof(
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                )?,
+            ),
             HirType::Nullish(payload) => choose(
                 HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone()),
-                string("undefined"), choose(
+                string("undefined"),
+                choose(
                     HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone()),
-                    string("object"), self.function_observable_typeof(
-                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload)?)),
+                    string("object"),
+                    self.function_observable_typeof(
+                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()),
+                        payload,
+                    )?,
+                ),
+            ),
             HirType::Union(elements) => {
                 let mut result = string("undefined");
                 for (index, member) in elements.iter().enumerate().rev() {
                     result = choose(
-                        HirExpr::BinOp(BinOp::EqEqEq,
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
                             Box::new(HirExpr::UnionTag(Box::new(value.clone()), elements.clone())),
-                            Box::new(HirExpr::Lit(HirLit::F64(index as f64)))),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
                         self.function_observable_typeof(
-                            HirExpr::UnionValue(Box::new(value.clone()), index, elements.clone()), member)?,
+                            HirExpr::UnionValue(Box::new(value.clone()), index, elements.clone()),
+                            member,
+                        )?,
                         result,
                     );
                 }
                 result
             }
-            HirType::Json | HirType::Dictionary(_) => HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![value]),
+            HirType::Json | HirType::Dictionary(_) => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                vec![value],
+            ),
             HirType::JsValue => {
-                let callable = HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![string("__thaw_typeof_dynamic_value")]);
+                let callable = HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![string("__thaw_typeof_dynamic_value")],
+                );
                 HirExpr::JsonAsString(Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("callDynamicValueWithValue".into())), vec![callable, value])))
+                    Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                    vec![callable, value],
+                )))
             }
-            _ => string(native_typeof_name(ty).ok_or_else(||
-                format!("`typeof` union member has no runtime category: {ty:?}"))?),
+            _ => {
+                string(native_typeof_name(ty).ok_or_else(|| {
+                    format!("`typeof` union member has no runtime category: {ty:?}")
+                })?)
+            }
         })
     }
 
@@ -205,7 +275,9 @@ impl<'a> FnLowerer<'a> {
                 vec![
                     HirExpr::Call(
                         Box::new(HirExpr::Var("getDynamicValue".into())),
-                        vec![HirExpr::Lit(HirLit::Str("__thaw_is_truthy_dynamic_value".into()))],
+                        vec![HirExpr::Lit(HirLit::Str(
+                            "__thaw_is_truthy_dynamic_value".into(),
+                        ))],
                     ),
                     value,
                 ],
@@ -441,11 +513,7 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), lhs_type.clone());
         let left = HirExpr::Var(name.clone());
         let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
-        let (then_value, else_value) = if is_and {
-            (rhs, left)
-        } else {
-            (left, rhs)
-        };
+        let (then_value, else_value) = if is_and { (rhs, left) } else { (left, rhs) };
         let result = HirExpr::Block(vec![HirStmt::If(
             condition,
             vec![HirStmt::Return(Some(then_value))],
@@ -514,8 +582,9 @@ impl<'a> FnLowerer<'a> {
         rhs_type: HirType,
     ) -> Result<HirExpr, String> {
         let payload = match &lhs_type {
-            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) =>
-                payload.as_ref().clone(),
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                payload.as_ref().clone()
+            }
             _ => unreachable!(),
         };
         let name = format!("__thaw_nullish_and_left_{}", self.next_binding);
@@ -523,16 +592,27 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), lhs_type.clone());
         let left = HirExpr::Var(name.clone());
         let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
-        let payload_always_truthy = matches!(&payload,
-            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
-            | HirType::Dictionary(_) | HirType::Promise(_));
+        let payload_always_truthy = matches!(
+            &payload,
+            HirType::Array(_)
+                | HirType::Tuple(_)
+                | HirType::Object(_)
+                | HirType::Dictionary(_)
+                | HirType::Promise(_)
+        );
 
         fn add_member(ty: HirType, members: &mut Vec<HirType>) {
-            if !members.contains(&ty) { members.push(ty); }
+            if !members.contains(&ty) {
+                members.push(ty);
+            }
         }
         fn add_parts(ty: &HirType, members: &mut Vec<HirType>) {
             match ty {
-                HirType::Union(parts) => for part in parts { add_parts(part, members); },
+                HirType::Union(parts) => {
+                    for part in parts {
+                        add_parts(part, members);
+                    }
+                }
                 HirType::Optional(payload) => {
                     add_parts(payload, members);
                     add_member(HirType::Undefined, members);
@@ -550,7 +630,9 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let mut members = Vec::new();
-        if !payload_always_truthy { add_parts(&payload, &mut members); }
+        if !payload_always_truthy {
+            add_parts(&payload, &mut members);
+        }
         match &lhs_type {
             HirType::Optional(_) => add_member(HirType::Undefined, &mut members),
             HirType::Nullable(_) => add_member(HirType::Null, &mut members),
@@ -562,13 +644,32 @@ impl<'a> FnLowerer<'a> {
         }
         add_parts(&rhs_type, &mut members);
         let result_type = if members.len() == 2 && members.contains(&HirType::Undefined) {
-            HirType::Optional(Box::new(members.iter().find(|ty| **ty != HirType::Undefined).unwrap().clone()))
+            HirType::Optional(Box::new(
+                members
+                    .iter()
+                    .find(|ty| **ty != HirType::Undefined)
+                    .unwrap()
+                    .clone(),
+            ))
         } else if members.len() == 2 && members.contains(&HirType::Null) {
-            HirType::Nullable(Box::new(members.iter().find(|ty| **ty != HirType::Null).unwrap().clone()))
-        } else if members.len() == 3 && members.contains(&HirType::Null)
-            && members.contains(&HirType::Undefined) {
-            HirType::Nullish(Box::new(members.iter()
-                .find(|ty| !matches!(ty, HirType::Null | HirType::Undefined)).unwrap().clone()))
+            HirType::Nullable(Box::new(
+                members
+                    .iter()
+                    .find(|ty| **ty != HirType::Null)
+                    .unwrap()
+                    .clone(),
+            ))
+        } else if members.len() == 3
+            && members.contains(&HirType::Null)
+            && members.contains(&HirType::Undefined)
+        {
+            HirType::Nullish(Box::new(
+                members
+                    .iter()
+                    .find(|ty| !matches!(ty, HirType::Null | HirType::Undefined))
+                    .unwrap()
+                    .clone(),
+            ))
         } else if members.len() == 1 {
             members[0].clone()
         } else {
@@ -719,7 +820,8 @@ impl<'a> FnLowerer<'a> {
             let left = HirExpr::Var(name.clone());
             let absent = if lhs_type == HirType::Json {
                 HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())), vec![left.clone()],
+                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                    vec![left.clone()],
                 )
             } else {
                 self.dynamic_value_is_undefined(left.clone())
@@ -761,7 +863,8 @@ impl<'a> FnLowerer<'a> {
                     vec![HirStmt::Return(Some(fallback))],
                     vec![HirStmt::Return(Some(HirExpr::OptionalSome(
                         Box::new(HirExpr::OptionalValue(
-                            Box::new(left), payload.as_ref().clone(),
+                            Box::new(left),
+                            payload.as_ref().clone(),
                         )),
                         payload.as_ref().clone(),
                     )))],
@@ -804,14 +907,23 @@ impl<'a> FnLowerer<'a> {
                     .clone()
                     .unwrap_or(self.infer_expr_type(&rhs)?);
                 let declared_result = match declared_type.as_ref() {
-                    Some(HirType::Nullish(declared_payload)) if declared_payload.as_ref() == payload.as_ref() => {
-                        Some(if matches!(rhs_type, HirType::Undefined | HirType::Optional(_) | HirType::Nullish(_)) {
-                            HirType::Nullish(payload.clone())
-                        } else {
-                            HirType::Nullable(payload.clone())
-                        })
+                    Some(HirType::Nullish(declared_payload))
+                        if declared_payload.as_ref() == payload.as_ref() =>
+                    {
+                        Some(
+                            if matches!(
+                                rhs_type,
+                                HirType::Undefined | HirType::Optional(_) | HirType::Nullish(_)
+                            ) {
+                                HirType::Nullish(payload.clone())
+                            } else {
+                                HirType::Nullable(payload.clone())
+                            },
+                        )
                     }
-                    Some(HirType::Nullable(declared_payload)) if declared_payload.as_ref() == payload.as_ref() => {
+                    Some(HirType::Nullable(declared_payload))
+                        if declared_payload.as_ref() == payload.as_ref() =>
+                    {
                         Some(HirType::Nullable(payload.clone()))
                     }
                     _ => None,
@@ -831,24 +943,34 @@ impl<'a> FnLowerer<'a> {
                         left.clone()
                     } else {
                         HirExpr::NullableSome(
-                            Box::new(HirExpr::NullishValue(Box::new(left.clone()), payload.as_ref().clone())),
+                            Box::new(HirExpr::NullishValue(
+                                Box::new(left.clone()),
+                                payload.as_ref().clone(),
+                            )),
                             payload.as_ref().clone(),
                         )
                     };
                     let result = HirExpr::Block(vec![
                         HirStmt::If(
-                            HirExpr::NullishIsUndefined(Box::new(left.clone()), payload.as_ref().clone()),
+                            HirExpr::NullishIsUndefined(
+                                Box::new(left.clone()),
+                                payload.as_ref().clone(),
+                            ),
                             vec![HirStmt::Return(Some(fallback))],
                             Vec::new(),
                         ),
                         HirStmt::If(
-                            HirExpr::NullishIsNull(Box::new(left.clone()), payload.as_ref().clone()),
+                            HirExpr::NullishIsNull(
+                                Box::new(left.clone()),
+                                payload.as_ref().clone(),
+                            ),
                             vec![HirStmt::Return(Some(null_value))],
                             Vec::new(),
                         ),
                         HirStmt::Return(Some(present_value)),
                     ]);
-                    let result = self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])?;
+                    let result =
+                        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])?;
                     self.expect_type(&result_type, &result, "destructuring default result")?;
                     return Ok(result);
                 }
@@ -886,18 +1008,23 @@ impl<'a> FnLowerer<'a> {
                     ),
                     HirStmt::If(
                         HirExpr::NullishIsNull(Box::new(left.clone()), payload.as_ref().clone()),
-                        vec![HirStmt::Return(Some(if result_type == HirType::Nullish(payload.clone()) {
-                            HirExpr::NullishNull(payload.as_ref().clone())
-                        } else {
-                            HirExpr::NullableNone(payload.as_ref().clone())
-                        }))],
+                        vec![HirStmt::Return(Some(
+                            if result_type == HirType::Nullish(payload.clone()) {
+                                HirExpr::NullishNull(payload.as_ref().clone())
+                            } else {
+                                HirExpr::NullableNone(payload.as_ref().clone())
+                            },
+                        ))],
                         Vec::new(),
                     ),
                     HirStmt::Return(Some(if result_type == HirType::Nullish(payload.clone()) {
                         left
                     } else {
                         HirExpr::NullableSome(
-                            Box::new(HirExpr::NullishValue(Box::new(left), payload.as_ref().clone())),
+                            Box::new(HirExpr::NullishValue(
+                                Box::new(left),
+                                payload.as_ref().clone(),
+                            )),
                             payload.as_ref().clone(),
                         )
                     })),
@@ -1078,14 +1205,21 @@ impl<'a> FnLowerer<'a> {
     /// caught or constructed `Error`, and an Error-family record, convert to the framed wire tag, so
     /// both are rendered `Name: message` (`thaw_error_to_string` returns any untagged string
     /// unchanged after one byte check). Internal conversions (console, throw) keep the raw tag.
-    pub(crate) fn coerce_concat_operand_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+    pub(crate) fn coerce_concat_operand_to_string(
+        &mut self,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
         let ty = self.infer_expr_type(&value)?;
         // A `Json` value can hold a framed Error string (an Error widened to `any`).
-        let may_be_error = (matches!(ty, HirType::Str | HirType::Json) && !matches!(value, HirExpr::Lit(_)))
+        let may_be_error = (matches!(ty, HirType::Str | HirType::Json)
+            && !matches!(value, HirExpr::Lit(_)))
             || object_type_is_error_family(&ty);
         let text = self.coerce_primitive_to_string(value)?;
         Ok(if may_be_error {
-            HirExpr::Call(Box::new(HirExpr::Var("__thaw_error_to_string".to_string())), vec![text])
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                vec![text],
+            )
         } else {
             text
         })
@@ -1132,12 +1266,23 @@ impl<'a> FnLowerer<'a> {
             // The operand is a constant, but evaluating it may still have effects.
             HirType::Null | HirType::Undefined => {
                 let text = HirExpr::Lit(HirLit::Str(
-                    if matches!(self.infer_expr_type(&value)?, HirType::Null) { "null" } else { "undefined" }.to_string(),
+                    if matches!(self.infer_expr_type(&value)?, HirType::Null) {
+                        "null"
+                    } else {
+                        "undefined"
+                    }
+                    .to_string(),
                 ));
-                if matches!(value, HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::UnionValue(..)) {
+                if matches!(
+                    value,
+                    HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::UnionValue(..)
+                ) {
                     Ok(text)
                 } else {
-                    Ok(HirExpr::Block(vec![HirStmt::Expr(value), HirStmt::Return(Some(text))]))
+                    Ok(HirExpr::Block(vec![
+                        HirStmt::Expr(value),
+                        HirStmt::Return(Some(text)),
+                    ]))
                 }
             }
             HirType::Optional(payload) => {
@@ -1212,7 +1357,8 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), union_type.clone());
                 let mut statements = Vec::with_capacity(members.len());
-                let is_carrier = HirType::Union(members.clone()) == crate::caught_exception_carrier_type();
+                let is_carrier =
+                    HirType::Union(members.clone()) == crate::caught_exception_carrier_type();
                 for index in 0..members.len() {
                     // A caught object / Json / live JS value (carrier members 6..=9): read it through
                     // the same live Json view `.message` uses, so `String(e)` / `e.toString()` of a
@@ -1249,8 +1395,13 @@ impl<'a> FnLowerer<'a> {
                     // A caught `Error` travels as a framed string (carrier member 3);
                     // its string form is `Name: message`, a plain string is unchanged.
                     let part = if index == 3 && is_carrier {
-                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_error_to_string".to_string())), vec![part])
-                    } else { part };
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                            vec![part],
+                        )
+                    } else {
+                        part
+                    };
                     if index + 1 == members.len() {
                         statements.push(HirStmt::Return(Some(part)));
                     } else {
@@ -1370,7 +1521,11 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(framed.clone(), HirType::Str);
                         let mut statements = Vec::new();
                         for (field, _) in &field_list {
-                            if field.starts_with("__") || field.starts_with('#') || field == "message" || field == "name" {
+                            if field.starts_with("__")
+                                || field.starts_with('#')
+                                || field == "message"
+                                || field == "name"
+                            {
                                 continue;
                             }
                             let read = HirExpr::PropAccess(
@@ -1378,15 +1533,20 @@ impl<'a> FnLowerer<'a> {
                                 object_type.clone(),
                                 field.clone(),
                             );
-                            let Ok(encoded) = self.coerce_to_declared(&HirType::Json, read) else { continue };
-                            statements.push(HirStmt::Expr(self.error_set_prop_call(&framed, field, encoded)));
+                            let Ok(encoded) = self.coerce_to_declared(&HirType::Json, read) else {
+                                continue;
+                            };
+                            statements.push(HirStmt::Expr(
+                                self.error_set_prop_call(&framed, field, encoded),
+                            ));
                         }
                         let name_read = HirExpr::PropAccess(
                             Box::new(HirExpr::Var(object_binding.clone())),
                             object_type.clone(),
                             "name".to_string(),
                         );
-                        let name_json = self.coerce_to_declared(&HirType::Json, name_read.clone())?;
+                        let name_json =
+                            self.coerce_to_declared(&HirType::Json, name_read.clone())?;
                         statements.push(HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::EqEqEq,
@@ -1394,7 +1554,9 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Lit(HirLit::Str(default_name))),
                             ),
                             Vec::new(),
-                            vec![HirStmt::Expr(self.error_set_prop_call(&framed, "name", name_json))],
+                            vec![HirStmt::Expr(
+                                self.error_set_prop_call(&framed, "name", name_json),
+                            )],
                         ));
                         // A stack remembered by `Error.captureStackTrace` travels with the throw.
                         let captured = HirExpr::Call(
@@ -1410,7 +1572,9 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Var("__thaw_object_stack_has".to_string())),
                                 vec![HirExpr::Var(object_binding.clone())],
                             ),
-                            vec![HirStmt::Expr(self.error_set_prop_call(&framed, "stack", captured))],
+                            vec![HirStmt::Expr(
+                                self.error_set_prop_call(&framed, "stack", captured),
+                            )],
                             Vec::new(),
                         ));
                         statements.push(HirStmt::Return(Some(HirExpr::Var(framed.clone()))));
@@ -1435,19 +1599,25 @@ impl<'a> FnLowerer<'a> {
                     // class/object literal already gets.
                     _ => {
                         if let Some(result) = self.invoke_class_ordinary_to_primitive(
-                            value.clone(), &HirType::Object(fields.clone()), "string",
+                            value.clone(),
+                            &HirType::Object(fields.clone()),
+                            "string",
                         )? {
                             return Ok(HirExpr::JsonAsString(Box::new(result)));
                         }
                         let tag_property = well_known_symbol_key("toStringTag");
                         if let Some(owner) = self.class_instance_accessor_owner(
-                            &HirType::Object(fields.clone()), &tag_property,
+                            &HirType::Object(fields.clone()),
+                            &tag_property,
                         ) {
                             let symbol = class_getter_symbol(&owner, &tag_property, false);
-                            if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
-                                let tag = HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![
-                                    self.assert_class_accessor_receiver(value, &owner),
-                                ]);
+                            if self.signatures.get(&symbol).is_some_and(|signature| {
+                                signature.accessor_owner.as_deref() == Some(owner.as_str())
+                            }) {
+                                let tag = HirExpr::Call(
+                                    Box::new(HirExpr::Var(symbol)),
+                                    vec![self.assert_class_accessor_receiver(value, &owner)],
+                                );
                                 return Ok(HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                                     vec![
@@ -1468,7 +1638,8 @@ impl<'a> FnLowerer<'a> {
                                 let projected = self.project_native_base(value)?;
                                 return self.coerce_primitive_to_string(projected);
                             } else {
-                                let name = format!("__thaw_native_tag_source_{}", self.next_binding);
+                                let name =
+                                    format!("__thaw_native_tag_source_{}", self.next_binding);
                                 self.next_binding += 1;
                                 let object_type = HirType::Object(fields.clone());
                                 self.scope.insert(name.clone(), object_type.clone());
@@ -1515,8 +1686,7 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Tuple(elements) => {
                 let tuple_type = HirType::Tuple(elements.clone());
-                let (tuple, binding) = if matches!(value, HirExpr::Var(_))
-                {
+                let (tuple, binding) = if matches!(value, HirExpr::Var(_)) {
                     (value, None)
                 } else {
                     let name = format!("__thaw_string_tuple_{}", self.next_binding);
@@ -1535,11 +1705,14 @@ impl<'a> FnLowerer<'a> {
                             vec![result, HirExpr::Lit(HirLit::Str(",".to_string()))],
                         );
                     }
-                    let part = self.coerce_join_slot_to_string(HirExpr::TypedIndex(
-                        Box::new(tuple.clone()),
-                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                        element.clone(),
-                    ), element)?;
+                    let part = self.coerce_join_slot_to_string(
+                        HirExpr::TypedIndex(
+                            Box::new(tuple.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            element.clone(),
+                        ),
+                        element,
+                    )?;
                     result = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                         vec![result, part],
@@ -1564,12 +1737,17 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
                 );
                 for (tag_value, text) in [
-                    (29, "[object Promise]"), (26, "[object WeakSet]"), (25, "[object Set]"),
-                    (24, "[object WeakMap]"), (23, "[object Map]"), (28, "function () { [native code] }"),
+                    (29, "[object Promise]"),
+                    (26, "[object WeakSet]"),
+                    (25, "[object Set]"),
+                    (24, "[object WeakMap]"),
+                    (23, "[object Map]"),
+                    (28, "function () { [native code] }"),
                 ] {
                     body = HirExpr::Conditional(
                         Box::new(HirExpr::BinOp(
-                            BinOp::EqEqEq, Box::new(tag.clone()),
+                            BinOp::EqEqEq,
+                            Box::new(tag.clone()),
                             Box::new(HirExpr::Lit(HirLit::I64(tag_value))),
                         )),
                         Box::new(HirExpr::Lit(HirLit::Str(text.into()))),
@@ -1580,8 +1758,12 @@ impl<'a> FnLowerer<'a> {
                 Ok(HirExpr::Call(
                     Box::new(HirExpr::Lambda(
                         Vec::new(),
-                        vec![HirParam { name: tag_name, ty: HirType::I64 }],
-                        HirType::Str, Box::new(body),
+                        vec![HirParam {
+                            name: tag_name,
+                            ty: HirType::I64,
+                        }],
+                        HirType::Str,
+                        Box::new(body),
                     )),
                     vec![HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_native_exception_tag".to_string())),
@@ -1712,11 +1894,14 @@ impl<'a> FnLowerer<'a> {
                     vec![result, separator_var.clone()],
                 );
             }
-            let part = self.coerce_join_slot_to_string(HirExpr::TypedIndex(
-                Box::new(tuple.clone()),
-                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                element.clone(),
-            ), &element)?;
+            let part = self.coerce_join_slot_to_string(
+                HirExpr::TypedIndex(
+                    Box::new(tuple.clone()),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    element.clone(),
+                ),
+                &element,
+            )?;
             result = HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                 vec![result, part],
@@ -1768,13 +1953,22 @@ impl<'a> FnLowerer<'a> {
         if !self.text_identity_pending {
             let carrier = crate::caught_exception_carrier_type();
             let is_var = |value: &HirExpr| matches!(value, HirExpr::Var(_));
-            let pair = (lhs_type == carrier && rhs_type == HirType::Str && is_var(&lhs) && is_var(&rhs))
-                .then_some((lhs.clone(), rhs.clone()))
-                .or_else(|| (rhs_type == carrier && lhs_type == HirType::Str && is_var(&lhs) && is_var(&rhs))
-                    .then_some((rhs.clone(), lhs.clone())));
+            let pair = (lhs_type == carrier
+                && rhs_type == HirType::Str
+                && is_var(&lhs)
+                && is_var(&rhs))
+            .then_some((lhs.clone(), rhs.clone()))
+            .or_else(|| {
+                (rhs_type == carrier && lhs_type == HirType::Str && is_var(&lhs) && is_var(&rhs))
+                    .then_some((rhs.clone(), lhs.clone()))
+            });
             if let Some((carrier_value, text_value)) = pair {
-                let HirType::Union(members) = carrier.clone() else { unreachable!() };
-                let index = members.iter().position(|m| m == &HirType::Str)
+                let HirType::Union(members) = carrier.clone() else {
+                    unreachable!()
+                };
+                let index = members
+                    .iter()
+                    .position(|m| m == &HirType::Str)
                     .expect("caught exception carrier has a Str member");
                 self.text_identity_pending = true;
                 let general = self.lower_strict_equality(lhs.clone(), rhs.clone());
@@ -1782,7 +1976,10 @@ impl<'a> FnLowerer<'a> {
                 let general = general?;
                 let active = HirExpr::BinOp(
                     BinOp::EqEqEq,
-                    Box::new(HirExpr::UnionTag(Box::new(carrier_value.clone()), members.clone())),
+                    Box::new(HirExpr::UnionTag(
+                        Box::new(carrier_value.clone()),
+                        members.clone(),
+                    )),
                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                 );
                 let text_member = HirExpr::UnionValue(Box::new(carrier_value), index, members);
@@ -1796,7 +1993,12 @@ impl<'a> FnLowerer<'a> {
                     Box::new(general.clone()),
                     HirType::Bool,
                 );
-                return Ok(HirExpr::Conditional(Box::new(active), Box::new(identical), Box::new(general), HirType::Bool));
+                return Ok(HirExpr::Conditional(
+                    Box::new(active),
+                    Box::new(identical),
+                    Box::new(general),
+                    HirType::Bool,
+                ));
             }
         }
         // A `Map`/`Set`/`Array` subclass instance is the wrapped collection itself in JavaScript:
@@ -1840,21 +2042,34 @@ impl<'a> FnLowerer<'a> {
         // The sparse-array index check needs the original TypedIndex shape.
         // Its helper binds the index expression first and then the undefined
         // operand, so it remains a separate source-order-preserving path.
-        let sparse_index = |value: &HirExpr, other: &HirType, this: &Self| -> Result<bool, String> {
-            let HirExpr::TypedIndex(array, _, _) = value else { return Ok(false); };
-            if *other != HirType::Undefined { return Ok(false); }
-            let HirType::Array(element) = this.infer_expr_type(array)? else { return Ok(false); };
-            Ok(!matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined)
-                && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined)))
+        let sparse_index = |value: &HirExpr,
+                            other: &HirType,
+                            this: &Self|
+         -> Result<bool, String> {
+            let HirExpr::TypedIndex(array, _, _) = value else {
+                return Ok(false);
+            };
+            if *other != HirType::Undefined {
+                return Ok(false);
+            }
+            let HirType::Array(element) = this.infer_expr_type(array)? else {
+                return Ok(false);
+            };
+            Ok(!matches!(
+                element.as_ref(),
+                HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined
+            ) && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined)))
         };
         if sparse_index(&lhs, &rhs_type, self)? {
-            if let Some(result) = self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())? {
+            if let Some(result) =
+                self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
+            {
                 return Ok(result);
             }
         }
         if sparse_index(&rhs, &lhs_type, self)? {
-            let result = self.lower_optional_undefined_equality(
-                rhs.clone(), HirExpr::Lit(HirLit::Undefined))?
+            let result = self
+                .lower_optional_undefined_equality(rhs.clone(), HirExpr::Lit(HirLit::Undefined))?
                 .ok_or("sparse index equality did not lower")?;
             let name = format!("__thaw_strict_undefined_{}", self.next_binding);
             self.next_binding += 1;
@@ -1873,7 +2088,11 @@ impl<'a> FnLowerer<'a> {
             None
         };
         if let Some(compare_null) = dynamic_nullish_literal {
-            let value = if lhs_type == HirType::JsValue { lhs } else { rhs };
+            let value = if lhs_type == HirType::JsValue {
+                lhs
+            } else {
+                rhs
+            };
             // Evaluate the live operand before the bootstrap helper's global lookup.
             let name = format!("__thaw_strict_dynamic_nullish_{}", self.next_binding);
             self.next_binding += 1;
@@ -1884,10 +2103,7 @@ impl<'a> FnLowerer<'a> {
             } else {
                 self.dynamic_value_is_undefined(bound)
             };
-            return self.wrap_call_argument_bindings(
-                result,
-                &[(name, HirType::JsValue, value)],
-            );
+            return self.wrap_call_argument_bindings(result, &[(name, HirType::JsValue, value)]);
         }
         let lhs_name = format!("__thaw_strict_left_{}", self.next_binding);
         self.next_binding += 1;
@@ -1919,11 +2135,9 @@ impl<'a> FnLowerer<'a> {
         let lhs_native_test = native_exception_test(&left, &lhs_type);
         let rhs_native_test = native_exception_test(&right, &rhs_type);
         let native_exception_guard = match (lhs_native_test, rhs_native_test) {
-            (Some(lhs), Some(rhs)) => Some(Self::strict_if(
-                lhs,
-                HirExpr::Lit(HirLit::Bool(true)),
-                rhs,
-            )),
+            (Some(lhs), Some(rhs)) => {
+                Some(Self::strict_if(lhs, HirExpr::Lit(HirLit::Bool(true)), rhs))
+            }
             (Some(test), None) | (None, Some(test)) => Some(test),
             (None, None) => None,
         };
@@ -1941,9 +2155,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(right.clone()),
                 carrier_members.clone(),
             ))
-        } else if lhs_type == carrier_type
-            && Self::contains_function_value(&rhs_type)
-        {
+        } else if lhs_type == carrier_type && Self::contains_function_value(&rhs_type) {
             Some(self.function_present_pair(
                 HirExpr::UnionValue(Box::new(left.clone()), 9, carrier_members.clone()),
                 &HirType::NativeException,
@@ -1992,17 +2204,22 @@ impl<'a> FnLowerer<'a> {
             identity
         } else if tagged_function_pair {
             self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, true)?
-        } else if let Some(result) = self.strict_optional_json_pair(
-            left.clone(), &lhs_type, right.clone(), &rhs_type,
-        )? {
+        } else if let Some(result) =
+            self.strict_optional_json_pair(left.clone(), &lhs_type, right.clone(), &rhs_type)?
+        {
             result
         } else if let Some(result) =
-            self.lower_optional_undefined_equality(left.clone(), right.clone())? {
+            self.lower_optional_undefined_equality(left.clone(), right.clone())?
+        {
             result
         } else if lhs_type == HirType::Json && rhs_type == HirType::Json {
             self.strict_json_pair(left, right)?
         } else if lhs_type == HirType::JsValue && rhs_type == HirType::JsValue {
-            self.call_dynamic_strict_comparator("__thaw_strict_equal_dynamic", Vec::new(), vec![left, right])?
+            self.call_dynamic_strict_comparator(
+                "__thaw_strict_equal_dynamic",
+                Vec::new(),
+                vec![left, right],
+            )?
         } else if lhs_type == HirType::JsValue {
             self.strict_handle_vs_native(left, right, &rhs_type)?
         } else if rhs_type == HirType::JsValue {
@@ -2011,18 +2228,32 @@ impl<'a> FnLowerer<'a> {
             self.strict_json_vs_native(left, right, &rhs_type)?
         } else if rhs_type == HirType::Json {
             self.strict_json_vs_native(right, left, &lhs_type)?
-        } else if matches!((&lhs_type, &rhs_type),
+        } else if matches!(
+            (&lhs_type, &rhs_type),
             (HirType::StrLiteral(_), HirType::Str)
-            | (HirType::Str, HirType::StrLiteral(_))
-            | (HirType::StrLiteral(_), HirType::StrLiteral(_))) {
-            HirExpr::BinOp(BinOp::EqEqEq,
+                | (HirType::Str, HirType::StrLiteral(_))
+                | (HirType::StrLiteral(_), HirType::StrLiteral(_))
+        ) {
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
                 Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(left))),
-                Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(right))))
-        } else if matches!(&lhs_type, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))
-            && rhs_type == HirType::Undefined {
+                Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(right))),
+            )
+        } else if matches!(
+            &lhs_type,
+            HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+                | HirType::OverloadedFunction(..)
+        ) && rhs_type == HirType::Undefined
+        {
             Self::function_pointer_is_undefined(left, &lhs_type)
-        } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))
-            && lhs_type == HirType::Undefined {
+        } else if matches!(
+            &rhs_type,
+            HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+                | HirType::OverloadedFunction(..)
+        ) && lhs_type == HirType::Undefined
+        {
             Self::function_pointer_is_undefined(right, &rhs_type)
         } else if lhs_type == rhs_type
             || Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type)
@@ -2032,7 +2263,8 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Lit(HirLit::Bool(false))
         };
         let result = if Self::has_tagged_identity_value(&lhs_type)
-            || Self::has_tagged_identity_value(&rhs_type) {
+            || Self::has_tagged_identity_value(&rhs_type)
+        {
             let left_status_name = format!("__thaw_strict_left_status_{}", self.next_binding);
             self.next_binding += 1;
             let right_status_name = format!("__thaw_strict_right_status_{}", self.next_binding);
@@ -2043,22 +2275,42 @@ impl<'a> FnLowerer<'a> {
             let right_status = HirExpr::Var(right_status_name.clone());
             let zero = || HirExpr::Lit(HirLit::F64(0.0));
             let both_present = HirExpr::Conditional(
-                Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                    Box::new(left_status.clone()), Box::new(zero()))),
-                Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                    Box::new(right_status.clone()), Box::new(zero()))),
-                Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool,
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(left_status.clone()),
+                    Box::new(zero()),
+                )),
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(right_status.clone()),
+                    Box::new(zero()),
+                )),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                HirType::Bool,
             );
-            let left_status_expr = self.function_observable_absence(left_for_observable_absence, &lhs_type);
-            let right_status_expr = self.function_observable_absence(right_for_observable_absence, &rhs_type);
+            let left_status_expr =
+                self.function_observable_absence(left_for_observable_absence, &lhs_type);
+            let right_status_expr =
+                self.function_observable_absence(right_for_observable_absence, &rhs_type);
             self.wrap_call_argument_bindings(
-                HirExpr::Conditional(Box::new(both_present), Box::new(base),
-                    Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                        Box::new(left_status), Box::new(right_status))), HirType::Bool),
-                &[(left_status_name, HirType::F64, left_status_expr),
-                  (right_status_name, HirType::F64, right_status_expr)],
+                HirExpr::Conditional(
+                    Box::new(both_present),
+                    Box::new(base),
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(left_status),
+                        Box::new(right_status),
+                    )),
+                    HirType::Bool,
+                ),
+                &[
+                    (left_status_name, HirType::F64, left_status_expr),
+                    (right_status_name, HirType::F64, right_status_expr),
+                ],
             )?
-        } else { base };
+        } else {
+            base
+        };
         // Keep native-exception dispatch outside observable-absence checks too:
         // those checks may inspect the Json projection of the normal branch.
         let result = if let Some(guard) = native_exception_guard {
@@ -2070,10 +2322,13 @@ impl<'a> FnLowerer<'a> {
         } else {
             result
         };
-        self.wrap_call_argument_bindings(result, &[
-            (lhs_name, source_lhs_type, lhs),
-            (rhs_name, source_rhs_type, rhs),
-        ])
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (lhs_name, source_lhs_type, lhs),
+                (rhs_name, source_rhs_type, rhs),
+            ],
+        )
     }
 
     /// Compare an exact Optional<Json> only after checking presence. Map.get
@@ -2092,10 +2347,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::OptionalValue(Box::new(left.clone()), HirType::Json),
                 right.clone(),
             )?;
-            let absent = self.lower_strict_equality(
-                HirExpr::Lit(HirLit::Undefined),
-                right,
-            )?;
+            let absent = self.lower_strict_equality(HirExpr::Lit(HirLit::Undefined), right)?;
             return Ok(Some(Self::strict_if(
                 HirExpr::OptionalIsNone(Box::new(left), HirType::Json),
                 absent,
@@ -2107,10 +2359,7 @@ impl<'a> FnLowerer<'a> {
                 left.clone(),
                 HirExpr::OptionalValue(Box::new(right.clone()), HirType::Json),
             )?;
-            let absent = self.lower_strict_equality(
-                left,
-                HirExpr::Lit(HirLit::Undefined),
-            )?;
+            let absent = self.lower_strict_equality(left, HirExpr::Lit(HirLit::Undefined))?;
             return Ok(Some(Self::strict_if(
                 HirExpr::OptionalIsNone(Box::new(right), HirType::Json),
                 absent,
@@ -2123,37 +2372,65 @@ impl<'a> FnLowerer<'a> {
     /// `caught === original` for a thrown native object: the carrier keeps the owner pointer of the
     /// original (member 6), so identity is the active tag plus pointer equality with that object.
     fn caught_object_identity(
-        carrier: &HirExpr, carrier_type: &HirType, object: &HirExpr, object_type: &HirType,
+        carrier: &HirExpr,
+        carrier_type: &HirType,
+        object: &HirExpr,
+        object_type: &HirType,
     ) -> Option<HirExpr> {
         let carrier_members = match carrier_type {
-            HirType::Union(members) if *carrier_type == crate::caught_exception_carrier_type() => members,
+            HirType::Union(members) if *carrier_type == crate::caught_exception_carrier_type() => {
+                members
+            }
             _ => return None,
         };
         if !matches!(object_type, HirType::Object(fields) if !fields.is_empty()) {
             return None;
         }
         Some(Self::strict_if(
-            HirExpr::BinOp(BinOp::EqEqEq,
-                Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), carrier_members.clone())),
-                Box::new(HirExpr::Lit(HirLit::F64(6.0)))),
-            HirExpr::BinOp(BinOp::EqEqEq,
-                Box::new(HirExpr::UnionValue(Box::new(carrier.clone()), 6, carrier_members.clone())),
-                Box::new(object.clone())),
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::UnionTag(
+                    Box::new(carrier.clone()),
+                    carrier_members.clone(),
+                )),
+                Box::new(HirExpr::Lit(HirLit::F64(6.0))),
+            ),
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::UnionValue(
+                    Box::new(carrier.clone()),
+                    6,
+                    carrier_members.clone(),
+                )),
+                Box::new(object.clone()),
+            ),
             HirExpr::Lit(HirLit::Bool(false)),
         ))
     }
 
     fn strict_if(condition: HirExpr, yes: HirExpr, no: HirExpr) -> HirExpr {
-        HirExpr::Conditional(Box::new(condition), Box::new(yes), Box::new(no), HirType::Bool)
+        HirExpr::Conditional(
+            Box::new(condition),
+            Box::new(yes),
+            Box::new(no),
+            HirType::Bool,
+        )
     }
 
     fn strict_json_handle(json: HirExpr) -> HirExpr {
-        HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())), vec![json])
+        HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())),
+            vec![json],
+        )
     }
 
     fn strict_has_handle(handle: HirExpr) -> HirExpr {
         Self::strict_if(
-            HirExpr::BinOp(BinOp::EqEqEq, Box::new(handle), Box::new(HirExpr::Lit(HirLit::I64(0)))),
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(handle),
+                Box::new(HirExpr::Lit(HirLit::I64(0))),
+            ),
             HirExpr::Lit(HirLit::Bool(false)),
             HirExpr::Lit(HirLit::Bool(true)),
         )
@@ -2167,18 +2444,39 @@ impl<'a> FnLowerer<'a> {
         let left_handle = Self::strict_json_handle(left.clone());
         let right_handle = Self::strict_json_handle(right.clone());
         let both_handles = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic", Vec::new(),
-            vec![Self::strict_handle_value(left_handle.clone()), Self::strict_handle_value(right_handle.clone())],
+            "__thaw_strict_equal_dynamic",
+            Vec::new(),
+            vec![
+                Self::strict_handle_value(left_handle.clone()),
+                Self::strict_handle_value(right_handle.clone()),
+            ],
         )?;
-        let left_to_right = self.strict_handle_vs_json(Self::strict_handle_value(left_handle.clone()), right.clone())?;
-        let right_to_left = self.strict_handle_vs_json(Self::strict_handle_value(right_handle.clone()), left.clone())?;
+        let left_to_right = self.strict_handle_vs_json(
+            Self::strict_handle_value(left_handle.clone()),
+            right.clone(),
+        )?;
+        let right_to_left = self.strict_handle_vs_json(
+            Self::strict_handle_value(right_handle.clone()),
+            left.clone(),
+        )?;
         let native = HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right));
-        Ok(Self::strict_if(Self::strict_has_handle(left_handle),
-            Self::strict_if(Self::strict_has_handle(right_handle.clone()), both_handles, left_to_right),
-            Self::strict_if(Self::strict_has_handle(right_handle), right_to_left, native)))
+        Ok(Self::strict_if(
+            Self::strict_has_handle(left_handle),
+            Self::strict_if(
+                Self::strict_has_handle(right_handle.clone()),
+                both_handles,
+                left_to_right,
+            ),
+            Self::strict_if(Self::strict_has_handle(right_handle), right_to_left, native),
+        ))
     }
 
-    fn strict_json_vs_native(&mut self, json: HirExpr, native: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+    fn strict_json_vs_native(
+        &mut self,
+        json: HirExpr,
+        native: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
         if matches!(ty, HirType::Object(fields)
             if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))
                 && Self::fixed_object_supports_live_projection(ty))
@@ -2187,14 +2485,20 @@ impl<'a> FnLowerer<'a> {
             return self.strict_json_pair(json, projected);
         }
         let handle = Self::strict_json_handle(json.clone());
-        let live = self.strict_handle_vs_native(Self::strict_handle_value(handle.clone()), native.clone(), ty)?;
+        let live = self.strict_handle_vs_native(
+            Self::strict_handle_value(handle.clone()),
+            native.clone(),
+            ty,
+        )?;
         let plain = match ty {
             HirType::Dictionary(_) => HirExpr::BinOp(
-                BinOp::EqEqEq, Box::new(json),
+                BinOp::EqEqEq,
+                Box::new(json),
                 Box::new(HirExpr::TypedClosure(HirType::Json, Box::new(native))),
             ),
             HirType::I64 => HirExpr::BinOp(
-                BinOp::EqEqEq, Box::new(json),
+                BinOp::EqEqEq,
+                Box::new(json),
                 Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_json_receiver_bigint".into())),
                     vec![native],
@@ -2202,7 +2506,9 @@ impl<'a> FnLowerer<'a> {
             ),
             HirType::StrLiteral(_) => {
                 let boxed = self.wrap_native_value_as_json(
-                    HirExpr::TypedClosure(HirType::Str, Box::new(native)), HirType::Str)?;
+                    HirExpr::TypedClosure(HirType::Str, Box::new(native)),
+                    HirType::Str,
+                )?;
                 HirExpr::BinOp(BinOp::EqEqEq, Box::new(json), Box::new(boxed))
             }
             HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined => {
@@ -2211,48 +2517,110 @@ impl<'a> FnLowerer<'a> {
             }
             _ => HirExpr::Lit(HirLit::Bool(false)),
         };
-        Ok(Self::strict_if(Self::strict_has_handle(handle), live, plain))
+        Ok(Self::strict_if(
+            Self::strict_has_handle(handle),
+            live,
+            plain,
+        ))
     }
 
     fn strict_handle_vs_json(&mut self, handle: HirExpr, json: HirExpr) -> Result<HirExpr, String> {
         let borrowed = Self::strict_json_handle(json.clone());
         let both_handles = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic", Vec::new(),
+            "__thaw_strict_equal_dynamic",
+            Vec::new(),
             vec![handle.clone(), Self::strict_handle_value(borrowed.clone())],
         )?;
-        let kind = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![json.clone()]);
-        let test_kind = |name: &str| HirExpr::BinOp(BinOp::EqEqEq,
-            Box::new(kind.clone()), Box::new(HirExpr::Lit(HirLit::Str(name.into()))));
+        let kind = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+            vec![json.clone()],
+        );
+        let test_kind = |name: &str| {
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(kind.clone()),
+                Box::new(HirExpr::Lit(HirLit::Str(name.into()))),
+            )
+        };
         let string = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle.clone()])?;
-        let number = self.strict_handle_vs_native(handle.clone(),
-            HirExpr::JsonAsNumber(Box::new(json.clone())), &HirType::F64)?;
+            "__thaw_strict_equal_dynamic",
+            vec![json.clone()],
+            vec![handle.clone()],
+        )?;
+        let number = self.strict_handle_vs_native(
+            handle.clone(),
+            HirExpr::JsonAsNumber(Box::new(json.clone())),
+            &HirType::F64,
+        )?;
         let boolean = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle.clone()])?;
+            "__thaw_strict_equal_dynamic",
+            vec![json.clone()],
+            vec![handle.clone()],
+        )?;
         let bigint_digits = self.coerce_to_declared(
-            &HirType::Json, HirExpr::JsonAsString(Box::new(json.clone())))?;
+            &HirType::Json,
+            HirExpr::JsonAsString(Box::new(json.clone())),
+        )?;
         let bigint = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_bigint_dynamic", vec![bigint_digits], vec![handle.clone()])?;
+            "__thaw_strict_equal_bigint_dynamic",
+            vec![bigint_digits],
+            vec![handle.clone()],
+        )?;
         let undefined = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_undefined_dynamic", Vec::new(), vec![handle.clone()])?;
+            "__thaw_strict_equal_undefined_dynamic",
+            Vec::new(),
+            vec![handle.clone()],
+        )?;
         let null = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_null_dynamic", Vec::new(), vec![handle.clone()])?;
+            "__thaw_strict_equal_null_dynamic",
+            Vec::new(),
+            vec![handle.clone()],
+        )?;
         // A native container reaches the JS realm as a shadow tagged with its origin serial, so a
         // live JS object is `===` to it exactly when it is that container's shadow.
         let identity = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle])?;
+            "__thaw_strict_equal_dynamic",
+            vec![json.clone()],
+            vec![handle],
+        )?;
         let object = Self::strict_if(
-            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_null".into())), vec![json]),
-            null, identity);
-        let native = Self::strict_if(test_kind("string"), string,
-            Self::strict_if(test_kind("number"), number,
-            Self::strict_if(test_kind("boolean"), boolean,
-            Self::strict_if(test_kind("bigint"), bigint,
-            Self::strict_if(test_kind("undefined"), undefined, object)))));
-        Ok(Self::strict_if(Self::strict_has_handle(borrowed), both_handles, native))
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                vec![json],
+            ),
+            null,
+            identity,
+        );
+        let native = Self::strict_if(
+            test_kind("string"),
+            string,
+            Self::strict_if(
+                test_kind("number"),
+                number,
+                Self::strict_if(
+                    test_kind("boolean"),
+                    boolean,
+                    Self::strict_if(
+                        test_kind("bigint"),
+                        bigint,
+                        Self::strict_if(test_kind("undefined"), undefined, object),
+                    ),
+                ),
+            ),
+        );
+        Ok(Self::strict_if(
+            Self::strict_has_handle(borrowed),
+            both_handles,
+            native,
+        ))
     }
 
-    fn strict_handle_vs_native(&mut self, handle: HirExpr, native: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+    fn strict_handle_vs_native(
+        &mut self,
+        handle: HirExpr,
+        native: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
         let (helper, json) = match ty {
             HirType::F64 => {
                 let text = self.coerce_primitive_to_string(native)?;
@@ -2264,77 +2632,121 @@ impl<'a> FnLowerer<'a> {
                 let json = self.coerce_to_declared(&HirType::Json, text)?;
                 ("__thaw_strict_equal_bigint_dynamic", vec![json])
             }
-            HirType::Str => ("__thaw_strict_equal_dynamic", vec![self.coerce_to_declared(&HirType::Json, native)?]),
-            HirType::StrLiteral(_) => ("__thaw_strict_equal_dynamic", vec![self.coerce_to_declared(&HirType::Json,
-                HirExpr::TypedClosure(HirType::Str, Box::new(native)))?]),
-            HirType::Bool => ("__thaw_strict_equal_dynamic", vec![self.coerce_to_declared(&HirType::Json, native)?]),
+            HirType::Str => (
+                "__thaw_strict_equal_dynamic",
+                vec![self.coerce_to_declared(&HirType::Json, native)?],
+            ),
+            HirType::StrLiteral(_) => (
+                "__thaw_strict_equal_dynamic",
+                vec![self.coerce_to_declared(
+                    &HirType::Json,
+                    HirExpr::TypedClosure(HirType::Str, Box::new(native)),
+                )?],
+            ),
+            HirType::Bool => (
+                "__thaw_strict_equal_dynamic",
+                vec![self.coerce_to_declared(&HirType::Json, native)?],
+            ),
             HirType::Null => ("__thaw_strict_equal_null_dynamic", Vec::new()),
             HirType::Undefined => ("__thaw_strict_equal_undefined_dynamic", Vec::new()),
             HirType::Json => return self.strict_handle_vs_json(handle, native),
-            HirType::Dictionary(_) => return self.strict_handle_vs_json(handle,
-                HirExpr::TypedClosure(HirType::Json, Box::new(native))),
+            HirType::Dictionary(_) => {
+                return self.strict_handle_vs_json(
+                    handle,
+                    HirExpr::TypedClosure(HirType::Json, Box::new(native)),
+                )
+            }
             _ => return Ok(HirExpr::Lit(HirLit::Bool(false))),
         };
         self.call_dynamic_strict_comparator(helper, json, vec![handle])
     }
 
     fn strict_reference_type(ty: &HirType) -> bool {
-        matches!(ty, HirType::Object(_) | HirType::Dictionary(_) | HirType::Array(_)
-            | HirType::Tuple(_) | HirType::Bytes | HirType::Map(_, _)
-            | HirType::WeakMap(_, _) | HirType::Set(_) | HirType::WeakSet(_)
-            | HirType::Promise(_) | HirType::Function(_, _) | HirType::CallableFunction(..))
+        matches!(
+            ty,
+            HirType::Object(_)
+                | HirType::Dictionary(_)
+                | HirType::Array(_)
+                | HirType::Tuple(_)
+                | HirType::Bytes
+                | HirType::Map(_, _)
+                | HirType::WeakMap(_, _)
+                | HirType::Set(_)
+                | HirType::WeakSet(_)
+                | HirType::Promise(_)
+                | HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+        )
     }
 
-    fn call_dynamic_strict_comparator(&mut self, name: &str,
-        json_values: Vec<HirExpr>, handles: Vec<HirExpr>) -> Result<HirExpr, String> {
+    fn call_dynamic_strict_comparator(
+        &mut self,
+        name: &str,
+        json_values: Vec<HirExpr>,
+        handles: Vec<HirExpr>,
+    ) -> Result<HirExpr, String> {
         let json_args = self.wrap_native_value_as_json(
-            HirExpr::ArrayLit(json_values), HirType::Array(Box::new(HirType::Json)))?;
-        let callable = HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str(name.into()))]);
+            HirExpr::ArrayLit(json_values),
+            HirType::Array(Box::new(HirType::Json)),
+        )?;
+        let callable = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(name.into()))],
+        );
         Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueMixed".into())),
-            vec![callable, json_args, HirExpr::ArrayLit(handles)]))))
+            vec![callable, json_args, HirExpr::ArrayLit(handles)],
+        ))))
     }
 
     // The two original operands have already been bound. Keep both as
     // positional graph arguments: the QuickJS bridge appends handle-array
     // arguments after JSON arguments, which would reverse ToPrimitive order.
     fn function_loose_dynamic_value(
-        &mut self, value: HirExpr, ty: &HirType,
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
     ) -> Result<(HirExpr, f64), String> {
         let (value, kind) = match ty {
             HirType::Function(_, _) | HirType::CallableFunction(..) => (value, 3.0),
             HirType::I64 => (self.bigint_decimal_string(value, ty)?, 1.0),
             HirType::Symbol => (HirExpr::TypedClosure(HirType::Str, Box::new(value)), 2.0),
-            HirType::StrLiteral(_) =>
-                (HirExpr::TypedClosure(HirType::Str, Box::new(value)), 0.0),
-            HirType::Dictionary(_) =>
-                (HirExpr::TypedClosure(HirType::Json, Box::new(value)), 0.0),
+            HirType::StrLiteral(_) => (HirExpr::TypedClosure(HirType::Str, Box::new(value)), 0.0),
+            HirType::Dictionary(_) => (HirExpr::TypedClosure(HirType::Json, Box::new(value)), 0.0),
             _ => (value, 0.0),
         };
         Ok((self.coerce_to_declared(&HirType::Json, value)?, kind))
     }
 
     fn function_dynamic_pair(
-        &mut self, lhs: HirExpr, lhs_ty: &HirType,
-        rhs: HirExpr, rhs_ty: &HirType, strict: bool,
+        &mut self,
+        lhs: HirExpr,
+        lhs_ty: &HirType,
+        rhs: HirExpr,
+        rhs_ty: &HirType,
+        strict: bool,
     ) -> Result<HirExpr, String> {
         let (left, left_kind) = self.function_loose_dynamic_value(lhs, lhs_ty)?;
         let (right, right_kind) = self.function_loose_dynamic_value(rhs, rhs_ty)?;
-        let left_flag = self.coerce_to_declared(&HirType::Json,
-            HirExpr::Lit(HirLit::F64(left_kind)))?;
-        let right_flag = self.coerce_to_declared(&HirType::Json,
-            HirExpr::Lit(HirLit::F64(right_kind)))?;
+        let left_flag =
+            self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::F64(left_kind)))?;
+        let right_flag =
+            self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::F64(right_kind)))?;
         let arguments = self.wrap_native_value_as_json(
             HirExpr::ArrayLit(vec![left, right, left_flag, right_flag]),
             HirType::Array(Box::new(HirType::Json)),
         )?;
-        let callable = HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str(if strict {
-                "__thaw_strict_equal_dynamic"
-            } else {
-                "__thaw_native_loose_equal"
-            }.into()))]);
+        let callable = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(
+                if strict {
+                    "__thaw_strict_equal_dynamic"
+                } else {
+                    "__thaw_native_loose_equal"
+                }
+                .into(),
+            ))],
+        );
         Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueMixed".into())),
             vec![callable, arguments, HirExpr::ArrayLit(Vec::new())],
@@ -2342,59 +2754,132 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn function_present_pair(
-        &mut self, lhs: HirExpr, lhs_ty: &HirType,
-        rhs: HirExpr, rhs_ty: &HirType, strict: bool,
+        &mut self,
+        lhs: HirExpr,
+        lhs_ty: &HirType,
+        rhs: HirExpr,
+        rhs_ty: &HirType,
+        strict: bool,
     ) -> Result<HirExpr, String> {
-        let choose = |test, yes, no| HirExpr::Conditional(
-            Box::new(test), Box::new(yes), Box::new(no), HirType::Bool);
+        let choose = |test, yes, no| {
+            HirExpr::Conditional(Box::new(test), Box::new(yes), Box::new(no), HirType::Bool)
+        };
         match lhs_ty {
-            HirType::Optional(payload) => return self.function_present_pair(
-                HirExpr::OptionalValue(Box::new(lhs), payload.as_ref().clone()), payload,
-                rhs, rhs_ty, strict),
-            HirType::Nullable(payload) => return self.function_present_pair(
-                HirExpr::NullableValue(Box::new(lhs), payload.as_ref().clone()), payload,
-                rhs, rhs_ty, strict),
-            HirType::Nullish(payload) => return self.function_present_pair(
-                HirExpr::NullishValue(Box::new(lhs), payload.as_ref().clone()), payload,
-                rhs, rhs_ty, strict),
+            HirType::Optional(payload) => {
+                return self.function_present_pair(
+                    HirExpr::OptionalValue(Box::new(lhs), payload.as_ref().clone()),
+                    payload,
+                    rhs,
+                    rhs_ty,
+                    strict,
+                )
+            }
+            HirType::Nullable(payload) => {
+                return self.function_present_pair(
+                    HirExpr::NullableValue(Box::new(lhs), payload.as_ref().clone()),
+                    payload,
+                    rhs,
+                    rhs_ty,
+                    strict,
+                )
+            }
+            HirType::Nullish(payload) => {
+                return self.function_present_pair(
+                    HirExpr::NullishValue(Box::new(lhs), payload.as_ref().clone()),
+                    payload,
+                    rhs,
+                    rhs_ty,
+                    strict,
+                )
+            }
             HirType::Union(members) => {
                 let mut result = HirExpr::Lit(HirLit::Bool(false));
                 for (index, member) in members.iter().enumerate().rev() {
-                    let active = HirExpr::BinOp(BinOp::EqEqEq,
+                    let active = HirExpr::BinOp(
+                        BinOp::EqEqEq,
                         Box::new(HirExpr::UnionTag(Box::new(lhs.clone()), members.clone())),
-                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))));
-                    result = choose(active, self.function_present_pair(
-                        HirExpr::UnionValue(Box::new(lhs.clone()), index, members.clone()), member,
-                        rhs.clone(), rhs_ty, strict)?, result);
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    result = choose(
+                        active,
+                        self.function_present_pair(
+                            HirExpr::UnionValue(Box::new(lhs.clone()), index, members.clone()),
+                            member,
+                            rhs.clone(),
+                            rhs_ty,
+                            strict,
+                        )?,
+                        result,
+                    );
                 }
                 return Ok(result);
             }
             _ => {}
         }
         match rhs_ty {
-            HirType::Optional(payload) => return self.function_present_pair(
-                lhs, lhs_ty, HirExpr::OptionalValue(Box::new(rhs), payload.as_ref().clone()), payload, strict),
-            HirType::Nullable(payload) => return self.function_present_pair(
-                lhs, lhs_ty, HirExpr::NullableValue(Box::new(rhs), payload.as_ref().clone()), payload, strict),
-            HirType::Nullish(payload) => return self.function_present_pair(
-                lhs, lhs_ty, HirExpr::NullishValue(Box::new(rhs), payload.as_ref().clone()), payload, strict),
+            HirType::Optional(payload) => {
+                return self.function_present_pair(
+                    lhs,
+                    lhs_ty,
+                    HirExpr::OptionalValue(Box::new(rhs), payload.as_ref().clone()),
+                    payload,
+                    strict,
+                )
+            }
+            HirType::Nullable(payload) => {
+                return self.function_present_pair(
+                    lhs,
+                    lhs_ty,
+                    HirExpr::NullableValue(Box::new(rhs), payload.as_ref().clone()),
+                    payload,
+                    strict,
+                )
+            }
+            HirType::Nullish(payload) => {
+                return self.function_present_pair(
+                    lhs,
+                    lhs_ty,
+                    HirExpr::NullishValue(Box::new(rhs), payload.as_ref().clone()),
+                    payload,
+                    strict,
+                )
+            }
             HirType::Union(members) => {
                 let mut result = HirExpr::Lit(HirLit::Bool(false));
                 for (index, member) in members.iter().enumerate().rev() {
-                    let active = HirExpr::BinOp(BinOp::EqEqEq,
+                    let active = HirExpr::BinOp(
+                        BinOp::EqEqEq,
                         Box::new(HirExpr::UnionTag(Box::new(rhs.clone()), members.clone())),
-                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))));
-                    result = choose(active, self.function_present_pair(
-                        lhs.clone(), lhs_ty,
-                        HirExpr::UnionValue(Box::new(rhs.clone()), index, members.clone()), member, strict)?,
-                        result);
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    result = choose(
+                        active,
+                        self.function_present_pair(
+                            lhs.clone(),
+                            lhs_ty,
+                            HirExpr::UnionValue(Box::new(rhs.clone()), index, members.clone()),
+                            member,
+                            strict,
+                        )?,
+                        result,
+                    );
                 }
                 return Ok(result);
             }
             _ => {}
         }
-        let left_fn = matches!(lhs_ty, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..));
-        let right_fn = matches!(rhs_ty, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..));
+        let left_fn = matches!(
+            lhs_ty,
+            HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+                | HirType::OverloadedFunction(..)
+        );
+        let right_fn = matches!(
+            rhs_ty,
+            HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+                | HirType::OverloadedFunction(..)
+        );
         if left_fn && right_fn {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
@@ -2408,25 +2893,37 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     (lhs, rhs, rhs_ty)
                 };
-                let tag = crate::native_exception_tag(function_ty).ok_or("function exception has no native category")?;
+                let tag = crate::native_exception_tag(function_ty)
+                    .ok_or("function exception has no native category")?;
                 let layout = crate::native_exception_layout_token(function_ty)
                     .ok_or("function exception has no layout token")?;
                 let owner = HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_native_exception_owner".into())),
-                    vec![descriptor, HirExpr::Lit(HirLit::I64(tag as i64)), HirExpr::Lit(HirLit::Str(layout))],
+                    vec![
+                        descriptor,
+                        HirExpr::Lit(HirLit::I64(tag as i64)),
+                        HirExpr::Lit(HirLit::Str(layout)),
+                    ],
                 );
                 let present = HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_native_exception_owner_present".into())),
                     vec![owner.clone()],
                 );
-                return Ok(choose(present,
-                    HirExpr::BinOp(BinOp::EqEqEq,
+                return Ok(choose(
+                    present,
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
                         Box::new(HirExpr::TypedClosure(function_ty.clone(), Box::new(owner))),
-                        Box::new(function)),
-                    HirExpr::Lit(HirLit::Bool(false))));
+                        Box::new(function),
+                    ),
+                    HirExpr::Lit(HirLit::Bool(false)),
+                ));
             }
             if strict {
-                return if matches!(other, HirType::Json | HirType::JsValue | HirType::Dictionary(_)) {
+                return if matches!(
+                    other,
+                    HirType::Json | HirType::JsValue | HirType::Dictionary(_)
+                ) {
                     self.function_dynamic_pair(lhs, lhs_ty, rhs, rhs_ty, true)
                 } else {
                     Ok(HirExpr::Lit(HirLit::Bool(false)))
@@ -2435,10 +2932,18 @@ impl<'a> FnLowerer<'a> {
             // Both native reference values are distinct allocations. JS `==`
             // between references does not invoke ToPrimitive. Live host objects
             // remain JsValue/Json and take the graph bridge below.
-            if matches!(other, HirType::Object(_)
-                | HirType::Array(_) | HirType::Tuple(_) | HirType::Bytes
-                | HirType::Map(_, _) | HirType::WeakMap(_, _)
-                | HirType::Set(_) | HirType::WeakSet(_) | HirType::Promise(_)) {
+            if matches!(
+                other,
+                HirType::Object(_)
+                    | HirType::Array(_)
+                    | HirType::Tuple(_)
+                    | HirType::Bytes
+                    | HirType::Map(_, _)
+                    | HirType::WeakMap(_, _)
+                    | HirType::Set(_)
+                    | HirType::WeakSet(_)
+                    | HirType::Promise(_)
+            ) {
                 return Ok(HirExpr::Lit(HirLit::Bool(false)));
             }
             if matches!(other, HirType::Void | HirType::Undefined | HirType::Null) {
@@ -2453,29 +2958,42 @@ impl<'a> FnLowerer<'a> {
         // Keep the established native coercion for source-supported pairs;
         // native Symbol/I64/JsValue/Json use the exact graph bridge instead.
         if matches!(lhs_ty, HirType::F64 | HirType::Str | HirType::Bool)
-            && matches!(rhs_ty, HirType::F64 | HirType::Str | HirType::Bool) {
+            && matches!(rhs_ty, HirType::F64 | HirType::Str | HirType::Bool)
+        {
             return self.lower_loose_equality_base(lhs, rhs);
         }
-        if matches!(lhs_ty, HirType::F64 | HirType::Str | HirType::StrLiteral(_)
-            | HirType::Bool | HirType::I64 | HirType::Symbol | HirType::Json | HirType::JsValue
-            | HirType::Dictionary(_))
-            && matches!(rhs_ty, HirType::F64 | HirType::Str | HirType::StrLiteral(_)
-            | HirType::Bool | HirType::I64 | HirType::Symbol | HirType::Json | HirType::JsValue
-            | HirType::Dictionary(_)) {
+        if matches!(
+            lhs_ty,
+            HirType::F64
+                | HirType::Str
+                | HirType::StrLiteral(_)
+                | HirType::Bool
+                | HirType::I64
+                | HirType::Symbol
+                | HirType::Json
+                | HirType::JsValue
+                | HirType::Dictionary(_)
+        ) && matches!(
+            rhs_ty,
+            HirType::F64
+                | HirType::Str
+                | HirType::StrLiteral(_)
+                | HirType::Bool
+                | HirType::I64
+                | HirType::Symbol
+                | HirType::Json
+                | HirType::JsValue
+                | HirType::Dictionary(_)
+        ) {
             return self.function_dynamic_pair(lhs, lhs_ty, rhs, rhs_ty, strict);
         }
         self.lower_loose_equality_base(lhs, rhs)
     }
 
-    fn lower_loose_equality(
-        &mut self,
-        lhs: HirExpr,
-        rhs: HirExpr,
-    ) -> Result<HirExpr, String> {
+    fn lower_loose_equality(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
-        if !Self::contains_function_value(&lhs_type)
-            && !Self::contains_function_value(&rhs_type) {
+        if !Self::contains_function_value(&lhs_type) && !Self::contains_function_value(&rhs_type) {
             return self.lower_loose_equality_base(lhs, rhs);
         }
         let lhs_name = format!("__thaw_loose_left_{}", self.next_binding);
@@ -2486,7 +3004,8 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(rhs_name.clone(), rhs_type.clone());
         let left = HirExpr::Var(lhs_name.clone());
         let right = HirExpr::Var(rhs_name.clone());
-        let base = self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, false)?;
+        let base =
+            self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, false)?;
         let lhs_status_name = format!("__thaw_loose_left_status_{}", self.next_binding);
         self.next_binding += 1;
         let rhs_status_name = format!("__thaw_loose_right_status_{}", self.next_binding);
@@ -2495,24 +3014,43 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(rhs_status_name.clone(), HirType::F64);
         let lhs_status = HirExpr::Var(lhs_status_name.clone());
         let rhs_status = HirExpr::Var(rhs_status_name.clone());
-        let is_absent = |value: HirExpr| HirExpr::BinOp(BinOp::EqEqEq,
-            Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                Box::new(value), Box::new(HirExpr::Lit(HirLit::F64(0.0))))),
-            Box::new(HirExpr::Lit(HirLit::Bool(false))));
+        let is_absent = |value: HirExpr| {
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                )),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            )
+        };
         let left_absent = is_absent(lhs_status.clone());
         let right_absent = is_absent(rhs_status.clone());
-        let result = HirExpr::Conditional(Box::new(left_absent.clone()),
+        let result = HirExpr::Conditional(
+            Box::new(left_absent.clone()),
             Box::new(right_absent.clone()),
-            Box::new(HirExpr::Conditional(Box::new(right_absent),
-                Box::new(HirExpr::Lit(HirLit::Bool(false))), Box::new(base), HirType::Bool)),
-            HirType::Bool);
+            Box::new(HirExpr::Conditional(
+                Box::new(right_absent),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                Box::new(base),
+                HirType::Bool,
+            )),
+            HirType::Bool,
+        );
         let lhs_status_expr = self.function_observable_absence(left, &lhs_type);
         let rhs_status_expr = self.function_observable_absence(right, &rhs_type);
-        let result = self.wrap_call_argument_bindings(result,
-            &[(lhs_status_name, HirType::F64, lhs_status_expr),
-              (rhs_status_name, HirType::F64, rhs_status_expr)])?;
-        self.wrap_call_argument_bindings(result,
-            &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)])
+        let result = self.wrap_call_argument_bindings(
+            result,
+            &[
+                (lhs_status_name, HirType::F64, lhs_status_expr),
+                (rhs_status_name, HirType::F64, rhs_status_expr),
+            ],
+        )?;
+        self.wrap_call_argument_bindings(
+            result,
+            &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
+        )
     }
 
     fn lower_loose_equality_base(
@@ -2533,28 +3071,39 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(right_name.clone(), HirType::Json);
             let left = HirExpr::Var(left_name.clone());
             let right = HirExpr::Var(right_name.clone());
-            let typeof_of = |value: &HirExpr| HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_json_typeof".into())),
-                vec![value.clone()],
-            );
-            let is_kind = |value: &HirExpr, kind: &str| HirExpr::BinOp(
-                BinOp::EqEqEq,
-                Box::new(typeof_of(value)),
-                Box::new(HirExpr::Lit(HirLit::Str(kind.into()))),
-            );
+            let typeof_of = |value: &HirExpr| {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                    vec![value.clone()],
+                )
+            };
+            let is_kind = |value: &HirExpr, kind: &str| {
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(typeof_of(value)),
+                    Box::new(HirExpr::Lit(HirLit::Str(kind.into()))),
+                )
+            };
             let strict = HirExpr::BinOp(
-                BinOp::EqEqEq, Box::new(left.clone()), Box::new(right.clone()),
+                BinOp::EqEqEq,
+                Box::new(left.clone()),
+                Box::new(right.clone()),
             );
-            let nullish = |value: &HirExpr| HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
-                vec![value.clone()],
-            );
+            let nullish = |value: &HirExpr| {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                    vec![value.clone()],
+                )
+            };
             let both_nullish = self.lower_logical_expr(nullish(&left), nullish(&right), true)?;
             let mut primitive_pairs: Option<HirExpr> = None;
             for (a, b) in [
-                ("string", "number"), ("number", "string"),
-                ("boolean", "number"), ("number", "boolean"),
-                ("boolean", "string"), ("string", "boolean"),
+                ("string", "number"),
+                ("number", "string"),
+                ("boolean", "number"),
+                ("number", "boolean"),
+                ("boolean", "string"),
+                ("string", "boolean"),
             ] {
                 let pair = self.lower_logical_expr(is_kind(&left, a), is_kind(&right, b), true)?;
                 primitive_pairs = Some(match primitive_pairs {
@@ -2567,12 +3116,16 @@ impl<'a> FnLowerer<'a> {
                 Box::new(self.coerce_primitive_to_number(left.clone())?),
                 Box::new(self.coerce_primitive_to_number(right.clone())?),
             );
-            let mixed = self.lower_logical_expr(primitive_pairs.expect("pairs"), numeric_equal, true)?;
+            let mixed =
+                self.lower_logical_expr(primitive_pairs.expect("pairs"), numeric_equal, true)?;
             let equal = self.lower_logical_expr(strict, both_nullish, false)?;
             let equal = self.lower_logical_expr(equal, mixed, false)?;
             return self.wrap_call_argument_bindings(
                 equal,
-                &[(left_name, HirType::Json, lhs), (right_name, HirType::Json, rhs)],
+                &[
+                    (left_name, HirType::Json, lhs),
+                    (right_name, HirType::Json, rhs),
+                ],
             );
         }
         if lhs_type == rhs_type {
@@ -2582,12 +3135,18 @@ impl<'a> FnLowerer<'a> {
         // equals both `undefined` and `null`. Bind both operands first to
         // preserve their effects and order, even when one is statically nullish.
         let nullish_function = match (&lhs_type, &rhs_type) {
-            (ty @ (HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)),
-                HirType::Null | HirType::Undefined) => Some((true, (*ty).clone())),
-            (HirType::Null | HirType::Undefined,
-                ty @ (HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))) => {
-                Some((false, (*ty).clone()))
-            }
+            (
+                ty @ (HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+                | HirType::OverloadedFunction(..)),
+                HirType::Null | HirType::Undefined,
+            ) => Some((true, (*ty).clone())),
+            (
+                HirType::Null | HirType::Undefined,
+                ty @ (HirType::Function(_, _)
+                | HirType::CallableFunction(..)
+                | HirType::OverloadedFunction(..)),
+            ) => Some((false, (*ty).clone())),
             _ => None,
         };
         if let Some((function_left, function_type)) = nullish_function {
@@ -2597,7 +3156,11 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(left_name.clone(), lhs_type.clone());
             self.scope.insert(right_name.clone(), rhs_type.clone());
-            let function = HirExpr::Var(if function_left { left_name.clone() } else { right_name.clone() });
+            let function = HirExpr::Var(if function_left {
+                left_name.clone()
+            } else {
+                right_name.clone()
+            });
             return self.wrap_call_argument_bindings(
                 Self::function_pointer_is_undefined(function, &function_type),
                 &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
@@ -2755,12 +3318,23 @@ impl<'a> FnLowerer<'a> {
         // `Object == primitive`: the object converts with ToPrimitive hint
         // "default" (not the numeric hint `ToNumber` would use), then the two
         // values compare as dynamic `Json`.
-        let is_primitive = |ty: &HirType| matches!(ty, HirType::F64 | HirType::Str | HirType::StrLiteral(_) | HirType::Bool);
+        let is_primitive = |ty: &HirType| {
+            matches!(
+                ty,
+                HirType::F64 | HirType::Str | HirType::StrLiteral(_) | HirType::Bool
+            )
+        };
         let object_left = matches!(lhs_type, HirType::Object(_)) && is_primitive(&rhs_type);
         let object_right = matches!(rhs_type, HirType::Object(_)) && is_primitive(&lhs_type);
         if object_left || object_right {
-            let object_ty = if object_left { lhs_type.clone() } else { rhs_type.clone() };
-            let HirType::Object(fields) = &object_ty else { unreachable!("object operand") };
+            let object_ty = if object_left {
+                lhs_type.clone()
+            } else {
+                rhs_type.clone()
+            };
+            let HirType::Object(fields) = &object_ty else {
+                unreachable!("object operand")
+            };
             let lhs_name = format!("__thaw_loose_object_left_{}", self.next_binding);
             self.next_binding += 1;
             let rhs_name = format!("__thaw_loose_object_right_{}", self.next_binding);
@@ -2770,23 +3344,38 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(lhs_name.clone(), lhs_type.clone());
             self.scope.insert(rhs_name.clone(), rhs_type.clone());
             self.scope.insert(prim_name.clone(), HirType::Json);
-            let (object_name, other_name) = if object_left { (lhs_name.clone(), rhs_name.clone()) } else { (rhs_name.clone(), lhs_name.clone()) };
-            let object = HirExpr::Var(object_name.clone());
-            let primitive = match self.object_default_to_primitive(object.clone(), fields, &object_ty)? {
-                Some(result) => result,
-                None => self.coerce_primitive_to_string(object)?,
+            let (object_name, other_name) = if object_left {
+                (lhs_name.clone(), rhs_name.clone())
+            } else {
+                (rhs_name.clone(), lhs_name.clone())
             };
+            let object = HirExpr::Var(object_name.clone());
+            let primitive =
+                match self.object_default_to_primitive(object.clone(), fields, &object_ty)? {
+                    Some(result) => result,
+                    None => self.coerce_primitive_to_string(object)?,
+                };
             let primitive = self.coerce_to_declared(&HirType::Json, primitive)?;
             let other = self.coerce_to_declared(&HirType::Json, HirExpr::Var(other_name))?;
-            let compared = self.lower_loose_equality_base(HirExpr::Var(prim_name.clone()), other)?;
-            let compared = self.wrap_call_argument_bindings(compared, &[(prim_name, HirType::Json, primitive)])?;
-            return self.wrap_call_argument_bindings(compared, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)]);
+            let compared =
+                self.lower_loose_equality_base(HirExpr::Var(prim_name.clone()), other)?;
+            let compared = self
+                .wrap_call_argument_bindings(compared, &[(prim_name, HirType::Json, primitive)])?;
+            return self.wrap_call_argument_bindings(
+                compared,
+                &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
+            );
         }
         // A live host handle (or Json) against a primitive: `==` must apply
         // ToPrimitive with hint "default", which only the realm's own `==`
         // does; numeric coercion below would use the "number" hint.
         let is_dynamic = |ty: &HirType| matches!(ty, HirType::Json | HirType::JsValue);
-        let is_primitive = |ty: &HirType| matches!(ty, HirType::F64 | HirType::Str | HirType::StrLiteral(_) | HirType::Bool);
+        let is_primitive = |ty: &HirType| {
+            matches!(
+                ty,
+                HirType::F64 | HirType::Str | HirType::StrLiteral(_) | HirType::Bool
+            )
+        };
         if (is_dynamic(&lhs_type) && is_primitive(&rhs_type))
             || (is_primitive(&lhs_type) && is_dynamic(&rhs_type))
         {
@@ -2808,14 +3397,25 @@ impl<'a> FnLowerer<'a> {
             } else {
                 (right.clone(), rhs_type.clone())
             };
-            let live = self.function_dynamic_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, false)?;
+            let live = self.function_dynamic_pair(
+                left.clone(),
+                &lhs_type,
+                right.clone(),
+                &rhs_type,
+                false,
+            )?;
             let native = HirExpr::BinOp(
                 BinOp::EqEqEq,
                 Box::new(self.coerce_primitive_to_number(left)?),
                 Box::new(self.coerce_primitive_to_number(right)?),
             );
             let guard = self.json_operand_is_object_like(dynamic, &dynamic_ty)?;
-            let result = HirExpr::Conditional(Box::new(guard), Box::new(live), Box::new(native), HirType::Bool);
+            let result = HirExpr::Conditional(
+                Box::new(guard),
+                Box::new(live),
+                Box::new(native),
+                HirType::Bool,
+            );
             return self.wrap_call_argument_bindings(
                 result,
                 &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
@@ -2838,10 +3438,7 @@ impl<'a> FnLowerer<'a> {
         // Keep numeric conversion on the live QuickJS value: JSON graph
         // projection drops symbol-keyed Symbol.toPrimitive methods.
         let value = self.coerce_to_declared(&HirType::Json, value)?;
-        let argument = self.coerce_to_declared(
-            &HirType::Json,
-            HirExpr::ArrayLit(vec![value]),
-        )?;
+        let argument = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
         let helper = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str(helper_name.into()))],
@@ -2861,7 +3458,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_primitive_to_number_impl(
-        &mut self, value: HirExpr, for_add: bool,
+        &mut self,
+        value: HirExpr,
+        for_add: bool,
     ) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::I64 if for_add => Ok(HirExpr::ThrowValue(
@@ -2966,10 +3565,10 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), optional_type.clone());
                 let bound = HirExpr::Var(name.clone());
-                let present = self.coerce_primitive_to_number_impl(HirExpr::OptionalValue(
-                    Box::new(bound.clone()),
-                    payload.as_ref().clone(),
-                ), for_add)?;
+                let present = self.coerce_primitive_to_number_impl(
+                    HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone()),
+                    for_add,
+                )?;
                 let result = HirExpr::Block(vec![HirStmt::If(
                     HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
                     vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(f64::NAN))))],
@@ -2983,9 +3582,10 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
                 let bound = HirExpr::Var(name.clone());
-                let present = self.coerce_primitive_to_number_impl(HirExpr::NullableValue(
-                    Box::new(bound.clone()), payload.as_ref().clone(),
-                ), for_add)?;
+                let present = self.coerce_primitive_to_number_impl(
+                    HirExpr::NullableValue(Box::new(bound.clone()), payload.as_ref().clone()),
+                    for_add,
+                )?;
                 let result = HirExpr::Block(vec![HirStmt::If(
                     HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone()),
                     vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(0.0))))],
@@ -2999,9 +3599,10 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
                 let bound = HirExpr::Var(name.clone());
-                let present = self.coerce_primitive_to_number_impl(HirExpr::NullishValue(
-                    Box::new(bound.clone()), payload.as_ref().clone(),
-                ), for_add)?;
+                let present = self.coerce_primitive_to_number_impl(
+                    HirExpr::NullishValue(Box::new(bound.clone()), payload.as_ref().clone()),
+                    for_add,
+                )?;
                 let result = HirExpr::Block(vec![
                     HirStmt::If(
                         HirExpr::NullishIsNull(Box::new(bound.clone()), payload.as_ref().clone()),
@@ -3023,9 +3624,14 @@ impl<'a> FnLowerer<'a> {
                 self.scope.insert(name.clone(), ty.clone());
                 let mut statements = Vec::with_capacity(members.len());
                 for index in 0..members.len() {
-                    let part = self.coerce_primitive_to_number_impl(HirExpr::UnionValue(
-                        Box::new(HirExpr::Var(name.clone())), index, members.clone(),
-                    ), for_add)?;
+                    let part = self.coerce_primitive_to_number_impl(
+                        HirExpr::UnionValue(
+                            Box::new(HirExpr::Var(name.clone())),
+                            index,
+                            members.clone(),
+                        ),
+                        for_add,
+                    )?;
                     if index + 1 == members.len() {
                         statements.push(HirStmt::Return(Some(part)));
                     } else {
@@ -3033,7 +3639,8 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::BinOp(
                                 BinOp::EqEqEq,
                                 Box::new(HirExpr::UnionTag(
-                                    Box::new(HirExpr::Var(name.clone())), members.clone(),
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    members.clone(),
                                 )),
                                 Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                             ),
@@ -3042,9 +3649,7 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                 }
-                self.wrap_call_argument_bindings(
-                    HirExpr::Block(statements), &[(name, ty, value)],
-                )
+                self.wrap_call_argument_bindings(HirExpr::Block(statements), &[(name, ty, value)])
             }
             other => Err(format!(
                 "numeric conversion is not defined for native type {other:?}"
@@ -3058,7 +3663,8 @@ impl<'a> FnLowerer<'a> {
     fn add_bigint_live_handle(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         let decimal = self.coerce_primitive_to_string(value)?;
         let arguments = self.wrap_native_value_as_json(
-            HirExpr::ArrayLit(vec![decimal]), HirType::Array(Box::new(HirType::Str)),
+            HirExpr::ArrayLit(vec![decimal]),
+            HirType::Array(Box::new(HirType::Str)),
         )?;
         Ok(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueHandle".into())),
@@ -3080,7 +3686,8 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(lhs_handle.clone(), HirType::JsValue);
         self.scope.insert(rhs_handle.clone(), HirType::JsValue);
         let empty_arguments = self.wrap_native_value_as_json(
-            HirExpr::ArrayLit(Vec::new()), HirType::Array(Box::new(HirType::Json)),
+            HirExpr::ArrayLit(Vec::new()),
+            HirType::Array(Box::new(HirType::Json)),
         )?;
         // A compiled-result read (`readDynamicValue`) refuses a BigInt like
         // `JSON.stringify`; the host-lease wrapping keeps it a Json BigInt.
@@ -3093,16 +3700,20 @@ impl<'a> FnLowerer<'a> {
                 ),
                 empty_arguments,
                 HirExpr::ArrayLit(vec![
-                    HirExpr::Var(lhs_handle.clone()), HirExpr::Var(rhs_handle.clone()),
+                    HirExpr::Var(lhs_handle.clone()),
+                    HirExpr::Var(rhs_handle.clone()),
                 ]),
             ],
         )));
         let lhs_live = self.add_bigint_live_handle(lhs)?;
         let rhs_live = self.add_bigint_live_handle(rhs)?;
-        self.wrap_call_argument_bindings(result, &[
-            (lhs_handle, HirType::JsValue, lhs_live),
-            (rhs_handle, HirType::JsValue, rhs_live),
-        ])
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (lhs_handle, HirType::JsValue, lhs_live),
+                (rhs_handle, HirType::JsValue, rhs_live),
+            ],
+        )
     }
 
     /// `ECMA-262`'s own `ToPrimitive(value)` (no hint override -- the
@@ -3120,7 +3731,8 @@ impl<'a> FnLowerer<'a> {
         // Optional<Json>.  Convert the optional tag to the existing JSON
         // undefined sentinel before the shared runtime string/number test.
         if matches!(&ty, HirType::Optional(inner) | HirType::Nullable(inner)
-            | HirType::Nullish(inner) if inner.as_ref() == &HirType::Json) {
+            | HirType::Nullish(inner) if inner.as_ref() == &HirType::Json)
+        {
             let json = self.coerce_to_declared(&HirType::Json, value)?;
             return Ok((json, HirType::Json));
         }
@@ -3164,8 +3776,7 @@ impl<'a> FnLowerer<'a> {
     /// call).
     /// A dynamic (Json-backed) operand, which may be a live QuickJS handle.
     fn add_operand_is_json(ty: &HirType) -> bool {
-        matches!(ty, HirType::Json)
-            || *ty == HirType::Optional(Box::new(HirType::Json))
+        matches!(ty, HirType::Json) || *ty == HirType::Optional(Box::new(HirType::Json))
     }
 
     /// Runtime guard for the QuickJS default-hint path: true when a dynamic
@@ -3173,7 +3784,9 @@ impl<'a> FnLowerer<'a> {
     /// handle with its own `Symbol.toPrimitive`. Plain numbers and strings
     /// fail it and keep the native coercion.
     pub(crate) fn json_operand_is_object_like(
-        &mut self, value: HirExpr, ty: &HirType,
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
     ) -> Result<HirExpr, String> {
         if *ty == HirType::JsValue {
             return Ok(HirExpr::Lit(HirLit::Bool(true)));
@@ -3182,27 +3795,47 @@ impl<'a> FnLowerer<'a> {
             return Ok(HirExpr::Lit(HirLit::Bool(false)));
         }
         let json = self.coerce_to_declared(&HirType::Json, value)?;
-        let typeof_of = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![json]);
-        let is_object = HirExpr::BinOp(BinOp::EqEqEq, Box::new(typeof_of.clone()),
-            Box::new(HirExpr::Lit(HirLit::Str("object".into()))));
-        let is_function = HirExpr::BinOp(BinOp::EqEqEq, Box::new(typeof_of),
-            Box::new(HirExpr::Lit(HirLit::Str("function".into()))));
+        let typeof_of = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+            vec![json],
+        );
+        let is_object = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(typeof_of.clone()),
+            Box::new(HirExpr::Lit(HirLit::Str("object".into()))),
+        );
+        let is_function = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(typeof_of),
+            Box::new(HirExpr::Lit(HirLit::Str("function".into()))),
+        );
         self.lower_logical_expr(is_object, is_function, false)
     }
 
     /// `+` with a dynamic operand: an object-like operand takes the QuickJS
     /// default-hint `+`; otherwise the native ToPrimitive path (unchanged).
     pub(super) fn lower_add_json_guarded(
-        &mut self, lhs: HirExpr, rhs: HirExpr, guaranteed_string: bool,
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        guaranteed_string: bool,
     ) -> Result<HirExpr, String> {
         let lhs_ty = self.infer_expr_type(&lhs)?;
         let rhs_ty = self.infer_expr_type(&rhs)?;
         // Only operands that already coerce to Json take the guard; anything
         // else (Symbol, BigInt, unions, ...) keeps its native lowering, which
         // owns those TypeError/BigInt rules.
-        let json_compatible = |ty: &HirType| Self::add_operand_is_json(ty)
-            || matches!(ty, HirType::JsValue | HirType::F64 | HirType::Str
-                | HirType::StrLiteral(_) | HirType::Bool);
+        let json_compatible = |ty: &HirType| {
+            Self::add_operand_is_json(ty)
+                || matches!(
+                    ty,
+                    HirType::JsValue
+                        | HirType::F64
+                        | HirType::Str
+                        | HirType::StrLiteral(_)
+                        | HirType::Bool
+                )
+        };
         if !(json_compatible(&lhs_ty) && json_compatible(&rhs_ty)) {
             return self.lower_add_with_to_primitive(lhs, rhs);
         }
@@ -3224,16 +3857,25 @@ impl<'a> FnLowerer<'a> {
         let left_guard = self.json_operand_is_object_like(left, &lhs_ty)?;
         let right_guard = self.json_operand_is_object_like(right, &rhs_ty)?;
         let guard = self.lower_logical_expr(left_guard, right_guard, false)?;
-        let result_ty = if guaranteed_string { HirType::Str } else { HirType::Json };
-        let result = HirExpr::Conditional(Box::new(guard), Box::new(live), Box::new(native), result_ty);
-        self.wrap_call_argument_bindings(result, &[(lhs_name, lhs_ty, lhs), (rhs_name, rhs_ty, rhs)])
+        let result_ty = if guaranteed_string {
+            HirType::Str
+        } else {
+            HirType::Json
+        };
+        let result =
+            HirExpr::Conditional(Box::new(guard), Box::new(live), Box::new(native), result_ty);
+        self.wrap_call_argument_bindings(
+            result,
+            &[(lhs_name, lhs_ty, lhs), (rhs_name, rhs_ty, rhs)],
+        )
     }
 
     fn add_operand_may_be_string(ty: &HirType) -> bool {
         match ty {
             HirType::Str | HirType::StrLiteral(_) => true,
-            HirType::Optional(payload) | HirType::Nullable(payload)
-            | HirType::Nullish(payload) => Self::add_operand_may_be_string(payload),
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                Self::add_operand_may_be_string(payload)
+            }
             HirType::Union(members) => members.iter().any(Self::add_operand_may_be_string),
             _ => false,
         }
@@ -3242,8 +3884,9 @@ impl<'a> FnLowerer<'a> {
     fn add_operand_may_be_bigint(ty: &HirType) -> bool {
         match ty {
             HirType::I64 | HirType::Json => true,
-            HirType::Optional(payload) | HirType::Nullable(payload)
-            | HirType::Nullish(payload) => Self::add_operand_may_be_bigint(payload),
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                Self::add_operand_may_be_bigint(payload)
+            }
             HirType::Union(members) => members.iter().any(Self::add_operand_may_be_bigint),
             _ => false,
         }
@@ -3253,12 +3896,15 @@ impl<'a> FnLowerer<'a> {
     // evaluated and each has undergone ToPrimitive in left-to-right order.
     // Tagged string wrappers are only strings when their payload is present.
     fn add_operand_has_primitive_type(
-        &mut self, value: HirExpr, ty: &HirType, primitive: &str,
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+        primitive: &str,
     ) -> HirExpr {
         let bool_lit = |value| HirExpr::Lit(HirLit::Bool(value));
-        let choose = |test, yes, no| HirExpr::Conditional(
-            Box::new(test), Box::new(yes), Box::new(no), HirType::Bool,
-        );
+        let choose = |test, yes, no| {
+            HirExpr::Conditional(Box::new(test), Box::new(yes), Box::new(no), HirType::Bool)
+        };
         match ty {
             HirType::Str | HirType::StrLiteral(_) => bool_lit(primitive == "string"),
             HirType::Symbol => bool_lit(primitive == "symbol"),
@@ -3275,14 +3921,18 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
                 bool_lit(false),
                 self.add_operand_has_primitive_type(
-                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload, primitive,
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                    primitive,
                 ),
             ),
             HirType::Nullable(payload) => choose(
                 HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone()),
                 bool_lit(false),
                 self.add_operand_has_primitive_type(
-                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload, primitive,
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                    primitive,
                 ),
             ),
             HirType::Nullish(payload) => choose(
@@ -3292,7 +3942,9 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone()),
                     bool_lit(false),
                     self.add_operand_has_primitive_type(
-                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload, primitive,
+                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()),
+                        payload,
+                        primitive,
                     ),
                 ),
             ),
@@ -3307,7 +3959,8 @@ impl<'a> FnLowerer<'a> {
                         ),
                         self.add_operand_has_primitive_type(
                             HirExpr::UnionValue(Box::new(value.clone()), index, members.clone()),
-                            member, primitive,
+                            member,
+                            primitive,
                         ),
                         result,
                     );
@@ -3337,8 +3990,10 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(lhs_raw_name.clone(), lhs_raw_ty.clone());
         self.scope.insert(rhs_raw_name.clone(), rhs_raw_ty.clone());
-        let (lhs_prim, lhs_ty) = self.add_operand_to_primitive(HirExpr::Var(lhs_raw_name.clone()))?;
-        let (rhs_prim, rhs_ty) = self.add_operand_to_primitive(HirExpr::Var(rhs_raw_name.clone()))?;
+        let (lhs_prim, lhs_ty) =
+            self.add_operand_to_primitive(HirExpr::Var(lhs_raw_name.clone()))?;
+        let (rhs_prim, rhs_ty) =
+            self.add_operand_to_primitive(HirExpr::Var(rhs_raw_name.clone()))?;
         let lhs_name = format!("__thaw_add_to_primitive_lhs_{}", self.next_binding);
         self.next_binding += 1;
         let rhs_name = format!("__thaw_add_to_primitive_rhs_{}", self.next_binding);
@@ -3358,10 +4013,14 @@ impl<'a> FnLowerer<'a> {
             // A guaranteed string cannot need numeric conversion (including
             // BigInt), but implicit `+` still throws on a Symbol operand.
             let lhs_symbol = self.add_operand_has_primitive_type(
-                HirExpr::Var(lhs_name.clone()), &lhs_ty, "symbol",
+                HirExpr::Var(lhs_name.clone()),
+                &lhs_ty,
+                "symbol",
             );
             let rhs_symbol = self.add_operand_has_primitive_type(
-                HirExpr::Var(rhs_name.clone()), &rhs_ty, "symbol",
+                HirExpr::Var(rhs_name.clone()),
+                &rhs_ty,
+                "symbol",
             );
             let symbol = self.lower_logical_expr(lhs_symbol, rhs_symbol, false)?;
             let invalid_symbol = HirExpr::ThrowValue(
@@ -3371,18 +4030,23 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
             );
             HirExpr::Conditional(
-                Box::new(symbol), Box::new(invalid_symbol), Box::new(concat), HirType::Str,
+                Box::new(symbol),
+                Box::new(invalid_symbol),
+                Box::new(concat),
+                HirType::Str,
             )
         } else {
             let lhs_is_string = self.add_operand_has_primitive_type(
-                HirExpr::Var(lhs_name.clone()), &lhs_ty, "string",
+                HirExpr::Var(lhs_name.clone()),
+                &lhs_ty,
+                "string",
             );
             let rhs_is_string = self.add_operand_has_primitive_type(
-                HirExpr::Var(rhs_name.clone()), &rhs_ty, "string",
+                HirExpr::Var(rhs_name.clone()),
+                &rhs_ty,
+                "string",
             );
-            let either_is_string = self.lower_logical_expr(
-                lhs_is_string, rhs_is_string, false,
-            )?;
+            let either_is_string = self.lower_logical_expr(lhs_is_string, rhs_is_string, false)?;
             let numeric = HirExpr::BinOp(
                 BinOp::Add,
                 Box::new(self.coerce_primitive_to_number_for_add(HirExpr::Var(lhs_name.clone()))?),
@@ -3391,10 +4055,14 @@ impl<'a> FnLowerer<'a> {
             let concat = self.coerce_to_declared(&HirType::Json, concat)?;
             let numeric = self.coerce_to_declared(&HirType::Json, numeric)?;
             let lhs_bigint = self.add_operand_has_primitive_type(
-                HirExpr::Var(lhs_name.clone()), &lhs_ty, "bigint",
+                HirExpr::Var(lhs_name.clone()),
+                &lhs_ty,
+                "bigint",
             );
             let rhs_bigint = self.add_operand_has_primitive_type(
-                HirExpr::Var(rhs_name.clone()), &rhs_ty, "bigint",
+                HirExpr::Var(rhs_name.clone()),
+                &rhs_ty,
+                "bigint",
             );
             let either_bigint = self.lower_logical_expr(lhs_bigint, rhs_bigint, false)?;
             let numeric = HirExpr::Conditional(
@@ -3415,33 +4083,46 @@ impl<'a> FnLowerer<'a> {
                 && Self::add_operand_may_be_bigint(&rhs_ty)
             {
                 let lhs_bigint = self.add_operand_has_primitive_type(
-                    HirExpr::Var(lhs_name.clone()), &lhs_ty, "bigint",
+                    HirExpr::Var(lhs_name.clone()),
+                    &lhs_ty,
+                    "bigint",
                 );
                 let rhs_bigint = self.add_operand_has_primitive_type(
-                    HirExpr::Var(rhs_name.clone()), &rhs_ty, "bigint",
+                    HirExpr::Var(rhs_name.clone()),
+                    &rhs_ty,
+                    "bigint",
                 );
                 let both_bigint = self.lower_logical_expr(lhs_bigint, rhs_bigint, true)?;
                 let bigint_sum = self.add_bigint_pair_as_json(
-                    HirExpr::Var(lhs_name.clone()), HirExpr::Var(rhs_name.clone()),
+                    HirExpr::Var(lhs_name.clone()),
+                    HirExpr::Var(rhs_name.clone()),
                 )?;
                 HirExpr::Conditional(
-                    Box::new(both_bigint), Box::new(bigint_sum), Box::new(numeric),
+                    Box::new(both_bigint),
+                    Box::new(bigint_sum),
+                    Box::new(numeric),
                     HirType::Json,
                 )
             } else {
                 numeric
             };
             let selected = HirExpr::Conditional(
-                Box::new(either_is_string), Box::new(concat), Box::new(numeric),
+                Box::new(either_is_string),
+                Box::new(concat),
+                Box::new(numeric),
                 HirType::Json,
             );
             // `String(Symbol)` is legal, but implicit `+` never uses that
             // conversion, including when its other operand is a string.
             let lhs_symbol = self.add_operand_has_primitive_type(
-                HirExpr::Var(lhs_name.clone()), &lhs_ty, "symbol",
+                HirExpr::Var(lhs_name.clone()),
+                &lhs_ty,
+                "symbol",
             );
             let rhs_symbol = self.add_operand_has_primitive_type(
-                HirExpr::Var(rhs_name.clone()), &rhs_ty, "symbol",
+                HirExpr::Var(rhs_name.clone()),
+                &rhs_ty,
+                "symbol",
             );
             let symbol = self.lower_logical_expr(lhs_symbol, rhs_symbol, false)?;
             HirExpr::Conditional(
@@ -3460,21 +4141,20 @@ impl<'a> FnLowerer<'a> {
             result,
             &[(lhs_name, lhs_ty, lhs_prim), (rhs_name, rhs_ty, rhs_prim)],
         )?;
-        self.wrap_call_argument_bindings(after_values, &[
-            (lhs_raw_name, lhs_raw_ty, lhs),
-            (rhs_raw_name, rhs_raw_ty, rhs),
-        ])
+        self.wrap_call_argument_bindings(
+            after_values,
+            &[
+                (lhs_raw_name, lhs_raw_ty, lhs),
+                (rhs_raw_name, rhs_raw_ty, rhs),
+            ],
+        )
     }
 
     /// A Json-backed value plus a live JS value must execute `+` in that
     /// JS realm. Both operands stay in their original graph positions: the
     /// mixed-call ABI appends separate handle arguments after JSON arguments,
     /// which would reverse ToPrimitive order for a live left operand.
-    fn lower_add_with_live_json(
-        &mut self,
-        lhs: HirExpr,
-        rhs: HirExpr,
-    ) -> Result<HirExpr, String> {
+    fn lower_add_with_live_json(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_ty = self.infer_expr_type(&lhs)?;
         let rhs_ty = self.infer_expr_type(&rhs)?;
         let lhs_name = format!("__thaw_add_live_lhs_{}", self.next_binding);
@@ -3507,21 +4187,17 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("callDynamicValueMixed".into())),
             vec![callable, arguments, HirExpr::ArrayLit(Vec::new())],
         );
-        self.wrap_call_argument_bindings(result, &[
-            (lhs_name, lhs_ty, lhs),
-            (rhs_name, rhs_ty, rhs),
-        ])
+        self.wrap_call_argument_bindings(
+            result,
+            &[(lhs_name, lhs_ty, lhs), (rhs_name, rhs_ty, rhs)],
+        )
     }
 
     /// The decimal digits of a `bigint`-like operand: a native `i64` via
     /// `thaw_i64_to_string`, or a live `JsValue` (a `bigint` beyond `i64`,
     /// kept as a handle) via its own `toString()`. Used to compare a
     /// fixed-width native `bigint` against one outside its range.
-    fn bigint_decimal_string(
-        &mut self,
-        value: HirExpr,
-        ty: &HirType,
-    ) -> Result<HirExpr, String> {
+    fn bigint_decimal_string(&mut self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
         match ty {
             HirType::I64 => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_i64_to_string".into())),
@@ -3532,11 +4208,7 @@ impl<'a> FnLowerer<'a> {
                     self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(Vec::new()))?;
                 let call = HirExpr::Call(
                     Box::new(HirExpr::Var("callDynamicMethod".into())),
-                    vec![
-                        value,
-                        HirExpr::Lit(HirLit::Str("toString".into())),
-                        no_args,
-                    ],
+                    vec![value, HirExpr::Lit(HirLit::Str("toString".into())), no_args],
                 );
                 Ok(HirExpr::JsonAsString(Box::new(call)))
             }
@@ -3580,26 +4252,19 @@ impl<'a> FnLowerer<'a> {
         // operations the ordinary path rejects outright; `+` between two
         // dynamic values keeps its existing string-concatenation behavior
         // (thaw can't tell a dynamic bigint from a dynamic string).
-        let both_dynamic = lhs_type == HirType::JsValue
-            && rhs_type == HirType::JsValue
-            && op != BinaryOp::Add;
+        let both_dynamic =
+            lhs_type == HirType::JsValue && rhs_type == HirType::JsValue && op != BinaryOp::Add;
         if !mixed && !both_dynamic {
             return Ok(None);
         }
         let left = self.bigint_decimal_string(lhs.clone(), &lhs_type)?;
         let right = self.bigint_decimal_string(rhs.clone(), &rhs_type)?;
-        let digits = HirExpr::Call(
-            Box::new(HirExpr::Var(intrinsic.into())),
-            vec![left, right],
-        );
+        let digits = HirExpr::Call(Box::new(HirExpr::Var(intrinsic.into())), vec![left, right]);
         let constructor = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
             vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
         );
-        let arguments = self.coerce_to_declared(
-            &HirType::Json,
-            HirExpr::ArrayLit(vec![digits]),
-        )?;
+        let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![digits]))?;
         Ok(Some(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueHandle".into())),
             vec![constructor, arguments],
@@ -3698,12 +4363,18 @@ impl<'a> FnLowerer<'a> {
             let left = HirExpr::Var(left_name.clone());
             let right = HirExpr::Var(right_name.clone());
             let both_strings = {
-                let left_is = self.add_operand_has_primitive_type(left.clone(), &lhs_type, "string");
-                let right_is = self.add_operand_has_primitive_type(right.clone(), &rhs_type, "string");
+                let left_is =
+                    self.add_operand_has_primitive_type(left.clone(), &lhs_type, "string");
+                let right_is =
+                    self.add_operand_has_primitive_type(right.clone(), &rhs_type, "string");
                 self.lower_logical_expr(left_is, right_is, true)?
             };
             let text = |value: HirExpr, ty: &HirType| {
-                if *ty == HirType::Json { HirExpr::JsonAsString(Box::new(value)) } else { value }
+                if *ty == HirType::Json {
+                    HirExpr::JsonAsString(Box::new(value))
+                } else {
+                    value
+                }
             };
             let string_compare = HirExpr::Call(
                 Box::new(HirExpr::Var(
@@ -3716,7 +4387,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     .to_string(),
                 )),
-                vec![text(left.clone(), &lhs_type), text(right.clone(), &rhs_type)],
+                vec![
+                    text(left.clone(), &lhs_type),
+                    text(right.clone(), &rhs_type),
+                ],
             );
             let numeric = HirExpr::BinOp(
                 op,
@@ -3766,113 +4440,123 @@ impl<'a> FnLowerer<'a> {
         if rhs_type == HirType::Undefined {
             if let HirExpr::TypedIndex(array, index, _) = &lhs {
                 if let HirType::Array(element) = self.infer_expr_type(array)? {
-                    if !matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined)
-                        && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined))
+                    if !matches!(
+                        element.as_ref(),
+                        HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined
+                    ) && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined))
                     {
-                    let is_json_element = *element == HirType::Json;
-                    let has_function_element = Self::contains_function_value(&element);
-                    let element_type = element.as_ref().clone();
-                    let array_expr = array.as_ref().clone();
-                    let index_expr = index.as_ref().clone();
-                    let array_name = format!("__thaw_index_array_{}", self.next_binding);
-                    self.next_binding += 1;
-                    let index_name = format!("__thaw_index_value_{}", self.next_binding);
-                    self.next_binding += 1;
-                    let array_type = HirType::Array(element);
-                    self.scope.insert(array_name.clone(), array_type.clone());
-                    self.scope.insert(index_name.clone(), HirType::F64);
-                    let array = HirExpr::Var(array_name.clone());
-                    let index = HirExpr::Var(index_name.clone());
-                    let in_bounds = self.lower_logical_expr(
-                        HirExpr::BinOp(
-                            BinOp::GtEq,
-                            Box::new(index.clone()),
-                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                        ),
-                        HirExpr::BinOp(
-                            BinOp::Lt,
-                            Box::new(index.clone()),
-                            Box::new(HirExpr::ArrayLen(Box::new(array.clone()))),
-                        ),
-                        true,
-                    )?;
-                    let integer_index = self.lower_logical_expr(
-                        in_bounds,
-                        HirExpr::BinOp(
+                        let is_json_element = *element == HirType::Json;
+                        let has_function_element = Self::contains_function_value(&element);
+                        let element_type = element.as_ref().clone();
+                        let array_expr = array.as_ref().clone();
+                        let index_expr = index.as_ref().clone();
+                        let array_name = format!("__thaw_index_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let index_name = format!("__thaw_index_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let array_type = HirType::Array(element);
+                        self.scope.insert(array_name.clone(), array_type.clone());
+                        self.scope.insert(index_name.clone(), HirType::F64);
+                        let array = HirExpr::Var(array_name.clone());
+                        let index = HirExpr::Var(index_name.clone());
+                        let in_bounds = self.lower_logical_expr(
+                            HirExpr::BinOp(
+                                BinOp::GtEq,
+                                Box::new(index.clone()),
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            ),
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(index.clone()),
+                                Box::new(HirExpr::ArrayLen(Box::new(array.clone()))),
+                            ),
+                            true,
+                        )?;
+                        let integer_index = self.lower_logical_expr(
+                            in_bounds,
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(index.clone()),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                                    vec![index.clone()],
+                                )),
+                            ),
+                            true,
+                        )?;
+                        let present = self.lower_logical_expr(
+                            integer_index,
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                                    vec![array.clone(), index.clone()],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                            ),
+                            true,
+                        )?;
+                        let missing = HirExpr::BinOp(
                             BinOp::EqEqEq,
-                            Box::new(index.clone()),
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
-                                vec![index.clone()],
-                            )),
-                        ),
-                        true,
-                    )?;
-                    let present = self.lower_logical_expr(
-                        integer_index,
-                        HirExpr::BinOp(
-                            BinOp::EqEqEq,
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_array_index_state".into())),
-                                vec![array.clone(), index.clone()],
-                            )),
-                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                        ),
-                        true,
-                    )?;
-                    let missing = HirExpr::BinOp(
-                        BinOp::EqEqEq,
-                        Box::new(present),
-                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                    );
-                    // A present (state `1`, not the `2` a literal/
-                    // `OptionalNone(Json)` write marks) slot can still
-                    // *hold* the real `Json` "undefined" sentinel
-                    // (`thaw_json_undefined`) -- e.g. `.map()`'s generic
-                    // `IndexAssign` write path (`lower_array_map`'s
-                    // "callback type already matches element type" fast
-                    // path) marks state `1` unconditionally, with no
-                    // concept of "the value I'm storing happens to be
-                    // undefined". The presence-state check above can't
-                    // see that; also check the loaded value itself for a
-                    // `Json` element, so `mapped[i] === undefined` agrees
-                    // with `typeof mapped[i] === "undefined"` regardless
-                    // of which write path produced the slot.
-                    let missing = if is_json_element || has_function_element {
-                        let loaded = HirExpr::TypedIndex(
-                            Box::new(array), Box::new(index), element_type.clone(),
+                            Box::new(present),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
                         );
-                        let value_is_undefined = if is_json_element {
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
-                                vec![loaded],
-                            )
+                        // A present (state `1`, not the `2` a literal/
+                        // `OptionalNone(Json)` write marks) slot can still
+                        // *hold* the real `Json` "undefined" sentinel
+                        // (`thaw_json_undefined`) -- e.g. `.map()`'s generic
+                        // `IndexAssign` write path (`lower_array_map`'s
+                        // "callback type already matches element type" fast
+                        // path) marks state `1` unconditionally, with no
+                        // concept of "the value I'm storing happens to be
+                        // undefined". The presence-state check above can't
+                        // see that; also check the loaded value itself for a
+                        // `Json` element, so `mapped[i] === undefined` agrees
+                        // with `typeof mapped[i] === "undefined"` regardless
+                        // of which write path produced the slot.
+                        let missing = if is_json_element || has_function_element {
+                            let loaded = HirExpr::TypedIndex(
+                                Box::new(array),
+                                Box::new(index),
+                                element_type.clone(),
+                            );
+                            let value_is_undefined = if is_json_element {
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                                    vec![loaded],
+                                )
+                            } else {
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(
+                                        self.function_observable_absence(loaded, &element_type),
+                                    ),
+                                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                                )
+                            };
+                            self.lower_logical_expr(missing, value_is_undefined, false)?
                         } else {
-                            HirExpr::BinOp(BinOp::EqEqEq,
-                                Box::new(self.function_observable_absence(loaded, &element_type)),
-                                Box::new(HirExpr::Lit(HirLit::F64(1.0))))
+                            missing
                         };
-                        self.lower_logical_expr(missing, value_is_undefined, false)?
-                    } else {
-                        missing
-                    };
-                    let undefined_name = format!("__thaw_index_undefined_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(undefined_name.clone(), HirType::Undefined);
-                    let snapshot_name = format!("__thaw_index_missing_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(snapshot_name.clone(), HirType::Bool);
-                    return self
-                        .wrap_call_argument_bindings(
-                            HirExpr::Var(snapshot_name.clone()),
-                            &[
-                                (array_name, array_type, array_expr),
-                                (index_name, HirType::F64, index_expr),
-                                (snapshot_name, HirType::Bool, missing),
-                                (undefined_name, HirType::Undefined, rhs),
-                            ],
-                        )
-                        .map(Some);
+                        let undefined_name =
+                            format!("__thaw_index_undefined_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(undefined_name.clone(), HirType::Undefined);
+                        let snapshot_name = format!("__thaw_index_missing_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(snapshot_name.clone(), HirType::Bool);
+                        return self
+                            .wrap_call_argument_bindings(
+                                HirExpr::Var(snapshot_name.clone()),
+                                &[
+                                    (array_name, array_type, array_expr),
+                                    (index_name, HirType::F64, index_expr),
+                                    (snapshot_name, HirType::Bool, missing),
+                                    (undefined_name, HirType::Undefined, rhs),
+                                ],
+                            )
+                            .map(Some);
                     }
                 }
             }
@@ -3880,193 +4564,193 @@ impl<'a> FnLowerer<'a> {
         if lhs_type == HirType::Undefined && matches!(rhs, HirExpr::TypedIndex(_, _, _)) {
             return self.lower_optional_undefined_equality(rhs, lhs);
         }
-        let result =
-            match (&lhs_type, &rhs_type) {
-                (HirType::Optional(payload), HirType::Undefined) => Some(HirExpr::OptionalIsNone(
+        let result = match (&lhs_type, &rhs_type) {
+            (HirType::Optional(payload), HirType::Undefined) => Some(HirExpr::OptionalIsNone(
+                Box::new(lhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Undefined, HirType::Optional(payload)) => Some(HirExpr::OptionalIsNone(
+                Box::new(rhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Optional(payload), other) if payload.as_ref() == other => {
+                let left_name = format!("__thaw_optional_equality_left_{}", self.next_binding);
+                self.next_binding += 1;
+                let right_name = format!("__thaw_optional_equality_right_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(left_name.clone(), lhs_type.clone());
+                self.scope.insert(right_name.clone(), rhs_type.clone());
+                let left = HirExpr::Var(left_name.clone());
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(left.clone()), other.clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                    vec![HirStmt::Return(Some(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::OptionalValue(Box::new(left), other.clone())),
+                        Box::new(HirExpr::Var(right_name.clone())),
+                    )))],
+                )]);
+                Some(self.wrap_call_argument_bindings(
+                    result,
+                    &[
+                        (left_name, lhs_type.clone(), lhs),
+                        (right_name, rhs_type.clone(), rhs),
+                    ],
+                )?)
+            }
+            (other, HirType::Optional(payload)) if payload.as_ref() == other => {
+                return self.lower_optional_undefined_equality(rhs, lhs);
+            }
+            (HirType::Optional(left), HirType::Optional(right)) if left == right => {
+                Some(self.lower_absence_equality(
+                    lhs,
+                    rhs,
+                    lhs_type.clone(),
+                    rhs_type.clone(),
+                    left.as_ref().clone(),
+                    AbsenceKind::Optional,
+                )?)
+            }
+            (HirType::Nullable(left), HirType::Nullable(right)) if left == right => {
+                Some(self.lower_absence_equality(
+                    lhs,
+                    rhs,
+                    lhs_type.clone(),
+                    rhs_type.clone(),
+                    left.as_ref().clone(),
+                    AbsenceKind::Nullable,
+                )?)
+            }
+            (HirType::Nullish(left), HirType::Nullish(right)) if left == right => {
+                Some(self.lower_absence_equality(
+                    lhs,
+                    rhs,
+                    lhs_type.clone(),
+                    rhs_type.clone(),
+                    left.as_ref().clone(),
+                    AbsenceKind::Nullish,
+                )?)
+            }
+            (HirType::Json, HirType::Null) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                vec![lhs],
+            )),
+            (HirType::Null, HirType::Json) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                vec![rhs],
+            )),
+            (HirType::Json, HirType::Undefined) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                vec![lhs],
+            )),
+            (HirType::Undefined, HirType::Json) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                vec![rhs],
+            )),
+            // A live `JsValue` (a real QuickJS handle, e.g. `const x:
+            // JsValue = someDynamicCall()`) has no equivalent of the
+            // `Json` case above's `$__thaw_napi_undefined$` sentinel
+            // tag to check locally -- there's no local representation
+            // of "undefined" to compare against at all, only the live
+            // handle itself. Ask the engine directly instead, the same
+            // way `typeof` on a `JsValue` already does
+            // (`__thaw_typeof_dynamic_value`, just above in this same
+            // file's `UnaryOp::TypeOf` handling): round-trip through a
+            // tiny bootstrap-registered JS function
+            // (`__thaw_is_undefined_dynamic_value`) via
+            // `callDynamicValueWithValue`, decoding its boolean result.
+            // Without this arm, the call fell through to the catch-all
+            // `(_, HirType::Undefined) => false` below -- unconditionally
+            // wrong for a live value that genuinely is `undefined` (real
+            // trigger: joi's `schema.validate(...)` result, whose
+            // `.error` field on a valid input is a real absent/
+            // `undefined` property read off a live handle).
+            (HirType::JsValue, HirType::Undefined) => Some(self.dynamic_value_is_undefined(lhs)),
+            (HirType::Undefined, HirType::JsValue) => Some(self.dynamic_value_is_undefined(rhs)),
+            // Same story as the `Undefined` case just above, for
+            // `null` instead: a live value that's genuinely `null`
+            // otherwise fell through to the blanket `(HirType::Null,
+            // _) | (_, HirType::Null) => false` catch-all further
+            // down, unconditionally wrong.
+            (HirType::JsValue, HirType::Null) => Some(self.dynamic_value_is_null(lhs)),
+            (HirType::Null, HirType::JsValue) => Some(self.dynamic_value_is_null(rhs)),
+            (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
+                Box::new(lhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Null, HirType::Nullable(payload)) => Some(HirExpr::NullableIsNone(
+                Box::new(rhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Nullish(payload), HirType::Null) => Some(HirExpr::NullishIsNull(
+                Box::new(lhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Null, HirType::Nullish(payload)) => Some(HirExpr::NullishIsNull(
+                Box::new(rhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Nullish(payload), HirType::Undefined) => Some(HirExpr::NullishIsUndefined(
+                Box::new(lhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Undefined, HirType::Nullish(payload)) => Some(HirExpr::NullishIsUndefined(
+                Box::new(rhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Union(left), HirType::Union(right)) if left == right => Some(
+                HirExpr::UnionIsEqual(Box::new(lhs), Box::new(rhs), left.clone()),
+            ),
+            (HirType::Union(left), HirType::Union(right))
+                if equivalent_union_members(left, right) =>
+            {
+                let rhs = self.coerce_to_declared(&HirType::Union(left.clone()), rhs)?;
+                Some(HirExpr::UnionIsEqual(
                     Box::new(lhs),
-                    payload.as_ref().clone(),
-                )),
-                (HirType::Undefined, HirType::Optional(payload)) => Some(HirExpr::OptionalIsNone(
                     Box::new(rhs),
-                    payload.as_ref().clone(),
-                )),
-                (HirType::Optional(payload), other) if payload.as_ref() == other => {
-                    let left_name = format!("__thaw_optional_equality_left_{}", self.next_binding);
-                    self.next_binding += 1;
-                    let right_name = format!("__thaw_optional_equality_right_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(left_name.clone(), lhs_type.clone());
-                    self.scope.insert(right_name.clone(), rhs_type.clone());
-                    let left = HirExpr::Var(left_name.clone());
-                    let result = HirExpr::Block(vec![HirStmt::If(
-                        HirExpr::OptionalIsNone(Box::new(left.clone()), other.clone()),
-                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
-                        vec![HirStmt::Return(Some(HirExpr::BinOp(
-                            BinOp::EqEqEq,
-                            Box::new(HirExpr::OptionalValue(Box::new(left), other.clone())),
-                            Box::new(HirExpr::Var(right_name.clone())),
-                        )))],
-                    )]);
-                    Some(self.wrap_call_argument_bindings(
-                        result,
-                        &[(left_name, lhs_type.clone(), lhs), (right_name, rhs_type.clone(), rhs)],
-                    )?)
-                }
-                (other, HirType::Optional(payload)) if payload.as_ref() == other => {
-                    return self.lower_optional_undefined_equality(rhs, lhs);
-                }
-                (HirType::Optional(left), HirType::Optional(right)) if left == right => {
-                    Some(self.lower_absence_equality(
-                        lhs,
-                        rhs,
-                        lhs_type.clone(),
-                        rhs_type.clone(),
-                        left.as_ref().clone(),
-                        AbsenceKind::Optional,
-                    )?)
-                }
-                (HirType::Nullable(left), HirType::Nullable(right)) if left == right => {
-                    Some(self.lower_absence_equality(
-                        lhs,
-                        rhs,
-                        lhs_type.clone(),
-                        rhs_type.clone(),
-                        left.as_ref().clone(),
-                        AbsenceKind::Nullable,
-                    )?)
-                }
-                (HirType::Nullish(left), HirType::Nullish(right)) if left == right => {
-                    Some(self.lower_absence_equality(
-                        lhs,
-                        rhs,
-                        lhs_type.clone(),
-                        rhs_type.clone(),
-                        left.as_ref().clone(),
-                        AbsenceKind::Nullish,
-                    )?)
-                }
-                (HirType::Json, HirType::Null) => Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_is_null".into())),
-                    vec![lhs],
-                )),
-                (HirType::Null, HirType::Json) => Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_is_null".into())),
-                    vec![rhs],
-                )),
-                (HirType::Json, HirType::Undefined) => Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
-                    vec![lhs],
-                )),
-                (HirType::Undefined, HirType::Json) => Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
-                    vec![rhs],
-                )),
-                // A live `JsValue` (a real QuickJS handle, e.g. `const x:
-                // JsValue = someDynamicCall()`) has no equivalent of the
-                // `Json` case above's `$__thaw_napi_undefined$` sentinel
-                // tag to check locally -- there's no local representation
-                // of "undefined" to compare against at all, only the live
-                // handle itself. Ask the engine directly instead, the same
-                // way `typeof` on a `JsValue` already does
-                // (`__thaw_typeof_dynamic_value`, just above in this same
-                // file's `UnaryOp::TypeOf` handling): round-trip through a
-                // tiny bootstrap-registered JS function
-                // (`__thaw_is_undefined_dynamic_value`) via
-                // `callDynamicValueWithValue`, decoding its boolean result.
-                // Without this arm, the call fell through to the catch-all
-                // `(_, HirType::Undefined) => false` below -- unconditionally
-                // wrong for a live value that genuinely is `undefined` (real
-                // trigger: joi's `schema.validate(...)` result, whose
-                // `.error` field on a valid input is a real absent/
-                // `undefined` property read off a live handle).
-                (HirType::JsValue, HirType::Undefined) => {
-                    Some(self.dynamic_value_is_undefined(lhs))
-                }
-                (HirType::Undefined, HirType::JsValue) => {
-                    Some(self.dynamic_value_is_undefined(rhs))
-                }
-                // Same story as the `Undefined` case just above, for
-                // `null` instead: a live value that's genuinely `null`
-                // otherwise fell through to the blanket `(HirType::Null,
-                // _) | (_, HirType::Null) => false` catch-all further
-                // down, unconditionally wrong.
-                (HirType::JsValue, HirType::Null) => Some(self.dynamic_value_is_null(lhs)),
-                (HirType::Null, HirType::JsValue) => Some(self.dynamic_value_is_null(rhs)),
-                (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
-                    Box::new(lhs),
-                    payload.as_ref().clone(),
-                )),
-                (HirType::Null, HirType::Nullable(payload)) => Some(HirExpr::NullableIsNone(
-                    Box::new(rhs),
-                    payload.as_ref().clone(),
-                )),
-                (HirType::Nullish(payload), HirType::Null) => Some(HirExpr::NullishIsNull(
-                    Box::new(lhs),
-                    payload.as_ref().clone(),
-                )),
-                (HirType::Null, HirType::Nullish(payload)) => Some(HirExpr::NullishIsNull(
-                    Box::new(rhs),
-                    payload.as_ref().clone(),
-                )),
-                (HirType::Nullish(payload), HirType::Undefined) => Some(
-                    HirExpr::NullishIsUndefined(Box::new(lhs), payload.as_ref().clone()),
-                ),
-                (HirType::Undefined, HirType::Nullish(payload)) => Some(
-                    HirExpr::NullishIsUndefined(Box::new(rhs), payload.as_ref().clone()),
-                ),
-                (HirType::Union(left), HirType::Union(right)) if left == right => Some(
-                    HirExpr::UnionIsEqual(Box::new(lhs), Box::new(rhs), left.clone()),
-                ),
-                (HirType::Union(left), HirType::Union(right))
-                    if equivalent_union_members(left, right) =>
-                {
-                    let rhs = self.coerce_to_declared(&HirType::Union(left.clone()), rhs)?;
-                    Some(HirExpr::UnionIsEqual(
+                    left.clone(),
+                ))
+            }
+            (HirType::Union(elements), member) => elements
+                .iter()
+                .position(|element| element == member)
+                .map(|index| {
+                    HirExpr::UnionMemberIsEqual(
                         Box::new(lhs),
                         Box::new(rhs),
-                        left.clone(),
-                    ))
-                }
-                (HirType::Union(elements), member) => elements
-                    .iter()
-                    .position(|element| element == member)
-                    .map(|index| {
-                        HirExpr::UnionMemberIsEqual(
-                            Box::new(lhs),
-                            Box::new(rhs),
-                            index,
-                            elements.clone(),
-                        )
-                    }),
-                (member, HirType::Union(elements)) => elements
-                    .iter()
-                    .position(|element| element == member)
-                    .map(|index| {
-                        HirExpr::UnionMemberIsEqual(
-                            Box::new(rhs),
-                            Box::new(lhs),
-                            index,
-                            elements.clone(),
-                        )
-                    }),
-                (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
-                (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
-                (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
-                // A `string` can still hold the null pointer (a tagged template's
-                // invalid-escape cooked entry), so compare honestly.
-                (HirType::Str, HirType::Undefined) => Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
-                    vec![lhs],
-                )),
-                (HirType::Undefined, HirType::Str) => Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
-                    vec![rhs],
-                )),
-                (HirType::Undefined, _) | (_, HirType::Undefined) => {
-                    Some(HirExpr::Lit(HirLit::Bool(false)))
-                }
-                _ => None,
-            };
+                        index,
+                        elements.clone(),
+                    )
+                }),
+            (member, HirType::Union(elements)) => elements
+                .iter()
+                .position(|element| element == member)
+                .map(|index| {
+                    HirExpr::UnionMemberIsEqual(
+                        Box::new(rhs),
+                        Box::new(lhs),
+                        index,
+                        elements.clone(),
+                    )
+                }),
+            (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
+            (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
+            (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
+            // A `string` can still hold the null pointer (a tagged template's
+            // invalid-escape cooked entry), so compare honestly.
+            (HirType::Str, HirType::Undefined) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                vec![lhs],
+            )),
+            (HirType::Undefined, HirType::Str) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                vec![rhs],
+            )),
+            (HirType::Undefined, _) | (_, HirType::Undefined) => {
+                Some(HirExpr::Lit(HirLit::Bool(false)))
+            }
+            _ => None,
+        };
         Ok(result)
     }
 
@@ -4272,10 +4956,17 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(name.clone(), HirType::JsValue);
         let fallback = match self.decorator_class_token(class) {
-            Some(token) => self.dynamic_value_instanceof(HirExpr::Var(name.clone()), HirExpr::Var(token))?,
+            Some(token) => {
+                self.dynamic_value_instanceof(HirExpr::Var(name.clone()), HirExpr::Var(token))?
+            }
             None => self.dynamic_value_check_by_name(class, HirExpr::Var(name.clone()))?,
         };
+        // (A thaw-js build has no interned native views: its handles never alias a native owner,
+        // so the realm question below is the whole answer and needs no QuickJS pointer query.)
         let native = self.interfaces.get(class).cloned().filter(|ty| {
+            if crate::lower::thaw_js_routed() {
+                return false;
+            }
             let nested = std::mem::replace(&mut self.alias_native_arrays, true);
             let live = self.class_instance_supports_live_methods(ty);
             self.alias_native_arrays = nested;
@@ -4284,7 +4975,9 @@ impl<'a> FnLowerer<'a> {
         let Some(ty @ HirType::Object(_)) = native else {
             return self.wrap_call_argument_bindings(fallback, &[(name, HirType::JsValue, value)]);
         };
-        let HirType::Object(fields) = &ty else { unreachable!() };
+        let HirType::Object(fields) = &ty else {
+            unreachable!()
+        };
         let owner = format!("__thaw_live_instanceof_owner_{}", self.next_binding);
         self.next_binding += 1;
         let owner_type = HirType::Optional(Box::new(ty.clone()));
@@ -4305,14 +4998,20 @@ impl<'a> FnLowerer<'a> {
             ],
         );
         let result = HirExpr::Conditional(
-            Box::new(HirExpr::OptionalIsNone(Box::new(HirExpr::Var(owner.clone())), ty.clone())),
+            Box::new(HirExpr::OptionalIsNone(
+                Box::new(HirExpr::Var(owner.clone())),
+                ty.clone(),
+            )),
             Box::new(fallback),
             Box::new(identity),
             HirType::Bool,
         );
         self.wrap_call_argument_bindings(
             result,
-            &[(name, HirType::JsValue, value), (owner, owner_type, owner_call)],
+            &[
+                (name, HirType::JsValue, value),
+                (owner, owner_type, owner_call),
+            ],
         )
     }
 
@@ -4343,7 +5042,9 @@ impl<'a> FnLowerer<'a> {
             vec![
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str("__thaw_json_host_instanceof".into()))],
+                    vec![HirExpr::Lit(HirLit::Str(
+                        "__thaw_json_host_instanceof".into(),
+                    ))],
                 ),
                 json_arguments,
                 HirExpr::ArrayLit(Vec::new()),
@@ -4351,7 +5052,10 @@ impl<'a> FnLowerer<'a> {
         )));
         self.wrap_call_argument_bindings(
             result,
-            &[(left_name, left_type, left), (right_name, right_type, right)],
+            &[
+                (left_name, left_type, left),
+                (right_name, right_type, right),
+            ],
         )
     }
 
