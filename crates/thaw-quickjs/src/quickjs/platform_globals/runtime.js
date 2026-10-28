@@ -2305,7 +2305,8 @@
         set(_target, key, value, receiver) {
           sync();
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
-          if (index === undefined) return false;
+          // A key outside the fixed native layout lives on the JS shadow target only.
+          if (index === undefined) return thawGraphReflectSet(target, key, value);
           if (accessors[index]) return thawGraphReflectSet(target, key, value, receiver);
           if (isClass && methods[index]) return thawGraphReflectSet(target, key, value);
           if (!(flags(key) & 1)) return false;
@@ -2345,7 +2346,7 @@
         defineProperty(_target, key, descriptor) {
           sync();
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
-          if (index === undefined) return false;
+          if (index === undefined) return thawGraphReflectDefineProperty(target, key, descriptor);
           if (isClass && methods[index]) return thawGraphReflectDefineProperty(target, key, descriptor);
           const before = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           const updated = { ...descriptor };
