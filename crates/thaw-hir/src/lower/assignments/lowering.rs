@@ -743,7 +743,7 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(object_name.clone(), object_type.clone());
             self.scope.insert(value_name.clone(), HirType::Str);
             let store = HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_object_stack_set".into())),
+                Box::new(HirExpr::Var("__thaw_object_stack_assign".into())),
                 vec![HirExpr::Var(object_name.clone()), HirExpr::Var(value_name.clone())],
             );
             return self.wrap_call_argument_bindings(

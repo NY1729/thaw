@@ -1634,7 +1634,8 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "error property name")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_object_stack_set" | "__thaw_object_stack_has" | "__thaw_object_stack_get" => {
+                    "__thaw_object_stack_set" | "__thaw_object_stack_has" | "__thaw_object_stack_get"
+                    | "__thaw_object_stack_assign" | "__thaw_object_stack_visible" => {
                         // The owner is any record; the other operands are strings.
                         for operand in args.iter().skip(1) {
                             self.expect_type(&HirType::Str, operand, "stack text")?;

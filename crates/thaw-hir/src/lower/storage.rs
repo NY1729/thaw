@@ -1824,6 +1824,9 @@ fn storage_type(span: Span, source: HirType) -> HirType {
         return quickjs_reference_slot_type(source);
     }
     if !has_dynamic_storage(span) { return source; }
+    // An `extends Array/Map/Set` instance keeps its wrapper layout: collapsing it to `Json` would
+    // lose the wrapped collection (`length`, methods) and the subclass form when printed.
+    if native_base_type(&source).is_some() { return source; }
     dynamic_storage_type(source)
 }
 
