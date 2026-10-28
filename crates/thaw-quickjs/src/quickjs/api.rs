@@ -6958,7 +6958,63 @@ fn host_memory_usage(ctx: Ctx<'_>) -> String {
 /// Marker for an uncaught Worker exception carried as structured JSON (`__thaw_worker_error_wire`) instead of a bare message.
 const WORKER_ERROR_WIRE: char = '\u{6}';
 
+/// Reported text for a Worker whose resourceLimits memory cap was exhausted.
+const WORKER_OUT_OF_MEMORY: &str = "ERR_WORKER_OUT_OF_MEMORY:Worker terminated due to reaching memory limit: JS heap out of memory";
+
+thread_local! {
+    /// The armed resourceLimits cap of this Worker's runtime in bytes (0 = none).
+    static WORKER_MEMORY_CAP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn set_worker_memory_cap(bytes: u64) {
+    WORKER_MEMORY_CAP.with(|cap| cap.set(bytes));
+}
+
+/// Lifts the Worker's memory cap before its error is described: describing allocates and
+/// would fail under the same cap. The Worker is ending, so the cap has no further use.
+fn lift_worker_memory_cap(ctx: &Ctx<'_>) {
+    if WORKER_MEMORY_CAP.with(std::cell::Cell::get) != 0 {
+        // SAFETY: the runtime belongs to this thread; the limit is only cleared.
+        unsafe { rquickjs::qjs::JS_SetMemoryLimit(rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()), 0) };
+    }
+}
+
+/// True when the pending exception is the memory-cap failure of a capped Worker. QuickJS
+/// raises its own `InternalError: out of memory`; when it cannot even allocate that object
+/// it throws null. Both are classified from the exception itself: heap usage cannot be read
+/// here because unwinding has already freed the allocation that hit the cap.
+/// ponytail: a user `throw null` inside a capped Worker is reported the same way; telling
+/// them apart needs the allocator's failure flag, add it if that ever matters.
+fn take_worker_exception_if_out_of_memory(ctx: &Ctx<'_>) -> bool {
+    lift_worker_memory_cap(ctx);
+    if WORKER_MEMORY_CAP.with(std::cell::Cell::get) == 0 {
+        return false;
+    }
+    let exc = ctx.catch();
+    let out_of_memory = if exc.is_null() || exc.is_undefined() {
+        true
+    } else {
+        exc.as_object().is_some_and(|object| {
+            object.get::<_, Option<String>>("name").ok().flatten().as_deref() == Some("InternalError")
+                && object.get::<_, Option<String>>("message").ok().flatten().as_deref() == Some("out of memory")
+        })
+    };
+    ctx.throw(exc);
+    out_of_memory
+}
+
+/// Describes a Worker job or timer exception, classifying the memory-cap failure first.
+fn describe_worker_job_exception(ctx: &Ctx<'_>) -> String {
+    if take_worker_exception_if_out_of_memory(ctx) {
+        return WORKER_OUT_OF_MEMORY.to_string();
+    }
+    describe_exception(ctx)
+}
+
 fn describe_worker_exception(ctx: &Ctx<'_>) -> String {
+    if take_worker_exception_if_out_of_memory(ctx) {
+        return WORKER_OUT_OF_MEMORY.to_string();
+    }
     let exc = ctx.catch();
     if let Ok(wire) = ctx.globals().get::<_, Function>("__thaw_worker_error_wire") {
         if let Ok(wire) = wire.call::<_, String>((exc.clone(),)) {
