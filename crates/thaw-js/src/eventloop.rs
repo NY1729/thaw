@@ -74,37 +74,45 @@ struct Imm {
 
 // ----- coroutines -----
 
-enum Resume {
+pub(crate) enum Resume {
     Value(Value),
     Throw(Value),
+    /// `generator.return(v)`: unwinds the generator body (running `finally` blocks).
+    Return(Value),
 }
 
-enum Yield {
+pub(crate) enum Yield {
     Await(Value),
+    /// `yield v` inside a generator body.
+    Yielded(Value),
     Done(R<Value>),
 }
 
 /// Moves `Rc`-bearing data across the hand-off; sound only because of the strict alternation.
-struct SendBox<T>(T);
+pub(crate) struct SendBox<T>(pub(crate) T);
 // SAFETY: see the module docs; only one side touches the payload at a time.
 unsafe impl<T> Send for SendBox<T> {}
 impl<T> SendBox<T> {
-    fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self) -> T {
         self.0
     }
 }
 
 pub(crate) struct CoCtx {
-    to_host: Sender<SendBox<Yield>>,
-    from_host: Receiver<SendBox<Resume>>,
+    pub(crate) to_host: Sender<SendBox<Yield>>,
+    pub(crate) from_host: Receiver<SendBox<Resume>>,
+    /// The body of an async generator: `yield` awaits its operand first.
+    pub(crate) agen: bool,
 }
 
 pub(crate) struct Co {
-    to_co: Sender<SendBox<Resume>>,
-    from_co: Receiver<SendBox<Yield>>,
-    ctx: Rc<CoCtx>,
+    pub(crate) to_co: Sender<SendBox<Resume>>,
+    pub(crate) from_co: Receiver<SendBox<Yield>>,
+    pub(crate) ctx: Rc<CoCtx>,
     interp: *mut Interp,
     promise: Obj,
+    /// Set for an async generator: its yields and completion are routed to the generator driver.
+    pub(crate) gen: Option<Obj>,
 }
 
 #[derive(Default)]
@@ -112,7 +120,7 @@ pub(crate) struct Rt {
     micro: VecDeque<Job>,
     ticks: VecDeque<(Value, Vec<Value>)>,
     unhandled: Vec<Obj>,
-    cur_co: Vec<Rc<CoCtx>>,
+    pub(crate) cur_co: Vec<Rc<CoCtx>>,
     timers: Vec<Timer>,
     immediates: Vec<Imm>,
     cleared: Vec<u64>,
@@ -132,6 +140,11 @@ pub(crate) struct Rt {
     promise_proto: Option<Obj>,
     timeout_proto: Option<Obj>,
     immediate_proto: Option<Obj>,
+    pub(crate) has_instance_key: Option<Rc<str>>,
+    pub(crate) pending_nt: Option<Value>,
+    pub(crate) bigint_proto: Option<Obj>,
+    pub(crate) generator_proto: Option<Obj>,
+    pub(crate) async_generator_proto: Option<Obj>,
     process: Option<Obj>,
     /// Print console output as it happens instead of buffering it in `Interp::out`.
     pub(crate) stream: bool,
@@ -466,16 +479,39 @@ impl Interp {
         args: &[Value],
     ) -> R<Value> {
         let promise = self.new_promise();
+        let (co, snap) = self.new_co(f, def, scope, this, args, promise.clone(), None)?;
+        self.co_wait(&co, snap)?;
+        Ok(Value::Object(promise))
+    }
+
+    /// Start the coroutine thread for a closure body. On success the coroutine's context is on
+    /// `cur_co` and the caller must `co_wait` (or the generator equivalent) on the result.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_co(
+        &mut self,
+        f: &Value,
+        def: &Rc<FuncDef>,
+        scope: &Rc<Scope>,
+        this: &Value,
+        args: &[Value],
+        promise: Obj,
+        gen: Option<Obj>,
+    ) -> R<(Rc<Co>, (usize, usize, usize))> {
         let (to_co, from_host) = channel();
         let (to_host, from_co) = channel();
         let done_tx = to_host.clone();
-        let ctx = Rc::new(CoCtx { to_host, from_host });
+        let ctx = Rc::new(CoCtx {
+            to_host,
+            from_host,
+            agen: gen.is_some(),
+        });
         let co = Rc::new(Co {
             to_co,
             from_co,
             ctx: ctx.clone(),
             interp: self as *mut Interp,
-            promise: promise.clone(),
+            promise,
+            gen,
         });
         let payload = SendBox((
             self as *mut Interp,
@@ -502,24 +538,22 @@ impl Interp {
             });
         if spawned.is_err() {
             self.rt.cur_co.pop();
-            return self.throw_error("RangeError", "cannot start async function (thread limit)");
+            return self.throw_error("RangeError", "cannot start coroutine (thread limit)");
         }
-        let r = self.co_wait(&co, snap);
-        r?;
-        Ok(Value::Object(promise))
+        Ok((co, snap))
     }
 
     /// Per-thread evaluator state that must follow the thread across coroutine switches.
-    fn snapshot(&self) -> (usize, usize, usize) {
+    pub(crate) fn snapshot(&self) -> (usize, usize, usize) {
         (self.depth, self.stack_limit, self.max_depth)
     }
 
-    fn restore(&mut self, s: (usize, usize, usize)) {
+    pub(crate) fn restore(&mut self, s: (usize, usize, usize)) {
         (self.depth, self.stack_limit, self.max_depth) = s;
     }
 
     /// Block until the coroutine yields or finishes, then act on what it did.
-    fn co_wait(&mut self, co: &Rc<Co>, snap: (usize, usize, usize)) -> R<()> {
+    pub(crate) fn co_wait(&mut self, co: &Rc<Co>, snap: (usize, usize, usize)) -> R<()> {
         let y = co.from_co.recv();
         self.restore(snap);
         self.rt.cur_co.pop();
@@ -538,6 +572,8 @@ impl Interp {
                 self.promise_then(&p, on_ful, on_rej, None);
                 Ok(())
             }
+            Ok(Yield::Yielded(v)) => self.agen_yielded(co, v),
+            Ok(Yield::Done(r)) if co.gen.is_some() => self.agen_done(co, r),
             Ok(Yield::Done(Ok(v))) => self.resolve_promise(&co.promise, v),
             Ok(Yield::Done(Err(Ctl::Throw(e)))) => {
                 self.reject_promise(&co.promise, e);
@@ -548,7 +584,7 @@ impl Interp {
         }
     }
 
-    fn co_step(&mut self, co: &Rc<Co>, resume: Resume) -> R<()> {
+    pub(crate) fn co_step(&mut self, co: &Rc<Co>, resume: Resume) -> R<()> {
         assert!(
             std::ptr::eq(co.interp, self),
             "an Interp must not be moved while an async function is suspended"
@@ -572,6 +608,7 @@ impl Interp {
         match msg.map(SendBox::into_inner) {
             Ok(Resume::Value(v)) => Ok(v),
             Ok(Resume::Throw(e)) => Err(Ctl::Throw(e)),
+            Ok(Resume::Return(v)) => Err(Ctl::Return(v)),
             Err(_) => loop {
                 // the host dropped this coroutine (promise never settled): never touch shared state again
                 std::thread::park();
@@ -1178,6 +1215,7 @@ fn received(v: &Value, shown: &str) -> String {
         Value::Bool(b) => format!("type boolean ({b})"),
         Value::Number(_) => format!("type number ({shown})"),
         Value::Str(s) => format!("type string ('{s}')"),
+        Value::BigInt(b) => format!("type bigint ({b}n)"),
         Value::Object(_) => "an instance of Object".into(),
     }
 }

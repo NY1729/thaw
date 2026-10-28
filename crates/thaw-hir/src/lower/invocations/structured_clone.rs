@@ -7,6 +7,12 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         value_type: HirType,
     ) -> Result<HirExpr, String> {
+        // A `Buffer` / `Uint8Array` clones into a fresh byte buffer of its own.
+        if matches!(&value_type, HirType::Array(element) if **element == HirType::F64)
+            && self.infer_expr_type_inner(&value)? == HirType::Bytes
+        {
+            return Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_clone".into())), vec![value]));
+        }
         // Cloning a `Map`/`Set` subclass instance yields a plain collection.
         if let Some(base) = native_base_type(&value_type).cloned() {
             let value = self.project_native_base(value)?;
