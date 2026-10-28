@@ -16,6 +16,41 @@ pub const CRYPTO: u8 = 7;
 pub const BUFFER: u8 = 8;
 /// a Node built-in without a table (events, stream, http, ...)
 pub const OPAQUE: u8 = 9;
+/// built-in objects made by `new Map / Set / Date / Error / Promise`: no content is tracked, so every
+/// value stored into one (a `set` argument, a property write, a `then` callback) is tainted
+pub const MAP: u8 = 10;
+pub const SET: u8 = 11;
+pub const DATE: u8 = 12;
+pub const ERROR: u8 = 13;
+pub const PROMISE: u8 = 14;
+
+/// `new <name>(..)` of an unresolved global that yields an opaque built-in object.
+pub fn ext_of_ctor(name: &str) -> Option<u8> {
+    Some(match name {
+        "Map" | "WeakMap" => MAP,
+        "Set" | "WeakSet" => SET,
+        "Date" => DATE,
+        "Error" | "TypeError" | "RangeError" | "SyntaxError" | "ReferenceError" | "EvalError"
+        | "URIError" => ERROR,
+        "Promise" => PROMISE,
+        _ => return None,
+    })
+}
+
+pub fn is_ext(ns: u8) -> bool {
+    (MAP..=PROMISE).contains(&ns)
+}
+
+/// Guard for a value of an opaque built-in kind (`WeakMap` / `WeakSet` fail it: the dynamic path runs).
+pub fn ext_guard(ns: u8) -> &'static str {
+    match ns {
+        MAP => "Map",
+        SET => "Set",
+        DATE => "Date",
+        ERROR => "Error",
+        _ => "Promise",
+    }
+}
 
 /// `require(spec)` of a Node built-in.
 pub fn ns_of_require(spec: &str) -> Option<u8> {
@@ -47,6 +82,43 @@ pub fn ns_of_global(name: &str) -> Option<u8> {
     })
 }
 
+const DATE_NUM: &[&str] = &[
+    "getTime",
+    "valueOf",
+    "getFullYear",
+    "getMonth",
+    "getDate",
+    "getDay",
+    "getHours",
+    "getMinutes",
+    "getSeconds",
+    "getMilliseconds",
+    "getTimezoneOffset",
+    "getUTCFullYear",
+    "getUTCMonth",
+    "getUTCDate",
+    "getUTCDay",
+    "getUTCHours",
+    "getUTCMinutes",
+    "getUTCSeconds",
+    "getUTCMilliseconds",
+    "setTime",
+    "setFullYear",
+    "setMonth",
+    "setDate",
+    "setHours",
+    "setMinutes",
+    "setSeconds",
+    "setMilliseconds",
+    "setUTCFullYear",
+    "setUTCMonth",
+    "setUTCDate",
+    "setUTCHours",
+    "setUTCMinutes",
+    "setUTCSeconds",
+    "setUTCMilliseconds",
+];
+
 impl An {
     fn arr_of(&mut self, key: u32, tag: u8, elem: Ty) -> Ty {
         let s = self.site_pub((key, tag), Site::Arr(elem));
@@ -63,6 +135,7 @@ impl An {
             (PROCESS, "argv" | "execArgv") => self.arr_of(key, 11, Ty::str()),
             (PROCESS, "stdout" | "stderr" | "stdin") => Ty::one(Atom::Ns(OPAQUE)),
             (FS, "promises") => Ty::one(Atom::Ns(OPAQUE)),
+            (MAP | SET, "size") => Ty::num(),
             (UTIL, "types") => Ty::one(Atom::Ns(OPAQUE)),
             _ => Ty::Any(Reason::Builtin),
         }
@@ -122,6 +195,28 @@ impl An {
             (CRYPTO, "randomInt") => Ty::num(),
             (BUFFER, "isBuffer") => Ty::bool(),
             (BUFFER, "byteLength") => Ty::num(),
+            (MAP | SET, "has" | "delete") => Ty::bool(),
+            (MAP | SET, "clear") => Ty::undef(),
+            (MAP, "set") | (SET, "add") => {
+                for (t, _) in args {
+                    self.taint_as(t, Reason::Builtin);
+                }
+                Ty::one(Atom::Ns(ns))
+            }
+            // only the real methods: a polyfill may add `Date.prototype.getWeek = ..` returning anything
+            (DATE, n) if DATE_NUM.contains(&n) => Ty::num(),
+            (
+                DATE,
+                "toISOString" | "toString" | "toDateString" | "toTimeString" | "toUTCString"
+                | "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString",
+            )
+            | (ERROR, "toString") => Ty::str(),
+            (PROMISE, "then" | "catch" | "finally") => {
+                for (t, _) in args {
+                    self.taint_as(t, Reason::Async);
+                }
+                Ty::one(Atom::Ns(PROMISE))
+            }
             _ => return None,
         })
     }
