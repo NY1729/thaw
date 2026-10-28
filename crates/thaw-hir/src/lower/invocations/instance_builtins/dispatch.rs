@@ -211,12 +211,21 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(receiver_name.clone(), receiver_type.clone());
             let mut bindings = vec![(receiver_name.clone(), receiver_type.clone(), receiver)];
-            let (arguments, spread_bindings) = self.lower_native_spread_values(
-                &call.args, &format!("{}.{}", "native receiver", property.sym),
-            )?;
+            // The locale methods read their options object literal's source properties,
+            // so their arguments must reach `lower_intl_arguments` unlowered.
+            let keep_arguments = property.sym.starts_with("toLocale");
+            let (arguments, spread_bindings) = if keep_arguments {
+                (Vec::new(), Vec::new())
+            } else {
+                self.lower_native_spread_values(
+                    &call.args, &format!("{}.{}", "native receiver", property.sym),
+                )?
+            };
             bindings.extend(spread_bindings);
             let mut synthetic_call = call.clone();
-            synthetic_call.args.clear();
+            if !keep_arguments {
+                synthetic_call.args.clear();
+            }
             for argument in arguments {
                 let ty = self.infer_expr_type(&argument)?;
                 let name = format!("__thaw_date_method_arg_{}", self.next_binding);
