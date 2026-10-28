@@ -4,7 +4,7 @@ use crate::narrow::{assigns_in_expr, assigns_in_stmt, assigns_in_stmts, exits};
 use crate::prescan::*;
 use crate::ty::*;
 use crate::Config;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
@@ -41,6 +41,8 @@ pub struct An {
     pub any_hist: BTreeMap<Reason, usize>,
     decl_const: bool,
     pub dts_fns: HashMap<usize, Vec<crate::dts::Sig>>,
+    /// functions whose `dts_fns` entry comes from a JSDoc block, not a declaration file
+    pub jsdoc_fns: HashSet<usize>,
     dts_sites: HashMap<(usize, usize, usize), usize>,
     pub dts_ret: HashMap<usize, Ty>,
     cb_flowed: std::collections::HashSet<usize>,
@@ -114,6 +116,7 @@ impl An {
             any_hist: BTreeMap::new(),
             decl_const: false,
             dts_fns: HashMap::new(),
+            jsdoc_fns: HashSet::new(),
             dts_sites: HashMap::new(),
             dts_ret: HashMap::new(),
             cb_flowed: Default::default(),
@@ -654,6 +657,8 @@ impl An {
                     Key::Name(_) => self.kill(s, Reason::Proto),
                     _ => self.kill(s, Reason::DynamicKey),
                 },
+                // a property written onto an opaque built-in object can be read back by unknown code
+                Atom::Ns(n) if crate::builtins::is_ext(n) => self.taint_as(v, Reason::Builtin),
                 _ => {}
             }
         }
@@ -685,7 +690,7 @@ impl An {
         }
         let fi = &self.st.funcs[f];
         if fi.async_ {
-            return Ty::Any(Reason::Async);
+            return self.async_result(f);
         }
         if fi.gen {
             return Ty::Any(Reason::Generator);
@@ -1209,10 +1214,18 @@ impl An {
         }
     }
 
-    fn fn_result(&self, f: usize) -> Ty {
+    /// An async function returns a promise; what it resolves to is read by `await` / `.then`, which are
+    /// unknown code, so the values it returns are tainted.
+    fn async_result(&mut self, f: usize) -> Ty {
+        let ret = self.st.funcs[f].ret.clone();
+        self.taint_as(&ret, Reason::Async);
+        Ty::one(Atom::Ns(crate::builtins::PROMISE))
+    }
+
+    fn fn_result(&mut self, f: usize) -> Ty {
         let fi = &self.st.funcs[f];
         if fi.async_ {
-            Ty::Any(Reason::Async)
+            self.async_result(f)
         } else if fi.gen {
             Ty::Any(Reason::Generator)
         } else {
@@ -1570,8 +1583,18 @@ impl An {
                 if key.is_none() {
                     n.callee.visit_with(self);
                 }
+                let ext = match (&key, strip(&n.callee)) {
+                    (None, E::Ident(i)) => crate::builtins::ext_of_ctor(&i.sym),
+                    _ => None,
+                };
                 match key.and_then(|k| self.new_class(&k, &args)) {
                     Some(t) => t,
+                    None if ext.is_some() => {
+                        for (t, _) in &args {
+                            self.taint_as(t, Reason::New);
+                        }
+                        Ty::one(Atom::Ns(ext.unwrap()))
+                    }
                     None => {
                         for (t, _) in &args {
                             self.taint_as(t, Reason::New);
@@ -2170,6 +2193,10 @@ impl An {
                         && !self.esc_fns.contains(&fid)
                         && (self.seen_fns.contains(&fid) || !self.escape_final)
                 };
+            if self.st.funcs[fid].async_ {
+                // the promise it returns is read by unknown code
+                self.async_result(fid);
+            }
             if !closed {
                 // closures returned from a function that external code calls are called externally
                 let ret = self.st.funcs[fid].ret.clone();
@@ -2214,7 +2241,11 @@ impl An {
                         None
                     };
                     if dts.is_some() {
-                        self.st.funcs[fid].trust |= TRUST_DTS;
+                        self.st.funcs[fid].trust |= if self.jsdoc_fns.contains(&fid) {
+                            TRUST_JSDOC
+                        } else {
+                            TRUST_DTS
+                        };
                         dts
                     } else if let Some(t) = self.evidence_param(fid, i) {
                         self.st.funcs[fid].trust |= TRUST_EVIDENCE;
@@ -2223,6 +2254,9 @@ impl An {
                         // the default value (flowed in `enter`) is the evidence
                         self.st.funcs[fid].trust |= TRUST_HINT;
                         None
+                    } else if let Some(t) = self.default_contract_ty(fid, i) {
+                        self.st.funcs[fid].trust |= TRUST_DEFAULT;
+                        Some(t)
                     } else if !self.escape_final && !self.st.funcs[fid].exports.is_empty() {
                         // evidence about an exported function may still arrive: decide `any` at the end
                         None
@@ -2246,6 +2280,66 @@ impl An {
                     self.flow(&(fid, n), &t);
                 }
             }
+        }
+    }
+
+    /// `function f(n = 10)`: with `default_contract`, callers are taken to pass what the default is
+    /// (or nothing); the entry guard sends anything else down the original path.
+    fn default_contract_ty(&self, fid: usize, i: usize) -> Option<Ty> {
+        if !self.cfg.default_contract {
+            return None;
+        }
+        match self.st.funcs[fid].default_lit.get(i)? {
+            1 => Some(Ty::num()),
+            2 => Some(Ty::str()),
+            3 => Some(Ty::bool()),
+            _ => None,
+        }
+    }
+
+    /// JSDoc `@param` blocks directly in front of a function become its (guarded) contract.
+    pub fn init_jsdoc(&mut self, src: &str, off: &dyn Fn(u32) -> usize) {
+        if !self.cfg.jsdoc {
+            return;
+        }
+        let blocks = crate::jsdoc::blocks(src);
+        if blocks.is_empty() {
+            return;
+        }
+        for fid in 1..self.st.funcs.len() {
+            let f = &self.st.funcs[fid];
+            if f.iife || f.bind.is_some() || self.dts_fns.contains_key(&fid) {
+                continue;
+            }
+            let lo = off(f.lo);
+            // the nearest block that ends before the function
+            let Some(b) = blocks.iter().rev().find(|b| b.end <= lo) else {
+                continue;
+            };
+            if !crate::jsdoc::gap_ok(&src[b.end..lo]) {
+                continue;
+            }
+            let params: Vec<crate::dts::DT> = f
+                .params
+                .iter()
+                .map(|p| {
+                    p.as_ref()
+                        .and_then(|n| b.params.iter().find(|(m, _)| m == n))
+                        .map_or(crate::dts::DT::Any, |(_, t)| t.clone())
+                })
+                .collect();
+            if params.iter().all(|p| *p == crate::dts::DT::Any) {
+                continue;
+            }
+            self.dts_fns.insert(
+                fid,
+                vec![crate::dts::Sig {
+                    owner: None,
+                    params,
+                    ret: crate::dts::DT::Any,
+                }],
+            );
+            self.jsdoc_fns.insert(fid);
         }
     }
 
