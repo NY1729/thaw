@@ -767,8 +767,35 @@ impl<'a> FnLowerer<'a> {
                 let json = self.wrap_native_value_as_json(value, actual)?;
                 return Ok(HirExpr::JsonAsNative(Box::new(json), declared.clone()));
             }
-            // `Bytes` and `Array(F64)` share a layout -- pass either
-            // straight through as the other.
+            // `Bytes` is a view record, not an `f64`-slot array: crossing the
+            // two copies (a `Buffer[]` list converts one level deep).
+            if bytes_layout_eq(declared, &actual) {
+                let inner = self.infer_expr_type_inner(&value)?;
+                let intrinsic = match (declared, &inner) {
+                    (HirType::Bytes, HirType::Array(element)) if **element == HirType::F64 => {
+                        Some("__thaw_bytes_from_array")
+                    }
+                    (HirType::Array(element), HirType::Bytes) if **element == HirType::F64 => {
+                        Some("__thaw_bytes_to_array")
+                    }
+                    (HirType::Array(want), HirType::Array(have))
+                        if **want == HirType::Bytes
+                            && matches!(have.as_ref(), HirType::Array(e) if **e == HirType::F64) =>
+                    {
+                        Some("__thaw_bytes_narrow_list")
+                    }
+                    (HirType::Array(want), HirType::Array(have))
+                        if **have == HirType::Bytes
+                            && matches!(want.as_ref(), HirType::Array(e) if **e == HirType::F64) =>
+                    {
+                        Some("__thaw_bytes_widen_list")
+                    }
+                    _ => None,
+                };
+                if let Some(intrinsic) = intrinsic {
+                    return Ok(HirExpr::Call(Box::new(HirExpr::Var(intrinsic.into())), vec![value]));
+                }
+            }
             if declared != &actual && bytes_layout_eq(declared, &actual) {
                 return Ok(value);
             }
@@ -1434,7 +1461,11 @@ impl<'a> FnLowerer<'a> {
             // apart from an ordinary `number[]` of the same runtime
             // layout.
             if self.infer_expr_type_inner(&value)? == HirType::Bytes {
-                let data = self.wrap_native_value_as_json(value, HirType::Bytes)?;
+                let widened = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_to_array".into())),
+                    vec![value],
+                );
+                let data = self.wrap_native_value_as_json(widened, HirType::Array(Box::new(HirType::F64)))?;
                 let kind = self.wrap_native_value_as_json(
                     HirExpr::Lit(HirLit::Str("Buffer".to_string())),
                     HirType::Str,

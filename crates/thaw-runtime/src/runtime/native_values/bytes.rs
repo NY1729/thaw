@@ -111,29 +111,114 @@ fn decode_string(text: &[u8], encoding: &str) -> Vec<u8> {
     }
 }
 
-unsafe fn read_byte_array(array: *const u8) -> Option<Vec<u8>> {
-    let length = unsafe { native_array_length(array) }?;
-    let mut bytes = Vec::with_capacity(length);
-    for index in 0..length {
-        let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
-        bytes.push(slot as i64 as u8);
+// A byte buffer is a pointer to a `ByteView` record over a shared `ByteStore`
+// (the `ArrayBuffer`): one `u8` per byte. The compiled Buffer value is the
+// ordinary array handle cell whose "data" word points at this record, so
+// `.length` (record word 0) and every `compile_array_data` unwrap keep working.
+// `subarray`/`slice` create a second record over the same store.
+
+/// The backing store: an `ArrayBuffer`'s bytes.
+#[repr(C)]
+struct ByteStore {
+    data: *mut u8,
+    len: usize,
+    /// Reserved for a pinned JS `ArrayBuffer` wrapper.
+    js: u64,
+    _reserved: u64,
+}
+
+/// A view record. `len` is first so `[len]...` readers see the length; `tag` is
+/// `BYTE_VIEW_MAGIC | flags`, which tells a record from an `f64`-slot array (whose
+/// first element would have to be exactly that NaN payload).
+#[repr(C)]
+struct ByteView {
+    len: usize,
+    tag: u64,
+    base: *mut u8,
+    store: *mut ByteStore,
+}
+
+const BYTE_VIEW_MAGIC: u64 = 0x7FF8_5EED_B17E_B100;
+const BYTE_VIEW_FLAG_MASK: u64 = 0xFF;
+/// A `Buffer` (as opposed to a plain `Uint8Array`): `slice` shares.
+const BYTE_VIEW_BUFFER: u64 = 1;
+/// The whole backing store as an `ArrayBuffer` (`buf.buffer`): `slice` copies and
+/// `Buffer.from` / `new Uint8Array` over it share.
+const BYTE_VIEW_ARRAY_BUFFER: u64 = 2;
+
+unsafe fn is_byte_view(ptr: *const u8) -> bool {
+    !ptr.is_null() && (unsafe { ptr.add(8).cast::<u64>().read_unaligned() } & !BYTE_VIEW_FLAG_MASK) == BYTE_VIEW_MAGIC
+}
+
+/// `ptr` as a view record: a record passes through, an `f64`-slot array (a value
+/// whose static type was erased on the way) is narrowed into a fresh one.
+unsafe fn coerce_view(ptr: *const u8) -> *const ByteView {
+    if ptr.is_null() || unsafe { is_byte_view(ptr) } {
+        return ptr.cast();
     }
-    Some(bytes)
+    unsafe { thaw_bytes_from_array(ptr) }.cast()
+}
+
+fn view_flags(view: &ByteView) -> u64 {
+    view.tag & BYTE_VIEW_FLAG_MASK
+}
+
+unsafe fn alloc_byte_owner(len: usize, flags: u64) -> *mut u8 {
+    let header = std::mem::size_of::<ByteView>() + std::mem::size_of::<ByteStore>();
+    let Some(total) = header.checked_add(len) else {
+        return std::ptr::null_mut();
+    };
+    let block = thaw_arena::thaw_arena_alloc(total.max(header + 1), 16);
+    if block.is_null() {
+        return block;
+    }
+    let view = block.cast::<ByteView>();
+    let store = unsafe { block.add(std::mem::size_of::<ByteView>()) }.cast::<ByteStore>();
+    let data = unsafe { block.add(header) };
+    unsafe {
+        data.write_bytes(0, len);
+        store.write(ByteStore { data, len, js: 0, _reserved: 0 });
+        view.write(ByteView { len, tag: BYTE_VIEW_MAGIC | flags, base: data, store });
+    }
+    block
+}
+
+unsafe fn new_byte_view(parent: *const u8, start: usize, len: usize) -> *mut u8 {
+    let parent = unsafe { coerce_view(parent) };
+    let block = thaw_arena::thaw_arena_alloc(std::mem::size_of::<ByteView>(), 8);
+    if block.is_null() || parent.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let parent = &*parent;
+        block.cast::<ByteView>().write(ByteView {
+            len,
+            tag: parent.tag,
+            base: parent.base.add(start),
+            store: parent.store,
+        });
+    }
+    block
+}
+
+unsafe fn view_bytes<'a>(view: *const u8) -> Option<&'a [u8]> {
+    let view = unsafe { coerce_view(view).as_ref() }?;
+    Some(unsafe { std::slice::from_raw_parts(view.base, view.len) })
+}
+
+unsafe fn view_bytes_mut<'a>(view: *mut u8) -> Option<&'a mut [u8]> {
+    let view = unsafe { coerce_view(view).as_ref() }?;
+    Some(unsafe { std::slice::from_raw_parts_mut(view.base, view.len) })
+}
+
+unsafe fn read_byte_array(array: *const u8) -> Option<Vec<u8>> {
+    unsafe { view_bytes(array) }.map(<[u8]>::to_vec)
 }
 
 unsafe fn write_byte_array(bytes: &[u8]) -> *mut u8 {
-    let output = thaw_arena::thaw_arena_alloc(8 + bytes.len() * 8, 8);
-    if output.is_null() {
-        return std::ptr::null_mut();
-    }
-    unsafe { output.cast::<u64>().write(bytes.len() as u64) };
-    for (index, &byte) in bytes.iter().enumerate() {
-        unsafe {
-            output
-                .add(8 + index * 8)
-                .cast::<f64>()
-                .write_unaligned(f64::from(byte));
-        }
+    let output = unsafe { alloc_byte_owner(bytes.len(), BYTE_VIEW_BUFFER) };
+    if let Some(target) = unsafe { view_bytes_mut(output) } {
+        target.copy_from_slice(bytes);
     }
     output
 }
@@ -283,7 +368,7 @@ pub unsafe extern "C" fn thaw_bytes_set_from_string(
     }
     let (read, decoded) = if array.is_null() || text.is_null() {
         (0, Vec::new())
-    } else if let Some(length) = unsafe { native_array_length(array) } {
+    } else if let Some(length) = unsafe { view_bytes(array) }.map(<[u8]>::len) {
         let source = unsafe { CStr::from_ptr(text) }.to_bytes();
         match encoding_str(encoding).as_str() {
             "base64" => decode_set_from_base64(&wtf8_decode_utf16(source), length),
@@ -301,12 +386,9 @@ pub unsafe extern "C" fn thaw_bytes_set_from_string(
     } else {
         (0, Vec::new())
     };
-    for (index, byte) in decoded.iter().enumerate() {
-        unsafe {
-            array.add(8 + index * 8).cast::<f64>().write_unaligned(f64::from(*byte));
-        }
+    if let Some(target) = unsafe { view_bytes_mut(array) } {
+        target[..decoded.len()].copy_from_slice(&decoded);
     }
-    unsafe { thaw_bytes_sync(array, 0.0, decoded.len() as f64) };
     unsafe {
         result.cast::<f64>().write_unaligned(read as f64);
         result.add(8).cast::<f64>().write_unaligned(decoded.len() as f64);
@@ -325,10 +407,306 @@ pub unsafe extern "C" fn thaw_bytes_set_from_string(
 ///
 /// `array` must point to a Thaw array of `f64` element slots.
 pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
-    let Some(bytes) = (unsafe { read_byte_array(array) }) else {
+    if unsafe { is_byte_view(array) } {
+        return array.cast_mut();
+    }
+    let Some(length) = (unsafe { native_array_length(array) }) else {
         return std::ptr::null_mut();
     };
-    unsafe { write_byte_array(&bytes) }
+    let output = unsafe { alloc_byte_owner(length, BYTE_VIEW_BUFFER) };
+    if let Some(target) = unsafe { view_bytes_mut(output) } {
+        for (index, byte) in target.iter_mut().enumerate() {
+            let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+            *byte = slot as i64 as u8;
+        }
+    }
+    output
+}
+
+#[no_mangle]
+/// Widens a byte buffer into a fresh `[len][f64 slot...]` array buffer (the
+/// layout every generic `number[]` operation reads). A copy.
+///
+/// # Safety
+///
+/// `buffer` must be null or a byte view record.
+pub unsafe extern "C" fn thaw_bytes_to_array(buffer: *const u8) -> *mut u8 {
+    if !buffer.is_null() && !unsafe { is_byte_view(buffer) } {
+        return buffer.cast_mut();
+    }
+    let bytes = unsafe { view_bytes(buffer) }.unwrap_or_default();
+    let output = thaw_arena::thaw_arena_alloc(8 + bytes.len() * 8, 8);
+    if output.is_null() {
+        return output;
+    }
+    unsafe { output.cast::<u64>().write(bytes.len() as u64) };
+    for (index, &byte) in bytes.iter().enumerate() {
+        unsafe { output.add(8 + index * 8).cast::<f64>().write_unaligned(f64::from(byte)) };
+    }
+    output
+}
+
+#[no_mangle]
+/// Narrows the first `min(len, array.len)` slots of an `f64` array buffer
+/// back into an existing byte buffer, in place (`ToUint8` per element).
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record, `array` an `f64`-slot array buffer.
+pub unsafe extern "C" fn thaw_bytes_store_array(buffer: *mut u8, array: *const u8) {
+    let (Some(target), Some(length)) =
+        (unsafe { view_bytes_mut(buffer) }, unsafe { native_array_length(array) })
+    else {
+        return;
+    };
+    for (index, byte) in target.iter_mut().enumerate().take(length) {
+        let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+        *byte = slot as i64 as u8;
+    }
+}
+
+unsafe fn map_buffer_list(
+    list: *const u8,
+    convert: unsafe extern "C" fn(*const u8) -> *mut u8,
+) -> *mut u8 {
+    let Some(count) = (unsafe { native_array_length(list) }) else {
+        return std::ptr::null_mut();
+    };
+    let output = thaw_arena::thaw_arena_alloc(8 + count * 8, 8);
+    if output.is_null() {
+        return output;
+    }
+    unsafe { output.cast::<u64>().write(count as u64) };
+    for index in 0..count {
+        let handle = unsafe { list.add(8 + index * 8).cast::<*const u8>().read() };
+        let converted = if handle.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let data = unsafe { handle.cast::<*const u8>().read() };
+            let converted = unsafe { convert(data) };
+            let cell = thaw_arena::thaw_arena_alloc(16, 8);
+            if !cell.is_null() {
+                unsafe {
+                    cell.cast::<*const u8>().write(converted);
+                    cell.add(8).cast::<*const u8>().write(std::ptr::null());
+                }
+            }
+            cell
+        };
+        unsafe { output.add(8 + index * 8).cast::<*mut u8>().write(converted) };
+    }
+    output
+}
+
+#[no_mangle]
+/// A list of byte buffers as a list of `f64`-slot arrays (each element copied).
+///
+/// # Safety
+///
+/// `list` must be an array buffer of handles onto byte view records.
+pub unsafe extern "C" fn thaw_bytes_widen_list(list: *const u8) -> *mut u8 {
+    unsafe { map_buffer_list(list, thaw_bytes_to_array) }
+}
+
+#[no_mangle]
+/// A list of `f64`-slot arrays as a list of byte buffers (each element copied).
+///
+/// # Safety
+///
+/// `list` must be an array buffer of handles onto `f64`-slot array buffers.
+pub unsafe extern "C" fn thaw_bytes_narrow_list(list: *const u8) -> *mut u8 {
+    unsafe { map_buffer_list(list, thaw_bytes_from_array) }
+}
+
+#[no_mangle]
+/// Marks a fresh byte buffer as a plain `Uint8Array` (so `slice` copies).
+///
+/// # Safety
+///
+/// `buffer` must be null or a byte view record.
+pub unsafe extern "C" fn thaw_bytes_as_u8(buffer: *mut u8) -> *mut u8 {
+    if unsafe { is_byte_view(buffer) } {
+        if let Some(view) = unsafe { buffer.cast::<ByteView>().as_mut() } {
+            view.tag &= !BYTE_VIEW_BUFFER;
+        }
+    }
+    buffer
+}
+
+#[no_mangle]
+/// `Buffer.from(buffer)`: a fresh copy that is a `Buffer`.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_clone(buffer: *const u8) -> *mut u8 {
+    let bytes = unsafe { view_bytes(buffer) }.unwrap_or_default();
+    unsafe { write_byte_array(bytes) }
+}
+
+#[no_mangle]
+/// `buf.subarray(start, end)` / Buffer `slice`: a new view over the same
+/// store. Indexes follow `relative_array_index` (negative counts from the
+/// end, clamped).
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_subarray(buffer: *const u8, start: f64, end: f64) -> *mut u8 {
+    let buffer = unsafe { coerce_view(buffer) }.cast::<u8>();
+    let Some(len) = (unsafe { view_bytes(buffer) }).map(<[u8]>::len) else {
+        return std::ptr::null_mut();
+    };
+    let start = relative_array_index(start, len);
+    let end = relative_array_index(end, len).max(start);
+    unsafe { new_byte_view(buffer, start, end - start) }
+}
+
+#[no_mangle]
+/// `buf.fill(value, start, end)` for an already-encoded `pattern` (repeated and
+/// truncated to the range; an empty pattern zero-fills). Indexes follow
+/// `relative_array_index`.
+///
+/// # Safety
+///
+/// `buffer` / `pattern` must be byte view records.
+pub unsafe extern "C" fn thaw_bytes_fill(buffer: *mut u8, pattern: *const u8, start: f64, end: f64) {
+    let Some(target) = (unsafe { view_bytes_mut(buffer) }) else {
+        return;
+    };
+    let pattern = unsafe { view_bytes(pattern) }.unwrap_or_default().to_vec();
+    let start = relative_array_index(start, target.len());
+    let end = relative_array_index(end, target.len()).max(start);
+    let range = &mut target[start..end];
+    if pattern.is_empty() {
+        range.fill(0);
+    } else if let [byte] = pattern.as_slice() {
+        range.fill(*byte);
+    } else {
+        for (slot, byte) in range.iter_mut().zip(pattern.iter().cycle()) {
+            *slot = *byte;
+        }
+    }
+}
+
+#[no_mangle]
+/// In-place `buf.reverse()` (`order` 0) or numeric `buf.sort()` (`order` 1).
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_reorder(buffer: *mut u8, order: f64) {
+    if let Some(bytes) = unsafe { view_bytes_mut(buffer) } {
+        if order == 0.0 {
+            bytes.reverse();
+        } else {
+            bytes.sort_unstable();
+        }
+    }
+}
+
+#[no_mangle]
+/// `buf.buffer`: an `ArrayBuffer`-flagged view of the whole backing store.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_buffer(buffer: *const u8) -> *mut u8 {
+    let buffer = unsafe { coerce_view(buffer) };
+    let Some(view) = (unsafe { buffer.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let store = unsafe { &*view.store };
+    let block = thaw_arena::thaw_arena_alloc(std::mem::size_of::<ByteView>(), 8);
+    if block.is_null() {
+        return block;
+    }
+    unsafe {
+        block.cast::<ByteView>().write(ByteView {
+            len: store.len,
+            tag: BYTE_VIEW_MAGIC | BYTE_VIEW_ARRAY_BUFFER,
+            base: store.data,
+            store: view.store,
+        });
+    }
+    block
+}
+
+#[no_mangle]
+/// `new Uint8Array(source, byteOffset, length)` (`kind` 0) and `Buffer.from(source,
+/// byteOffset, length)` (`kind` 1): over an `ArrayBuffer` (`buf.buffer`) the result
+/// shares its memory; over a `Buffer` / `Uint8Array` it is a copy. A `NaN` offset or
+/// length means "omitted".
+///
+/// # Safety
+///
+/// `source` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_from_buffer_like(
+    source: *const u8,
+    byte_offset: f64,
+    length: f64,
+    kind: f64,
+) -> *mut u8 {
+    let source = unsafe { coerce_view(source) };
+    let Some(view) = (unsafe { source.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let flags = if kind != 0.0 { BYTE_VIEW_BUFFER } else { 0 };
+    let result = if view_flags(view) & BYTE_VIEW_ARRAY_BUFFER != 0 {
+        let available = view.len;
+        let start = if byte_offset.is_nan() { 0 } else { (byte_offset.max(0.0) as usize).min(available) };
+        let count = if length.is_nan() { available - start } else { (length.max(0.0) as usize).min(available - start) };
+        unsafe { new_byte_view(source.cast(), start, count) }
+    } else {
+        let bytes = unsafe { view_bytes(source.cast()) }.unwrap_or_default();
+        let start = if byte_offset.is_nan() { 0 } else { (byte_offset.max(0.0) as usize).min(bytes.len()) };
+        let count = if length.is_nan() { bytes.len() - start } else { (length.max(0.0) as usize).min(bytes.len() - start) };
+        let output = unsafe { alloc_byte_owner(count, flags) };
+        if let Some(target) = unsafe { view_bytes_mut(output) } {
+            target.copy_from_slice(&bytes[start..start + count]);
+        }
+        output
+    };
+    if let Some(view) = unsafe { result.cast::<ByteView>().as_mut() } {
+        view.tag = BYTE_VIEW_MAGIC | flags;
+    }
+    result
+}
+
+#[no_mangle]
+/// `slice`: a shared view for a `Buffer`, a copy for a plain `Uint8Array`.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_slice(buffer: *const u8, start: f64, end: f64) -> *mut u8 {
+    let buffer_flag = unsafe { coerce_view(buffer).as_ref() }
+        .is_some_and(|view| view_flags(view) & BYTE_VIEW_BUFFER != 0);
+    if buffer_flag {
+        unsafe { thaw_bytes_subarray(buffer, start, end) }
+    } else {
+        unsafe { thaw_bytes_slice_copy(buffer, start, end) }
+    }
+}
+
+#[no_mangle]
+/// `Uint8Array.prototype.slice`: a copy of the range.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_slice_copy(buffer: *const u8, start: f64, end: f64) -> *mut u8 {
+    let Some(bytes) = (unsafe { view_bytes(buffer) }) else {
+        return std::ptr::null_mut();
+    };
+    let start = relative_array_index(start, bytes.len());
+    let end = relative_array_index(end, bytes.len()).max(start);
+    let flags = unsafe { coerce_view(buffer).as_ref() }.map_or(0, view_flags);
+    let output = unsafe { alloc_byte_owner(end - start, flags) };
+    if let Some(target) = unsafe { view_bytes_mut(output) } {
+        target.copy_from_slice(&bytes[start..end]);
+    }
+    output
 }
 
 /// Element width in bytes for a `thaw_bytes_read`/`write` `width`/`kind`
@@ -412,7 +790,7 @@ pub unsafe extern "C" fn thaw_bytes_read(
     kind: f64,
     le: f64,
 ) -> f64 {
-    let Some(bytes) = (unsafe { read_byte_array(buf) }) else {
+    let Some(bytes) = (unsafe { view_bytes(buf) }) else {
         return 0.0;
     };
     let Some(width) = accessor_width(width) else {
@@ -453,9 +831,10 @@ pub unsafe extern "C" fn thaw_bytes_write(
     kind: f64,
     le: f64,
 ) -> f64 {
-    let Some(length) = (unsafe { native_array_length(buf) }) else {
+    let Some(target) = (unsafe { view_bytes_mut(buf) }) else {
         return offset;
     };
+    let length = target.len();
     let Some(width) = accessor_width(width) else {
         return offset;
     };
@@ -472,13 +851,8 @@ pub unsafe extern "C" fn thaw_bytes_write(
         } else {
             encoded[width - 1 - index]
         };
-        unsafe {
-            buf.add(8 + (offset + index) * 8)
-                .cast::<f64>()
-                .write_unaligned(f64::from(byte));
-        }
+        target[offset + index] = byte;
     }
-    unsafe { thaw_bytes_sync(buf, offset as f64, width as f64) };
     end as f64
 }
 
@@ -501,7 +875,7 @@ pub unsafe extern "C" fn thaw_bytes_write(
 ///
 /// `buf` must be null or point to a Thaw array of `f64` element slots.
 pub unsafe extern "C" fn thaw_bytes_read_i64(buf: *const u8, offset: f64, le: f64) -> i64 {
-    let Some(bytes) = (unsafe { read_byte_array(buf) }) else {
+    let Some(bytes) = (unsafe { view_bytes(buf) }) else {
         return 0;
     };
     if !(offset.is_finite() && offset >= 0.0) {
@@ -538,9 +912,10 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
     value: i64,
     le: f64,
 ) -> f64 {
-    let Some(length) = (unsafe { native_array_length(buf) }) else {
+    let Some(target) = (unsafe { view_bytes_mut(buf) }) else {
         return offset;
     };
+    let length = target.len();
     if !(offset.is_finite() && offset >= 0.0) {
         return offset;
     }
@@ -554,13 +929,8 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
         } else {
             encoded[8 - 1 - index]
         };
-        unsafe {
-            buf.add(8 + (offset + index) * 8)
-                .cast::<f64>()
-                .write_unaligned(f64::from(byte));
-        }
+        target[offset + index] = byte;
     }
-    unsafe { thaw_bytes_sync(buf, offset as f64, 8.0) };
     end as f64
 }
 
@@ -582,10 +952,12 @@ pub unsafe extern "C" fn thaw_bytes_copy(
     source_start: f64,
     source_end: f64,
 ) -> f64 {
+    // `memmove` semantics: source and target may overlap (views of one store).
     let src = unsafe { read_byte_array(source) }.unwrap_or_default();
-    let Some(target_len) = (unsafe { native_array_length(target) }) else {
+    let Some(target_bytes) = (unsafe { view_bytes_mut(target) }) else {
         return 0.0;
     };
+    let target_len = target_bytes.len();
     let clamp = |value: f64, hi: usize| -> usize {
         if value.is_finite() && value >= 0.0 {
             (value as usize).min(hi)
@@ -604,15 +976,8 @@ pub unsafe extern "C" fn thaw_bytes_copy(
         return 0.0;
     }
     let count = (source_end - source_start).min(target_len - target_start);
-    for index in 0..count {
-        unsafe {
-            target
-                .add(8 + (target_start + index) * 8)
-                .cast::<f64>()
-                .write_unaligned(f64::from(src[source_start + index]));
-        }
-    }
-    unsafe { thaw_bytes_sync(target, target_start as f64, count as f64) };
+    target_bytes[target_start..target_start + count]
+        .copy_from_slice(&src[source_start..source_start + count]);
     count as f64
 }
 
@@ -634,8 +999,8 @@ pub unsafe extern "C" fn thaw_bytes_index_of(
     from: f64,
     last: f64,
 ) -> f64 {
-    let hay = unsafe { read_byte_array(haystack) }.unwrap_or_default();
-    let nee = unsafe { read_byte_array(needle) }.unwrap_or_default();
+    let hay = unsafe { view_bytes(haystack) }.unwrap_or_default();
+    let nee = unsafe { view_bytes(needle) }.unwrap_or_default();
     let clamp_from = |hi: usize| -> usize {
         if from.is_nan() || from <= 0.0 {
             0
@@ -730,8 +1095,8 @@ pub unsafe extern "C" fn thaw_bytes_concat(list: *const u8, total: f64) -> *mut 
             continue;
         }
         let inner_buffer = unsafe { inner_handle.cast::<*const u8>().read() };
-        if let Some(bytes) = unsafe { read_byte_array(inner_buffer) } {
-            result.extend(bytes);
+        if let Some(bytes) = unsafe { view_bytes(inner_buffer) } {
+            result.extend_from_slice(bytes);
         }
     }
     if total.is_finite() && total >= 0.0 {
@@ -750,8 +1115,8 @@ pub unsafe extern "C" fn thaw_bytes_concat(list: *const u8, total: f64) -> *mut 
 ///
 /// `a` / `b` must be null or point to Thaw arrays of `f64` element slots.
 pub unsafe extern "C" fn thaw_bytes_equals(a: *const u8, b: *const u8) -> bool {
-    let left = unsafe { read_byte_array(a) }.unwrap_or_default();
-    let right = unsafe { read_byte_array(b) }.unwrap_or_default();
+    let left = unsafe { view_bytes(a) }.unwrap_or_default();
+    let right = unsafe { view_bytes(b) }.unwrap_or_default();
     left == right
 }
 
@@ -764,7 +1129,7 @@ pub extern "C" fn thaw_bytes_alloc(size: f64) -> *mut u8 {
     } else {
         0
     };
-    unsafe { write_byte_array(&vec![0_u8; size]) }
+    unsafe { alloc_byte_owner(size, BYTE_VIEW_BUFFER) }
 }
 
 #[no_mangle]
@@ -790,162 +1155,6 @@ pub unsafe extern "C" fn thaw_bytes_alloc_fill(size: f64, pattern: *const u8) ->
     unsafe { write_byte_array(&bytes) }
 }
 
-// Shared `Buffer` views. A Buffer is a plain `[len][f64 slot...]` block that
-// cannot alias another block, so `subarray`/`slice` copy and then register the
-// copy here as an overlay of its parent. Every Bytes write path calls
-// `thaw_bytes_sync`, which eagerly copies the written slots into the other
-// members of the group, so all reads stay coherent without read hooks.
-// ponytail: at most BYTE_VIEW_LARGE_MAX large (>= BYTE_VIEW_SMALL_LEN slots)
-// members per group and BYTE_VIEW_LINK_MAX links per thread; past that a new
-// view is an unlinked copy. Writes made by code that does not call
-// `thaw_bytes_sync` (native readers filling a buffer, QuickJS typed arrays)
-// are not propagated. Real shared u8 storage would remove both limits.
-const BYTE_VIEW_SMALL_LEN: usize = 256;
-const BYTE_VIEW_LARGE_MAX: usize = 256;
-const BYTE_VIEW_LINK_MAX: usize = 1 << 17;
-
-#[derive(Clone, Copy)]
-struct ByteViewMember {
-    buffer: usize,
-    offset: usize,
-    len: usize,
-}
-
-#[derive(Default)]
-struct ByteViewGroup {
-    // Few and long: scanned on every sync.
-    large: Vec<ByteViewMember>,
-    // Many and short: sorted by offset, so a sync only visits the members that
-    // can overlap the written range (`max_small` bounds how far back to look).
-    small: Vec<ByteViewMember>,
-    max_small: usize,
-}
-
-#[derive(Default)]
-struct ByteViews {
-    group_of: std::collections::HashMap<usize, (usize, usize)>,
-    groups: Vec<ByteViewGroup>,
-    links: usize,
-}
-
-thread_local! {
-    static BYTE_VIEWS: RefCell<ByteViews> = RefCell::new(ByteViews::default());
-}
-
-fn reset_byte_views(_tracing: bool) {
-    // Members are bare buffer addresses; drop the whole table rather than
-    // risk a link to reused memory (a surviving view degrades to a copy).
-    BYTE_VIEWS.with(|views| *views.borrow_mut() = ByteViews::default());
-}
-
-impl ByteViewGroup {
-    fn add(&mut self, member: ByteViewMember) -> bool {
-        if member.len >= BYTE_VIEW_SMALL_LEN {
-            if self.large.len() >= BYTE_VIEW_LARGE_MAX {
-                return false;
-            }
-            self.large.push(member);
-        } else {
-            let at = self.small.partition_point(|other| other.offset <= member.offset);
-            self.small.insert(at, member);
-            self.max_small = self.max_small.max(member.len);
-        }
-        true
-    }
-}
-
-#[no_mangle]
-/// Registers `child` (a fresh copy of `parent[start..]`, same relative
-/// index rule as `thaw_array_slice`) as a view of `parent`.
-///
-/// # Safety
-///
-/// `parent` and `child` must be null or Thaw `f64`-slot arrays.
-pub unsafe extern "C" fn thaw_bytes_link(parent: *const u8, child: *const u8, start: f64) {
-    let (Some(parent_len), Some(child_len)) = (
-        unsafe { native_array_length(parent) },
-        unsafe { native_array_length(child) },
-    ) else {
-        return;
-    };
-    if child_len == 0 || parent == child {
-        return;
-    }
-    let start = relative_array_index(start, parent_len);
-    thaw_arena::register_metadata_reset_hook(reset_byte_views);
-    BYTE_VIEWS.with(|views| {
-        let mut views = views.borrow_mut();
-        if views.links >= BYTE_VIEW_LINK_MAX {
-            return;
-        }
-        let (group, parent_offset) = match views.group_of.get(&(parent as usize)).copied() {
-            Some(found) => found,
-            None => {
-                let mut group = ByteViewGroup::default();
-                group.add(ByteViewMember { buffer: parent as usize, offset: 0, len: parent_len });
-                views.groups.push(group);
-                let group = views.groups.len() - 1;
-                views.group_of.insert(parent as usize, (group, 0));
-                (group, 0)
-            }
-        };
-        let offset = parent_offset + start;
-        if views.groups[group].add(ByteViewMember { buffer: child as usize, offset, len: child_len }) {
-            views.group_of.insert(child as usize, (group, offset));
-            views.links += 1;
-        }
-    });
-}
-
-#[no_mangle]
-/// Propagates the `count` slots of `buffer` starting at `start` into every
-/// other buffer that overlays the same bytes. A no-op for an unlinked buffer.
-///
-/// # Safety
-///
-/// `buffer` must be null or a Thaw `f64`-slot array.
-pub unsafe extern "C" fn thaw_bytes_sync(buffer: *mut u8, start: f64, count: f64) {
-    let Some(length) = (unsafe { native_array_length(buffer) }) else {
-        return;
-    };
-    let start = if start > 0.0 { (start as usize).min(length) } else { 0 };
-    let count = if count > 0.0 { (count as usize).min(length - start) } else { 0 };
-    if count == 0 {
-        return;
-    }
-    BYTE_VIEWS.with(|views| {
-        let views = views.borrow();
-        let Some(&(group, base)) = views.group_of.get(&(buffer as usize)) else {
-            return;
-        };
-        let group = &views.groups[group];
-        let (from, to) = (base + start, base + start + count);
-        let copy_into = |member: &ByteViewMember| {
-            if member.buffer == buffer as usize {
-                return;
-            }
-            let (low, high) = (from.max(member.offset), to.min(member.offset + member.len));
-            if low < high {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        buffer.add(8 + (low - base) * 8),
-                        (member.buffer as *mut u8).add(8 + (low - member.offset) * 8),
-                        (high - low) * 8,
-                    );
-                }
-            }
-        };
-        group.large.iter().for_each(copy_into);
-        let upto = group.small.partition_point(|member| member.offset < to);
-        for member in group.small[..upto].iter().rev() {
-            if member.offset + group.max_small <= from {
-                break;
-            }
-            copy_into(member);
-        }
-    });
-}
-
 #[no_mangle]
 /// `buf.byteOffset`: the position of `buffer` inside the buffer it was
 /// viewed from (0 for an owner).
@@ -954,11 +1163,19 @@ pub unsafe extern "C" fn thaw_bytes_sync(buffer: *mut u8, start: f64, count: f64
 ///
 /// `buffer` must be null or a Thaw `f64`-slot array.
 pub unsafe extern "C" fn thaw_bytes_byte_offset(buffer: *const u8) -> f64 {
-    BYTE_VIEWS.with(|views| {
-        views
-            .borrow()
-            .group_of
-            .get(&(buffer as usize))
-            .map_or(0.0, |&(_, offset)| offset as f64)
-    })
+    let Some(view) = (unsafe { coerce_view(buffer).as_ref() }) else {
+        return 0.0;
+    };
+    let store = unsafe { &*view.store };
+    (view.base as usize - store.data as usize) as f64
+}
+
+#[no_mangle]
+/// `buf.buffer.byteLength`: the size of the shared backing store.
+///
+/// # Safety
+///
+/// `buffer` must be null or a byte view record.
+pub unsafe extern "C" fn thaw_bytes_store_length(buffer: *const u8) -> f64 {
+    unsafe { coerce_view(buffer).as_ref() }.map_or(0.0, |view| unsafe { (*view.store).len } as f64)
 }

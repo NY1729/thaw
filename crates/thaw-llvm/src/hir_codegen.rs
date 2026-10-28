@@ -898,7 +898,14 @@ impl<'ctx> HirCompiler<'ctx> {
         for func in &program.functions {
             self.declare_function(func)?;
         }
+        let quickjs_before_init = self.uses_quickjs;
         self.emit_top_level_init(program)?;
+        if !quickjs_before_init
+            && self.uses_quickjs
+            && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
+        {
+            eprintln!("thaw-js routing: the top-level initializer needs QuickJS");
+        }
         for func in &program.functions {
             if func.name.starts_with("__thaw_lazy_module_")
                 && func.name["__thaw_lazy_module_".len()..]
@@ -910,7 +917,17 @@ impl<'ctx> HirCompiler<'ctx> {
             {
                 continue;
             }
+            let quickjs_before = self.uses_quickjs;
             self.compile_function_body(func)?;
+            if !quickjs_before
+                && self.uses_quickjs
+                && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
+            {
+                eprintln!(
+                    "thaw-js routing: `{}` is the first function that needs QuickJS",
+                    func.name
+                );
+            }
         }
 
         let has_main = self.module.get_function(USER_MAIN_SYMBOL).is_some();

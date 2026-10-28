@@ -1,0 +1,13 @@
+sync end
+v 1
+v 2
+v 3
+agfin
+p1
+p2
+{ value: 1, done: false } { value: 'x', done: true } { value: undefined, done: true }
+src 0
+src 1
+[ 'a', 'b' ]
+k
+[object AsyncGenerator]

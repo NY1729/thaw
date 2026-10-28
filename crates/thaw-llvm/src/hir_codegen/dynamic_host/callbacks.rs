@@ -3242,7 +3242,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     "dynamic_bytes_result",
                 ).map_err(|error| error.to_string())?;
                 result.add_incoming(&[(&buffer_result, buffer_end), (&wrapper_result, wrapper_end)]);
-                let wrapped = self.compile_array_wrap(result.as_basic_value().into_pointer_value())?;
+                // The decoded `f64`-slot array becomes a byte view record.
+                let narrowed = self.builder.build_call(
+                    self.module.get_function("thaw_bytes_from_array").unwrap(),
+                    &[result.as_basic_value().into()],
+                    "dynamic_bytes_narrow",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_bytes_from_array returned no value")?.into_pointer_value();
+                let wrapped = self.compile_array_wrap(narrowed)?;
                 self.compile_destroy_typed_input_if_detached(json, ty, None)?;
                 Ok(wrapped.into())
             }

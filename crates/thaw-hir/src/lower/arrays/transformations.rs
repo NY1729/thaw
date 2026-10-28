@@ -1507,25 +1507,35 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(index_name.clone(), HirType::F64);
         let receiver = HirExpr::Var(receiver_name.clone());
         let index = HirExpr::Var(index_name.clone());
-        let (optional_type, present, absent) = Self::array_optional_read(
-            &element_type,
-            HirExpr::TypedIndex(
-                Box::new(receiver.clone()), Box::new(index.clone()), element_type.clone(),
-            ),
-        );
-        let value = HirExpr::Conditional(
-            Box::new(HirExpr::BinOp(
-                BinOp::EqEqEq,
-                Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_array_index_state".into())),
-                    vec![receiver.clone(), index.clone()],
+        // A byte buffer reads `u8` storage through `__thaw_bytes_get`; it has no holes.
+        let is_bytes = element_type == HirType::F64
+            && self.infer_expr_type_inner(&source).is_ok_and(|ty| ty == HirType::Bytes);
+        let read = if is_bytes {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_get".into())),
+                vec![receiver.clone(), index.clone()],
+            )
+        } else {
+            HirExpr::TypedIndex(Box::new(receiver.clone()), Box::new(index.clone()), element_type.clone())
+        };
+        let (optional_type, present, absent) = Self::array_optional_read(&element_type, read);
+        let value = if is_bytes {
+            present
+        } else {
+            HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                        vec![receiver.clone(), index.clone()],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
                 )),
-                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-            )),
-            Box::new(present),
-            Box::new(absent.clone()),
-            optional_type.clone(),
-        );
+                Box::new(present),
+                Box::new(absent.clone()),
+                optional_type.clone(),
+            )
+        };
         let value = HirExpr::Conditional(
             Box::new(HirExpr::BinOp(
                 BinOp::Lt,
