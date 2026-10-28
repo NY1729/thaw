@@ -53,6 +53,7 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
         // statically `any`-typed one can't promise that.
         HirType::Json => Ok("any"),
         HirType::Array(_)
+        | HirType::Bytes
         | HirType::Tuple(_)
         | HirType::Object(_)
         | HirType::Dictionary(_)

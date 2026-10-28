@@ -2962,6 +2962,191 @@
       "name": "buffer u8 element wrap-around and generic array methods on views",
       "expect": "matched",
       "source": "function sumOf(v: Buffer): number {\n  let s = 0;\n  for (let i = 0; i < v.length; i++) s += v[i];\n  return s;\n}\nfunction main(): void {\n  const b = Buffer.alloc(8);\n  b[0] = 300;\n  b[1] = -1;\n  b[2] = 1.9;\n  b[3] = NaN;\n  b[4] = 256;\n  b[5] = Infinity;\n  b[6] = -0.5;\n  console.log(b.toString(\"hex\"), b[8], b[-1], b[1.5]);\n  const v = b.subarray(1, 6);\n  console.log([...v], v.map((x) => x * 2).join(\",\"), v.filter((x) => x > 0).length, v.reduce((a, x) => a + x, 0));\n  let it = 0;\n  for (const x of v) it += x;\n  console.log(it, sumOf(v), sumOf(b.subarray(2)), JSON.stringify(v), v.includes(255), v.indexOf(1), v.join(\"-\"));\n  const over = Buffer.from([1, 2, 3, 4, 5, 6]);\n  over.copy(over, 2, 0, 4);\n  console.log(over.toString(\"hex\"));\n  const sh = Buffer.from([1, 2, 3, 4, 5, 6]);\n  sh.subarray(0, 4).copy(sh.subarray(2));\n  console.log(sh.toString(\"hex\"));\n  const rs = Buffer.from([9, 8, 7, 6, 5]);\n  const rv = rs.subarray(1, 4);\n  rv.reverse();\n  rv.sort();\n  console.log(rs.toString(\"hex\"), rv.fill(1, 1).toString(\"hex\"), rs.toString(\"hex\"));\n  const a1 = Buffer.from(\"abc\");\n  const a2 = Buffer.from(\"xabcx\").subarray(1, 4);\n  console.log(a1.equals(a2), Buffer.concat([a1, a2.subarray(1)]).toString(), a2.toString(), Buffer.isBuffer(a2));\n  console.log(a2, [a2, a1], { v: a2 });\n  const big = new Uint8Array(0);\n  console.log(big.length);\n}\n"
+    },
+    {
+      "name": "buffer erasure promise then write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => { q[0] = 65; });\n  setTimeout(() => console.log(b.toString(), b.length), 0);\n}\n"
+    },
+    {
+      "name": "buffer erasure promise then read",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => console.log(q[1], q.length));\n}\n"
+    },
+    {
+      "name": "buffer erasure promise then return bytes",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => q).then((r) => { r[0] = 67; console.log(b.toString(), r.toString(\"hex\")); });\n}\n"
+    },
+    {
+      "name": "buffer erasure async return write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  async function mk(): Promise<Buffer> { return Buffer.from(\"hi\"); }\n  (async () => { const x = await mk(); x[0] = 90; console.log(x.toString(), x[1]); })();\n}\n"
+    },
+    {
+      "name": "buffer erasure async param write",
+      "expect": "matched",
+      "source": "async function w(v: Buffer): Promise<void> { v[0] = 90; }\nfunction main(): void {\n  const b = Buffer.from(\"hi\");\n  (async () => { await w(b); console.log(b.toString(), b[0]); })();\n}\n"
+    },
+    {
+      "name": "buffer erasure array of array write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const bb: Buffer[][] = [[b]];\n  bb[0][0][0] = 65;\n  console.log(b.toString(), bb[0][0].length);\n}\n"
+    },
+    {
+      "name": "buffer erasure map value write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const m = new Map<string, Buffer>();\n  const b = Buffer.from(\"ab\");\n  m.set(\"k\", b);\n  const v = m.get(\"k\")!;\n  v[0] = 65;\n  console.log(b.toString(), v[1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure map array write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const m = new Map<string, Buffer[]>();\n  const b = Buffer.from(\"ab\");\n  m.set(\"k\", [b]);\n  m.get(\"k\")![0][0] = 65;\n  console.log(b.toString(), m.get(\"k\")![0][1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure array destructure write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const [x] = [b];\n  x[0] = 65;\n  console.log(b.toString(), x[1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure object destructure write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const { v } = { v: b };\n  v[0] = 65;\n  console.log(b.toString(), v.length);\n}\n"
+    },
+    {
+      "name": "buffer erasure closure capture write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const f = (): number => { b[0] = 65; return b[0]; };\n  console.log(f(), b.toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure object field write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const o = { buf: Buffer.from(\"ab\") };\n  o.buf[0] = 65;\n  console.log(o.buf.toString(), o.buf[1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure generic identity write",
+      "expect": "matched",
+      "source": "function id<T>(x: T): T { return x; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const y = id(b);\n  y[0] = 65;\n  console.log(b.toString(), y[1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure ternary write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const t = b.length > 0 ? b : Buffer.from(\"zz\");\n  t[0] = 65;\n  console.log(b.toString(), t.toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure promise all write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.all([b]).then(([q]) => { q[0] = 65; console.log(b.toString()); });\n}\n"
+    },
+    {
+      "name": "buffer erasure tuple write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const t: [Buffer, number] = [b, 1];\n  t[0][0] = 65;\n  console.log(b.toString(), t[1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure set iter write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const s = new Set<Buffer>([b]);\n  for (const x of s) x[0] = 65;\n  console.log(b.toString(), s.size);\n}\n"
+    },
+    {
+      "name": "buffer erasure array push write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const arr: Buffer[] = [];\n  arr.push(b);\n  arr[0][0] = 65;\n  console.log(b.toString(), arr[0][1]);\n}\n"
+    },
+    {
+      "name": "buffer erasure promise nested array write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve([b]).then((a) => { a[0][0] = 65; console.log(b.toString(), a[0].length); });\n}\n"
+    },
+    {
+      "name": "buffer erasure promise object write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve({ v: b }).then((o) => { o.v[0] = 65; console.log(b.toString(), o.v[1]); });\n}\n"
+    },
+    {
+      "name": "buffer erasure promise then read bytes value",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => q[0] + q[1]).then((s) => console.log(s));\n}\n"
+    },
+    {
+      "name": "buffer erasure optional write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const ob: Buffer | undefined = b;\n  ob![0] = 65;\n  console.log(b.toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure fn returns array write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  function arr(): Buffer[] { return [b]; }\n  arr()[0][0] = 65;\n  console.log(b.toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure for of grid write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const rows: Buffer[] = [Buffer.from(\"ab\"), Buffer.from(\"cd\")];\n  for (const row of rows) row[0] = 88;\n  console.log(rows[0].toString(), rows[1].toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure copywithin receiver",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"abcd\");\n  const u = new Uint8Array(b.buffer, b.byteOffset, b.length);\n  Promise.resolve(b).then((q) => { q.copyWithin(0, 2); console.log(b.toString(\"hex\"), u[0]); });\n}\n"
+    },
+    {
+      "name": "buffer erasure tosorted receiver",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"cab\");\n  Promise.resolve(b).then((q) => { const s = q.toSorted(); console.log(s.join(\",\"), b.join(\",\")); });\n}\n"
+    },
+    {
+      "name": "buffer erasure map of map buffer",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const m = new Map<string, Map<number, Buffer>>();\n  const inner = new Map<number, Buffer>();\n  const b = Buffer.from(\"ab\");\n  inner.set(1, b);\n  m.set(\"x\", inner);\n  m.get(\"x\")!.get(1)![0] = 65;\n  console.log(b.toString(), m.get(\"x\")!.get(1)!.length);\n}\n"
+    },
+    {
+      "name": "buffer erasure await in loop write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  (async () => { for (let i = 0; i < 2; i++) { const q = await Promise.resolve(b); q[i] = 65 + i; } console.log(b.toString()); })();\n}\n"
+    },
+    {
+      "name": "buffer erasure closure array element write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const arr: Buffer[] = [b];\n  const f = () => { arr[0][0] = 70; };\n  f();\n  console.log(b.toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure map values iter write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const m = new Map<string, Buffer>();\n  const b = Buffer.from(\"ab\");\n  m.set(\"k\", b);\n  for (const v of m.values()) v[0] = 65;\n  console.log(b.toString(), m.size);\n}\n"
+    },
+    {
+      "name": "buffer erasure spread array write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const arr: Buffer[] = [b];\n  const copy = [...arr];\n  copy[0][0] = 65;\n  console.log(b.toString(), copy.length);\n}\n"
+    },
+    {
+      "name": "buffer erasure async arrow return write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const f = async () => b;\n  f().then((q) => { q[0] = 65; console.log(b.toString(), q[1]); });\n}\n"
+    },
+    {
+      "name": "buffer erasure promise race write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.race([Promise.resolve(b)]).then((q) => { q[0] = 65; console.log(b.toString()); });\n}\n"
+    },
+    {
+      "name": "buffer erasure generic array identity write",
+      "expect": "matched",
+      "source": "function idArr<T>(xs: T[]): T[] { return xs; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const xs = idArr([b]);\n  xs[0][0] = 65;\n  console.log(b.toString(), xs.length);\n}\n"
+    },
+    {
+      "name": "buffer erasure closure return buffer write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const g = (): Buffer => b;\n  g()[0] = 65;\n  console.log(b.toString());\n}\n"
+    },
+    {
+      "name": "buffer erasure object array field write",
+      "expect": "matched",
+      "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const o: { list: Buffer[] } = { list: [b] };\n  o.list[0][0] = 65;\n  console.log(b.toString(), o.list.length);\n}\n"
+    },
+    {
+      "name": "buffer erasure generic fn return write",
+      "expect": "matched",
+      "source": "function wrap<T>(x: T): { v: T } { return { v: x }; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const y = wrap(b).v;\n  y[0] = 65;\n  console.log(b.toString());\n}\n"
     }
   ]
 }
