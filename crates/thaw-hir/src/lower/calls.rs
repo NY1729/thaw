@@ -1316,6 +1316,7 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        let closure = name_function_value(closure, Some(method_name.to_string()), signature.is_async, false);
         self.wrap_call_argument_bindings(closure, &[(receiver_name, receiver_type, receiver)])
             .map(Some)
     }
