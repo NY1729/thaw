@@ -343,7 +343,7 @@ fn execute_worker_pending_job(ctx: &Ctx<'_>) -> Result<bool, String> {
     // rquickjs::Ctx::execute_pending_job maps QuickJS -1 to `true`, the
     // same value as a successful job. Inspect and consume the exception
     // before another job or addon teardown hides its origin.
-    if ctx.has_exception() { Err(describe_exception(ctx)) } else { Ok(ran) }
+    if ctx.has_exception() { Err(describe_worker_job_exception(ctx)) } else { Ok(ran) }
 }
 
 fn close_worker_napi() -> Result<(), String> {
@@ -452,7 +452,9 @@ fn run_host_worker(
                 let mut usage: rquickjs::qjs::JSMemoryUsage = std::mem::zeroed();
                 rquickjs::qjs::JS_ComputeMemoryUsage(runtime, &mut usage);
                 let baseline = usage.malloc_size.max(0) as u64;
-                rquickjs::qjs::JS_SetMemoryLimit(runtime, baseline.saturating_add((limit_mb * 1024.0 * 1024.0) as u64) as _);
+                let cap = baseline.saturating_add((limit_mb * 1024.0 * 1024.0) as u64);
+                set_worker_memory_cap(cap);
+                rquickjs::qjs::JS_SetMemoryLimit(runtime, cap as _);
             }
         }
         let _ = events.send(HostWorkerEvent::Online);
@@ -466,8 +468,10 @@ fn run_host_worker(
         if terminate.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(1);
         }
-        if memory_limit_mb.is_some() && error.contains("out of memory") {
-            return Err("ERR_WORKER_OUT_OF_MEMORY:Worker terminated due to reaching memory limit: JS heap out of memory".into());
+        // Structured errors were classified when described; only plain text is matched here, so a
+        // user error that merely mentions memory (sent as a wire object) is not the cap.
+        if memory_limit_mb.is_some() && !error.starts_with(WORKER_ERROR_WIRE) && error.contains("out of memory") {
+            return Err(WORKER_OUT_OF_MEMORY.into());
         }
         Err(error)
     };
@@ -2517,5 +2521,85 @@ mod m_wave_tests {
         let after = host_loop_stats();
         assert!(after[1] > before[1], "sleeping in the loop is idle time: {before:?} -> {after:?}");
         assert!(after[0] >= 0.0 && after[1] >= 0.0);
+    }
+}
+
+#[cfg(test)]
+mod worker_memory_limit_tests {
+    use super::*;
+
+    /// Runs one Worker to completion on its own thread, as spawn_host_worker does, and
+    /// returns the error it reports (None when it exits normally).
+    fn run_worker(source: &str, config_json: &str) -> Option<String> {
+        let (_commands_sender, commands) = mpsc::channel();
+        let (events_sender, events) = mpsc::channel();
+        // workerData crosses as the structured-clone encoding the parent produces, not raw JSON.
+        let worker_data_json = with_context(|ctx| ctx.eval::<String, _>("__thaw_worker_encode(null, [])").unwrap());
+        let start = HostWorkerStart {
+            bundle_source: String::new(),
+            source: source.to_string(),
+            worker_data_json,
+            config_json: config_json.to_string(),
+            thread_id: 1,
+            shared_env: Arc::default(),
+            terminate: Arc::default(),
+        };
+        std::thread::spawn(move || run_host_worker(start, commands, events_sender)).join().unwrap();
+        // The last event is the terminal Exit or Error.
+        let mut error = None;
+        for event in events.try_iter() {
+            if let HostWorkerEvent::Error(message) = event {
+                error = Some(message);
+            }
+        }
+        error
+    }
+
+    const LIMITED: &str = r#"{"resourceLimits":{"maxOldGenerationSizeMb":16}}"#;
+
+    #[test]
+    fn worker_memory_limit_is_reported_as_out_of_memory_every_time() {
+        let source = "const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }";
+        for run in 0..50 {
+            let error = run_worker(source, LIMITED);
+            assert!(
+                error.as_deref().is_some_and(|e| e.starts_with("ERR_WORKER_OUT_OF_MEMORY:")),
+                "run {run}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_memory_limit_covers_other_heap_shapes() {
+        let small_objects = "const keep = []; let i = 0; while (true) { keep.push({ a: i++ }); }";
+        // Doubling a string hits QuickJS's string length limit before the heap cap, so grow many strings instead.
+        let string_growth = "const parts = []; while (true) { parts.push('x'.repeat(100000)); }";
+        for (source, mb) in [
+            (small_objects, 16),
+            (string_growth, 16),
+            ("const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }", 1),
+            ("const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }", 4),
+            ("const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }", 64),
+        ] {
+            let config = format!(r#"{{"resourceLimits":{{"maxOldGenerationSizeMb":{mb}}}}}"#);
+            for _ in 0..5 {
+                let error = run_worker(source, &config);
+                assert!(
+                    error.as_deref().is_some_and(|e| e.starts_with("ERR_WORKER_OUT_OF_MEMORY:")),
+                    "{mb} MB {source}: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_memory_errors_are_not_reported_as_worker_out_of_memory() {
+        // No resourceLimits: a user error mentioning memory is not the memory cap.
+        // Each must surface the user's own error text, so the check is not vacuous.
+        let error = run_worker("throw new Error('out of memory');", "{}");
+        assert!(error.as_deref().is_some_and(|e| e.contains("out of memory") && !e.starts_with("ERR_WORKER_OUT_OF_MEMORY:")), "{error:?}");
+        // Limit set with plenty of headroom: the same user error is still not the cap.
+        let error = run_worker("throw new Error('out of memory');", r#"{"resourceLimits":{"maxOldGenerationSizeMb":64}}"#);
+        assert!(error.as_deref().is_some_and(|e| e.contains("out of memory") && !e.starts_with("ERR_WORKER_OUT_OF_MEMORY:")), "{error:?}");
     }
 }
