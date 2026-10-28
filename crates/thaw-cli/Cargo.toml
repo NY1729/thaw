@@ -24,6 +24,10 @@ thaw-js = { version = "0.1.0", path = "../thaw-js" }
 thaw-js-infer = { version = "0.1.0", path = "../thaw-js-infer" }
 semver = "1"
 
+[dev-dependencies]
+# Loopback TLS server for the hermetic HTTPS test (same provider as thaw-quickjs).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
 [features]
 # Opt-in diagnostics (with THAW_JS_RUNTIME=1): scan each registry bundle with the experimental thaw-js
 # evaluator and record which packages it could run instead of QuickJS in the artifact manifest.

@@ -1,0 +1,14 @@
+const t = new EventTarget();
+const log = [];
+const once = () => log.push('once');
+const keep = () => log.push('keep');
+t.addEventListener('x', once, { once: true });
+t.addEventListener('x', keep);
+t.addEventListener('x', keep);
+t.dispatchEvent(new Event('x'));
+t.dispatchEvent(new Event('x'));
+t.removeEventListener('x', keep);
+t.dispatchEvent(new Event('x'));
+console.log(JSON.stringify(log));
+t.addEventListener('y', null);
+console.log(t.dispatchEvent(new Event('y')));

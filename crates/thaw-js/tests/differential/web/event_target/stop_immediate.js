@@ -1,0 +1,10 @@
+const t = new EventTarget();
+const log = [];
+t.addEventListener('s', e => { log.push(1); e.stopImmediatePropagation(); });
+t.addEventListener('s', () => log.push(2));
+t.dispatchEvent(new Event('s'));
+console.log(JSON.stringify(log));
+const cancel = new Event('c', { cancelable: true });
+const nc = new Event('c');
+t.addEventListener('c', e => e.preventDefault());
+console.log(t.dispatchEvent(cancel), t.dispatchEvent(nc));

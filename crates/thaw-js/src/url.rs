@@ -280,6 +280,7 @@ const URL_PRELUDE: &str = r#"
     if (u) { var s = sp.toString(); u['@@rec'].query = s === '' ? null : s; }
   }
   var P = USP.prototype;
+  Object.defineProperty(P, Symbol.toStringTag, { value: 'URLSearchParams', configurable: true });
   function need(n, args) {
     if (args.length < n) { var e = new TypeError('The "' + (n === 2 ? 'name" and "value" arguments' : 'name" argument') + ' must be specified'); e.code = 'ERR_MISSING_ARGS'; throw e; }
   }
@@ -316,16 +317,27 @@ const URL_PRELUDE: &str = r#"
     var l = this['@@list'];
     for (var i = 0; i < l.length; i++) f.call(t, l[i][1], l[i][0], this);
   });
-  def(P, 'keys', function () { return this['@@list'].map(function (p) { return p[0]; }); });
-  def(P, 'values', function () { return this['@@list'].map(function (p) { return p[1]; }); });
-  def(P, 'entries', function () { return this['@@list'].map(function (p) { return [p[0], p[1]]; }); });
-  Object.defineProperty(P, 'size', { get: function () { return this['@@list'].length; }, configurable: true });
-  P[Symbol.iterator] = function () {
-    var l = this.entries(), i = 0;
-    var it = { next: function () { return i < l.length ? { value: l[i++], done: false } : { value: undefined, done: true }; } };
-    it[Symbol.iterator] = function () { return it; };
+  // live iterator over the list (WHATWG: sees appends made while iterating)
+  var ITP = {};
+  def(ITP, 'next', function () {
+    var l = this['@@l'];
+    if (this['@@i'] >= l.length) return { value: undefined, done: true };
+    var p = l[this['@@i']++], k = this['@@k'];
+    return { value: k === 0 ? p[0] : k === 1 ? p[1] : [p[0], p[1]], done: false };
+  });
+  ITP[Symbol.iterator] = function () { return this; };
+  Object.defineProperty(ITP, Symbol.toStringTag, { value: 'URLSearchParams Iterator', configurable: true });
+  function iter(list, kind) {
+    var it = Object.create(ITP);
+    Object.defineProperty(it, '@@l', { value: list }); Object.defineProperty(it, '@@k', { value: kind });
+    Object.defineProperty(it, '@@i', { value: 0, writable: true });
     return it;
-  };
+  }
+  def(P, 'keys', function () { return iter(this['@@list'], 0); });
+  def(P, 'values', function () { return iter(this['@@list'], 1); });
+  def(P, 'entries', function () { return iter(this['@@list'], 2); });
+  Object.defineProperty(P, 'size', { get: function () { return this['@@list'].length; }, configurable: true });
+  P[Symbol.iterator] = P.entries;
 
   // ----- URL -----
   function URLImpl(input, base) {

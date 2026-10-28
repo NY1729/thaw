@@ -232,9 +232,10 @@ impl FnLowerer<'_> {
                 }
             }
         }
+        // Keep `Bytes`: a buffer argument instantiates `T` as a buffer, not as `number[]`.
         let param_types = args
             .iter()
-            .map(|arg| self.infer_expr_type(arg))
+            .map(|arg| self.infer_expr_type_inner(arg))
             .collect::<Result<Vec<_>, _>>()?;
         let has_generic_optional = signature.generic_param_optional.iter().any(|optional| *optional);
         let specialization_params = if has_generic_optional {
@@ -856,7 +857,7 @@ impl<'a> FnLowerer<'a> {
         }
         let parameter_types = arguments
             .iter()
-            .map(|argument| self.infer_expr_type(argument))
+            .map(|argument| self.infer_expr_type_inner(argument))
             .collect::<Result<Vec<_>, _>>()?;
         let mut inference_signature = signature.clone();
         let inference_types = parameter_types.clone();
