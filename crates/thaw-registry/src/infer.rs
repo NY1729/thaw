@@ -44,6 +44,8 @@ pub fn analyze_with_program(
         dts,
         evidence,
         returns: true,
+        jsdoc: true,
+        default_contract: true,
         ..Default::default()
     };
     let source = bundle.to_string();
