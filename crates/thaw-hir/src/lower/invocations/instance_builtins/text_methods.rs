@@ -189,12 +189,14 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"localeCompare" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "localeCompare receiver")?;
+                    if call.args.is_empty() || call.args.len() > 3 || call.args[0].spread.is_some() {
+                        return Err("native `.localeCompare()` expects a string and optional locales and options".into());
+                    }
                     let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "String.localeCompare")?;
-                    let [other] = arguments.as_slice() else {
-                        return Err("native `.localeCompare()` expects exactly one argument".into());
-                    };
-                    let other = self.coerce_primitive_to_string(other.clone())?;
+                        self.lower_native_spread_values(&call.args[..1], "String.localeCompare")?;
+                    let (locales, options) =
+                        self.lower_intl_arguments(&call.args[1..], INTL_COMPARE_OPTIONS, ".localeCompare()")?;
+                    let other = self.coerce_primitive_to_string(arguments[0].clone())?;
                     let receiver_name =
                         format!("__thaw_locale_compare_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -203,10 +205,12 @@ impl<'a> FnLowerer<'a> {
                     self.scope.insert(receiver_name.clone(), HirType::Str);
                     self.scope.insert(other_name.clone(), HirType::Str);
                     let result = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_string_locale_compare".to_string())),
+                        Box::new(HirExpr::Var("__thaw_intl_compare".to_string())),
                         vec![
                             HirExpr::Var(receiver_name.clone()),
                             HirExpr::Var(other_name.clone()),
+                            locales,
+                            options,
                         ],
                     );
                     let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
