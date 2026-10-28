@@ -401,7 +401,12 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => self.compile_expr(closure),
             HirExpr::FunctionRef(name, params, ret) => {
                 let closure = self.compile_function_ref(name, params, ret)?;
-                self.compile_register_function_label(closure, &format!("f{}", function_display_name(name)))?;
+                let kind = if self.frame_async_functions.contains_key(name.as_str()) {
+                    'a'
+                } else {
+                    named_function_kind(ret, &HirExpr::Lit(HirLit::I64(0)))
+                };
+                self.compile_register_function_label(closure, &format!("{kind}{}", function_display_name(name)))?;
                 Ok(closure)
             }
             HirExpr::MethodRef(unbound, explicit, params, ret, is_static, receiver_class) => {
