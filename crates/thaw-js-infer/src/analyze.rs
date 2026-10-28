@@ -4,7 +4,7 @@ use crate::narrow::{assigns_in_expr, assigns_in_stmt, assigns_in_stmts, exits};
 use crate::prescan::*;
 use crate::ty::*;
 use crate::Config;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use swc_ecma_visit::{Visit, VisitWith};
 use thaw_parser::ast as a;
 
@@ -41,6 +41,8 @@ pub struct An {
     pub any_hist: BTreeMap<Reason, usize>,
     decl_const: bool,
     pub dts_fns: HashMap<usize, Vec<crate::dts::Sig>>,
+    /// functions whose `dts_fns` entry comes from a JSDoc block, not a declaration file
+    pub jsdoc_fns: HashSet<usize>,
     dts_sites: HashMap<(usize, usize, usize), usize>,
     pub dts_ret: HashMap<usize, Ty>,
     cb_flowed: std::collections::HashSet<usize>,
@@ -114,6 +116,7 @@ impl An {
             any_hist: BTreeMap::new(),
             decl_const: false,
             dts_fns: HashMap::new(),
+            jsdoc_fns: HashSet::new(),
             dts_sites: HashMap::new(),
             dts_ret: HashMap::new(),
             cb_flowed: Default::default(),
@@ -598,6 +601,9 @@ impl An {
                         (Site::Obj(_), Key::Name(n)) if PROTO_NAMES.contains(&n.as_str()) => {
                             Ty::Any(Reason::Proto)
                         }
+                        (Site::Obj(_), Key::Name(n)) if self.proto_extra_of(s, n) => {
+                            Ty::Any(Reason::Proto)
+                        }
                         (Site::Obj(m), Key::Name(n)) => {
                             let own = m.get(n).cloned();
                             let methods = self.fam_candidates(s, n);
@@ -643,12 +649,16 @@ impl An {
                     _ => self.kill(s, Reason::DynamicKey),
                 },
                 Atom::Obj(s) => match key {
-                    Key::Name(n) if !PROTO_NAMES.contains(&n.as_str()) => {
+                    Key::Name(n)
+                        if !PROTO_NAMES.contains(&n.as_str()) && !self.proto_extra_of(s, n) =>
+                    {
                         self.site_field_flow(s, n, v, !self.def_write)
                     }
                     Key::Name(_) => self.kill(s, Reason::Proto),
                     _ => self.kill(s, Reason::DynamicKey),
                 },
+                // a property written onto an opaque built-in object can be read back by unknown code
+                Atom::Ns(n) if crate::builtins::is_ext(n) => self.taint_as(v, Reason::Builtin),
                 _ => {}
             }
         }
@@ -680,7 +690,7 @@ impl An {
         }
         let fi = &self.st.funcs[f];
         if fi.async_ {
-            return Ty::Any(Reason::Async);
+            return self.async_result(f);
         }
         if fi.gen {
             return Ty::Any(Reason::Generator);
@@ -739,6 +749,29 @@ impl An {
             "BigInt" => Ty::Any(Reason::BigInt),
             "require" => Ty::Any(Reason::Require),
             "eval" => Ty::Any(Reason::Eval),
+            // the timer runs the callback later with the extra arguments (none for a microtask)
+            "queueMicrotask" | "setTimeout" | "setImmediate" | "setInterval" if matches!(args.first(), Some((Ty::Set(a), false)) if !a.is_empty() && a.iter().all(|x| matches!(x, Atom::Fn(_)))) =>
+            {
+                let skip = if name == "queueMicrotask" || name == "setImmediate" {
+                    1
+                } else {
+                    2
+                };
+                let cb = args[0].0.clone();
+                let rest: Vec<(Ty, bool)> = args.iter().skip(skip).cloned().collect();
+                if rest.iter().any(|r| r.1) {
+                    return self.unknown_call(args, Reason::UnknownGlobal);
+                }
+                self.call_value(&cb, &rest, None);
+                for (t, _) in args.iter().skip(1) {
+                    self.taint_as(t, Reason::UnknownGlobal);
+                }
+                if name == "queueMicrotask" {
+                    Ty::undef()
+                } else {
+                    Ty::Any(Reason::Builtin)
+                }
+            }
             _ => self.unknown_call(args, Reason::UnknownGlobal),
         }
     }
@@ -757,6 +790,12 @@ impl An {
                 Some((t, false)) => t.clone(),
                 _ => return None,
             },
+            ("Object", "create") if matches!(args, [(t, false)] if *t == Ty::one(Atom::Null)) => {
+                // a prototype-less dictionary: reads of absent names are `undefined`
+                let s = self.site((key, 15), Site::Obj(Default::default()));
+                Ty::one(Atom::Obj(s))
+            }
+            ("JSON", "parse") => Ty::Any(Reason::Builtin),
             ("Object", "isFrozen" | "isSealed" | "isExtensible" | "hasOwn" | "is") => Ty::bool(),
             ("Object", "getOwnPropertyNames") => {
                 let s = self.site((key, 14), Site::Arr(Ty::str()));
@@ -1104,6 +1143,20 @@ impl An {
         })
     }
 
+    /// `n` was added to the prototype of the class that owns `site` by `defineProperty` / a literal
+    fn proto_extra_of(&self, site: usize, n: &str) -> bool {
+        if self.st.proto_extra.is_empty() {
+            return false;
+        }
+        let Some(root) = self.site_class.get(&site) else {
+            return false;
+        };
+        self.st
+            .proto_extra
+            .iter()
+            .any(|(k, m)| m == n && self.family_root(k) == *root)
+    }
+
     fn find_ro(&mut self, s: usize) -> usize {
         self.find(s)
     }
@@ -1161,10 +1214,18 @@ impl An {
         }
     }
 
-    fn fn_result(&self, f: usize) -> Ty {
+    /// An async function returns a promise; what it resolves to is read by `await` / `.then`, which are
+    /// unknown code, so the values it returns are tainted.
+    fn async_result(&mut self, f: usize) -> Ty {
+        let ret = self.st.funcs[f].ret.clone();
+        self.taint_as(&ret, Reason::Async);
+        Ty::one(Atom::Ns(crate::builtins::PROMISE))
+    }
+
+    fn fn_result(&mut self, f: usize) -> Ty {
         let fi = &self.st.funcs[f];
         if fi.async_ {
-            Ty::Any(Reason::Async)
+            self.async_result(f)
         } else if fi.gen {
             Ty::Any(Reason::Generator)
         } else {
@@ -1522,8 +1583,18 @@ impl An {
                 if key.is_none() {
                     n.callee.visit_with(self);
                 }
+                let ext = match (&key, strip(&n.callee)) {
+                    (None, E::Ident(i)) => crate::builtins::ext_of_ctor(&i.sym),
+                    _ => None,
+                };
                 match key.and_then(|k| self.new_class(&k, &args)) {
                     Some(t) => t,
+                    None if ext.is_some() => {
+                        for (t, _) in &args {
+                            self.taint_as(t, Reason::New);
+                        }
+                        Ty::one(Atom::Ns(ext.unwrap()))
+                    }
                     None => {
                         for (t, _) in &args {
                             self.taint_as(t, Reason::New);
@@ -1990,7 +2061,17 @@ impl An {
             if f.iife || f.bind.is_some() {
                 continue;
             }
-            let Some(name) = f.prop_name.clone() else {
+            // an anonymous function exported as the module's default value (`module.exports = (a) => ..`)
+            // is the declaration that `export =` / `export default` names
+            let anon_default = if matches!(f.prop_name.as_deref(), None | Some("exports"))
+                && f.owner.is_none()
+                && f.exports.iter().any(|(_, n)| n == "<default>")
+            {
+                idx.default_name.clone()
+            } else {
+                None
+            };
+            let Some(name) = anon_default.or_else(|| f.prop_name.clone()) else {
                 continue;
             };
             let sigs: Vec<crate::dts::Sig> = idx
@@ -2112,6 +2193,10 @@ impl An {
                         && !self.esc_fns.contains(&fid)
                         && (self.seen_fns.contains(&fid) || !self.escape_final)
                 };
+            if self.st.funcs[fid].async_ {
+                // the promise it returns is read by unknown code
+                self.async_result(fid);
+            }
             if !closed {
                 // closures returned from a function that external code calls are called externally
                 let ret = self.st.funcs[fid].ret.clone();
@@ -2156,7 +2241,11 @@ impl An {
                         None
                     };
                     if dts.is_some() {
-                        self.st.funcs[fid].trust |= TRUST_DTS;
+                        self.st.funcs[fid].trust |= if self.jsdoc_fns.contains(&fid) {
+                            TRUST_JSDOC
+                        } else {
+                            TRUST_DTS
+                        };
                         dts
                     } else if let Some(t) = self.evidence_param(fid, i) {
                         self.st.funcs[fid].trust |= TRUST_EVIDENCE;
@@ -2165,6 +2254,9 @@ impl An {
                         // the default value (flowed in `enter`) is the evidence
                         self.st.funcs[fid].trust |= TRUST_HINT;
                         None
+                    } else if let Some(t) = self.default_contract_ty(fid, i) {
+                        self.st.funcs[fid].trust |= TRUST_DEFAULT;
+                        Some(t)
                     } else if !self.escape_final && !self.st.funcs[fid].exports.is_empty() {
                         // evidence about an exported function may still arrive: decide `any` at the end
                         None
@@ -2188,6 +2280,66 @@ impl An {
                     self.flow(&(fid, n), &t);
                 }
             }
+        }
+    }
+
+    /// `function f(n = 10)`: with `default_contract`, callers are taken to pass what the default is
+    /// (or nothing); the entry guard sends anything else down the original path.
+    fn default_contract_ty(&self, fid: usize, i: usize) -> Option<Ty> {
+        if !self.cfg.default_contract {
+            return None;
+        }
+        match self.st.funcs[fid].default_lit.get(i)? {
+            1 => Some(Ty::num()),
+            2 => Some(Ty::str()),
+            3 => Some(Ty::bool()),
+            _ => None,
+        }
+    }
+
+    /// JSDoc `@param` blocks directly in front of a function become its (guarded) contract.
+    pub fn init_jsdoc(&mut self, src: &str, off: &dyn Fn(u32) -> usize) {
+        if !self.cfg.jsdoc {
+            return;
+        }
+        let blocks = crate::jsdoc::blocks(src);
+        if blocks.is_empty() {
+            return;
+        }
+        for fid in 1..self.st.funcs.len() {
+            let f = &self.st.funcs[fid];
+            if f.iife || f.bind.is_some() || self.dts_fns.contains_key(&fid) {
+                continue;
+            }
+            let lo = off(f.lo);
+            // the nearest block that ends before the function
+            let Some(b) = blocks.iter().rev().find(|b| b.end <= lo) else {
+                continue;
+            };
+            if !crate::jsdoc::gap_ok(&src[b.end..lo]) {
+                continue;
+            }
+            let params: Vec<crate::dts::DT> = f
+                .params
+                .iter()
+                .map(|p| {
+                    p.as_ref()
+                        .and_then(|n| b.params.iter().find(|(m, _)| m == n))
+                        .map_or(crate::dts::DT::Any, |(_, t)| t.clone())
+                })
+                .collect();
+            if params.iter().all(|p| *p == crate::dts::DT::Any) {
+                continue;
+            }
+            self.dts_fns.insert(
+                fid,
+                vec![crate::dts::Sig {
+                    owner: None,
+                    params,
+                    ret: crate::dts::DT::Any,
+                }],
+            );
+            self.jsdoc_fns.insert(fid);
         }
     }
 
@@ -2310,6 +2462,31 @@ impl Visit for An {
         );
     }
     fn visit_throw_stmt(&mut self, n: &a::ThrowStmt) {
+        // `throw new TypeError(msg)`: a fresh built-in error handed straight to the unwinder; it is
+        // never a value of the program, only its arguments are
+        if let a::Expr::New(ne) = strip(&n.arg) {
+            if let a::Expr::Ident(i) = strip(&ne.callee) {
+                let fid = *self.cur.last().unwrap();
+                if self.st.resolve(fid, &i.sym).is_none()
+                    && matches!(
+                        &*i.sym,
+                        "Error"
+                            | "TypeError"
+                            | "RangeError"
+                            | "SyntaxError"
+                            | "ReferenceError"
+                            | "EvalError"
+                            | "URIError"
+                    )
+                {
+                    for x in ne.args.iter().flatten() {
+                        let t = self.ty(&x.expr);
+                        self.taint_as(&t, Reason::New);
+                    }
+                    return;
+                }
+            }
+        }
         let t = self.ty(&n.arg);
         self.taint_as(&t, Reason::Catch);
     }
@@ -2354,6 +2531,67 @@ impl Visit for An {
                     None => {}
                 }
             }
+            (p, Some(e)) if destructure_simple(p) => {
+                // `const { a, b: c = 1 } = obj` / `const [x, y] = arr`: plain reads of known shapes
+                let t = self.ty(e);
+                let arr_only = matches!(&t, Ty::Set(s) if !s.is_empty() && s.iter().all(|x| matches!(x, Atom::Arr(_))));
+                match p {
+                    a::Pat::Object(o) => {
+                        for pr in &o.props {
+                            let (key, name, dflt) = match pr {
+                                a::ObjectPatProp::Assign(ap) => (
+                                    ap.key.sym.to_string(),
+                                    ap.key.sym.to_string(),
+                                    ap.value.as_deref(),
+                                ),
+                                a::ObjectPatProp::KeyValue(kv) => {
+                                    let key = match &kv.key {
+                                        a::PropName::Ident(i) => i.sym.to_string(),
+                                        a::PropName::Str(s) => {
+                                            s.value.as_str().unwrap_or("\u{fffd}").to_string()
+                                        }
+                                        _ => unreachable!(),
+                                    };
+                                    let (nm, d) = match &*kv.value {
+                                        a::Pat::Ident(b) => (b.id.sym.to_string(), None),
+                                        a::Pat::Assign(ap) => match &*ap.left {
+                                            a::Pat::Ident(b) => {
+                                                (b.id.sym.to_string(), Some(&*ap.right))
+                                            }
+                                            _ => unreachable!(),
+                                        },
+                                        _ => unreachable!(),
+                                    };
+                                    (key, nm, d)
+                                }
+                                _ => unreachable!(),
+                            };
+                            let r = self.member_read(&t, &Key::Name(key));
+                            let r = self.with_default(r, dflt);
+                            self.flow_name(&name, &r);
+                        }
+                    }
+                    a::Pat::Array(ar) if arr_only => {
+                        for el in ar.elems.iter().flatten() {
+                            let (name, d) = match el {
+                                a::Pat::Ident(b) => (b.id.sym.to_string(), None),
+                                a::Pat::Assign(ap) => match &*ap.left {
+                                    a::Pat::Ident(b) => (b.id.sym.to_string(), Some(&*ap.right)),
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            };
+                            let r = self.member_read(&t, &Key::Num);
+                            let r = self.with_default(r, d);
+                            self.flow_name(&name, &r);
+                        }
+                    }
+                    _ => {
+                        self.taint_as(&t, Reason::Destructure);
+                        self.flow_any_pat(p, Reason::Destructure);
+                    }
+                }
+            }
             (p, init) => {
                 if let Some(e) = init {
                     let t = self.ty(e);
@@ -2395,6 +2633,24 @@ impl Visit for An {
 }
 
 impl An {
+    /// `r` with `undefined` replaced by the type of the default (`const { a = 5 } = o`).
+    fn with_default(&mut self, r: Ty, dflt: Option<&a::Expr>) -> Ty {
+        let Some(d) = dflt else { return r };
+        let dt = self.ty(d);
+        let kept = match r {
+            Ty::Set(s) => {
+                let v: Vec<Atom> = s.into_iter().filter(|x| *x != Atom::Undef).collect();
+                if v.is_empty() {
+                    Ty::Bottom
+                } else {
+                    Ty::Set(v)
+                }
+            }
+            o => o,
+        };
+        self.join(&kept, &dt)
+    }
+
     fn head(&mut self, h: &a::ForHead, t: Ty) {
         let mut ids: Vec<String> = Vec::new();
         match h {
@@ -2418,5 +2674,27 @@ impl An {
         for i in ids {
             self.flow_name(&i, &t);
         }
+    }
+}
+
+/// A destructuring pattern of plain identifiers (with defaults): `{ a, b: c = 1 }`, `[x, y = 2]`.
+fn destructure_simple(p: &a::Pat) -> bool {
+    fn leaf(p: &a::Pat) -> bool {
+        match p {
+            a::Pat::Ident(_) => true,
+            a::Pat::Assign(ap) => matches!(&*ap.left, a::Pat::Ident(_)),
+            _ => false,
+        }
+    }
+    match p {
+        a::Pat::Object(o) => o.props.iter().all(|pr| match pr {
+            a::ObjectPatProp::Assign(_) => true,
+            a::ObjectPatProp::KeyValue(kv) => {
+                matches!(&kv.key, a::PropName::Ident(_) | a::PropName::Str(_)) && leaf(&kv.value)
+            }
+            _ => false,
+        }),
+        a::Pat::Array(ar) => ar.elems.iter().flatten().all(leaf),
+        _ => false,
     }
 }

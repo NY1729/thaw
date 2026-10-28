@@ -30,6 +30,8 @@ pub struct Sig {
 #[derive(Clone, Debug, Default)]
 pub struct DtsIndex {
     pub sigs: HashMap<String, Vec<Sig>>,
+    /// the declared function that is the module's default / `export =` value
+    pub default_name: Option<String>,
 }
 
 struct Ctx {
@@ -229,6 +231,18 @@ impl DtsIndex {
         let mut decls = Vec::new();
         collect(&module.body, &mut cx, &mut decls);
         let mut idx = DtsIndex::default();
+        for it in &module.body {
+            if let a::ModuleItem::ModuleDecl(m) = it {
+                let e = match m {
+                    a::ModuleDecl::TsExportAssignment(e) => Some(&*e.expr),
+                    a::ModuleDecl::ExportDefaultExpr(e) => Some(&*e.expr),
+                    _ => None,
+                };
+                if let Some(a::Expr::Ident(i)) = e {
+                    idx.default_name = Some(i.sym.to_string());
+                }
+            }
+        }
         let mut add = |name: String, owner: Option<String>, params: Vec<DT>, ret: DT| {
             idx.sigs
                 .entry(name)

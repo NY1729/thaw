@@ -1,0 +1,24 @@
+1
+2
+closed
+closed
+1
+{ value: 0, done: false } { value: 1, done: false } { value: 'stopped', done: true } { value: undefined, done: true }
+[[0,1,2],[0,1],{"1":2}]
+inner returned done
+[0,1,"a","b",7,8]
+closed
+{ value: 'early', done: true } { value: undefined, done: true }
+caught x
+[{"value":"recovered","done":true},{"done":true}]
+created
+start
+[1,2,3]
+[1,2,3] 3 3
+a 1
+b 2
+x 1
+function Generator [object Generator] true
+TypeError Generator is already running
+[0,1,2]
+[{"value":0,"done":false},{"value":9,"done":true},{"done":true}]

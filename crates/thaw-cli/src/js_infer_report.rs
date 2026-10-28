@@ -104,12 +104,12 @@ mod js_infer_report_tests {
     use super::*;
 
     fn sample_clone() -> thaw_js_infer::clone::AotClone {
-        use thaw_js_infer::clone::Prim;
+        use thaw_js_infer::clone::{CTy, Prim};
         thaw_js_infer::clone::AotClone {
             exports: vec!["twice".into()],
             fn_name: "__thaw_aot_pkg_0_twice".into(),
             params: vec![Prim::Num.into()],
-            ret: Prim::Num,
+            ret: CTy::Prim(Prim::Num),
             ts: "function __thaw_aot_pkg_0_twice(x: number): number { return x * 2; }".into(),
         }
     }
@@ -146,7 +146,7 @@ mod js_infer_report_tests {
             exports: vec!["total".into()],
             fn_name: "__thaw_aot_pkg_1_total".into(),
             params: vec![CTy::Arr(Prim::Num), CTy::Prim(Prim::Num)],
-            ret: Prim::Num,
+            ret: CTy::Prim(Prim::Num),
             ts: "function __thaw_aot_pkg_1_total(xs: number[], k: number): number { return xs.length * k; }".into(),
         }
     }
@@ -502,7 +502,7 @@ fn js_infer_signature_matches(signature: &str, clone: &thaw_js_infer::clone::Aot
     let ret = signature[close + 2..].trim().trim_end_matches(';');
     let declared: Vec<&str> = if params.trim().is_empty() { vec![] } else { js_infer_split_top(params) };
     declared.len() == clone.params.len()
-        && CTy::parse(ret) == Some(CTy::from(clone.ret))
+        && CTy::parse(ret) == Some(clone.ret.clone())
         && declared.iter().zip(&clone.params).all(|(d, p)| {
             d.split_once(':').and_then(|(_, t)| CTy::parse(t)).as_ref() == Some(p)
         })

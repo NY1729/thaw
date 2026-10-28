@@ -931,3 +931,148 @@ fn program_evidence_proves_a_contract_only_for_direct_calls_of_evident_types() {
         "{imp}function two(): number {{ return 2; }}\nf([1], two());"
     )));
 }
+
+#[test]
+fn prototype_literal_and_define_property_keep_the_class_modelled() {
+    // methods of `F.prototype = {..}` are modelled; a data entry and a defineProperty name are dynamic
+    let s = "function F(){ this.n = 1; } \
+             F.prototype = { inc: function(){ this.n = this.n + 1; return this.n; }, tag: 'x' }; \
+             Object.defineProperty(F.prototype, 'acc', { get: function(){ return 5; } }); \
+             function use(){ var f = new F(); var a = f.inc(); var t = f.tag; var c = f.acc; return a; } use();";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let inc = r.iter().find(|f| f.name == "inc").unwrap();
+    assert_eq!(inc.ret, "number");
+    assert!(inc.this_typed);
+    assert_eq!(slot(s, "use", "a"), "number");
+    // `tag` / `acc` live on the prototype: the model must not claim `undefined`
+    assert_eq!(slot(s, "use", "t"), "any");
+    assert_eq!(slot(s, "use", "c"), "any");
+    // writing a prototype-only name kills the record instead of typing it
+    let s = "function G(){ this.n = 1; } G.prototype = { get v(){ return 1; } }; new G();";
+    analyze_source(s, Config::default()).unwrap();
+}
+
+#[test]
+fn simple_destructuring_reads_known_shapes() {
+    let s = "function f(){ var o = { a: 1, b: 'x' }; var { a, b: c = 'z' } = o; var [p, q] = [1, 2]; return a + p; } f();";
+    assert_eq!(slot(s, "f", "a"), "number");
+    assert_eq!(slot(s, "f", "c"), "string");
+    assert_eq!(slot(s, "f", "p"), "number | undefined");
+}
+
+#[test]
+fn arguments_length_read_does_not_force_any() {
+    let s = "function f(a){ return a + arguments.length; } f(1); f(2);";
+    assert_eq!(slot(s, "f", "a"), "number");
+    let s = "function g(a){ arguments[0] = 'x'; return a; } g(1);";
+    assert_eq!(fnr(s, Config::default(), "g").reasons[0], Reason::Arguments);
+}
+
+#[test]
+fn aot_clones_may_return_fresh_primitive_arrays_but_never_an_alias_of_a_parameter() {
+    use crate::clone::{CTy, Prim};
+    let s = r#"exports.upto = function (n) { var r = []; for (var i = 0; i < n; i++) { r.push(i * 2); } return r; };
+exports.same = function (xs) { return xs; };
+exports.copy = function (xs) { return xs.slice(); };
+exports.peek = function (n) { var r = [n]; return [r[3], n]; };"#;
+    let cfg = with_dts(
+        "declare function upto(n: number): number[]; declare function same(xs: number[]): number[]; \
+         declare function copy(xs: number[]): number[]; declare function peek(n: number): number[];",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    // `same` would hand the caller's array back (the clone works on a copy), `peek` reads out of bounds
+    assert_eq!(names, vec!["upto", "copy"], "{clones:#?}");
+    assert_eq!(clones[0].ret, CTy::Arr(Prim::Num));
+    assert!(clones[0].ts.contains(": number[] {"), "{}", clones[0].ts);
+}
+
+#[test]
+fn anonymous_default_export_takes_the_declaration_of_export_equals() {
+    let s = "module.exports = (b, c, d) => (1 - d) * b + d * c;";
+    let cfg =
+        with_dts("declare function lerp(x: number, y: number, a: number): number;\nexport = lerp;");
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    assert_eq!(clones.len(), 1, "{clones:#?}");
+}
+
+#[test]
+fn aot_clones_reject_every_way_of_returning_a_parameter_and_sorting() {
+    let s = r#"function id(xs) { return xs; }
+exports.pick = function (xs, c) { return c ? xs : []; };
+exports.via = function (xs) { return id(xs); };
+exports.logical = function (xs) { return xs || []; };
+exports.seq = function (xs) { return (0, xs); };
+exports.late = function (xs) { var r = []; if (xs.length > 0) { r = xs; } return r; };
+exports.sorted = function (xs) { return xs.slice().sort(function (a, b) { return a - b; }); };
+exports.fresh = function (xs) { return xs.slice(); };"#;
+    let cfg = with_dts(
+        "declare function pick(xs: number[], c: boolean): number[]; declare function via(xs: number[]): number[]; \
+         declare function logical(xs: number[]): number[]; declare function seq(xs: number[]): number[]; \
+         declare function late(xs: number[]): number[]; declare function sorted(xs: number[]): number[]; \
+         declare function fresh(xs: number[]): number[];",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    assert_eq!(names, vec!["fresh"], "{clones:#?}");
+}
+
+#[test]
+fn jsdoc_params_are_a_guarded_contract() {
+    let s = "/**\n * @param {number} a\n * @param {string|number} [b]\n * @param {Array<string>} c\n */\nfunction f(a, b, c) { return a; }\nexports.f = f;";
+    let cfg = Config {
+        jsdoc: true,
+        ..Default::default()
+    };
+    let r = fnr(s, cfg.clone(), "f");
+    assert_eq!(r.slots[0].1, "number", "{r:?}");
+    assert_ne!(r.trust & crate::TRUST_JSDOC, 0);
+    assert_eq!(r.trust & crate::TRUST_DTS, 0);
+    assert!(
+        r.guard
+            .as_deref()
+            .is_some_and(|g| g.contains("typeof a === 'number'")),
+        "{:?}",
+        r.guard
+    );
+    let r = fnr(s, Config::default(), "f");
+    assert_eq!(r.trust, 0);
+}
+
+#[test]
+fn literal_default_is_a_guarded_contract_only_when_enabled() {
+    let s = "exports.f = function (k = 10, s = 'x') { return k; };";
+    let on = Config {
+        default_contract: true,
+        ..Default::default()
+    };
+    let r = fnr(s, on, "f");
+    assert_ne!(r.trust & crate::TRUST_DEFAULT, 0);
+    assert!(
+        r.guard
+            .as_deref()
+            .is_some_and(|g| g.contains("typeof k === 'number'")),
+        "{:?}",
+        r.guard
+    );
+    assert_eq!(fnr(s, Config::default(), "f").trust, 0);
+}
+
+#[test]
+fn opaque_builtins_async_and_catch() {
+    let s = "function f(x) { var m = new Map(); m.set('a', x); var d = new Date(); return m.size + d.getTime() + x; } f(1);";
+    assert_eq!(slot(s, "f", "m"), "NodeModule");
+    let r = fnr(s, Config::default(), "f");
+    assert_eq!(r.class, crate::Class::Concrete, "{r:?}");
+    // a value stored into a Map is reachable by unknown code: the array is dead
+    let s = "function g(x) { var m = new Map(); m.set('a', x); x.push('s'); return 1; } g([1]);";
+    assert_ne!(fnr(s, Config::default(), "g").class, crate::Class::Concrete);
+    let s = "async function h(a) { return a + 1; } h(1);";
+    assert_ne!(
+        fnr(s, Config::default(), "h").reasons.first(),
+        Some(&Reason::Async)
+    );
+    let s = "function t(a) { try { return a + 1; } catch (e) { return -1; } } t(1);";
+    assert_eq!(slot(s, "t", "e"), "unknown");
+    assert_eq!(fnr(s, Config::default(), "t").class, crate::Class::Union);
+}

@@ -127,7 +127,8 @@ impl<'a> FnLowerer<'a> {
                 None => self.lower_expr_with_expected_type(&argument.expr, expected_type)?,
             };
             let value = if argument.spread.is_some() {
-                self.project_native_base(value)?
+                let value = self.project_native_base(value)?;
+                self.bytes_to_f64_array(value)?
             } else {
                 value
             };

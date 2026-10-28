@@ -152,6 +152,18 @@ impl<'a> FnLowerer<'a> {
         // `.toString("hex")` later reads to decide whether to decode.
         // `bytes_erasure` rewrites it to `Array(F64)` before codegen.
         let result_type = self.infer_expr_type_inner(&result)?;
+        // The binding of a byte buffer keeps `Bytes` (also in `scope`, which later
+        // captures read) so erasure can route its element accesses to the byte view
+        // (an erased `number[]` would not be).
+        let mut bytes_bindings = HashSet::new();
+        for (name, ty, source) in bindings {
+            if matches!(ty, HirType::Array(element) if **element == HirType::F64)
+                && self.infer_expr_type_inner(source).is_ok_and(|inner| inner == HirType::Bytes)
+            {
+                self.scope.insert(name.clone(), HirType::Bytes);
+                bytes_bindings.insert(name.clone());
+            }
+        }
         for index in (0..bindings.len()).rev() {
             let (name, ty, source) = &bindings[index];
             let body = if result_type == HirType::Void {
@@ -181,12 +193,13 @@ impl<'a> FnLowerer<'a> {
                     })
                 })
                 .collect();
+            let ty = if bytes_bindings.contains(name) { HirType::Bytes } else { ty.clone() };
             result = HirExpr::Call(
                 Box::new(HirExpr::Lambda(
                     captures,
                     vec![HirParam {
                         name: name.clone(),
-                        ty: ty.clone(),
+                        ty,
                     }],
                     result_type.clone(),
                     Box::new(body),
