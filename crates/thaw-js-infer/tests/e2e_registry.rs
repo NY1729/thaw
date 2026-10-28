@@ -219,6 +219,44 @@ fn aot_clones_match_node_and_beat_the_quickjs_calls() {
             direct: &["isPrime"],
             guarded: &[],
         },
+        // an array result (a fresh `number[]` built by the clone), a different package family
+        Case {
+            name: "simple-statistics-array",
+            package: "simple-statistics",
+            local: false,
+            direct: &["numericSort"],
+            guarded: &[],
+        },
+        // arrays built by the clone (a result array is fresh); `same` (returns its argument) is not cloned
+        Case {
+            name: "aot-arrays",
+            package: "aot-arrays",
+            local: true,
+            direct: &["evens", "scale", "words"],
+            guarded: &[],
+        },
+        Case {
+            name: "more-rounding",
+            package: "",
+            local: false,
+            direct: &["round", "roundUp", "roundDown"],
+            guarded: &[],
+        },
+        Case {
+            name: "leap-year-checker",
+            package: "",
+            local: false,
+            direct: &["isLeapYear"],
+            guarded: &[],
+        },
+        // an anonymous arrow exported as `module.exports`, typed by `export = lerp`
+        Case {
+            name: "lerpjs",
+            package: "",
+            local: false,
+            direct: &["lerp"],
+            guarded: &[],
+        },
         // nothing is cloned here: the opt-in build must still produce the baseline's output
         Case {
             name: "uuid",

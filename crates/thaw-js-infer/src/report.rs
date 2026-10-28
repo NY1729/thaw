@@ -370,6 +370,9 @@ pub(crate) fn run(
             next_list: 0,
             direct: 0,
             stmt_assign: None,
+            proto_lits: Default::default(),
+            proto_owner: None,
+            args_writes: Default::default(),
         };
         module.visit_with(&mut p);
     }
@@ -412,6 +415,9 @@ pub(crate) fn run(
             next_list: 0,
             direct: 0,
             stmt_assign: None,
+            proto_lits: Default::default(),
+            proto_owner: None,
+            args_writes: Default::default(),
         };
         module.visit_with(&mut p);
     }
@@ -493,6 +499,14 @@ pub(crate) fn run(
         st.funcs[f].bind = Some(k);
     }
     link_classes(&mut st);
+    if std::env::var_os("THAW_JS_INFER_DEBUG").is_some() {
+        for (k, w) in &st.complex_why {
+            let nm = st.classes.get(k).map_or(0, |c| c.methods.len());
+            if nm > 0 {
+                eprintln!("complex-class {} {} {}", k.1, w, nm);
+            }
+        }
+    }
     // function declarations that are bound once evaluate to their own function value
     let decls: Vec<((usize, String), usize)> = st
         .funcs

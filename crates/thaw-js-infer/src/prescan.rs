@@ -244,6 +244,11 @@ pub struct State {
     pub fam_size: HashMap<(usize, String), usize>,
     /// (class, method) whose function value is read as a value: `this` may be rebound
     pub unsafe_methods: std::collections::HashSet<((usize, String), String)>,
+    /// (class, name): a name added to the prototype by `defineProperty(X.prototype, "n", ..)` or a
+    /// non-method entry of `X.prototype = {..}`; a read of it is dynamic, a write kills the record
+    pub proto_extra: std::collections::HashSet<((usize, String), String)>,
+    /// number of `X.prototype = {..}` literal assignments per class (more than one is not modelled)
+    pub proto_lit_n: HashMap<(usize, String), u32>,
     pub funcs: Vec<FnInfo>,
     pub by_span: HashMap<(u32, u32), usize>,
     pub binds: HashMap<(usize, String), Bind>,
@@ -294,6 +299,50 @@ pub struct Pre<'s> {
     pub direct: u32,
     /// (assign expr lo, rhs hi, list): this assignment is a statement of its own list
     pub stmt_assign: Option<(u32, u32, u32)>,
+    /// object literal (span lo) that is the right side of `X.prototype = {..}` -> class name
+    pub proto_lits: HashMap<u32, String>,
+    /// owner of the object-literal property being visited (taken by the property visitor)
+    pub proto_owner: Option<String>,
+    /// spans of `arguments` members that are written / deleted
+    pub args_writes: HashMap<u32, u32>,
+}
+
+/// `X.prototype = { m() {}, f: function () {}, data: 1 }` with plain keys: (class name, literal).
+fn proto_literal(asg: &a::AssignExpr) -> Option<(String, &a::ObjectLit)> {
+    if asg.op != a::AssignOp::Assign {
+        return None;
+    }
+    let a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) = &asg.left else {
+        return None;
+    };
+    if !matches!(&m.prop, a::MemberProp::Ident(q) if q.sym == "prototype") {
+        return None;
+    }
+    let a::Expr::Ident(c) = strip(&m.obj) else {
+        return None;
+    };
+    let a::Expr::Object(lit) = strip(&asg.right) else {
+        return None;
+    };
+    for p in &lit.props {
+        let a::PropOrSpread::Prop(p) = p else {
+            return None;
+        };
+        let ok = match &**p {
+            a::Prop::Method(m) => matches!(&m.key, a::PropName::Ident(k) if k.sym != "__proto__"),
+            a::Prop::KeyValue(kv) => match &kv.key {
+                a::PropName::Ident(k) => k.sym != "__proto__",
+                a::PropName::Str(s) => s.value.as_str().is_some_and(|v| v != "__proto__"),
+                _ => false,
+            },
+            a::Prop::Shorthand(_) => true,
+            _ => false,
+        };
+        if !ok {
+            return None;
+        }
+    }
+    Some((c.sym.to_string(), lit))
 }
 
 impl<'s> Pre<'s> {
@@ -576,6 +625,25 @@ impl<'s> Pre<'s> {
         self.st.binds.get_mut(&k)
     }
 
+    /// `arguments.length` or `arguments[expr]`
+    fn reads_arguments(&self, m: &a::MemberExpr) -> bool {
+        matches!(strip(&m.obj), a::Expr::Ident(i) if i.sym == "arguments")
+            && self.st.resolve(self.fid(), "arguments").is_none()
+            && match &m.prop {
+                a::MemberProp::Ident(q) => q.sym == "length",
+                a::MemberProp::Computed(_) => true,
+                _ => false,
+            }
+    }
+
+    /// `arguments[i] = ..`, `arguments[i]++`, `delete arguments[i]`: a real use of the object.
+    fn args_write(&mut self, m: &a::MemberExpr) {
+        if self.reads_arguments(m) {
+            self.args_writes.insert(m.span.lo.0, m.span.hi.0);
+            self.flag_up(|f| f.uses_args = true, true);
+        }
+    }
+
     fn ref_ident(&mut self, name: &str, callee: bool, pos: u32) {
         self.mention(name, pos, MK::Other, 0);
         if name == "arguments" && self.st.resolve(self.fid(), name).is_none() {
@@ -802,10 +870,25 @@ impl<'s> Visit for Pre<'s> {
         n.function.visit_with(self);
         self.pending_prop = None;
     }
+    fn visit_object_lit(&mut self, n: &a::ObjectLit) {
+        let Some(owner) = self.proto_lits.get(&n.span.lo.0).cloned() else {
+            return n.visit_children_with(self);
+        };
+        for p in &n.props {
+            self.proto_owner = Some(owner.clone());
+            p.visit_with(self);
+            self.proto_owner = None;
+        }
+    }
     fn visit_method_prop(&mut self, n: &a::MethodProp) {
+        let po = self.proto_owner.take();
         self.pending_member = true;
         if let a::PropName::Ident(k) = &n.key {
-            self.pending_prop = Some((k.sym.to_string(), None));
+            self.pending_prop = Some((k.sym.to_string(), po.clone()));
+            if po.is_some() {
+                self.pending_proto = true;
+                self.pending_owner_key = po.as_ref().and_then(|o| self.st.resolve(self.fid(), o));
+            }
         }
         n.key.visit_with(self);
         n.function.visit_with(self);
@@ -813,7 +896,14 @@ impl<'s> Visit for Pre<'s> {
         self.pending_member = false;
     }
     fn visit_key_value_prop(&mut self, n: &a::KeyValueProp) {
-        if let (a::PropName::Ident(k), a::Expr::Fn(_) | a::Expr::Arrow(_)) =
+        let po = self.proto_owner.take();
+        if let (a::PropName::Ident(k), a::Expr::Fn(_)) = (&n.key, strip(&n.value)) {
+            if po.is_some() {
+                self.pending_proto = true;
+                self.pending_owner_key = po.as_ref().and_then(|o| self.st.resolve(self.fid(), o));
+            }
+            self.pending_prop = Some((k.sym.to_string(), po));
+        } else if let (a::PropName::Ident(k), a::Expr::Fn(_) | a::Expr::Arrow(_)) =
             (&n.key, strip(&n.value))
         {
             self.pending_prop = Some((k.sym.to_string(), None));
@@ -902,6 +992,9 @@ impl<'s> Visit for Pre<'s> {
     fn visit_expr(&mut self, e: &a::Expr) {
         if self.phase == 0 {
             if let a::Expr::Assign(asg) = e {
+                if let Some((c, lit)) = proto_literal(asg) {
+                    self.proto_lits.insert(lit.span.lo.0, c);
+                }
                 if let (
                     a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)),
                     a::Expr::Fn(_) | a::Expr::Arrow(_),
@@ -933,6 +1026,17 @@ impl<'s> Visit for Pre<'s> {
         }
         match e {
             a::Expr::Ident(i) => self.ref_ident(&i.sym, false, i.span.lo.0),
+            // `arguments.length` / `arguments[i]` read: nothing can change the parameters or the
+            // arguments object through it, so the function does not count as using `arguments`
+            // (writes, `delete`, `++` and any other use are flagged where they are seen)
+            a::Expr::Member(m)
+                if self.reads_arguments(m)
+                    && self.args_writes.get(&m.span.lo.0) != Some(&m.span.hi.0) =>
+            {
+                if let a::MemberProp::Computed(c) = &m.prop {
+                    c.expr.visit_with(self);
+                }
+            }
             a::Expr::New(n) => {
                 if let a::Expr::Ident(i) = strip(&n.callee) {
                     self.ref_ident(&i.sym, false, i.span.lo.0);
@@ -1020,7 +1124,71 @@ impl<'s> Visit for Pre<'s> {
                         && c.args.len() == 3
                         && matches!(strip(&c.args[0].expr), a::Expr::Ident(_))
                         && matches!(strip(&c.args[1].expr), a::Expr::Lit(a::Lit::Str(s)) if s.value.as_str() != Some("prototype"));
-                    for x in c.args.iter().filter(|_| !statics) {
+                    // `Object.defineProperty(X.prototype, "n", ..)`: the name `n` is dynamic on every
+                    // instance; the class stays modelled
+                    let proto_name = cname.as_deref() == Some("defineProperty")
+                        && c.args.len() == 3
+                        && match (strip(&c.args[0].expr), strip(&c.args[1].expr)) {
+                            (a::Expr::Member(pm), a::Expr::Lit(a::Lit::Str(s))) if matches!(&pm.prop, a::MemberProp::Ident(q) if q.sym == "prototype") => {
+                                match (strip(&pm.obj), s.value.as_str()) {
+                                    (a::Expr::Ident(i), Some(n)) => {
+                                        match self.st.resolve(self.fid(), &i.sym) {
+                                            Some(k) => {
+                                                self.st.proto_extra.insert((k, n.to_string()));
+                                                true
+                                            }
+                                            None => false,
+                                        }
+                                    }
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        };
+                    let proto_names = cname.as_deref() == Some("defineProperties")
+                        && c.args.len() == 2
+                        && match (strip(&c.args[0].expr), strip(&c.args[1].expr)) {
+                            (a::Expr::Member(pm), a::Expr::Object(lit)) if matches!(&pm.prop, a::MemberProp::Ident(q) if q.sym == "prototype") =>
+                            {
+                                let names: Option<Vec<String>> = lit
+                                    .props
+                                    .iter()
+                                    .map(|p| match p {
+                                        a::PropOrSpread::Prop(p) => match &**p {
+                                            a::Prop::KeyValue(kv) => match &kv.key {
+                                                a::PropName::Ident(i) => Some(i.sym.to_string()),
+                                                a::PropName::Str(s) => {
+                                                    s.value.as_str().map(|v| v.to_string())
+                                                }
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    })
+                                    .collect();
+                                match (strip(&pm.obj), names) {
+                                    (a::Expr::Ident(i), Some(names)) => {
+                                        match self.st.resolve(self.fid(), &i.sym) {
+                                            Some(k) => {
+                                                for n in names {
+                                                    self.st.proto_extra.insert((k.clone(), n));
+                                                }
+                                                true
+                                            }
+                                            None => false,
+                                        }
+                                    }
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        };
+                    for x in c
+                        .args
+                        .iter()
+                        .filter(|_| !statics && !proto_name && !proto_names)
+                    {
                         self.mark_complex(&x.expr, &why);
                     }
                 }
@@ -1114,6 +1282,11 @@ impl<'s> Visit for Pre<'s> {
                 e.visit_children_with(self)
             }
             a::Expr::Unary(u) => {
+                if u.op == a::UnaryOp::Delete {
+                    if let a::Expr::Member(m) = strip(&u.arg) {
+                        self.args_write(m);
+                    }
+                }
                 if matches!(
                     u.op,
                     a::UnaryOp::Plus | a::UnaryOp::Minus | a::UnaryOp::Tilde
@@ -1123,6 +1296,9 @@ impl<'s> Visit for Pre<'s> {
                 e.visit_children_with(self)
             }
             a::Expr::Assign(asg) => {
+                if let a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) = &asg.left {
+                    self.args_write(m);
+                }
                 self.record_exports(asg);
                 match &asg.left {
                     a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) if matches!(&m.prop, a::MemberProp::Ident(q) if q.sym == "prototype") =>
@@ -1145,6 +1321,44 @@ impl<'s> Visit for Pre<'s> {
                                         inherited = true;
                                     }
                                 }
+                            }
+                        }
+                        if let Some((cn, lit)) = proto_literal(asg) {
+                            // `X.prototype = { m() {}, .. }` is a set of prototype methods; other
+                            // entries are names whose reads are dynamic
+                            if let Some(k) = self.st.resolve(self.fid(), &cn) {
+                                let n = self.st.proto_lit_n.entry(k.clone()).or_default();
+                                *n += 1;
+                                if *n > 1 {
+                                    self.mark_complex(&m.obj, "proto-assign-twice");
+                                }
+                                for p in &lit.props {
+                                    let a::PropOrSpread::Prop(p) = p else {
+                                        continue;
+                                    };
+                                    let name = match &**p {
+                                        a::Prop::Method(_) => None,
+                                        a::Prop::KeyValue(kv) => {
+                                            match (&kv.key, strip(&kv.value)) {
+                                                (a::PropName::Ident(_), a::Expr::Fn(_)) => None,
+                                                (a::PropName::Ident(i), _) => {
+                                                    Some(i.sym.to_string())
+                                                }
+                                                (a::PropName::Str(s), _) => {
+                                                    s.value.as_str().map(|v| v.to_string())
+                                                }
+                                                _ => None,
+                                            }
+                                        }
+                                        a::Prop::Shorthand(i) => Some(i.sym.to_string()),
+                                        _ => None,
+                                    };
+                                    if let Some(n) = name {
+                                        self.st.proto_extra.insert((k.clone(), n));
+                                    }
+                                }
+                                self.bump_proto(&k);
+                                inherited = true;
                             }
                         }
                         if !inherited {
@@ -1185,6 +1399,9 @@ impl<'s> Visit for Pre<'s> {
                 e.visit_children_with(self)
             }
             a::Expr::Update(u) => {
+                if let a::Expr::Member(m) = strip(&u.arg) {
+                    self.args_write(m);
+                }
                 if let a::Expr::Ident(i) = strip(&u.arg) {
                     self.assigned(&i.sym, 2, None);
                 }

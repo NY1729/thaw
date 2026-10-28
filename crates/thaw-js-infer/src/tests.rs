@@ -931,3 +931,67 @@ fn program_evidence_proves_a_contract_only_for_direct_calls_of_evident_types() {
         "{imp}function two(): number {{ return 2; }}\nf([1], two());"
     )));
 }
+
+#[test]
+fn prototype_literal_and_define_property_keep_the_class_modelled() {
+    // methods of `F.prototype = {..}` are modelled; a data entry and a defineProperty name are dynamic
+    let s = "function F(){ this.n = 1; } \
+             F.prototype = { inc: function(){ this.n = this.n + 1; return this.n; }, tag: 'x' }; \
+             Object.defineProperty(F.prototype, 'acc', { get: function(){ return 5; } }); \
+             function use(){ var f = new F(); var a = f.inc(); var t = f.tag; var c = f.acc; return a; } use();";
+    let (r, _) = analyze_source(s, Config::default()).unwrap();
+    let inc = r.iter().find(|f| f.name == "inc").unwrap();
+    assert_eq!(inc.ret, "number");
+    assert!(inc.this_typed);
+    assert_eq!(slot(s, "use", "a"), "number");
+    // `tag` / `acc` live on the prototype: the model must not claim `undefined`
+    assert_eq!(slot(s, "use", "t"), "any");
+    assert_eq!(slot(s, "use", "c"), "any");
+    // writing a prototype-only name kills the record instead of typing it
+    let s = "function G(){ this.n = 1; } G.prototype = { get v(){ return 1; } }; new G();";
+    analyze_source(s, Config::default()).unwrap();
+}
+
+#[test]
+fn simple_destructuring_reads_known_shapes() {
+    let s = "function f(){ var o = { a: 1, b: 'x' }; var { a, b: c = 'z' } = o; var [p, q] = [1, 2]; return a + p; } f();";
+    assert_eq!(slot(s, "f", "a"), "number");
+    assert_eq!(slot(s, "f", "c"), "string");
+    assert_eq!(slot(s, "f", "p"), "number | undefined");
+}
+
+#[test]
+fn arguments_length_read_does_not_force_any() {
+    let s = "function f(a){ return a + arguments.length; } f(1); f(2);";
+    assert_eq!(slot(s, "f", "a"), "number");
+    let s = "function g(a){ arguments[0] = 'x'; return a; } g(1);";
+    assert_eq!(fnr(s, Config::default(), "g").reasons[0], Reason::Arguments);
+}
+
+#[test]
+fn aot_clones_may_return_fresh_primitive_arrays_but_never_an_alias_of_a_parameter() {
+    use crate::clone::{CTy, Prim};
+    let s = r#"exports.upto = function (n) { var r = []; for (var i = 0; i < n; i++) { r.push(i * 2); } return r; };
+exports.same = function (xs) { return xs; };
+exports.copy = function (xs) { return xs.slice(); };
+exports.peek = function (n) { var r = [n]; return [r[3], n]; };"#;
+    let cfg = with_dts(
+        "declare function upto(n: number): number[]; declare function same(xs: number[]): number[]; \
+         declare function copy(xs: number[]): number[]; declare function peek(n: number): number[];",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    // `same` would hand the caller's array back (the clone works on a copy), `peek` reads out of bounds
+    assert_eq!(names, vec!["upto", "copy"], "{clones:#?}");
+    assert_eq!(clones[0].ret, CTy::Arr(Prim::Num));
+    assert!(clones[0].ts.contains(": number[] {"), "{}", clones[0].ts);
+}
+
+#[test]
+fn anonymous_default_export_takes_the_declaration_of_export_equals() {
+    let s = "module.exports = (b, c, d) => (1 - d) * b + d * c;";
+    let cfg =
+        with_dts("declare function lerp(x: number, y: number, a: number): number;\nexport = lerp;");
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    assert_eq!(clones.len(), 1, "{clones:#?}");
+}
