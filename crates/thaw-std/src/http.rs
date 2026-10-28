@@ -783,65 +783,70 @@ unsafe extern "C" fn request_get_header(
     thaw_arena::arena_string(value.as_bytes())
 }
 
-/// Number of bytes each element occupies in the native `Array(F64)`
-/// payload, and the size of the leading `i64` length header -- the layout
-/// `thaw-llvm`'s `compile_array_wrap` / element access and `thaw-std`'s
-/// `json.rs` number-array bridge both assume.
-const NATIVE_ARRAY_HEADER: usize = 8;
-const NATIVE_ARRAY_ELEMENT: usize = 8;
+/// A `HirType::Bytes` value is the ordinary two-word array handle whose data word
+/// points at a byte view record, `{ len: u64, tag: u64, base: *mut u8, store: *mut
+/// ByteStore }`, over a `{ data, len, js, reserved }` backing store holding one `u8`
+/// per byte -- the layout `thaw-runtime`'s `native_values/bytes.rs` owns. `tag` is
+/// `BYTE_VIEW_MAGIC | flags`.
+const BYTE_VIEW_MAGIC: u64 = 0x7FF8_5EED_B17E_B100;
+const BYTE_VIEW_BUFFER: u64 = 1;
+const BYTE_VIEW_BYTES: usize = 32;
+const BYTE_STORE_BYTES: usize = 32;
 
-/// Reads a `HirType::Bytes` argument (a two-pointer handle onto a native
-/// `[len: i64][f64 * len]` buffer, exactly what `Buffer.from` / a byte
-/// literal produce) back into raw bytes. Each element is truncated toward
-/// zero and taken mod 256, matching `Buffer`'s own `ToUint8` coercion.
-/// A null handle or null buffer (a failed allocation upstream) reads as
-/// empty rather than faulting across the FFI boundary.
+/// Reads a `HirType::Bytes` argument back into raw bytes. A null handle or record
+/// (a failed allocation upstream) reads as empty rather than faulting across the
+/// FFI boundary.
 unsafe fn native_bytes_to_vec(handle: *const u8) -> Vec<u8> {
     if handle.is_null() {
         return Vec::new();
     }
-    let buffer = (handle as *const *const u8).read();
-    if buffer.is_null() {
+    let record = (handle as *const *const u8).read();
+    if record.is_null() {
         return Vec::new();
     }
-    let length = (buffer as *const i64).read().max(0) as usize;
+    let length = (record as *const u64).read() as usize;
+    let tag = (record.add(8) as *const u64).read_unaligned();
+    if tag & !0xff == BYTE_VIEW_MAGIC {
+        let base = (record.add(16) as *const *const u8).read();
+        return std::slice::from_raw_parts(base, length).to_vec();
+    }
+    // An `f64`-slot array whose static type was erased on the way: each element
+    // truncated toward zero and taken mod 256.
     (0..length)
         .map(|index| {
-            let value = (buffer.add(NATIVE_ARRAY_HEADER + index * NATIVE_ARRAY_ELEMENT)
-                as *const f64)
-                .read();
-            (value as i64 & 0xff) as u8
+            ((record.add(8 + index * 8) as *const f64).read_unaligned() as i64 & 0xff) as u8
         })
         .collect()
 }
 
-/// Builds a native `HirType::Bytes` value from raw bytes: the
-/// `[len: i64][f64 * len]` payload, then the two-pointer handle onto it that
-/// every `Array`/`Bytes` value is (see `compile_array_wrap` /
-/// `json.rs::wrap_array_handle`). Arena-allocated, so it lives as long as
-/// every other heap value the handler sees. Returns null only if an
-/// allocation fails.
+/// Builds a native `HirType::Bytes` value from raw bytes: one arena block holding
+/// the view record, its backing store and the payload, then the two-pointer array
+/// handle onto the record. Returns null only if an allocation fails.
 fn native_bytes_from_slice(bytes: &[u8]) -> *mut u8 {
-    let payload = thaw_arena::thaw_arena_alloc(
-        NATIVE_ARRAY_HEADER + bytes.len() * NATIVE_ARRAY_ELEMENT,
-        NATIVE_ARRAY_ELEMENT,
-    );
-    if payload.is_null() {
+    let header = BYTE_VIEW_BYTES + BYTE_STORE_BYTES;
+    let block = thaw_arena::thaw_arena_alloc(header + bytes.len().max(1), 16);
+    if block.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
-        (payload as *mut i64).write(bytes.len() as i64);
-        for (index, &byte) in bytes.iter().enumerate() {
-            (payload.add(NATIVE_ARRAY_HEADER + index * NATIVE_ARRAY_ELEMENT) as *mut f64)
-                .write(f64::from(byte));
-        }
+        let store = block.add(BYTE_VIEW_BYTES);
+        let data = block.add(header);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+        (block as *mut u64).write(bytes.len() as u64);
+        (block.add(8) as *mut u64).write(BYTE_VIEW_MAGIC | BYTE_VIEW_BUFFER);
+        (block.add(16) as *mut *mut u8).write(data);
+        (block.add(24) as *mut *mut u8).write(store);
+        (store as *mut *mut u8).write(data);
+        (store.add(8) as *mut u64).write(bytes.len() as u64);
+        (store.add(16) as *mut u64).write(0);
+        (store.add(24) as *mut u64).write(0);
     }
-    let handle = thaw_arena::thaw_arena_alloc(16, NATIVE_ARRAY_ELEMENT);
+    let handle = thaw_arena::thaw_arena_alloc(16, 8);
     if handle.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
-        (handle as *mut *mut u8).write(payload);
+        (handle as *mut *mut u8).write(block);
         (handle.add(8) as *mut *mut u8).write(std::ptr::null_mut());
     }
     handle

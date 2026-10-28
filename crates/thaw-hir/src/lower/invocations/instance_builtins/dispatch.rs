@@ -177,6 +177,9 @@ impl<'a> FnLowerer<'a> {
                 &[(receiver_name, receiver_type, receiver)],
             );
         }
+        if let Some(result) = self.lower_bytes_generic_array_method(member, property, call)? {
+            return Ok(result);
+        }
         if let Some(result) = self.lower_json_array_method(member, property, call)? {
             return Ok(result);
         }
