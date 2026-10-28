@@ -252,6 +252,20 @@ impl<'a> FnLowerer<'a> {
                 }
                 let mut object = self.lower_json_mutable_chain(&member.obj)?;
                 let mut object_type = self.infer_expr_type(&object)?;
+                // `q[i] = v` on an element that came out of an array pattern (`([q]) => ...` over
+                // `Promise.all`) is `Optional(Array)`; unwrap it like the read path does.
+                if let HirType::Optional(payload) = &object_type {
+                    if matches!(payload.as_ref(), HirType::Array(_) | HirType::Bytes) {
+                        if let MemberProp::Computed(_) = &member.prop {
+                            let reject = self.receiver_requires_narrowing(&member.obj);
+                            (object, object_type) = self.unwrap_required_optional_member(object, object_type, "computed property", reject)?;
+                            // Index writes are typed as `Array` (see `infer_expr_type`); a buffer element is the same layout.
+                            if object_type == HirType::Bytes {
+                                object_type = HirType::Array(Box::new(HirType::F64));
+                            }
+                        }
+                    }
+                }
                 if let HirType::NonArrowReceiver(declared) = object_type {
                     let access = match &member.prop {
                         MemberProp::Ident(property) => {

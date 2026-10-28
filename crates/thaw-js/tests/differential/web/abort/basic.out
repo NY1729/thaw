@@ -1,0 +1,11 @@
+false undefined [object AbortSignal] [object AbortController]
+true true
+listener abort true
+onabort
+true AbortError This operation was aborted 20 true
+AbortError
+thrown AbortError
+why
+true Illegal constructor
+true AbortError
+7

@@ -2838,7 +2838,8 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
             let mut value = self.lower_expr(&argument.expr)?;
-            let mut value_type = self.infer_expr_type(&value)?;
+            // Keep `Bytes`: the resolved payload type is what a `then` callback's parameter gets.
+            let mut value_type = self.infer_expr_type_inner(&value)?;
             if !is_reject && matches!(value_type, HirType::Json | HirType::JsValue) {
                 // An `any` argument may be a thenable: `__thaw_defer_thenable` reads its `then` once now and
                 // defers the call to a microtask, as PromiseResolveThenableJob does.

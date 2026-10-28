@@ -1,0 +1,6 @@
+AbortError boom 20 true true
+[object DOMException] AbortError: boom
+["Error","",0]
+25 0
+20 23 25
+TimeoutError 23 5 string
