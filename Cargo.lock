@@ -3127,6 +3127,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "inkwell",
+ "rustls",
  "semver",
  "serde_json",
  "swc_ecma_visit",

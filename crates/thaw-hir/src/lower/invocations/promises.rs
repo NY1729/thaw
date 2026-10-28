@@ -49,8 +49,8 @@ impl<'a> FnLowerer<'a> {
                 if self.signatures.get(name).is_some_and(|signature| signature.is_async)));
         if !is_async_call
             && matches!(
-                self.infer_expr_type(&value)?,
-                HirType::F64 | HirType::Bool | HirType::Str | HirType::StrLiteral(_)
+                self.infer_expr_type_inner(&value)?,
+                HirType::F64 | HirType::Bool | HirType::Str | HirType::StrLiteral(_) | HirType::Bytes
             )
         {
             return self.lower_call(&Self::promise_resolve_call(expr.span(), expr));

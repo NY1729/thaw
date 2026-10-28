@@ -1,0 +1,17 @@
+const p = new URLSearchParams('a=1&b=2&a=3&c=%20x+y');
+console.log(p.get('a'), JSON.stringify(p.getAll('a')), p.has('b'), p.has('a', '3'), p.get('zz'), p.get('c'));
+p.append('d', 'é&='); p.set('a', 'Z'); p.delete('b');
+console.log(p.toString(), p.size);
+console.log(JSON.stringify([...p]), JSON.stringify([...p.keys()]), JSON.stringify([...p.values()]));
+const it = p.entries();
+console.log(Object.prototype.toString.call(it), JSON.stringify(it.next()));
+const q = new URLSearchParams({ x: '1', y: '2' });
+console.log(String(q));
+console.log(String(new URLSearchParams([['k', 'v'], ['k', 'w']])));
+console.log(String(new URLSearchParams(new Map([['m', 'n']]))));
+q.sort(); const out = []; q.forEach((v, k, o) => out.push(k + v + (o === q)));
+console.log(out.join());
+console.log(String(new URLSearchParams('?z=1')), Object.prototype.toString.call(q));
+const u = new URL('http://h/p?x=1'); u.searchParams.append('y', '2');
+console.log(u.href);
+for (const [k, v] of new URLSearchParams('m=1&n=2')) console.log(k, v);

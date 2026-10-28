@@ -94,7 +94,11 @@ impl StoragePlan {
         if !uninit_sinks.is_empty() {
             EXTENDED_STORAGE_USED.with(|used| used.set(true));
         }
-        let mut graph = StorageGraph { uninit_sinks, ..StorageGraph::default() };
+        let mut graph = StorageGraph {
+            uninit_sinks,
+            readonly_formals: clone_readonly_formals(module),
+            ..StorageGraph::default()
+        };
         module.visit_with(&mut graph);
         let graph_uninit_sinks = graph.uninit_sinks.clone();
         let graph_sink_slots = graph.sink_slots.clone();
@@ -236,6 +240,9 @@ struct StorageGraph {
     sink_results: HashSet<(u32, u32)>,
     /// Variables (and the arrays/maps they hold) that receive a sink read.
     sink_slots: HashSet<(u32, u32)>,
+    /// Array parameters of ahead-of-time package clones (`__thaw_aot_*`) that their body only reads.
+    /// A call hands such a parameter a copy, so the argument keeps its own (native) storage.
+    readonly_formals: HashSet<(u32, u32)>,
 }
 
 impl StorageGraph {
@@ -462,9 +469,12 @@ impl StorageGraph {
                             for (position, &(actual, spread)) in call.arguments.iter().enumerate() {
                                 if spread || spread_seen {
                                     let start = if spread_seen { 0 } else { position.min(callable.params.len()) };
-                                    for formal in &callable.params[start..] { links.push((storage_key(actual), storage_key(*formal))); }
+                                    for formal in &callable.params[start..] {
+                                        if !self.readonly_formals.contains(&storage_key(*formal)) { links.push((storage_key(actual), storage_key(*formal))); }
+                                    }
                                     spread_seen = true;
                                 } else if let Some(formal) = callable.params.get(position).or_else(|| callable.rest.then(|| callable.params.last()).flatten()) {
+                                    if self.readonly_formals.contains(&storage_key(*formal)) { continue; }
                                     links.push((storage_key(actual), storage_key(*formal)));
                                     if call.source_function == Some(node) && position < callable.params.len() - usize::from(callable.rest) {
                                         self.argument_parameters.entry(storage_key(actual)).or_default().insert(storage_key(*formal));
@@ -2246,7 +2256,8 @@ impl FnLowerer<'_> {
         physical: &HirExpr,
         preserve_class_physical: bool,
     ) -> Result<HirType, String> {
-        let physical_type = self.infer_expr_type(physical)?;
+        // Keep `Bytes`: the instance's `T` must be a buffer, matching the call-site specialization.
+        let physical_type = self.infer_expr_type_inner(physical)?;
         if preserve_class_physical && contains_native_class(&physical_type) {
             return Ok(physical_type);
         }
@@ -3035,4 +3046,132 @@ impl Visit for UninitNames<'_> {
         self.names.extend(fields);
         declaration.visit_children_with(self);
     }
+}
+
+/// Parameters of `__thaw_aot_*` package clones that the clone only reads: indexed (`x[i]`), measured
+/// (`x.length`) or handed to another such parameter. Mutating them (`x[i] = v`, `x.push(..)`),
+/// calling a method on them or letting them escape anywhere else keeps them out of the set.
+fn clone_readonly_formals(module: &Module) -> HashSet<(u32, u32)> {
+    struct Functions(Vec<FnDecl>);
+    impl Visit for Functions {
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            if declaration.ident.sym.starts_with("__thaw_aot_") && declaration.function.body.is_some() {
+                self.0.push(declaration.clone());
+            }
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut collected = Functions(Vec::new());
+    module.visit_with(&mut collected);
+    let functions = collected.0;
+    if functions.is_empty() {
+        return HashSet::new();
+    }
+    let parameter_name = |function: &FnDecl, index: usize| -> Option<String> {
+        match &function.function.params.get(index)?.pat {
+            Pat::Ident(binding) => Some(binding.id.sym.to_string()),
+            _ => None,
+        }
+    };
+    // Optimistically every plain parameter is read-only; demote until stable.
+    let mut readonly: HashSet<(String, usize)> = HashSet::new();
+    for function in &functions {
+        for index in 0..function.function.params.len() {
+            if parameter_name(function, index).is_some() {
+                readonly.insert((function.ident.sym.to_string(), index));
+            }
+        }
+    }
+    struct Uses<'a> {
+        name: &'a str,
+        readonly: &'a HashSet<(String, usize)>,
+        ok: bool,
+    }
+    impl Uses<'_> {
+        fn member_of_name(&self, expr: &Expr) -> bool {
+            match expr {
+                Expr::Member(member) => matches!(member.obj.as_ref(), Expr::Ident(id) if id.sym == *self.name),
+                Expr::Paren(paren) => self.member_of_name(&paren.expr),
+                _ => false,
+            }
+        }
+    }
+    impl Visit for Uses<'_> {
+        fn visit_member_expr(&mut self, member: &MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::Ident(id) if id.sym == *self.name) {
+                member.prop.visit_with(self);
+            } else {
+                member.visit_children_with(self);
+            }
+        }
+        fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+            struct Target<'b>(&'b str, bool);
+            impl Visit for Target<'_> {
+                fn visit_member_expr(&mut self, member: &MemberExpr) {
+                    if matches!(member.obj.as_ref(), Expr::Ident(id) if id.sym == *self.0) { self.1 = true; }
+                    member.visit_children_with(self);
+                }
+            }
+            let mut target = Target(self.name, false);
+            assign.left.visit_with(&mut target);
+            if target.1 { self.ok = false; }
+            assign.visit_children_with(self);
+        }
+        fn visit_update_expr(&mut self, update: &swc_ecma_ast::UpdateExpr) {
+            if self.member_of_name(&update.arg) { self.ok = false; }
+            update.visit_children_with(self);
+        }
+        fn visit_unary_expr(&mut self, unary: &swc_ecma_ast::UnaryExpr) {
+            if unary.op == swc_ecma_ast::UnaryOp::Delete && self.member_of_name(&unary.arg) { self.ok = false; }
+            unary.visit_children_with(self);
+        }
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if self.member_of_name(callee) { self.ok = false; }
+                // `g(.., x, ..)` with `g` a clone whose matching parameter is read-only.
+                if let Expr::Ident(target) = callee.as_ref() {
+                    callee.visit_with(self);
+                    for (position, argument) in call.args.iter().enumerate() {
+                        let handed_on = argument.spread.is_none()
+                            && matches!(argument.expr.as_ref(), Expr::Ident(id) if id.sym == *self.name)
+                            && self.readonly.contains(&(target.sym.to_string(), position));
+                        if !handed_on { argument.visit_with(self); }
+                    }
+                    return;
+                }
+            }
+            call.visit_children_with(self);
+        }
+        fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+            if ident.sym == *self.name { self.ok = false; }
+        }
+    }
+    loop {
+        let mut demoted = Vec::new();
+        for function in &functions {
+            let Some(body) = &function.function.body else { continue };
+            for index in 0..function.function.params.len() {
+                let key = (function.ident.sym.to_string(), index);
+                if !readonly.contains(&key) { continue; }
+                let Some(name) = parameter_name(function, index) else { continue };
+                let mut uses = Uses { name: &name, readonly: &readonly, ok: true };
+                body.visit_with(&mut uses);
+                if !uses.ok { demoted.push(key); }
+            }
+        }
+        if demoted.is_empty() { break; }
+        for key in demoted { readonly.remove(&key); }
+    }
+    let mut formals = HashSet::new();
+    for function in &functions {
+        for (index, parameter) in function.function.params.iter().enumerate() {
+            if readonly.contains(&(function.ident.sym.to_string(), index))
+                && matches!(&parameter.pat, Pat::Ident(binding)
+                    if binding.type_ann.as_ref().is_some_and(|ann| matches!(ann.type_ann.as_ref(), TsType::TsArrayType(_))))
+            {
+                formals.insert(storage_key(parameter.pat.span()));
+            }
+        }
+    }
+    formals
 }
