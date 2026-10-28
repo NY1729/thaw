@@ -438,11 +438,11 @@ impl<'a> FnLowerer<'a> {
                         .iter()
                         .find_map(|(field, ty)| (field == &name).then_some(ty))
                 });
-                Some(vec![(
-                    name,
-                    self.lower_object_method(method,
-                        receiver(method_this_stays_in_prefix(&method.function, fields))?, expected)?,
-                )])
+                let lowered = self.lower_object_method(method,
+                    receiver(method_this_stays_in_prefix(&method.function, fields))?, expected)?;
+                let lowered = name_function_value(
+                    lowered, Some(name.to_string()), method.function.is_async, method.function.is_generator);
+                Some(vec![(name, lowered)])
             }
             Prop::Getter(getter) => {
                 let name = self

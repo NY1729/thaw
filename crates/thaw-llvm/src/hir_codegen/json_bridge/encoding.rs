@@ -1604,7 +1604,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// A native byte buffer as its `Buffer.toJSON()` shape, `{ "type": "Buffer", "data": [..] }`.
     /// A function nested in a `console.log` value: the sentinel the inspector prints as `[Function: name]`.
-    fn compile_console_function_sentinel(
+    pub(super) fn compile_console_function_sentinel(
         &mut self,
         closure: PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
