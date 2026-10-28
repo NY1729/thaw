@@ -139,6 +139,8 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         // unnecessarily narrow check, not a masked gap the way the
         // `Object`/`Json` case above turned out to be.
         HirType::Array(inner) => supports_generic_native_layout(inner),
+        // A byte buffer is the same native layout as `number[]` (see `erase_bytes`).
+        HirType::Bytes => true,
         HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
             supports_generic_native_layout(inner)
         }
@@ -489,6 +491,8 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
                     .collect::<String>()
             ),
             HirType::Json => "json".into(),
+            // A buffer instance is its own specialization, not `number[]`.
+            HirType::Bytes => "bytes".into(),
             HirType::Array(inner) => format!("array_{}", fingerprint(inner)),
             HirType::Tuple(elements) => format!(
                 "tuple_{}",

@@ -4154,8 +4154,17 @@ impl<'a> FnLowerer<'a> {
                     alternate_optional.as_ref(),
                 )?;
                 self.restore_narrowings(saved_narrowings);
-                let consequent_type = self.infer_expr_type(&consequent)?;
-                let alternate_type = self.infer_expr_type(&alternate)?;
+                // `Bytes` survives only when both arms are the same buffer type; a mix keeps the
+                // top-level erased types as before.
+                let (consequent_type, alternate_type) = {
+                    let (c, a) = (self.infer_expr_type_inner(&consequent)?, self.infer_expr_type_inner(&alternate)?);
+                    if c == a {
+                        (c, a)
+                    } else {
+                        let erase_top = |ty: HirType| if ty == HirType::Bytes { HirType::Array(Box::new(HirType::F64)) } else { ty };
+                        (erase_top(c), erase_top(a))
+                    }
+                };
                 let result_type = if consequent_type == alternate_type {
                     consequent_type
                 } else if !matches!(consequent_type, HirType::Union(_))
