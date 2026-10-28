@@ -3754,6 +3754,41 @@ impl<'a> FnLowerer<'a> {
                     // `thaw_error_stack`'s own doc comment (thaw-runtime)
                     // for why this can't just reuse `.toString()`'s
                     // intrinsic despite the similar rendering.
+                    HirType::Str if prop.sym == *"stack" && PROGRAM_DELETES_STACK.with(Cell::get) => {
+                        // The program deletes `stack` somewhere: an Error without its own `stack`
+                        // reads `undefined`, so the read is `string | undefined` in this program.
+                        let name = format!("__thaw_stack_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Str);
+                        let receiver = || HirExpr::Var(name.clone());
+                        let call = |function: &str, args: Vec<HirExpr>| {
+                            HirExpr::Call(Box::new(HirExpr::Var(function.into())), args)
+                        };
+                        let deleted = HirExpr::Conditional(
+                            Box::new(call("__thaw_error_is_error", vec![receiver()])),
+                            Box::new(HirExpr::Conditional(
+                                Box::new(call(
+                                    "__thaw_error_has_prop",
+                                    vec![receiver(), HirExpr::Lit(HirLit::Str("stack".into()))],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                HirType::Bool,
+                            )),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                            HirType::Bool,
+                        );
+                        let result = HirExpr::Conditional(
+                            Box::new(deleted),
+                            Box::new(HirExpr::OptionalNone(HirType::Str)),
+                            Box::new(HirExpr::OptionalSome(
+                                Box::new(call("__thaw_error_stack_with_frames", vec![receiver()])),
+                                HirType::Str,
+                            )),
+                            HirType::Optional(Box::new(HirType::Str)),
+                        );
+                        self.wrap_call_argument_bindings(result, &[(name, HirType::Str, obj)])
+                    }
                     HirType::Str if prop.sym == *"stack" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_error_stack_with_frames".to_string())),
                         vec![obj],
