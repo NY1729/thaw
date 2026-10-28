@@ -11,9 +11,10 @@ pub(crate) const PRELUDE: &str = r#"
     Object.defineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
   }
   function mkError(name, Parent) {
-    var C = function (message) {
-      if (!(this instanceof C)) return new C(message);
+    var C = function (message, options) {
+      if (!(this instanceof C)) return new C(message, options);
       if (message !== undefined) def(this, 'message', String(message));
+      if (options !== null && typeof options === 'object' && 'cause' in options) def(this, 'cause', options.cause);
       def(this, 'stack', name + (message !== undefined ? ': ' + String(message) : ''));
     };
     def(C, 'name', name);
@@ -29,6 +30,7 @@ pub(crate) const PRELUDE: &str = r#"
     return m ? this.name + ': ' + m : String(this.name);
   });
   def(E, 'captureStackTrace', function () {});
+  E.stackTraceLimit = 10;
   Error = E;
   TypeError = mkError('TypeError', E);
   RangeError = mkError('RangeError', E);
@@ -80,7 +82,7 @@ pub(crate) const PRELUDE: &str = r#"
     for (var u = 0; u < undef; u++) a[n + u] = undefined;
     return a;
   });
-  def(Object, 'fromEntries', function (entries) { var o = {}; for (var i = 0; i < entries.length; i++) o[entries[i][0]] = entries[i][1]; return o; });
+  def(Object, 'fromEntries', function (entries) { var o = {}; for (var e of entries) o[e[0]] = e[1]; return o; });
 })();
 "#;
 
@@ -161,7 +163,14 @@ impl Interp {
                     Err(e) => {
                         return self.throw_error(
                             "SyntaxError",
-                            &format!("Invalid regular expression: /{source}/: {e}"),
+                            &format!(
+                                "Invalid regular expression: /{source}/: {}",
+                                match e.to_string().as_str() {
+                                    "Unbalanced bracket" =>
+                                        "Unterminated character class".to_string(),
+                                    other => other.to_string(),
+                                }
+                            ),
                         )
                     }
                 };
@@ -289,6 +298,7 @@ impl Interp {
         &mut self,
         template: &str,
         m: &[Value],
+        named: &Value,
         index: usize,
         input: &str,
     ) -> String {
@@ -323,6 +333,18 @@ impl Interp {
                         i += 2;
                         continue;
                     }
+                    '<' if !matches!(named, Value::Undefined) => {
+                        if let Some(end) = chars[i + 2..].iter().position(|c| *c == '>') {
+                            let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                            if let Ok(v) = self.get(named, &name) {
+                                if !matches!(v, Value::Undefined) {
+                                    out.push_str(&self.to_str(&v));
+                                }
+                            }
+                            i += end + 3;
+                            continue;
+                        }
+                    }
                     d if d.is_ascii_digit() => {
                         let mut n = d.to_digit(10).unwrap() as usize;
                         let mut used = 2;
@@ -354,7 +376,7 @@ impl Interp {
         let pattern = arg(args, 0);
         let repl = arg(args, 1);
         // (char index, match-array-like values) of the matches to replace
-        let mut matches: Vec<(usize, Vec<Value>)> = Vec::new();
+        let mut matches: Vec<(usize, Vec<Value>, Value)> = Vec::new();
         if let Some((ro, re)) = self.regexp_of(&pattern) {
             let global = matches!(
                 find_own(&ro, "global"),
@@ -376,14 +398,19 @@ impl Interp {
                     Kind::Array(v) => v.clone(),
                     _ => vec![],
                 };
-                matches.push((idx, items));
+                let groups = self.get(&m, "groups")?;
+                matches.push((idx, items, groups));
             }
         } else {
             let needle = self.to_str(&pattern);
             let mut from = 0;
             while let Some(pos) = s[from..].find(&*needle) {
                 let b = from + pos;
-                matches.push((byte_to_char(&s, b), vec![Value::str(&needle)]));
+                matches.push((
+                    byte_to_char(&s, b),
+                    vec![Value::str(&needle)],
+                    Value::Undefined,
+                ));
                 if !all {
                     break;
                 }
@@ -396,7 +423,7 @@ impl Interp {
         let chars: Vec<char> = s.chars().collect();
         let mut out = String::new();
         let mut pos = 0usize;
-        for (idx, groups) in matches {
+        for (idx, groups, named) in matches {
             if idx < pos {
                 continue;
             }
@@ -412,11 +439,14 @@ impl Interp {
                 let mut call_args = groups.clone();
                 call_args.push(Value::Number(idx as f64));
                 call_args.push(Value::Str(s.clone()));
+                if !matches!(named, Value::Undefined) {
+                    call_args.push(named.clone());
+                }
                 let r = self.call(&repl, &Value::Undefined, &call_args)?;
                 self.to_str(&r).to_string()
             } else {
                 let t = self.to_str(&repl);
-                self.expand_replacement(&t, &groups, idx, &s)
+                self.expand_replacement(&t, &groups, &named, idx, &s)
             };
             out.push_str(&text);
             pos = idx + matched_len;
@@ -444,7 +474,7 @@ impl Interp {
             has(self, "get")?,
             has(self, "set")?,
         );
-        let existing = o.props.borrow().iter().position(|p| &*p.key == key);
+        let existing = o.position(key);
         // array index / length writes go through the element storage
         if value.is_some() {
             if let Kind::Array(_) = &*o.kind.borrow() {
@@ -482,12 +512,16 @@ impl Interp {
                 p.enumerable = flag(&enumerable, p.enumerable);
                 p.writable = flag(&writable, p.writable);
             }
-            None => props.push(Prop {
-                key: key.into(),
-                slot,
-                enumerable: flag(&enumerable, false),
-                writable: flag(&writable, false),
-            }),
+            None => crate::push_prop(
+                o,
+                &mut props,
+                Prop {
+                    key: key.into(),
+                    slot,
+                    enumerable: flag(&enumerable, false),
+                    writable: flag(&writable, false),
+                },
+            ),
         }
         Ok(())
     }
@@ -516,10 +550,115 @@ impl Interp {
         match v {
             Value::Object(o) => match &*o.kind.borrow() {
                 Kind::Array(items) => items.clone(),
+                // an array-like: `{ length: n, 0: ..., 1: ... }` (data properties only)
+                Kind::Plain => match find_own(o, "length") {
+                    Some((Slot::Data(Value::Number(n)), _)) if (0.0..1e7).contains(&n) => (0..n
+                        as usize)
+                        .map(|i| match find_own(o, &i.to_string()) {
+                            Some((Slot::Data(x), _)) => x,
+                            _ => Value::Undefined,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
                 _ => Vec::new(),
             },
+            Value::Str(s) => s
+                .chars()
+                .map(|c| Value::Str(c.to_string().into()))
+                .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// `util.format` for `console.log`: `%s %d %i %f %j %o %O %c %%` in a leading string, then the
+    /// remaining arguments inspected and space separated.
+    pub(crate) fn format_log(&mut self, args: &[Value]) -> String {
+        let mut rest = args.iter();
+        let mut out = String::new();
+        if let (Some(Value::Str(f)), true) = (args.first(), args.len() > 1) {
+            rest.next();
+            let chars: Vec<char> = f.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '%' && i + 1 < chars.len() {
+                    let spec = chars[i + 1];
+                    if spec == '%' {
+                        out.push('%');
+                        i += 2;
+                        continue;
+                    }
+                    if "sdifjoOc".contains(spec) {
+                        let Some(v) = rest.next() else {
+                            out.push('%');
+                            out.push(spec);
+                            i += 2;
+                            continue;
+                        };
+                        match spec {
+                            's' => match v {
+                                Value::Str(s) => out.push_str(s),
+                                Value::BigInt(b) => out.push_str(&format!("{b}n")),
+                                Value::Object(_) => out.push_str(&self.inspect(v, false)),
+                                other => out.push_str(&self.to_str(other)),
+                            },
+                            'd' => match v {
+                                Value::BigInt(b) => out.push_str(&format!("{b}n")),
+                                Value::Object(_) => out.push_str("NaN"),
+                                other => {
+                                    let n = self.num(other);
+                                    out.push_str(&number_to_string(n));
+                                }
+                            },
+                            'i' => {
+                                let n = self.num(v).trunc();
+                                out.push_str(&number_to_string(if n.is_finite() {
+                                    n
+                                } else {
+                                    f64::NAN
+                                }));
+                            }
+                            'f' => {
+                                let n = string_to_number(&self.to_str(v));
+                                out.push_str(&number_to_string(n));
+                            }
+                            'j' => {
+                                let json = self
+                                    .lookup(&self.global.clone(), "JSON")
+                                    .unwrap_or(Value::Undefined);
+                                let stringify =
+                                    self.get(&json, "stringify").unwrap_or(Value::Undefined);
+                                match self.call(&stringify, &json, std::slice::from_ref(v)) {
+                                    Ok(Value::Str(s)) => out.push_str(&s),
+                                    _ => out.push_str("undefined"),
+                                }
+                            }
+                            'o' | 'O' => out.push_str(&self.inspect(v, false)),
+                            _ => {}
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            for v in rest {
+                out.push(' ');
+                match v {
+                    Value::Str(s) => out.push_str(s),
+                    other => out.push_str(&self.inspect(other, false)),
+                }
+            }
+            return out;
+        }
+        for (i, v) in args.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push_str(&self.inspect(v, true));
+        }
+        out
     }
 
     pub(crate) fn install_builtins(&mut self) {
@@ -529,22 +668,16 @@ impl Interp {
 
         // ----- console -----
         let console = self.plain();
-        self.set_native(&console, "log", |it, _, args| {
-            let line = args
-                .iter()
-                .map(|v| it.inspect(v, true))
-                .collect::<Vec<_>>()
-                .join(" ");
-            it.emit_out(&line, true);
-            Ok(Value::Undefined)
-        });
-        for name in ["error", "warn"] {
+        for name in ["log", "info", "debug"] {
             self.set_native(&console, name, |it, _, args| {
-                let line = args
-                    .iter()
-                    .map(|v| it.inspect(v, true))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let line = it.format_log(args);
+                it.emit_out(&line, true);
+                Ok(Value::Undefined)
+            });
+        }
+        for name in ["error", "warn", "trace"] {
+            self.set_native(&console, name, |it, _, args| {
+                let line = it.format_log(args);
                 it.emit_err(&line);
                 Ok(Value::Undefined)
             });
@@ -691,6 +824,16 @@ impl Interp {
             });
             self.set_native(o, "defineProperty", |it, _, args| {
                 let key = it.key_of(&arg(args, 1));
+                if let Value::Object(po) = arg(args, 0) {
+                    if let Some((target, handler, trap)) = it.proxy_trap(&po, "defineProperty")? {
+                        if trap.is_callable() {
+                            it.call(&trap, &handler, &[target, arg(args, 1), arg(args, 2)])?;
+                        } else {
+                            it.define_property(&target, &key, &arg(args, 2))?;
+                        }
+                        return Ok(arg(args, 0));
+                    }
+                }
                 it.define_property(&arg(args, 0), &key, &arg(args, 2))?;
                 Ok(arg(args, 0))
             });
@@ -721,13 +864,25 @@ impl Interp {
             });
             self.set_native(o, "getOwnPropertyNames", |it, _, args| {
                 let t = arg(args, 0);
+                if let Value::Object(po) = &t {
+                    if let Some(keys) = it.proxy_own_keys(po, false)? {
+                        let names = keys
+                            .into_iter()
+                            .filter(|k| matches!(k, Value::Str(_)))
+                            .collect();
+                        return Ok(it.array(names));
+                    }
+                }
                 let mut names: Vec<Value> = it.own_keys(&t).into_iter().map(Value::Str).collect();
+                if matches!(t, Value::Str(_)) {
+                    names.push(Value::str("length"));
+                }
                 if let Value::Object(o) = &t {
                     names.extend(
                         o.props
                             .borrow()
                             .iter()
-                            .filter(|p| !p.enumerable && !p.key.starts_with("@@sym:"))
+                            .filter(|p| !p.enumerable && !p.key.starts_with("@@"))
                             .map(|p| Value::Str(p.key.clone())),
                     );
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) {
@@ -740,6 +895,13 @@ impl Interp {
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(it.array(vec![]));
                 };
+                if let Some(keys) = it.proxy_own_keys(&o, false)? {
+                    let syms = keys
+                        .into_iter()
+                        .filter(|k| matches!(k, Value::Object(_)))
+                        .collect();
+                    return Ok(it.array(syms));
+                }
                 let found: Vec<Value> = o
                     .props
                     .borrow()
@@ -754,6 +916,19 @@ impl Interp {
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(Value::Undefined);
                 };
+                if let Some((target, handler, trap)) =
+                    it.proxy_trap(&o, "getOwnPropertyDescriptor")?
+                {
+                    let gopd = it
+                        .lookup(&it.global.clone(), "Object")
+                        .unwrap_or(Value::Undefined);
+                    let gopd = it.get(&gopd, "getOwnPropertyDescriptor")?;
+                    return if trap.is_callable() {
+                        it.call(&trap, &handler, &[target, arg(args, 1)])
+                    } else {
+                        it.call(&gopd, &Value::Undefined, &[target, arg(args, 1)])
+                    };
+                }
                 let Some(p) = o.props.borrow().iter().find(|p| *p.key == *key).cloned() else {
                     let v = it.get(&arg(args, 0), &key)?;
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) && !matches!(v, Value::Undefined)
@@ -790,17 +965,48 @@ impl Interp {
             });
             self.set_native(o, "isFrozen", |_, _, args| {
                 Ok(Value::Bool(match arg(args, 0) {
-                    Value::Object(o) => o.frozen.get(),
+                    Value::Object(o) => {
+                        o.frozen.get() || (o.ext.get() != 0 && o.props.borrow().is_empty())
+                    }
                     _ => true,
                 }))
             });
-            self.set_native(o, "preventExtensions", |_, _, args| Ok(arg(args, 0)));
-            self.set_native(o, "seal", |_, _, args| Ok(arg(args, 0)));
-            self.set_native(o, "isExtensible", |_, _, _| Ok(Value::Bool(true)));
+            self.set_native(o, "preventExtensions", |_, _, args| {
+                if let Value::Object(o) = arg(args, 0) {
+                    o.ext.set(o.ext.get().max(1));
+                }
+                Ok(arg(args, 0))
+            });
+            self.set_native(o, "seal", |_, _, args| {
+                if let Value::Object(o) = arg(args, 0) {
+                    o.ext.set(2);
+                }
+                Ok(arg(args, 0))
+            });
+            self.set_native(o, "isExtensible", |_, _, args| {
+                Ok(Value::Bool(match arg(args, 0) {
+                    Value::Object(o) => o.ext.get() == 0 && !o.frozen.get(),
+                    _ => false,
+                }))
+            });
+            self.set_native(o, "isSealed", |_, _, args| {
+                Ok(Value::Bool(match arg(args, 0) {
+                    Value::Object(o) => o.ext.get() == 2 || o.frozen.get(),
+                    _ => true,
+                }))
+            });
         }
         g.declare("Object", object, true);
         self.set_native(&op, "hasOwnProperty", |it, this, args| {
-            let key = it.to_str(&arg(args, 0));
+            let key = it.key_of(&arg(args, 0));
+            if let Value::Object(po) = this {
+                if matches!(&*po.kind.borrow(), Kind::Proxy(_)) {
+                    let object = it.lookup(&it.global.clone(), "Object").unwrap_or(Value::Undefined);
+                    let gopd = it.get(&object, "getOwnPropertyDescriptor")?;
+                    let d = it.call(&gopd, &object, &[this.clone(), arg(args, 0)])?;
+                    return Ok(Value::Bool(!matches!(d, Value::Undefined)));
+                }
+            }
             Ok(Value::Bool(match this {
                 Value::Object(o) => find_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| i < items.len()) || *key == *"length"),
                 Value::Str(s) => key.parse::<usize>().is_ok_and(|i| i < s.chars().count()),
@@ -846,6 +1052,7 @@ impl Interp {
                 Value::Number(_) => "[object Number]",
                 Value::Bool(_) => "[object Boolean]",
                 Value::Str(_) => "[object String]",
+                Value::BigInt(_) => "[object BigInt]",
                 Value::Object(o) => match &*o.kind.borrow() {
                     Kind::Array(_) => "[object Array]",
                     Kind::Closure { .. } | Kind::Native(_) => "[object Function]",
@@ -857,7 +1064,10 @@ impl Interp {
                     Kind::ArrayBuffer(_) => "[object ArrayBuffer]",
                     Kind::Typed(t) => t.ty.tag(),
                     Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
-                    Kind::Plain | Kind::Global => "[object Object]",
+                    Kind::Plain if is_error_instance(it, o) => "[object Error]",
+                    Kind::Plain | Kind::Global | Kind::Generator(_) | Kind::Proxy(_) => {
+                        "[object Object]"
+                    }
                 },
             }))
         });
@@ -885,12 +1095,28 @@ impl Interp {
                 it.call(&target, &bound_this, &all)
             }))
         });
-        self.set_native(&fp, "toString", |_, this, _| {
-            Ok(Value::str(if this.is_callable() {
-                "function () { [native code] }"
-            } else {
-                ""
-            }))
+        self.set_native(&fp, "toString", |it, this, _| {
+            if !this.is_callable() {
+                return Ok(Value::str(""));
+            }
+            // a script function prints its source text, a native one `function name() { [native code] }`
+            if let Value::Object(o) = this {
+                if let Kind::Closure { def, .. } = &*o.kind.borrow() {
+                    let (run, lo, hi) = def.src;
+                    if let Some(text) = it.sources.get(&run).and_then(|s| {
+                        s.get(lo.saturating_sub(1) as usize..hi.saturating_sub(1) as usize)
+                    }) {
+                        return Ok(Value::str(text.trim_start()));
+                    }
+                }
+            }
+            let name = match it.get(this, "name") {
+                Ok(Value::Str(n)) => n.to_string(),
+                _ => String::new(),
+            };
+            Ok(Value::str(&format!(
+                "function {name}() {{ [native code] }}"
+            )))
         });
         let function = self.native(|it, _, args| {
             let (body, params) = match args.split_last() {
@@ -903,7 +1129,8 @@ impl Interp {
                 ),
                 None => ("".into(), String::new()),
             };
-            it.eval_function(&format!("function anonymous({params}\n) {{\n{body}\n}}"))
+            let r = it.eval_function(&format!("function anonymous({params}\n) {{\n{body}\n}}"));
+            dynamic_code(r)
         });
         g.declare(
             "globalThis",
@@ -916,6 +1143,12 @@ impl Interp {
             put_hidden(&fp, "constructor", function.clone());
         }
         g.declare("Function", function, true);
+        // Only the indirect (global-scope) form: the scan rejects a direct `eval(...)` call.
+        let eval = self.native(|it, _, args| match arg(args, 0) {
+            Value::Str(src) => dynamic_code(it.run(&src)),
+            other => Ok(other),
+        });
+        g.declare("eval", eval, true);
 
         // ----- Array -----
         let ap = self.array_proto.clone();
@@ -1059,10 +1292,45 @@ impl Interp {
             self.set_native(&ap, name, move |it, this, args| {
                 let needle = arg(args, 0);
                 let items = it.array_items(this);
+                let len = items.len() as f64;
                 let pos = if last {
-                    items.iter().rposition(|v| strict_equals(v, &needle))
+                    let from = match arg(args, 1) {
+                        Value::Undefined => len - 1.0,
+                        v => {
+                            let n = it.num(&v);
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            if n < 0.0 {
+                                len + n
+                            } else {
+                                n.min(len - 1.0)
+                            }
+                        }
+                    };
+                    if from < 0.0 {
+                        None
+                    } else {
+                        items[..=(from as usize)]
+                            .iter()
+                            .rposition(|v| strict_equals(v, &needle))
+                    }
                 } else {
-                    items.iter().position(|v| strict_equals(v, &needle))
+                    let from = match arg(args, 1) {
+                        Value::Undefined => 0.0,
+                        v => {
+                            let n = it.num(&v);
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            if n < 0.0 {
+                                (len + n).max(0.0)
+                            } else {
+                                n
+                            }
+                        }
+                    } as usize;
+                    items
+                        .iter()
+                        .skip(from)
+                        .position(|v| strict_equals(v, &needle))
+                        .map(|p| p + from)
                 };
                 Ok(Value::Number(pos.map_or(-1.0, |i| i as f64)))
             });
@@ -1070,7 +1338,17 @@ impl Interp {
         self.set_native(&ap, "includes", |it, this, args| {
             let needle = arg(args, 0);
             let same_zero = |v: &Value| strict_equals(v, &needle) || matches!((v, &needle), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan());
-            Ok(Value::Bool(it.array_items(this).iter().any(same_zero)))
+            let items = it.array_items(this);
+            let len = items.len() as f64;
+            let from = match arg(args, 1) {
+                Value::Undefined => 0.0,
+                v => {
+                    let n = it.num(&v);
+                    let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                    if n < 0.0 { (len + n).max(0.0) } else { n }
+                }
+            } as usize;
+            Ok(Value::Bool(items.iter().skip(from).any(same_zero)))
         });
         self.set_native(&ap, "slice", |it, this, args| {
             let items = it.array_items(this);
@@ -1083,6 +1361,17 @@ impl Interp {
                 match v {
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
                         items.extend(it.array_items(v))
+                    }
+                    Value::Object(_) => {
+                        let key = it.well_known_key("isConcatSpreadable");
+                        if it.get(v, &key)?.truthy() {
+                            let n = it.get(v, "length")?;
+                            for i in 0..it.num(&n).max(0.0) as usize {
+                                items.push(it.get(v, &i.to_string())?);
+                            }
+                        } else {
+                            items.push(v.clone());
+                        }
                     }
                     other => items.push(other.clone()),
                 }
@@ -1174,7 +1463,12 @@ impl Interp {
         });
         self.set_native(&sp, "endsWith", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            Ok(Value::Bool(s.ends_with(&*n)))
+            let end = match arg(args, 1) {
+                Value::Undefined => s.chars().count(),
+                v => (it.num(&v).max(0.0) as usize).min(s.chars().count()),
+            };
+            let head: String = s.chars().take(end).collect();
+            Ok(Value::Bool(head.ends_with(&*n)))
         });
         self.set_native(&sp, "toUpperCase", |it, this, _| {
             Ok(Value::Str(this_str(it, this).to_uppercase().into()))
@@ -1278,11 +1572,11 @@ impl Interp {
         });
         self.set_native(&sp, "localeCompare", |it, this, args| {
             let (a, b) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            Ok(Value::Number(match a.cmp(&b) {
+            Ok(Value::Number(match collate(&a, &b) {
                 std::cmp::Ordering::Less => -1.0,
                 std::cmp::Ordering::Equal => 0.0,
                 std::cmp::Ordering::Greater => 1.0,
-            })) // ponytail: code point order, not ICU collation
+            }))
         });
         self.set_native(&sp, "replace", |it, this, args| {
             it.string_replace(this, args, false)
@@ -1468,6 +1762,10 @@ impl Interp {
                 ))
             });
         }
+        if let Value::Object(o) = &number {
+            put_hidden(o, "prototype", Value::Object(self.number_proto.clone()));
+            put_hidden(&self.number_proto.clone(), "constructor", number.clone());
+        }
         g.declare("Number", number, true);
         self.set_native(&self.number_proto.clone(), "toString", |it, this, args| {
             let n = it.num(this);
@@ -1492,29 +1790,18 @@ impl Interp {
             }
             Ok(Value::Str(digits.iter().rev().collect::<String>().into()))
         });
-        self.set_native(&self.number_proto.clone(), "toFixed", |it, this, args| {
-            let n = it.num(this);
-            let d = it.num(&arg(args, 0)).max(0.0) as usize;
-            Ok(Value::Str(
-                if n.abs() >= 1e21 {
-                    number_to_string(n)
-                } else {
-                    format!("{n:.d$}")
-                }
-                .into(),
-            ))
-        });
         self.set_native(&self.number_proto.clone(), "valueOf", |_, this, _| {
             Ok(this.clone())
         });
         self.set_native(&self.bool_proto.clone(), "toString", |it, this, _| {
             Ok(Value::Str(it.to_str(this)))
         });
-        g.declare(
-            "Boolean",
-            self.native(|_, _, args| Ok(Value::Bool(arg(args, 0).truthy()))),
-            true,
-        );
+        let boolean = self.native(|_, _, args| Ok(Value::Bool(arg(args, 0).truthy())));
+        if let Value::Object(o) = &boolean {
+            put_hidden(o, "prototype", Value::Object(self.bool_proto.clone()));
+            put_hidden(&self.bool_proto.clone(), "constructor", boolean.clone());
+        }
+        g.declare("Boolean", boolean, true);
         g.declare(
             "isNaN",
             self.native(|it, _, args| Ok(Value::Bool(it.num(&arg(args, 0)).is_nan()))),
@@ -1725,149 +2012,8 @@ impl Interp {
 
         // ----- JSON -----
         let json = self.plain();
-        self.set_native(&json, "stringify", |it, _, args| {
-            let indent = match arg(args, 2) {
-                Value::Number(n) => " ".repeat(n.clamp(0.0, 10.0) as usize),
-                Value::Str(s) => s.chars().take(10).collect(),
-                _ => String::new(),
-            };
-            let mut out = String::new();
-            let wrote = it.json_write(&arg(args, 0), &indent, "", &mut out)?;
-            Ok(if wrote {
-                Value::Str(out.into())
-            } else {
-                Value::Undefined
-            })
-        });
-        self.set_native(&json, "parse", |it, _, args| {
-            let text = it.to_str(&arg(args, 0));
-            let mut p = JsonParser {
-                s: text.as_bytes(),
-                i: 0,
-            };
-            let v = p.value(it);
-            match v {
-                Some(v)
-                    if {
-                        p.ws();
-                        p.i == p.s.len()
-                    } =>
-                {
-                    Ok(v)
-                }
-                _ => {
-                    let at = p.i.min(text.len());
-                    let tok =
-                        text[at..]
-                            .chars()
-                            .next()
-                            .map_or("end of JSON input".to_string(), |c| {
-                                format!(
-                                    "token '{c}', \"{}\" is not valid JSON",
-                                    &text[..text.len().min(at + 10)]
-                                )
-                            });
-                    it.throw_error("SyntaxError", &format!("Unexpected {tok}"))
-                }
-            }
-        });
+        self.install_json(&json);
         g.declare("JSON", Value::Object(json), true);
-    }
-
-    /// Serialize per JSON.stringify; returns false when the value has no JSON form (undefined/function).
-    fn json_write(&mut self, v: &Value, indent: &str, cur: &str, out: &mut String) -> R<bool> {
-        match v {
-            Value::Undefined => Ok(false),
-            Value::Null => {
-                out.push_str("null");
-                Ok(true)
-            }
-            Value::Bool(b) => {
-                out.push_str(if *b { "true" } else { "false" });
-                Ok(true)
-            }
-            Value::Number(n) => {
-                out.push_str(&if n.is_finite() {
-                    number_to_string(*n)
-                } else {
-                    "null".into()
-                });
-                Ok(true)
-            }
-            Value::Str(s) => {
-                json_quote(s, out);
-                Ok(true)
-            }
-            Value::Object(o) => {
-                if v.is_callable() {
-                    return Ok(false);
-                }
-                if let Ok(f) = self.get(v, "toJSON") {
-                    if f.is_callable() {
-                        let r = self.call(&f, v, &[])?;
-                        return self.json_write(&r, indent, cur, out);
-                    }
-                }
-                let inner = format!("{cur}{indent}");
-                let (open_nl, sep, close_nl) = if indent.is_empty() {
-                    (String::new(), ",".to_string(), String::new())
-                } else {
-                    (
-                        format!("\n{inner}"),
-                        format!(",\n{inner}"),
-                        format!("\n{cur}"),
-                    )
-                };
-                if matches!(&*o.kind.borrow(), Kind::Array(_)) {
-                    let items = self.array_items(v);
-                    if items.is_empty() {
-                        out.push_str("[]");
-                        return Ok(true);
-                    }
-                    out.push('[');
-                    out.push_str(&open_nl);
-                    for (i, item) in items.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(&sep);
-                        }
-                        if !self.json_write(item, indent, &inner, out)? {
-                            out.push_str("null");
-                        }
-                    }
-                    out.push_str(&close_nl);
-                    out.push(']');
-                    return Ok(true);
-                }
-                let mut first = true;
-                let mut body = String::new();
-                for k in self.own_keys(v) {
-                    let val = self.get(v, &k)?;
-                    let mut piece = String::new();
-                    if self.json_write(&val, indent, &inner, &mut piece)? {
-                        if !first {
-                            body.push_str(&sep);
-                        }
-                        first = false;
-                        json_quote(&k, &mut body);
-                        body.push(':');
-                        if !indent.is_empty() {
-                            body.push(' ');
-                        }
-                        body.push_str(&piece);
-                    }
-                }
-                if first {
-                    out.push_str("{}");
-                } else {
-                    out.push('{');
-                    out.push_str(&open_nl);
-                    out.push_str(&body);
-                    out.push_str(&close_nl);
-                    out.push('}');
-                }
-                Ok(true)
-            }
-        }
     }
 }
 
@@ -1889,145 +2035,233 @@ pub(crate) fn json_quote(s: &str, out: &mut String) {
     out.push('"');
 }
 
-struct JsonParser<'a> {
-    s: &'a [u8],
-    i: usize,
+/// Latin base letter of an accented character (`é` -> `e`), plus whether it was accented.
+fn fold_accent(c: char) -> (char, bool) {
+    let base = match c {
+        'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
+        'ç' | 'ć' | 'č' => 'c',
+        'è'..='ë' | 'ē' | 'ę' | 'ě' => 'e',
+        'ì'..='ï' | 'ī' => 'i',
+        'ñ' | 'ń' | 'ň' => 'n',
+        'ò'..='ö' | 'ø' | 'ō' => 'o',
+        'ù'..='ü' | 'ū' | 'ů' => 'u',
+        'ý' | 'ÿ' => 'y',
+        'ś' | 'š' => 's',
+        'ź' | 'ż' | 'ž' => 'z',
+        _ => return (c, false),
+    };
+    (base, true)
 }
 
-impl JsonParser<'_> {
-    fn ws(&mut self) {
-        while self.i < self.s.len() && matches!(self.s[self.i], b' ' | b'\t' | b'\n' | b'\r') {
-            self.i += 1;
-        }
-    }
-
-    fn lit(&mut self, word: &str) -> bool {
-        if self.s[self.i..].starts_with(word.as_bytes()) {
-            self.i += word.len();
-            true
+/// Approximation of the ICU root collation (`localeCompare`): punctuation < digits < letters;
+/// letters by base letter, then accents, then lower case before upper case.
+// ponytail: Latin only; full UCA tables would need icu_collator.
+pub(crate) fn collate(a: &str, b: &str) -> std::cmp::Ordering {
+    fn class(c: char) -> u8 {
+        if c.is_whitespace() {
+            0
+        } else if c.is_alphabetic() {
+            3
+        } else if c.is_numeric() {
+            2
         } else {
-            false
+            1
         }
     }
-
-    fn string(&mut self) -> Option<String> {
-        self.i += 1; // opening quote
-        let mut out: Vec<u8> = Vec::new();
-        while self.i < self.s.len() {
-            match self.s[self.i] {
-                b'"' => {
-                    self.i += 1;
-                    return String::from_utf8(out).ok();
-                }
-                b'\\' => {
-                    self.i += 1;
-                    let c = *self.s.get(self.i)?;
-                    self.i += 1;
-                    match c {
-                        b'n' => out.push(b'\n'),
-                        b't' => out.push(b'\t'),
-                        b'r' => out.push(b'\r'),
-                        b'b' => out.push(8),
-                        b'f' => out.push(12),
-                        b'/' | b'\\' | b'"' => out.push(c),
-                        b'u' => {
-                            let hex = std::str::from_utf8(self.s.get(self.i..self.i + 4)?).ok()?;
-                            let code = u32::from_str_radix(hex, 16).ok()?;
-                            self.i += 4;
-                            let ch = char::from_u32(code).unwrap_or('\u{FFFD}'); // ponytail: lone surrogates become U+FFFD
-                            let mut buf = [0u8; 4];
-                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                        }
-                        _ => return None,
-                    }
-                }
-                c if c < 0x20 => return None,
-                c => {
-                    out.push(c);
-                    self.i += 1;
-                }
-            }
-        }
-        None
+    fn primary(s: &str) -> Vec<(u8, char)> {
+        s.chars()
+            .map(|c| {
+                let lower = c.to_lowercase().next().unwrap_or(c);
+                let (base, _) = fold_accent(lower);
+                (class(c), base)
+            })
+            .collect()
     }
+    let accents = |s: &str| -> Vec<bool> {
+        s.chars()
+            .map(|c| fold_accent(c.to_lowercase().next().unwrap_or(c)).1)
+            .collect()
+    };
+    let case = |s: &str| -> Vec<bool> { s.chars().map(|c| c.is_uppercase()).collect() };
+    primary(a)
+        .cmp(&primary(b))
+        .then_with(|| accents(a).cmp(&accents(b)))
+        .then_with(|| case(a).cmp(&case(b)))
+}
 
-    fn value(&mut self, it: &mut Interp) -> Option<Value> {
-        self.ws();
-        match *self.s.get(self.i)? {
-            b'{' => {
-                self.i += 1;
-                let obj = it.plain();
-                self.ws();
-                if self.s.get(self.i) == Some(&b'}') {
-                    self.i += 1;
-                    return Some(Value::Object(obj));
-                }
-                loop {
-                    self.ws();
-                    if *self.s.get(self.i)? != b'"' {
-                        return None;
-                    }
-                    let k = self.string()?;
-                    self.ws();
-                    if *self.s.get(self.i)? != b':' {
-                        return None;
-                    }
-                    self.i += 1;
-                    let v = self.value(it)?;
-                    put(&obj, &k, v);
-                    self.ws();
-                    match *self.s.get(self.i)? {
-                        b',' => self.i += 1,
-                        b'}' => {
-                            self.i += 1;
-                            return Some(Value::Object(obj));
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            b'[' => {
-                self.i += 1;
-                let mut items = Vec::new();
-                self.ws();
-                if self.s.get(self.i) == Some(&b']') {
-                    self.i += 1;
-                    return Some(it.array(items));
-                }
-                loop {
-                    items.push(self.value(it)?);
-                    self.ws();
-                    match *self.s.get(self.i)? {
-                        b',' => self.i += 1,
-                        b']' => {
-                            self.i += 1;
-                            return Some(it.array(items));
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            b'"' => self.string().map(|s| Value::Str(s.into())),
-            b't' => self.lit("true").then_some(Value::Bool(true)),
-            b'f' => self.lit("false").then_some(Value::Bool(false)),
-            b'n' => self.lit("null").then_some(Value::Null),
-            b'-' | b'0'..=b'9' => {
-                let start = self.i;
-                while self.i < self.s.len()
-                    && matches!(
-                        self.s[self.i],
-                        b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
-                    )
-                {
-                    self.i += 1;
-                }
-                std::str::from_utf8(&self.s[start..self.i])
-                    .ok()?
-                    .parse()
-                    .ok()
-                    .map(Value::Number)
-            }
-            _ => None,
+fn is_error_instance(it: &mut Interp, o: &Obj) -> bool {
+    let Some(ctor) = it.lookup(&it.global.clone(), "Error") else {
+        return false;
+    };
+    let Ok(Value::Object(proto)) = it.get(&ctor, "prototype") else {
+        return false;
+    };
+    let mut cur = o.proto.borrow().clone();
+    while let Some(c) = cur {
+        if Rc::ptr_eq(&c, &proto) {
+            return true;
         }
+        cur = c.proto.borrow().clone();
+    }
+    false
+}
+
+impl Interp {
+    /// Native `Array.prototype` iteration methods (they replace the self-hosted prelude versions: a
+    /// callback loop in the evaluator costs several interpreted calls per element).
+    pub(crate) fn install_array_iteration(&mut self) {
+        let ap = self.array_proto.clone();
+        fn length_of(it: &mut Interp, this: &Value) -> R<usize> {
+            if let Value::Object(o) = this {
+                if let Kind::Array(items) = &*o.kind.borrow() {
+                    return Ok(items.len());
+                }
+            }
+            let l = it.get(this, "length")?;
+            Ok(it.num(&l).max(0.0) as usize)
+        }
+        // an element still present at index `i` (the callback may have shrunk the array)
+        fn element(it: &mut Interp, this: &Value, i: usize) -> R<Option<Value>> {
+            if let Value::Object(o) = this {
+                if let Kind::Array(items) = &*o.kind.borrow() {
+                    return Ok(items.get(i).cloned());
+                }
+            }
+            Ok(Some(it.get_index(this, i)?))
+        }
+        fn callback(it: &mut Interp, f: &Value) -> R<()> {
+            if f.is_callable() {
+                return Ok(());
+            }
+            let shown = it.inspect(f, false);
+            it.throw_error("TypeError", &format!("{shown} is not a function"))
+        }
+        self.set_native(&ap, "forEach", |it, this, args| {
+            let (f, t) = (arg(args, 0), arg(args, 1));
+            callback(it, &f)?;
+            for i in 0..length_of(it, this)? {
+                if let Some(v) = element(it, this, i)? {
+                    it.call(&f, &t, &[v, Value::Number(i as f64), this.clone()])?;
+                }
+            }
+            Ok(Value::Undefined)
+        });
+        self.set_native(&ap, "map", |it, this, args| {
+            let (f, t) = (arg(args, 0), arg(args, 1));
+            callback(it, &f)?;
+            let len = length_of(it, this)?;
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                match element(it, this, i)? {
+                    Some(v) => {
+                        out.push(it.call(&f, &t, &[v, Value::Number(i as f64), this.clone()])?)
+                    }
+                    None => out.push(Value::Undefined),
+                }
+            }
+            Ok(it.array(out))
+        });
+        self.set_native(&ap, "filter", |it, this, args| {
+            let (f, t) = (arg(args, 0), arg(args, 1));
+            callback(it, &f)?;
+            let mut out = Vec::new();
+            for i in 0..length_of(it, this)? {
+                if let Some(v) = element(it, this, i)? {
+                    if it
+                        .call(&f, &t, &[v.clone(), Value::Number(i as f64), this.clone()])?
+                        .truthy()
+                    {
+                        out.push(v);
+                    }
+                }
+            }
+            Ok(it.array(out))
+        });
+        for (name, stop_on) in [("some", true), ("every", false)] {
+            self.set_native(&ap, name, move |it, this, args| {
+                let (f, t) = (arg(args, 0), arg(args, 1));
+                callback(it, &f)?;
+                for i in 0..length_of(it, this)? {
+                    if let Some(v) = element(it, this, i)? {
+                        if it
+                            .call(&f, &t, &[v, Value::Number(i as f64), this.clone()])?
+                            .truthy()
+                            == stop_on
+                        {
+                            return Ok(Value::Bool(stop_on));
+                        }
+                    }
+                }
+                Ok(Value::Bool(!stop_on))
+            });
+        }
+        for (name, want_index) in [("find", false), ("findIndex", true)] {
+            self.set_native(&ap, name, move |it, this, args| {
+                let (f, t) = (arg(args, 0), arg(args, 1));
+                callback(it, &f)?;
+                for i in 0..length_of(it, this)? {
+                    let v = element(it, this, i)?.unwrap_or(Value::Undefined);
+                    if it
+                        .call(&f, &t, &[v.clone(), Value::Number(i as f64), this.clone()])?
+                        .truthy()
+                    {
+                        return Ok(if want_index {
+                            Value::Number(i as f64)
+                        } else {
+                            v
+                        });
+                    }
+                }
+                Ok(if want_index {
+                    Value::Number(-1.0)
+                } else {
+                    Value::Undefined
+                })
+            });
+        }
+        self.set_native(&ap, "reduce", |it, this, args| {
+            let f = arg(args, 0);
+            callback(it, &f)?;
+            let len = length_of(it, this)?;
+            let mut i = 0;
+            let mut acc = if args.len() >= 2 {
+                args[1].clone()
+            } else {
+                loop {
+                    if i >= len {
+                        return it.throw_error(
+                            "TypeError",
+                            "Reduce of empty array with no initial value",
+                        );
+                    }
+                    i += 1;
+                    if let Some(v) = element(it, this, i - 1)? {
+                        break v;
+                    }
+                }
+            };
+            while i < len {
+                if let Some(v) = element(it, this, i)? {
+                    acc = it.call(
+                        &f,
+                        &Value::Undefined,
+                        &[acc, v, Value::Number(i as f64), this.clone()],
+                    )?;
+                }
+                i += 1;
+            }
+            Ok(acc)
+        });
+    }
+}
+
+/// Code compiled at run time that the evaluator cannot parse (`with`, sloppy-only syntax) is an
+/// unsupported construct, not a JavaScript `SyntaxError`.
+fn dynamic_code(r: R<Value>) -> R<Value> {
+    match r {
+        Err(Ctl::Throw(Value::Str(m))) if &*m == "failed to parse JavaScript source" => {
+            Err(Ctl::Unsupported("dynamic-code".into()))
+        }
+        other => other,
     }
 }

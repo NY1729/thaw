@@ -35,6 +35,9 @@ impl An {
                 Atom::SLit(i) => format!("{v} === {:?}", self.lits[i as usize]),
                 Atom::Bool => format!("typeof {v} === 'boolean'"),
                 Atom::Fn(_) => format!("typeof {v} === 'function'"),
+                Atom::Ns(n) if crate::builtins::is_ext(n) => {
+                    format!("{v} instanceof {}", crate::builtins::ext_guard(n))
+                }
                 Atom::Ns(_) => format!("typeof {v} === 'object'"),
                 Atom::Arr(s) => {
                     let s = self.find(s);

@@ -1,0 +1,7 @@
+set b|get a|has a|del a|keys 2
+5 { made: [ 1, 2 ] }
+2 true true
+3 0 true
+{} true {}
+dflt:foo
+true

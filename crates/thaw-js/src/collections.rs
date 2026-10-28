@@ -2,6 +2,138 @@
 
 use crate::*;
 
+/// A hashable stand-in for a value under SameValueZero (`NaN` equals `NaN`, `-0` equals `+0`).
+#[derive(PartialEq, Eq, Hash)]
+enum HKey {
+    Undefined,
+    Null,
+    Bool(bool),
+    Number(u64),
+    Str(Rc<str>),
+    Big(Rc<num_bigint::BigInt>),
+    Object(usize),
+}
+
+fn hkey(v: &Value) -> HKey {
+    match v {
+        Value::Undefined => HKey::Undefined,
+        Value::Null => HKey::Null,
+        Value::Bool(b) => HKey::Bool(*b),
+        Value::Number(n) if n.is_nan() => HKey::Number(f64::NAN.to_bits()),
+        Value::Number(n) => HKey::Number((if *n == 0.0 { 0.0 } else { *n }).to_bits()),
+        Value::Str(s) => HKey::Str(s.clone()),
+        Value::BigInt(b) => HKey::Big(b.clone()),
+        Value::Object(o) => HKey::Object(Rc::as_ptr(o) as usize),
+    }
+}
+
+/// Collections smaller than this are searched linearly.
+const HASH_MIN: usize = 16;
+
+/// `Map` storage: insertion-ordered entries plus a lazily built hash index.
+#[derive(Default)]
+pub(crate) struct MapData {
+    pub(crate) entries: Vec<(Value, Value)>,
+    index: Option<FxMap<HKey, usize>>,
+}
+
+impl MapData {
+    fn find(&mut self, key: &Value) -> Option<usize> {
+        if self.entries.len() < HASH_MIN {
+            return self
+                .entries
+                .iter()
+                .position(|(k, _)| same_value_zero(k, key));
+        }
+        let entries = &self.entries;
+        let index = self.index.get_or_insert_with(|| {
+            entries
+                .iter()
+                .enumerate()
+                .map(|(i, (k, _))| (hkey(k), i))
+                .collect()
+        });
+        index.get(&hkey(key)).copied()
+    }
+    pub(crate) fn get(&mut self, key: &Value) -> Option<Value> {
+        self.find(key).map(|i| self.entries[i].1.clone())
+    }
+    pub(crate) fn has(&mut self, key: &Value) -> bool {
+        self.find(key).is_some()
+    }
+    pub(crate) fn set(&mut self, key: Value, value: Value) {
+        match self.find(&key) {
+            Some(i) => self.entries[i].1 = value,
+            None => {
+                if let Some(index) = &mut self.index {
+                    index.insert(hkey(&key), self.entries.len());
+                }
+                self.entries.push((key, value));
+            }
+        }
+    }
+    pub(crate) fn delete(&mut self, key: &Value) -> bool {
+        let Some(i) = self.find(key) else {
+            return false;
+        };
+        self.entries.remove(i);
+        self.index = None;
+        true
+    }
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.index = None;
+    }
+}
+
+/// `Set` storage, like [`MapData`].
+#[derive(Default)]
+pub(crate) struct SetData {
+    pub(crate) items: Vec<Value>,
+    index: Option<FxMap<HKey, usize>>,
+}
+
+impl SetData {
+    fn find(&mut self, key: &Value) -> Option<usize> {
+        if self.items.len() < HASH_MIN {
+            return self.items.iter().position(|k| same_value_zero(k, key));
+        }
+        let items = &self.items;
+        let index = self.index.get_or_insert_with(|| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (hkey(k), i))
+                .collect()
+        });
+        index.get(&hkey(key)).copied()
+    }
+    pub(crate) fn has(&mut self, key: &Value) -> bool {
+        self.find(key).is_some()
+    }
+    pub(crate) fn add(&mut self, key: Value) {
+        if self.find(&key).is_some() {
+            return;
+        }
+        if let Some(index) = &mut self.index {
+            index.insert(hkey(&key), self.items.len());
+        }
+        self.items.push(key);
+    }
+    pub(crate) fn delete(&mut self, key: &Value) -> bool {
+        let Some(i) = self.find(key) else {
+            return false;
+        };
+        self.items.remove(i);
+        self.index = None;
+        true
+    }
+    pub(crate) fn clear(&mut self) {
+        self.items.clear();
+        self.index = None;
+    }
+}
+
 pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
     strict_equals(a, b)
         || matches!((a, b), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan())
@@ -45,11 +177,11 @@ impl Interp {
             Value::Object(o) => {
                 let pairs = match &*o.kind.borrow() {
                     Kind::Array(items) => return Some(items.clone()),
-                    Kind::Set(items) => return Some(items.clone()),
+                    Kind::Set(set) => return Some(set.items.clone()),
                     Kind::Typed(t) => {
                         return Some(t.to_vec().into_iter().map(Value::Number).collect())
                     }
-                    Kind::Map(entries) => entries.clone(),
+                    Kind::Map(map) => map.entries.clone(),
                     _ => return None,
                 };
                 Some(
@@ -171,6 +303,22 @@ impl Interp {
         if let Value::Object(s) = &symbol {
             put_hidden(s, "prototype", Value::Object(sym_proto.clone()));
             let registry = self.plain();
+            let reg_for_key = registry.clone();
+            self.set_native(s, "keyFor", move |it, _, args| {
+                let Value::Object(sym) = arg(args, 0) else {
+                    let shown = it.inspect(&arg(args, 0), false);
+                    return it.throw_error("TypeError", &format!("{shown} is not a symbol"));
+                };
+                let found = reg_for_key
+                    .props
+                    .borrow()
+                    .iter()
+                    .find_map(|p| match &p.slot {
+                        Slot::Data(Value::Object(o)) if Rc::ptr_eq(o, &sym) => Some(p.key.clone()),
+                        _ => None,
+                    });
+                Ok(found.map_or(Value::Undefined, Value::Str))
+            });
             let sp = sym_proto.clone();
             self.set_native(s, "for", move |it, _, args| {
                 let key = it.to_str(&arg(args, 0));
@@ -198,6 +346,15 @@ impl Interp {
                 "toPrimitive",
                 "toStringTag",
                 "species",
+                "isConcatSpreadable",
+                "match",
+                "matchAll",
+                "replace",
+                "search",
+                "split",
+                "unscopables",
+                "dispose",
+                "asyncDispose",
             ] {
                 self.next_symbol += 1;
                 let desc: Rc<str> = format!("Symbol.{name}").into();
@@ -231,7 +388,7 @@ impl Interp {
         let map = self.native({
             let mp = mp.clone();
             move |it, _, args| {
-                let mut entries: Vec<(Value, Value)> = Vec::new();
+                let mut entries = MapData::default();
                 if let Some(items) = it.iter_protocol(&arg(args, 0))? {
                     for item in items {
                         let kv = it.iter_items(&item).unwrap_or_default();
@@ -239,10 +396,7 @@ impl Interp {
                             kv.first().cloned().unwrap_or(Value::Undefined),
                             kv.get(1).cloned().unwrap_or(Value::Undefined),
                         );
-                        match entries.iter_mut().find(|(ek, _)| same_value_zero(ek, &k)) {
-                            Some(e) => e.1 = v,
-                            None => entries.push((k, v)),
-                        }
+                        entries.set(k, v);
                     }
                 }
                 Ok(Value::Object(new_obj(Some(mp.clone()), Kind::Map(entries))))
@@ -277,56 +431,45 @@ impl Interp {
         self.set_native(&mp, "get", |it, this, args| {
             let k = arg(args, 0);
             Ok(with_map!(this, it, |e| e
-                .iter()
-                .find(|(ek, _)| same_value_zero(ek, &k))
-                .map_or(Value::Undefined, |(_, v)| v.clone())))
+                .get(&k)
+                .unwrap_or(Value::Undefined)))
         });
         self.set_native(&mp, "has", |it, this, args| {
             let k = arg(args, 0);
-            Ok(Value::Bool(with_map!(this, it, |e| e
-                .iter()
-                .any(|(ek, _)| same_value_zero(ek, &k)))))
+            Ok(Value::Bool(with_map!(this, it, |e| e.has(&k))))
         });
         self.set_native(&mp, "set", |it, this, args| {
             let (k, v) = (arg(args, 0), arg(args, 1));
-            with_map!(
-                this,
-                it,
-                |e| match e.iter_mut().find(|(ek, _)| same_value_zero(ek, &k)) {
-                    Some(slot) => slot.1 = v,
-                    None => e.push((k, v)),
-                }
-            );
+            with_map!(this, it, |e| e.set(k, v));
             Ok(this.clone())
         });
         self.set_native(&mp, "delete", |it, this, args| {
             let k = arg(args, 0);
-            Ok(Value::Bool(with_map!(this, it, |e| {
-                let before = e.len();
-                e.retain(|(ek, _)| !same_value_zero(ek, &k));
-                e.len() != before
-            })))
+            Ok(Value::Bool(with_map!(this, it, |e| e.delete(&k))))
         });
         self.set_native(&mp, "clear", |it, this, _| {
             with_map!(this, it, |e| e.clear());
             Ok(Value::Undefined)
         });
-        let size =
-            self.native(|it, this, _| Ok(Value::Number(with_map!(this, it, |e| e.len()) as f64)));
+        let size = self.native(|it, this, _| {
+            Ok(Value::Number(
+                with_map!(this, it, |e| e.entries.len()) as f64
+            ))
+        });
         define_accessor(&mp, "size", Some(size), None, false);
         self.set_native(&mp, "forEach", |it, this, args| {
-            let entries = with_map!(this, it, |e| e.clone());
+            let entries = with_map!(this, it, |e| e.entries.clone());
             for (k, v) in entries {
                 it.call(&arg(args, 0), &arg(args, 1), &[v, k, this.clone()])?;
             }
             Ok(Value::Undefined)
         });
         self.set_native(&mp, "keys", |it, this, _| {
-            let e = with_map!(this, it, |e| e.clone());
+            let e = with_map!(this, it, |e| e.entries.clone());
             Ok(it.iterator_array(e.into_iter().map(|(k, _)| k).collect()))
         });
         self.set_native(&mp, "values", |it, this, _| {
-            let e = with_map!(this, it, |e| e.clone());
+            let e = with_map!(this, it, |e| e.entries.clone());
             Ok(it.iterator_array(e.into_iter().map(|(_, v)| v).collect()))
         });
         self.set_native(&mp, "entries", |it, this, _| {
@@ -339,11 +482,9 @@ impl Interp {
         let set = self.native({
             let sp = sp.clone();
             move |it, _, args| {
-                let mut items: Vec<Value> = Vec::new();
+                let mut items = SetData::default();
                 for v in it.iter_protocol(&arg(args, 0))?.unwrap_or_default() {
-                    if !items.iter().any(|x| same_value_zero(x, &v)) {
-                        items.push(v);
-                    }
+                    items.add(v);
                 }
                 Ok(Value::Object(new_obj(Some(sp.clone()), Kind::Set(items))))
             }
@@ -376,34 +517,26 @@ impl Interp {
         }
         self.set_native(&sp, "has", |it, this, args| {
             let k = arg(args, 0);
-            Ok(Value::Bool(with_set!(this, it, |e| e
-                .iter()
-                .any(|x| same_value_zero(x, &k)))))
+            Ok(Value::Bool(with_set!(this, it, |e| e.has(&k))))
         });
         self.set_native(&sp, "add", |it, this, args| {
             let k = arg(args, 0);
-            with_set!(this, it, |e| if !e.iter().any(|x| same_value_zero(x, &k)) {
-                e.push(k)
-            });
+            with_set!(this, it, |e| e.add(k));
             Ok(this.clone())
         });
         self.set_native(&sp, "delete", |it, this, args| {
             let k = arg(args, 0);
-            Ok(Value::Bool(with_set!(this, it, |e| {
-                let before = e.len();
-                e.retain(|x| !same_value_zero(x, &k));
-                e.len() != before
-            })))
+            Ok(Value::Bool(with_set!(this, it, |e| e.delete(&k))))
         });
         self.set_native(&sp, "clear", |it, this, _| {
             with_set!(this, it, |e| e.clear());
             Ok(Value::Undefined)
         });
-        let size =
-            self.native(|it, this, _| Ok(Value::Number(with_set!(this, it, |e| e.len()) as f64)));
+        let size = self
+            .native(|it, this, _| Ok(Value::Number(with_set!(this, it, |e| e.items.len()) as f64)));
         define_accessor(&sp, "size", Some(size), None, false);
         self.set_native(&sp, "forEach", |it, this, args| {
-            let items = with_set!(this, it, |e| e.clone());
+            let items = with_set!(this, it, |e| e.items.clone());
             for v in items {
                 it.call(&arg(args, 0), &arg(args, 1), &[v.clone(), v, this.clone()])?;
             }
@@ -411,12 +544,12 @@ impl Interp {
         });
         for name in ["values", "keys"] {
             self.set_native(&sp, name, |it, this, _| {
-                let e = with_set!(this, it, |e| e.clone());
+                let e = with_set!(this, it, |e| e.items.clone());
                 Ok(it.iterator_array(e))
             });
         }
         self.set_native(&sp, "entries", |it, this, _| {
-            let e = with_set!(this, it, |e| e.clone());
+            let e = with_set!(this, it, |e| e.items.clone());
             Ok(it.iterator_array(
                 e.into_iter()
                     .map(|v| it.array(vec![v.clone(), v]))
