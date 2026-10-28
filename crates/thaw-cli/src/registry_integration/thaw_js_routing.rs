@@ -28,13 +28,17 @@ fn thaw_js_blocking_value_export(pkg: &ResolvedPackage, user_source: &str, name:
         let (before, after) = (&user_source[..start], &user_source[start + name.len()..]);
         offset = start + name.len();
         rest = after;
-        if before.chars().next_back().is_some_and(is_word) || after.chars().next().is_some_and(is_word) {
+        if before.chars().next_back().is_some_and(is_word)
+            || after.chars().next().is_some_and(is_word)
+        {
             continue; // part of a longer identifier
         }
         let import_binding = before.trim_end().ends_with("import")
             || before.trim_end().ends_with("* as")
             || before.trim_end().ends_with(',')
-                && before.rfind("import").is_some_and(|i| !before[i..].contains(';'))
+                && before
+                    .rfind("import")
+                    .is_some_and(|i| !before[i..].contains(';'))
             || after.trim_start().starts_with("from ");
         if import_binding {
             continue;
@@ -46,7 +50,9 @@ fn thaw_js_blocking_value_export(pkg: &ResolvedPackage, user_source: &str, name:
         let called_function = member.is_some_and(|(member, tail)| {
             tail.starts_with('(') && pkg.functions.iter().any(|function| function.name == member)
         }) || (after.trim_start().starts_with('(')
-            && pkg.functions.iter().any(|function| function.name == name.rsplit('.').next().unwrap_or(name)));
+            && pkg.functions.iter().any(|function| {
+                function.name == name || function.name == name.rsplit('.').next().unwrap_or(name)
+            }));
         if !called_function {
             return true;
         }
@@ -144,7 +150,9 @@ fn thaw_js_declaration_plain(line: &str) -> bool {
             } else if ch.is_alphabetic() || ch == '_' || ch == '$' {
                 let start = index;
                 while index < chars.len()
-                    && (chars[index].is_alphanumeric() || chars[index] == '_' || chars[index] == '$')
+                    && (chars[index].is_alphanumeric()
+                        || chars[index] == '_'
+                        || chars[index] == '$')
                 {
                     index += 1;
                 }
@@ -192,7 +200,9 @@ fn thaw_js_class_declaration(line: &str, package: &str, class: &str) -> bool {
     else {
         return false;
     };
-    let Ok(key) = String::from_utf8(bytes) else { return false };
+    let Ok(key) = String::from_utf8(bytes) else {
+        return false;
+    };
     key.starts_with('$') && key.split('$').nth(2) == Some(&format!("{package}::{class}"))
 }
 
@@ -209,7 +219,8 @@ fn thaw_js_declared_function(line: &str, package: &str) -> Option<String> {
         .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
         .collect::<Option<Vec<_>>>()?;
     let key = String::from_utf8(bytes).ok()?;
-    key.strip_prefix(&format!("{package}::")).map(str::to_string)
+    key.strip_prefix(&format!("{package}::"))
+        .map(str::to_string)
 }
 
 /// Whether the thaw-js runtime can serve `pkg` for this program: its bundle passes the thaw-js
@@ -227,7 +238,10 @@ fn thaw_js_package_eligible(
     let debug = std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1");
     let reject = |why: String| {
         if debug {
-            eprintln!("thaw-js routing: package `{}` stays on QuickJS: {why}", pkg.name);
+            eprintln!(
+                "thaw-js routing: package `{}` stays on QuickJS: {why}",
+                pkg.name
+            );
         }
         false
     };
@@ -254,7 +268,13 @@ fn thaw_js_package_eligible(
     match thaw_js::scan::scan_bundle(bundle_js) {
         Ok(report) if report.is_clean() => {}
         Ok(report) => {
-            let blockers = report.blockers.keys().take(6).cloned().collect::<Vec<_>>().join(", ");
+            let blockers = report
+                .blockers
+                .keys()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             return reject(format!("bundle uses unsupported features: {blockers}"));
         }
         Err(error) => return reject(format!("bundle scan failed: {error}")),
@@ -268,7 +288,11 @@ fn thaw_js_package_eligible(
             };
             // A class-typed result is also an opaque `JsValue`; it must stay a live object.
             if let thaw_bridge::DtsType::Unsupported(reason) = &function.ret {
-                if pkg.classes.iter().any(|class| reason.contains(class.name.as_str())) {
+                if pkg
+                    .classes
+                    .iter()
+                    .any(|class| reason.contains(class.name.as_str()))
+                {
                     return reject(format!("`{}` returns a class instance", function.name));
                 }
             }
@@ -278,22 +302,35 @@ fn thaw_js_package_eligible(
             let lines = segment
                 .lines()
                 .filter(|line| {
-                    thaw_js_declared_function(line, &pkg.name).as_deref() == Some(function.name.as_str())
+                    thaw_js_declared_function(line, &pkg.name).as_deref()
+                        == Some(function.name.as_str())
                 })
                 .collect::<Vec<_>>();
             if lines.is_empty() {
                 if debug {
-                    for line in segment.lines().filter(|line| line.contains(function.name.as_str())).take(4) {
+                    for line in segment
+                        .lines()
+                        .filter(|line| line.contains(function.name.as_str()))
+                        .take(4)
+                    {
                         eprintln!("thaw-js routing:   shim: {}", &line[..line.len().min(300)]);
                     }
-                    eprintln!("thaw-js routing:   target: {target}; segment has {} lines", segment.lines().count());
+                    eprintln!(
+                        "thaw-js routing:   target: {target}; segment has {} lines",
+                        segment.lines().count()
+                    );
                     let hex = target.rsplit('_').next().unwrap_or("");
                     for line in segment.lines().filter(|line| line.contains(hex)).take(4) {
-                        eprintln!("thaw-js routing:   by-hex: {}", &line[..line.len().min(300)]);
+                        eprintln!(
+                            "thaw-js routing:   by-hex: {}",
+                            &line[..line.len().min(300)]
+                        );
                     }
                 }
                 return reject(format!("`{}` has no declaration", function.name));
             }
-            lines.into_iter().all(|line| thaw_js_declaration_plain(line) || reject(format!("`{}`: {line}", function.name)))
+            lines.into_iter().all(|line| {
+                thaw_js_declaration_plain(line) || reject(format!("`{}`: {line}", function.name))
+            })
         })
 }

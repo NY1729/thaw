@@ -1,0 +1,41 @@
+<h1>Title</h1>
+<p>Some <em>emphasis</em> and <strong>strong</strong> text with <code>code</code>.</p>
+
+<ul>
+<li>a</li>
+<li>b<ul>
+<li>c</li>
+</ul>
+</li>
+</ul>
+<ol>
+<li>one</li>
+<li>two</li>
+</ol>
+
+inline <em>only</em> <a href="http://x.y" title="t">link</a>
+<pre><code class="language-js">const a = 1;
+</code></pre>
+<blockquote>
+<p>quote</p>
+</blockquote>
+<hr>
+<table>
+<thead>
+<tr>
+<th>a</th>
+<th>b</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>2</td>
+</tr>
+</tbody></table>
+
+<p>line1
+line2 ~~strike~~</p>
+
+function function 1 heading
+<p>html <b>passes</b> &amp; escapes <script>x</script></p>
+
