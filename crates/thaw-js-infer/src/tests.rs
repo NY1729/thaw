@@ -995,3 +995,84 @@ fn anonymous_default_export_takes_the_declaration_of_export_equals() {
     let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
     assert_eq!(clones.len(), 1, "{clones:#?}");
 }
+
+#[test]
+fn aot_clones_reject_every_way_of_returning_a_parameter_and_sorting() {
+    let s = r#"function id(xs) { return xs; }
+exports.pick = function (xs, c) { return c ? xs : []; };
+exports.via = function (xs) { return id(xs); };
+exports.logical = function (xs) { return xs || []; };
+exports.seq = function (xs) { return (0, xs); };
+exports.late = function (xs) { var r = []; if (xs.length > 0) { r = xs; } return r; };
+exports.sorted = function (xs) { return xs.slice().sort(function (a, b) { return a - b; }); };
+exports.fresh = function (xs) { return xs.slice(); };"#;
+    let cfg = with_dts(
+        "declare function pick(xs: number[], c: boolean): number[]; declare function via(xs: number[]): number[]; \
+         declare function logical(xs: number[]): number[]; declare function seq(xs: number[]): number[]; \
+         declare function late(xs: number[]): number[]; declare function sorted(xs: number[]): number[]; \
+         declare function fresh(xs: number[]): number[];",
+    );
+    let clones = crate::clone::extract_clones(s, cfg, "__aot_").unwrap();
+    let names: Vec<_> = clones.iter().map(|c| c.exports[0].clone()).collect();
+    assert_eq!(names, vec!["fresh"], "{clones:#?}");
+}
+
+#[test]
+fn jsdoc_params_are_a_guarded_contract() {
+    let s = "/**\n * @param {number} a\n * @param {string|number} [b]\n * @param {Array<string>} c\n */\nfunction f(a, b, c) { return a; }\nexports.f = f;";
+    let cfg = Config {
+        jsdoc: true,
+        ..Default::default()
+    };
+    let r = fnr(s, cfg.clone(), "f");
+    assert_eq!(r.slots[0].1, "number", "{r:?}");
+    assert_ne!(r.trust & crate::TRUST_JSDOC, 0);
+    assert_eq!(r.trust & crate::TRUST_DTS, 0);
+    assert!(
+        r.guard
+            .as_deref()
+            .is_some_and(|g| g.contains("typeof a === 'number'")),
+        "{:?}",
+        r.guard
+    );
+    let r = fnr(s, Config::default(), "f");
+    assert_eq!(r.trust, 0);
+}
+
+#[test]
+fn literal_default_is_a_guarded_contract_only_when_enabled() {
+    let s = "exports.f = function (k = 10, s = 'x') { return k; };";
+    let on = Config {
+        default_contract: true,
+        ..Default::default()
+    };
+    let r = fnr(s, on, "f");
+    assert_ne!(r.trust & crate::TRUST_DEFAULT, 0);
+    assert!(
+        r.guard
+            .as_deref()
+            .is_some_and(|g| g.contains("typeof k === 'number'")),
+        "{:?}",
+        r.guard
+    );
+    assert_eq!(fnr(s, Config::default(), "f").trust, 0);
+}
+
+#[test]
+fn opaque_builtins_async_and_catch() {
+    let s = "function f(x) { var m = new Map(); m.set('a', x); var d = new Date(); return m.size + d.getTime() + x; } f(1);";
+    assert_eq!(slot(s, "f", "m"), "NodeModule");
+    let r = fnr(s, Config::default(), "f");
+    assert_eq!(r.class, crate::Class::Concrete, "{r:?}");
+    // a value stored into a Map is reachable by unknown code: the array is dead
+    let s = "function g(x) { var m = new Map(); m.set('a', x); x.push('s'); return 1; } g([1]);";
+    assert_ne!(fnr(s, Config::default(), "g").class, crate::Class::Concrete);
+    let s = "async function h(a) { return a + 1; } h(1);";
+    assert_ne!(
+        fnr(s, Config::default(), "h").reasons.first(),
+        Some(&Reason::Async)
+    );
+    let s = "function t(a) { try { return a + 1; } catch (e) { return -1; } } t(1);";
+    assert_eq!(slot(s, "t", "e"), "unknown");
+    assert_eq!(fnr(s, Config::default(), "t").class, crate::Class::Union);
+}

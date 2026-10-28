@@ -291,6 +291,7 @@ impl An {
             (Flt::IsNull, Atom::Null) => true,
             (Flt::IsNullish, Atom::Undef | Atom::Null) => true,
             (Flt::IsObj, Atom::Null | Atom::Arr(_) | Atom::Obj(_)) => true,
+            (Flt::IsObj, Atom::Ns(n)) => crate::builtins::is_ext(n),
             (Flt::IsArr(_), Atom::Arr(_)) => true,
             (Flt::IsInst(k), Atom::Obj(s)) => {
                 let r = self.find(s);

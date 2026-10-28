@@ -531,6 +531,8 @@ pub(crate) fn run(
     }
     let mut an = An::new(st, cfg);
     an.init_dts();
+    let off = |p: u32| cm.lookup_byte_offset(thaw_parser::common::BytePos(p)).pos.0 as usize;
+    an.init_jsdoc(src, &off);
     let mut passes = 0;
     // stage A runs without deciding `any` for exported functions (call-site evidence may still
     // arrive); stage B then finalises them
@@ -561,9 +563,7 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
         let this_ok = an.this_ok(fid);
         let (name, lo, excluded, closed_world, nparams, params, mut locals, ret) = {
             let f = &an.st.funcs[fid];
-            let excl = if f.async_ {
-                Some(Reason::Async)
-            } else if f.gen {
+            let excl = if f.gen {
                 Some(Reason::Generator)
             } else if f.uses_eval {
                 Some(Reason::Eval)
@@ -615,8 +615,19 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
             if i < params.len() && *t != Ty::Bottom {
                 all_params_bottom = false;
             }
-            let (c, r) = an.classify(t, &mut HashSet::new());
-            let ts = an.ts(t, 0);
+            // a catch parameter is `unknown`: whatever was thrown, to be narrowed before use
+            let is_catch = *t == Ty::Any(Reason::Catch)
+                && an.st.funcs[fid].declared.get(n) == Some(&DK::Catch);
+            let (c, r) = if is_catch {
+                (Class::Union, None)
+            } else {
+                an.classify(t, &mut HashSet::new())
+            };
+            let ts = if is_catch {
+                "unknown".to_string()
+            } else {
+                an.ts(t, 0)
+            };
             slots.push((n.clone(), ts, c));
             if let Some(r) = r {
                 reasons.push(r);
@@ -628,7 +639,7 @@ pub fn analyze_source(src: &str, cfg: Config) -> Result<(Vec<FnReport>, Summary)
                 *sum.slot_reason.entry(r).or_default() += 1;
             }
         }
-        let dts_fn = an.dts_fns.contains_key(&fid);
+        let dts_fn = an.dts_fns.contains_key(&fid) && !an.jsdoc_fns.contains(&fid);
         let ret = match (&ret, an.dts_ret.get(&fid)) {
             (Ty::Any(_), Some(d)) => d.clone(),
             _ => ret,
