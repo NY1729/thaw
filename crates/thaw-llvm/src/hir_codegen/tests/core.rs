@@ -420,7 +420,7 @@ fn console_log_safely_formats_functions_promises_and_dynamic_handles() {
 
     assert_eq!(
         compile_and_run(source, "opaque_console_values"),
-        "[Function]\n[Function]\n[Function]\nPromise { <pending> }\n42 [object Object]\n"
+        "[Function]\n[Function]\n[Function]\nPromise { <pending> }\n42 { value: 7 }\n"
     );
 }
 

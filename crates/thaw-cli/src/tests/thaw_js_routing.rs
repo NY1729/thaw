@@ -4,17 +4,33 @@
 #[test]
 fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
     let plain = |line: &str| thaw_js_declaration_plain(line);
-    assert!(plain("declare function __thaw_typed_js_6d73(value: number, options: { long: boolean }): string;"));
-    assert!(plain("declare function __thaw_typed_js_6d73__arity_1(args: string[]): JsValue;"));
-    assert!(plain("declare function __thaw_typed_js_6d73(a: string | number, b?: Json): null | undefined;"));
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73(value: number, options: { long: boolean }): string;"
+    ));
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73__arity_1(args: string[]): JsValue;"
+    ));
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73(a: string | number, b?: Json): null | undefined;"
+    ));
     // type parameters declared by the function itself are fine (inferred from plain arguments)
-    assert!(plain("declare function __thaw_typed_js_6d73__generic_rest__arity_1<T>(array: T[]): T[];"));
+    assert!(plain(
+        "declare function __thaw_typed_js_6d73__generic_rest__arity_1<T>(array: T[]): T[];"
+    ));
     assert!(plain("declare function __thaw_typed_js_6d73<TObject, TPath extends string>(data: TObject, path: TPath): JsValue;"));
     // callbacks, classes and other named types cannot cross the JSON boundary
-    assert!(!plain("declare function __thaw_typed_js_6d73(f: (x: number) => number): number;"));
-    assert!(!plain("declare function __thaw_typed_js_6d73(v: Buffer): number;"));
-    assert!(!plain("declare function __thaw_typed_js_6d73(v: SemVer): number;"));
-    assert!(!plain("declare function __thaw_typed_js_6d73(): Promise<number>;"));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(f: (x: number) => number): number;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(v: Buffer): number;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(v: SemVer): number;"
+    ));
+    assert!(!plain(
+        "declare function __thaw_typed_js_6d73(): Promise<number>;"
+    ));
     assert!(!plain("function __thaw_typed_wrapper_js_6d73(): number {"));
 }
 
@@ -24,8 +40,14 @@ fn thaw_js_symbols_decode_to_their_package_function() {
     assert_eq!(thaw_js_declared_function(line, "ms").as_deref(), Some("ms"));
     assert_eq!(thaw_js_declared_function(line, "other"), None);
     let generic = "declare function __thaw_typed_js_6c6f646173683a3a676574__generic_rest__arity_1<T>(a: T[]): T[];";
-    assert_eq!(thaw_js_declared_function(generic, "lodash").as_deref(), Some("get"));
-    assert_eq!(thaw_js_declared_function("declare function __thaw_typed_js_zz(): number;", "ms"), None);
+    assert_eq!(
+        thaw_js_declared_function(generic, "lodash").as_deref(),
+        Some("get")
+    );
+    assert_eq!(
+        thaw_js_declared_function("declare function __thaw_typed_js_zz(): number;", "ms"),
+        None
+    );
     assert!(thaw_js_mentions("ms(1)", "ms") && !thaw_js_mentions("ms(1)", "semver"));
     assert!(thaw_js_mentions("a.get(1)", "a.get") && thaw_js_mentions("get()", "ns.get"));
 }
@@ -48,7 +70,8 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
         package.join("package.d.ts"),
         "export declare function describe(items: string[], label: string): any;\n\
          export declare function add(a: number, b: number): number;\n\
-         export declare function apply(items: number[], f: (x: number) => number): number[];\n",
+         export declare function apply(items: number[], f: (x: number) => number): number[];\n\
+         export declare function pairs(items: string[]): string[][];\n",
     )
     .unwrap();
     // The registry's bundle layout (one factory per module, a require map and the entry key), plus
@@ -61,6 +84,7 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
            exports.describe = function (items, label) { var m = new Map(); items.forEach(function (x) { m.set(x, (m.get(x) || 0) + 1); }); var counts = {}; m.forEach(function (n, k) { counts[k] = n; }); return { label: label.toUpperCase(), counts: counts }; };\n\
            exports.add = function (a, b) { var m = new Map(); m.set('t', a); return m.get('t') + b; };\n\
            exports.apply = function (items, f) { return items.map(f); };\n\
+           exports.pairs = function (items) { var out = []; for (var i = 0; i < items.length; i += 2) out.push(items.slice(i, i + 2)); return out; };\n\
          },\n\
          };\n\
          var __thaw_bundle_require_maps = { \"tjs-kit/index.js\": {}, };\n\
@@ -78,7 +102,19 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 fn thaw_js_build(entry: &Path, output: &Path, registry: &Path, routed: bool) -> serde_json::Value {
     build_with_thaw_js_routing(
-        entry, output, &[], &[], &[], registry, &[], false, None, true, false, false, routed,
+        entry,
+        output,
+        &[],
+        &[],
+        &[],
+        registry,
+        &[],
+        false,
+        None,
+        true,
+        false,
+        false,
+        routed,
     )
     .unwrap();
     artifact_manifest_from_bytes(&std::fs::read(output).unwrap()).unwrap()
@@ -86,7 +122,11 @@ fn thaw_js_build(entry: &Path, output: &Path, registry: &Path, routed: bool) -> 
 
 fn thaw_js_run(output: &Path) -> String {
     let result = Command::new(output).output().unwrap();
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     String::from_utf8_lossy(&result.stdout).into_owned()
 }
 
@@ -110,13 +150,17 @@ fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
     );
     // The linked binary carries no QuickJS engine at all.
     let bytes = std::fs::read(&output).unwrap();
-    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "QuickJS was linked");
+    assert!(
+        !bytes.windows(8).any(|window| window == b"rquickjs"),
+        "QuickJS was linked"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn thaw_js_routing_off_is_the_unchanged_quickjs_path_with_the_same_result() {
-    let main = "import { add } from 'tjs-kit';\nfunction main(): void { console.log(add(40, 2)); }\n";
+    let main =
+        "import { add } from 'tjs-kit';\nfunction main(): void { console.log(add(40, 2)); }\n";
     let (dir, registry, entry) = thaw_js_fixture("parity", main);
     let routed_output = dir.join("routed");
     let plain_output = dir.join("plain");
@@ -127,6 +171,36 @@ fn thaw_js_routing_off_is_the_unchanged_quickjs_path_with_the_same_result() {
     assert_eq!(plain["thaw_js_routed"], serde_json::json!([]));
     assert_eq!(thaw_js_run(&routed_output), "42\n");
     assert_eq!(thaw_js_run(&plain_output), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn thaw_js_routing_decodes_a_nested_array_result_without_linking_quickjs() {
+    // A typed `string[][]` result is decoded from plain JSON: no interned-native-owner query (which
+    // would need the QuickJS realm) may be compiled into a thaw-js build.
+    let main = "import { pairs } from 'tjs-kit';\nfunction main(): void { const p = pairs(['a', 'b', 'c']); console.log(p.length, p[0][1], p[1][0]); }\n";
+    let (dir, registry, entry) = thaw_js_fixture("nested-array", main);
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
+    assert_eq!(thaw_js_run(&output), "2 b c\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn quickjs_path_prints_a_plain_object_result_like_node() {
+    // The package's `any` result is a live QuickJS object; `console.log` must inspect it like Node
+    // (not `String(value)`, which printed `[object Object]`).
+    let main = "import { describe } from 'tjs-kit';\nfunction main(): void { console.log(describe(['a', 'b', 'a'], 'x')); }\n";
+    let (dir, registry, entry) = thaw_js_fixture("quickjs-print", main);
+    let output = dir.join("plain");
+    let manifest = thaw_js_build(&entry, &output, &registry, false);
+    assert_eq!(manifest["quickjs"], true);
+    assert_eq!(
+        thaw_js_run(&output),
+        "{ label: 'X', counts: { a: 2, b: 1 } }\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -173,19 +247,38 @@ fn thaw_js_routing_serves_real_leaf_packages_like_node_when_enabled() {
         ),
     ];
     for (package, program, expected) in cases {
-        let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-real-{package}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-thaw-js-real-{package}-{}",
+            std::process::id()
+        ));
         let registry = dir.join("modules");
         std::fs::create_dir_all(&registry).unwrap();
         let entry = dir.join("main.ts");
         std::fs::write(&entry, program).unwrap();
         let output = dir.join("app");
         build_with_thaw_js_routing(
-            &entry, &output, &[], &[], &[], &registry, &[], false, None, true, true, false, true,
+            &entry,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &[],
+            false,
+            None,
+            true,
+            true,
+            false,
+            true,
         )
         .unwrap();
         let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
         assert_eq!(manifest["quickjs"], false, "{package}: {manifest}");
-        assert_eq!(manifest["thaw_js_routed"], serde_json::json!([package]), "{package}");
+        assert_eq!(
+            manifest["thaw_js_routed"],
+            serde_json::json!([package]),
+            "{package}"
+        );
         assert_eq!(thaw_js_run(&output), expected, "{package}");
         let _ = std::fs::remove_dir_all(dir);
     }

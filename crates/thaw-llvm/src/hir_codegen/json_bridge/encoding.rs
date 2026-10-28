@@ -1616,6 +1616,24 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "function sentinel returned no value".to_string())
     }
 
+    /// A byte buffer handle as a fresh `f64`-slot array handle (a copy), for
+    /// the element-wise JSON encoders.
+    fn compile_bytes_widened_handle(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let record = self.compile_array_data(buffer)?;
+        let data = self
+            .builder
+            .build_call(self.module.get_function("thaw_bytes_to_array").unwrap(), &[record.into()], "bytes_widen")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_bytes_to_array returned no value")?
+            .into_pointer_value();
+        self.compile_array_wrap(data)
+    }
+
     fn compile_native_bytes_to_json(
         &mut self,
         value: PointerValue<'ctx>,
@@ -1646,7 +1664,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 "set_bytes_type",
             )
             .map_err(|error| error.to_string())?;
-        let data = self.compile_native_array_to_json_with_undefined(value, &HirType::F64, true)?;
+        let widened = self.compile_bytes_widened_handle(value)?;
+        let data = self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)?;
         let data_key = self
             .builder
             .build_global_string_ptr("data", "bytes_data_key")

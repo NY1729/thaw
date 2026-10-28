@@ -73,8 +73,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_slice"
                 | "__thaw_array_rest"
                 | "__thaw_bytes_slice"
-                | "__thaw_bytes_view"
-                | "__thaw_bytes_sync"
+                | "__thaw_bytes_subarray"
+                | "__thaw_bytes_get"
+                | "__thaw_bytes_set"
+                | "__thaw_bytes_get_safe"
+                | "__thaw_bytes_set_safe"
+                | "__thaw_bytes_to_array"
+                | "__thaw_bytes_widen_list"
+                | "__thaw_bytes_narrow_list"
+                | "__thaw_bytes_as_u8"
+                | "__thaw_bytes_clone"
+                | "__thaw_bytes_buffer"
+                | "__thaw_bytes_fill"
+                | "__thaw_bytes_reorder"
+                | "__thaw_bytes_from_buffer_like"
+                | "__thaw_bytes_store_array"
+                | "__thaw_bytes_store_length"
                 | "__thaw_bytes_byte_offset"
                 | "__thaw_array_to_reversed"
                 | "__thaw_array_push"
@@ -106,49 +120,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Err(error) = self.guard_array_mutation(name, args) {
             return Some(Err(error));
         }
-        let result = self.compile_array_call(name, args);
-        if result.is_ok() {
-            if let Err(error) = self.sync_bytes_views_after_mutation(name, args) {
-                return Some(Err(error));
-            }
-        }
-        Some(result)
-    }
-
-    /// Whole-array mutators (`fill`/`reverse`/`copyWithin`/`sort`) cannot tell
-    /// a `Buffer` from a `number[]` after erasure; `thaw_bytes_sync` is a no-op
-    /// for any array that is not a linked `subarray`/`slice` view.
-    fn sync_bytes_views_after_mutation(
-        &mut self,
-        name: &str,
-        args: &[HirExpr],
-    ) -> Result<(), String> {
-        if !matches!(
-            name.rsplit("_array_").next(),
-            Some("fill" | "reverse" | "copy_within" | "sort")
-        ) {
-            return Ok(());
-        }
-        let Some(receiver @ HirExpr::Var(_)) = args.first() else {
-            return Ok(());
-        };
-        if !matches!(
-            self.expr_hir_type(receiver),
-            Some(HirType::Array(element)) if *element == HirType::F64
-        ) {
-            return Ok(());
-        }
-        let handle = self.compile_expr(receiver)?.into_pointer_value();
-        let buffer = self.compile_array_data(handle)?;
-        let f64_type = self.context.f64_type();
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_bytes_sync").unwrap(),
-                &[buffer.into(), f64_type.const_zero().into(), f64_type.const_float(f64::INFINITY).into()],
-                "bytes_view_sync",
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
+        Some(self.compile_array_call(name, args))
     }
 
     /// Throws a `TypeError` when a mutating array method targets an array that
@@ -240,6 +212,73 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_throw_type_error(message)?;
         self.builder.position_at_end(allowed);
         Ok(())
+    }
+
+    /// The `ByteView` record behind a Buffer value (the handle's data word).
+    fn compile_bytes_record(&mut self, buffer: &HirExpr) -> Result<PointerValue<'ctx>, String> {
+        let handle = self.compile_expr(buffer)?.into_pointer_value();
+        self.compile_array_data(handle)
+    }
+
+    /// `0 <= index < len` for a view record (false for NaN).
+    fn compile_bytes_index_in_range(
+        &mut self,
+        record: PointerValue<'ctx>,
+        index: inkwell::values::FloatValue<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let f64_type = self.context.f64_type();
+        let length = self
+            .builder
+            .build_load(self.context.i64_type(), record, "bytes_len")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let length = self
+            .builder
+            .build_unsigned_int_to_float(length, f64_type, "bytes_len_f64")
+            .map_err(|error| error.to_string())?;
+        let non_negative = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, index, f64_type.const_zero(), "bytes_index_non_negative")
+            .map_err(|error| error.to_string())?;
+        let below = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OLT, index, length, "bytes_index_below_len")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_and(non_negative, below, "bytes_index_in_range").map_err(|error| error.to_string())
+    }
+
+    /// Address of byte `index` of a view record `{ len, tag, base, store }`.
+    /// The caller guarantees `0 <= index < len` (thaw-hir range-checks first).
+    fn compile_bytes_slot(
+        &mut self,
+        record: PointerValue<'ctx>,
+        index: inkwell::values::FloatValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let base_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    record,
+                    &[self.context.i64_type().const_int(16, false)],
+                    "bytes_base_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let base = self
+            .builder
+            .build_load(ptr_type, base_slot, "bytes_base")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let index = self
+            .builder
+            .build_float_to_unsigned_int(index, self.context.i64_type(), "bytes_index")
+            .map_err(|error| error.to_string())?;
+        unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), base, &[index], "bytes_slot")
+                .map_err(|error| error.to_string())
+        }
     }
 
     fn compile_array_call(
@@ -466,27 +505,238 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| format!("`{name}` returned no value"));
             }
-            "__thaw_bytes_sync" | "__thaw_bytes_byte_offset" => {
-                let [receiver, rest @ ..] = args else {
+            "__thaw_bytes_byte_offset" | "__thaw_bytes_store_length" => {
+                let [receiver] = args else {
                     return Err(format!("`{name}` expects a receiver"));
                 };
-                let handle = self.compile_expr(receiver)?.into_pointer_value();
-                let mut call_args = vec![self.compile_array_data(handle)?.into()];
-                for argument in rest {
-                    call_args.push(self.compile_expr(argument)?.into());
-                }
-                let runtime = if name == "__thaw_bytes_sync" {
-                    "thaw_bytes_sync"
-                } else {
+                let record = self.compile_bytes_record(receiver)?;
+                let runtime = if name == "__thaw_bytes_byte_offset" {
                     "thaw_bytes_byte_offset"
+                } else {
+                    "thaw_bytes_store_length"
                 };
-                let value = self
+                return self
                     .builder
-                    .build_call(self.module.get_function(runtime).unwrap(), &call_args, "bytes_view_call")
+                    .build_call(self.module.get_function(runtime).unwrap(), &[record.into()], "bytes_view_call")
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
-                    .basic();
-                return Ok(value.unwrap_or_else(|| self.context.f64_type().const_zero().into()));
+                    .basic()
+                    .ok_or_else(|| format!("`{name}` returned no value"));
+            }
+            "__thaw_bytes_reorder" => {
+                let [receiver, order] = args else {
+                    return Err("`__thaw_bytes_reorder` expects a buffer and an order".into());
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let order = self.compile_expr(order)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_reorder").unwrap(),
+                        &[record.into(), order.into()],
+                        "bytes_reorder",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.f64_type().const_zero().into());
+            }
+            "__thaw_bytes_fill" => {
+                let [receiver, pattern, start, end] = args else {
+                    return Err("`__thaw_bytes_fill` expects a buffer, a pattern and a range".into());
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let pattern = self.compile_bytes_record(pattern)?;
+                let start = self.compile_expr(start)?;
+                let end = self.compile_expr(end)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_fill").unwrap(),
+                        &[record.into(), pattern.into(), start.into(), end.into()],
+                        "bytes_fill",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.f64_type().const_zero().into());
+            }
+            "__thaw_bytes_from_buffer_like" => {
+                let [source, offset, length, kind] = args else {
+                    return Err("`__thaw_bytes_from_buffer_like` expects four operands".into());
+                };
+                let record = self.compile_bytes_record(source)?;
+                let offset = self.compile_expr(offset)?;
+                let length = self.compile_expr(length)?;
+                let kind = self.compile_expr(kind)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_from_buffer_like").unwrap(),
+                        &[record.into(), offset.into(), length.into(), kind.into()],
+                        "bytes_from_buffer_like",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("`__thaw_bytes_from_buffer_like` returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_slice" | "__thaw_bytes_subarray" => {
+                let [receiver, start, end] = args else {
+                    return Err(format!("`{name}` expects a receiver, a start and an end"));
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let start = self.compile_expr(start)?;
+                let end = self.compile_expr(end)?;
+                let runtime = if name == "__thaw_bytes_slice" { "thaw_bytes_slice" } else { "thaw_bytes_subarray" };
+                let result = self
+                    .builder
+                    .build_call(self.module.get_function(runtime).unwrap(), &[record.into(), start.into(), end.into()], "bytes_view")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("`{name}` returned no value"))?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            // One handle in, one handle out: widen / narrow / clone / retag a
+            // byte buffer (or a list of them) through its runtime function.
+            "__thaw_bytes_to_array" | "__thaw_bytes_widen_list" | "__thaw_bytes_narrow_list"
+            | "__thaw_bytes_as_u8" | "__thaw_bytes_clone" | "__thaw_bytes_buffer" => {
+                let [receiver] = args else {
+                    return Err(format!("`{name}` expects one operand"));
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let runtime = match name {
+                    "__thaw_bytes_widen_list" => "thaw_bytes_widen_list",
+                    "__thaw_bytes_narrow_list" => "thaw_bytes_narrow_list",
+                    "__thaw_bytes_as_u8" => "thaw_bytes_as_u8",
+                    "__thaw_bytes_clone" => "thaw_bytes_clone",
+                    "__thaw_bytes_buffer" => "thaw_bytes_buffer",
+                    _ => "thaw_bytes_to_array",
+                };
+                let result = self
+                    .builder
+                    .build_call(self.module.get_function(runtime).unwrap(), &[record.into()], "bytes_convert")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("`{name}` returned no value"))?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_store_array" => {
+                let [receiver, array] = args else {
+                    return Err("`__thaw_bytes_store_array` expects a buffer and an array".into());
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let array = self.compile_expr(array)?.into_pointer_value();
+                let array = self.compile_array_data(array)?;
+                self.builder
+                    .build_call(self.module.get_function("thaw_bytes_store_array").unwrap(), &[record.into(), array.into()], "bytes_store_array")
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.f64_type().const_zero().into());
+            }
+            "__thaw_bytes_get" | "__thaw_bytes_get_safe" => {
+                let [receiver, index] = args else {
+                    return Err(format!("`{name}` expects a buffer and an index"));
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let index = self.compile_expr(index)?.into_float_value();
+                let f64_type = self.context.f64_type();
+                let checked_blocks = if name == "__thaw_bytes_get_safe" {
+                    let in_range = self.compile_bytes_index_in_range(record, index)?;
+                    let function = self.current_function();
+                    let read = self.context.append_basic_block(function, "bytes_get_read");
+                    let done = self.context.append_basic_block(function, "bytes_get_done");
+                    let start = self.builder.get_insert_block().ok_or("no insert block")?;
+                    self.builder.build_conditional_branch(in_range, read, done).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(read);
+                    Some((start, done))
+                } else {
+                    None
+                };
+                let slot = self.compile_bytes_slot(record, index)?;
+                let byte = self
+                    .builder
+                    .build_load(self.context.i8_type(), slot, "bytes_get")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let value = self
+                    .builder
+                    .build_unsigned_int_to_float(byte, f64_type, "bytes_get_f64")
+                    .map_err(|error| error.to_string())?;
+                let Some((start, done)) = checked_blocks else {
+                    return Ok(value.into());
+                };
+                let read_end = self.builder.get_insert_block().ok_or("no insert block")?;
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                let phi = self.builder.build_phi(f64_type, "bytes_get_result").map_err(|error| error.to_string())?;
+                phi.add_incoming(&[(&value, read_end), (&f64_type.const_float(f64::NAN), start)]);
+                return Ok(phi.as_basic_value());
+            }
+            "__thaw_bytes_set" | "__thaw_bytes_set_safe" => {
+                let [receiver, index, value] = args else {
+                    return Err("`__thaw_bytes_set` expects a buffer, an index and a value".into());
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let index = self.compile_expr(index)?.into_float_value();
+                let value = self.compile_expr(value)?.into_float_value();
+                let f64_type = self.context.f64_type();
+                let checked_done = if name == "__thaw_bytes_set_safe" {
+                    let in_range = self.compile_bytes_index_in_range(record, index)?;
+                    let function = self.current_function();
+                    let write = self.context.append_basic_block(function, "bytes_set_write");
+                    let done = self.context.append_basic_block(function, "bytes_set_done");
+                    self.builder.build_conditional_branch(in_range, write, done).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(write);
+                    Some(done)
+                } else {
+                    None
+                };
+                let slot = self.compile_bytes_slot(record, index)?;
+                // ToUint8: truncate, wrap modulo 256; NaN / infinities / |v| >= 2^63 are 0.
+                let finite = self
+                    .builder
+                    .build_float_compare(
+                        inkwell::FloatPredicate::OLT,
+                        self.builder
+                            .build_call(
+                                self.module.get_function("fabs").unwrap_or_else(|| {
+                                    self.module.add_function(
+                                        "fabs",
+                                        f64_type.fn_type(&[f64_type.into()], false),
+                                        Some(inkwell::module::Linkage::External),
+                                    )
+                                }),
+                                &[value.into()],
+                                "bytes_set_abs",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or("fabs returned no value")?
+                            .into_float_value(),
+                        f64_type.const_float(9.0e18),
+                        "bytes_set_finite",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let bounded = self
+                    .builder
+                    .build_select(finite, value, f64_type.const_zero(), "bytes_set_bounded")
+                    .map_err(|error| error.to_string())?
+                    .into_float_value();
+                let wide = self
+                    .builder
+                    .build_float_to_signed_int(bounded, self.context.i64_type(), "bytes_set_wide")
+                    .map_err(|error| error.to_string())?;
+                let byte = self
+                    .builder
+                    .build_int_truncate(wide, self.context.i8_type(), "bytes_set_byte")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(slot, byte).map_err(|error| error.to_string())?;
+                if let Some(done) = checked_done {
+                    self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(done);
+                }
+                return Ok(value.into());
             }
             "__thaw_bytes_byte_length" => {
                 let [text, encoding] = args else {
@@ -823,10 +1073,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_array_set_presence(handle, presence)?;
                 return Ok(handle.into());
             }
-            // `__thaw_bytes_slice` is `__thaw_array_slice` with a `Bytes`
-            // result type (see thaw-hir inference) -- identical codegen:
-            // the receiver is bound as an `Array(F64)` either way.
-            "__thaw_array_slice" | "__thaw_array_rest" | "__thaw_bytes_slice" | "__thaw_bytes_view" => {
+            "__thaw_array_slice" | "__thaw_array_rest" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
                 }
@@ -863,15 +1110,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array slice returned no value".to_string())?
                     .into_pointer_value();
-                if name == "__thaw_bytes_view" {
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_bytes_link").unwrap(),
-                            &[buffer.into(), result.into(), start.into()],
-                            "bytes_link",
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
                 let presence = self.compile_array_presence(handle)?;
                 let sliced_presence = self
                     .builder

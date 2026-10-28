@@ -289,6 +289,24 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_template_site" => {
                             return Some(HirType::Array(Box::new(HirType::Str)))
                         }
+                        // Byte buffers (and their widened copies) read as `number[]` here.
+                        "__thaw_bytes_to_array"
+                        | "__thaw_bytes_from_string"
+                        | "__thaw_bytes_from_array"
+                        | "__thaw_bytes_alloc"
+                        | "__thaw_bytes_alloc_fill"
+                        | "__thaw_bytes_concat"
+                        | "__thaw_bytes_slice"
+                        | "__thaw_bytes_subarray"
+                        | "__thaw_bytes_clone"
+                        | "__thaw_bytes_as_u8"
+                        | "__thaw_bytes_buffer"
+                        | "__thaw_bytes_from_buffer_like" => {
+                            return Some(HirType::Array(Box::new(HirType::F64)))
+                        }
+                        "__thaw_bytes_widen_list" | "__thaw_bytes_narrow_list" => {
+                            return Some(HirType::Array(Box::new(HirType::Array(Box::new(HirType::F64)))))
+                        }
                         "__thaw_json_own_keys" => {
                             return Some(HirType::Array(Box::new(HirType::Json)))
                         }

@@ -115,11 +115,18 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
         directory: &Path,
         files: &mut Vec<(String, String, &'static str)>,
     ) -> Result<(), String> {
-        let entries = std::fs::read_dir(directory)
-            .map_err(|error| format!("failed to read asset directory `{}`: {error}", directory.display()))?;
+        let entries = std::fs::read_dir(directory).map_err(|error| {
+            format!(
+                "failed to read asset directory `{}`: {error}",
+                directory.display()
+            )
+        })?;
         for entry in entries {
             let entry = entry.map_err(|error| {
-                format!("failed to read asset entry in `{}`: {error}", directory.display())
+                format!(
+                    "failed to read asset entry in `{}`: {error}",
+                    directory.display()
+                )
             })?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|error| {
@@ -153,8 +160,9 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             {
                 let relative = path.strip_prefix(root).unwrap();
                 let url = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
-                let bytes = std::fs::read(&path)
-                    .map_err(|error| format!("failed to read asset `{}`: {error}", path.display()))?;
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    format!("failed to read asset `{}`: {error}", path.display())
+                })?;
                 let (content, encoding) = match String::from_utf8(bytes.clone()) {
                     Ok(content) => (content, "utf8"),
                     Err(_) => (
@@ -169,17 +177,26 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
     }
 
     let canonical_root = std::fs::canonicalize(directory).map_err(|error| {
-        format!("failed to read asset directory `{}`: {error}", directory.display())
+        format!(
+            "failed to read asset directory `{}`: {error}",
+            directory.display()
+        )
     })?;
     let mut files = Vec::new();
     collect(directory, &canonical_root, directory, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     if files.is_empty() {
-        return Err(format!("asset directory `{}` is empty", directory.display()));
+        return Err(format!(
+            "asset directory `{}` is empty",
+            directory.display()
+        ));
     }
 
     fn mime(path: &str) -> &'static str {
-        match Path::new(path).extension().and_then(|extension| extension.to_str()) {
+        match Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
             Some("html") => "text/html; charset=utf-8",
             Some("css") => "text/css; charset=utf-8",
             Some("js" | "mjs") => "text/javascript; charset=utf-8",
@@ -319,7 +336,12 @@ fn report_thaw_js_mixed(ir: &str) {
     let mut seen = std::collections::BTreeSet::new();
     for line in ir.lines() {
         if let Some(rest) = line.strip_prefix("define ") {
-            current = rest.split('@').nth(1).and_then(|r| r.split('(').next()).unwrap_or("?").to_string();
+            current = rest
+                .split('@')
+                .nth(1)
+                .and_then(|r| r.split('(').next())
+                .unwrap_or("?")
+                .to_string();
         } else if line.contains("call ") {
             if let Some(callee) = line.split("@thaw_js_").nth(1) {
                 let callee = callee.split('(').next().unwrap_or("");
@@ -330,7 +352,7 @@ fn report_thaw_js_mixed(ir: &str) {
             }
         }
     }
-    for entry in seen.iter().filter(|entry| !entry.starts_with("main ->")).take(12) {
+    for entry in seen.iter().take(24) {
         eprintln!("thaw-js routing: QuickJS use in routed build: {entry}");
     }
 }
@@ -355,8 +377,18 @@ fn build_with_native_mode(
     icu4c: bool,
 ) -> Result<(), String> {
     build_with_thaw_js_routing(
-        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
-        static_link, assets, embed_native_addons, install_missing, icu4c,
+        input,
+        output,
+        extra_links,
+        bridge_dts,
+        ffi_metadata,
+        registry_dir,
+        use_packages,
+        static_link,
+        assets,
+        embed_native_addons,
+        install_missing,
+        icu4c,
         thaw_js_routing_enabled(),
     )
 }
@@ -380,22 +412,48 @@ fn build_with_thaw_js_routing(
     routing: bool,
 ) -> Result<(), String> {
     let result = build_with_native_mode_routed(
-        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
-        static_link, assets, embed_native_addons, install_missing, icu4c, routing,
+        input,
+        output,
+        extra_links,
+        bridge_dts,
+        ffi_metadata,
+        registry_dir,
+        use_packages,
+        static_link,
+        assets,
+        embed_native_addons,
+        install_missing,
+        icu4c,
+        routing,
     );
     match result {
         // Whatever a routed build could not express (it needed QuickJS as well, or the compiler
         // rejected a construct) is built the ordinary way: never a build failure or a wrong result
         // that the unrouted path would not have had.
-        Err(error) if routing && {
-            if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
-                eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
-            }
-            true
-        } => build_with_native_mode_routed(
-            input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
-            static_link, assets, embed_native_addons, install_missing, icu4c, false,
-        ),
+        Err(error)
+            if routing && {
+                if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+                    eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+                }
+                true
+            } =>
+        {
+            build_with_native_mode_routed(
+                input,
+                output,
+                extra_links,
+                bridge_dts,
+                ffi_metadata,
+                registry_dir,
+                use_packages,
+                static_link,
+                assets,
+                embed_native_addons,
+                install_missing,
+                icu4c,
+                false,
+            )
+        }
         result => result,
     }
 }
@@ -469,12 +527,8 @@ fn build_with_native_mode_routed(
                 if let Some(name) = external_package_name(&package) {
                     if let Some(node_modules) = installed_node_modules(input, &name) {
                         if thaw_registry::resolve(registry_dir, &name).is_err() {
-                            thaw_registry::add_installed_root(
-                                registry_dir,
-                                &node_modules,
-                                &name,
-                            )
-                            .map_err(|error| {
+                            thaw_registry::add_installed_root(registry_dir, &node_modules, &name)
+                                .map_err(|error| {
                                 format!(
                                     "{location}: failed to register installed `{name}`: {error}"
                                 )
@@ -532,7 +586,11 @@ fn build_with_native_mode_routed(
         .iter()
         .filter(|package| runtime_packages.contains(*package))
         .filter(|package| path_builtin_name(package).is_none())
-        .filter_map(|package| thaw_registry::resolve(registry_dir, package).ok()?.native_addon)
+        .filter_map(|package| {
+            thaw_registry::resolve(registry_dir, package)
+                .ok()?
+                .native_addon
+        })
         .collect::<Vec<_>>();
     native_addons.sort();
     native_addons.dedup();
@@ -574,14 +632,21 @@ fn build_with_native_mode_routed(
             &forced_jit_fallbacks,
             thaw_js_routing,
         )?;
-        let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
+        let external_resolutions =
+            registry_import_meta_resolutions(registry_dir, &resolved_packages);
         // `qs.stringify(x)`-style calls, for a name that collided across two
         // `--use`d packages, only exist as source-level syntax sugar over the
         // package-qualified alias `generate_registry_shims` actually
         // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
         // (and no parse at all) when there were no collisions.
-        let (registry_shim, js_infer_aot) = if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
-            js_infer_patch_shim(registry_shim, registry_dir, &resolved_packages, &user_source)
+        let (registry_shim, js_infer_aot) = if std::env::var("THAW_JS_INFER").as_deref() == Ok("1")
+        {
+            js_infer_patch_shim(
+                registry_shim,
+                registry_dir,
+                &resolved_packages,
+                &user_source,
+            )
         } else {
             (registry_shim, JsInferAot::default())
         };
@@ -592,7 +657,10 @@ fn build_with_native_mode_routed(
                     *target = clone.clone();
                 }
             }
-            for target in external_export_assignments.values_mut().filter(|t| *t == symbol) {
+            for target in external_export_assignments
+                .values_mut()
+                .filter(|t| *t == symbol)
+            {
                 *target = clone.clone();
             }
         }
@@ -633,7 +701,13 @@ fn build_with_native_mode_routed(
             }));
         }
         if let Ok(path) = std::env::var("THAW_JS_RUNTIME_DUMP_SHIM") {
-            let _ = std::fs::write(format!("{path}.{}", if thaw_js_routing { "routed" } else { "plain" }), &shim_source);
+            let _ = std::fs::write(
+                format!(
+                    "{path}.{}",
+                    if thaw_js_routing { "routed" } else { "plain" }
+                ),
+                &shim_source,
+            );
         }
         #[allow(unused_mut)]
         // functions that now run as AOT clones are no longer QuickJS fallbacks
@@ -666,7 +740,10 @@ fn build_with_native_mode_routed(
             package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
         let transform = |source: &str, module_path: &Path, is_override: bool| {
             let input_name = if is_override && source != user_source.as_str() {
-                thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()))
+                thaw_parser::common::FileName::Custom(format!(
+                    "{} (in-memory entry override)",
+                    module_path.display()
+                ))
             } else {
                 thaw_parser::common::FileName::Real(module_path.to_path_buf())
             };
@@ -681,7 +758,9 @@ fn build_with_native_mode_routed(
                 &input_name,
             )?;
             let qualified_name = if qualified != source {
-                thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)"))
+                thaw_parser::common::FileName::Custom(format!(
+                    "{input_name} (registry rewrite stage 1)"
+                ))
             } else {
                 input_name
             };
@@ -701,7 +780,9 @@ fn build_with_native_mode_routed(
                 &qualified_name,
             )?;
             let methods_name = if methods != qualified {
-                thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)"))
+                thaw_parser::common::FileName::Custom(format!(
+                    "{qualified_name} (registry rewrite stage 2)"
+                ))
             } else {
                 qualified_name
             };
@@ -726,20 +807,34 @@ fn build_with_native_mode_routed(
         if !shim_source.is_empty() {
             let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map_named(
                 &shim_source,
-                thaw_parser::common::FileName::Custom("generated registry and bridge shims.ts".into()),
+                thaw_parser::common::FileName::Custom(
+                    "generated registry and bridge shims.ts".into(),
+                ),
             )?;
             for item in &mut shim.body {
-                let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) = item else {
+                let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) =
+                    item
+                else {
                     continue;
                 };
-                if shim_source_map.lookup_byte_offset(statement.span.lo).pos.0 as usize >= registry_shim_len {
+                if shim_source_map.lookup_byte_offset(statement.span.lo).pos.0 as usize
+                    >= registry_shim_len
+                {
                     continue;
                 }
-                let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) = statement.expr.as_ref() else {
+                let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) =
+                    statement.expr.as_ref()
+                else {
                     continue;
                 };
-                if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1"))
-                    || value.value.as_str().is_some_and(|text| text.starts_with("__thaw_internal_module:")) {
+                if matches!(
+                    value.value.as_str(),
+                    Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1")
+                ) || value
+                    .value
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("__thaw_internal_module:"))
+                {
                     // Only compiler-produced registry shim statements receive
                     // the sentinel span recognized by HIR; user source and
                     // later bridge shims cannot switch initializer execution.
@@ -763,10 +858,18 @@ fn build_with_native_mode_routed(
             forced_jit_fallbacks.extend(newly_forced);
             continue;
         }
-        break (module, registry_native_libs, runtime_features, shim_source, manifest);
+        break (
+            module,
+            registry_native_libs,
+            runtime_features,
+            shim_source,
+            manifest,
+        );
     };
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
-    thaw_hir::set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
+    thaw_hir::set_thaw_js_routed(
+        thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty(),
+    );
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program
@@ -803,7 +906,8 @@ fn build_with_native_mode_routed(
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
-    compiler.set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
+    compiler
+        .set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
     compiler.compile_program(&program)?;
     compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();
@@ -830,7 +934,9 @@ fn build_with_native_mode_routed(
     let jit_lib = build_staticlib("thaw-jit")?;
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
     runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
-    if icu4c { runtime_features.extend(["intl", "icu4c"]); }
+    if icu4c {
+        runtime_features.extend(["intl", "icu4c"]);
+    }
     // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
     // dependency objects. Linking a second standalone QuickJS archive would
     // define every host symbol twice.
@@ -932,8 +1038,11 @@ fn build_with_native_mode_routed(
             linker.args(quickjs_callback_export_args());
         }
     }
+    // `THAW_KEEP_SYMBOLS=1`: leave the symbol table in (profiling a generated program with gdb).
+    if std::env::var_os("THAW_KEEP_SYMBOLS").is_none() {
+        linker.arg("-Wl,--strip-all");
+    }
     let link_output = linker
-        .arg("-Wl,--strip-all")
         .arg("-o")
         .arg(scratch.path.join("program"))
         .output()
@@ -950,8 +1059,12 @@ fn build_with_native_mode_routed(
     }
 
     let linked = scratch.path.join("program");
-    let linked_bytes = std::fs::read(&linked)
-        .map_err(|error| format!("failed to inspect linked artifact `{}`: {error}", linked.display()))?;
+    let linked_bytes = std::fs::read(&linked).map_err(|error| {
+        format!(
+            "failed to inspect linked artifact `{}`: {error}",
+            linked.display()
+        )
+    })?;
     let linked_manifest = artifact_manifest_from_bytes(&linked_bytes)?;
     if linked_manifest != manifest {
         return Err("linked artifact metadata differs from the build manifest".into());
@@ -978,19 +1091,36 @@ impl BuildScratch {
     fn new(output: &Path) -> Result<Self, String> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let parent = output.parent().filter(|path| !path.as_os_str().is_empty())
+        let parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         for _ in 0..100 {
             let path = parent.join(format!(
-                ".thaw-build-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+                ".thaw-build-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             match std::fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path, preserve: std::cell::Cell::new(false) }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        preserve: std::cell::Cell::new(false),
+                    })
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("failed to create build directory `{}`: {error}", path.display())),
+                Err(error) => {
+                    return Err(format!(
+                        "failed to create build directory `{}`: {error}",
+                        path.display()
+                    ))
+                }
             }
         }
-        Err(format!("failed to reserve a build directory beside `{}`", output.display()))
+        Err(format!(
+            "failed to reserve a build directory beside `{}`",
+            output.display()
+        ))
     }
 }
 
@@ -1002,7 +1132,10 @@ impl Drop for BuildScratch {
     }
 }
 
-fn external_native_directories(output: &Path, scratch: &BuildScratch) -> Result<(PathBuf, PathBuf), String> {
+fn external_native_directories(
+    output: &Path,
+    scratch: &BuildScratch,
+) -> Result<(PathBuf, PathBuf), String> {
     let name = output
         .file_name()
         .and_then(|name| name.to_str())
@@ -1027,11 +1160,15 @@ fn publish_build_artifacts(
     }
     let has_native = if let Some((staging, destination)) = external_native_dirs {
         if destination.symlink_metadata().is_ok() && !destination.is_dir() {
-            return Err(format!("native output `{}` is not a directory", destination.display()));
+            return Err(format!(
+                "native output `{}` is not a directory",
+                destination.display()
+            ));
         }
         std::fs::read_dir(staging)
             .map_err(|error| format!("failed to read `{}`: {error}", staging.display()))?
-            .next().transpose()
+            .next()
+            .transpose()
             .map_err(|error| format!("failed to inspect `{}`: {error}", staging.display()))?
             .is_some()
     } else {
@@ -1049,16 +1186,30 @@ fn publish_build_artifacts(
         if had_native {
             if let Err(error) = std::fs::rename(destination, &old_native) {
                 return Err(rollback_publish_failure(
-                    scratch, format!("failed to save `{}`: {error}", destination.display()),
-                    output, &old_output, had_output, None, &old_native, false, false,
+                    scratch,
+                    format!("failed to save `{}`: {error}", destination.display()),
+                    output,
+                    &old_output,
+                    had_output,
+                    None,
+                    &old_native,
+                    false,
+                    false,
                 ));
             }
         }
         if has_native {
             if let Err(error) = std::fs::rename(staging, destination) {
                 return Err(rollback_publish_failure(
-                    scratch, format!("failed to install `{}`: {error}", destination.display()),
-                    output, &old_output, had_output, Some(destination), &old_native, had_native, false,
+                    scratch,
+                    format!("failed to install `{}`: {error}", destination.display()),
+                    output,
+                    &old_output,
+                    had_output,
+                    Some(destination),
+                    &old_native,
+                    had_native,
+                    false,
                 ));
             }
             installed_native = true;
@@ -1066,10 +1217,15 @@ fn publish_build_artifacts(
     }
     if let Err(error) = std::fs::rename(&staged_output, output) {
         return Err(rollback_publish_failure(
-            scratch, format!("failed to install `{}`: {error}", output.display()),
-            output, &old_output, had_output,
+            scratch,
+            format!("failed to install `{}`: {error}", output.display()),
+            output,
+            &old_output,
+            had_output,
             external_native_dirs.map(|(_, destination)| destination.as_path()),
-            &old_native, had_native, installed_native,
+            &old_native,
+            had_native,
+            installed_native,
         ));
     }
     Ok(())
@@ -1109,7 +1265,11 @@ fn rollback_publish_failure(
         cause
     } else {
         scratch.preserve.set(true);
-        format!("{cause}; rollback failed ({}); saved artifacts remain in `{}`", failures.join("; "), scratch.path.display())
+        format!(
+            "{cause}; rollback failed ({}); saved artifacts remain in `{}`",
+            failures.join("; "),
+            scratch.path.display()
+        )
     }
 }
 
@@ -1152,22 +1312,22 @@ fn native_addon_compatibility_error(
     supported: &std::collections::HashSet<String>,
 ) -> Option<String> {
     let missing = imports
-            .iter()
-            .filter(|name| name.starts_with("napi_") || name.starts_with("node_api_"))
-            .filter(|name| !supported.contains(name.split('@').next().unwrap_or_default()))
-            .cloned()
-            .collect::<Vec<_>>();
+        .iter()
+        .filter(|name| name.starts_with("napi_") || name.starts_with("node_api_"))
+        .filter(|name| !supported.contains(name.split('@').next().unwrap_or_default()))
+        .cloned()
+        .collect::<Vec<_>>();
     let internals = imports
-            .iter()
-            .filter(|name| {
-                name.as_str() == "node_module_register"
-                    || name.starts_with("_ZN2v8")
-                    || name.starts_with("_ZN4node")
-                    || name.starts_with("_ZNK2v8")
-                    || name.starts_with("_ZNK4node")
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        .iter()
+        .filter(|name| {
+            name.as_str() == "node_module_register"
+                || name.starts_with("_ZN2v8")
+                || name.starts_with("_ZN4node")
+                || name.starts_with("_ZNK2v8")
+                || name.starts_with("_ZNK4node")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     if missing.is_empty() && internals.is_empty() {
         return None;
     }
@@ -1397,9 +1557,7 @@ fn quickjs_fallback_reasons(
             let detail = jit_fallback_reasons
                 .get(&(package.clone(), function.clone()))
                 .map(String::as_str)
-                .unwrap_or(
-                    "dynamic class/object lifecycle is outside the specialization JIT",
-                );
+                .unwrap_or("dynamic class/object lifecycle is outside the specialization JIT");
             reasons.push(serde_json::json!({
                 "kind": "registry-fallback",
                 "package": package,
@@ -1428,7 +1586,10 @@ fn quickjs_fallback_reasons(
 fn source_line_column(source: &str, offset: usize) -> (usize, usize) {
     let prefix = &source[..offset];
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = prefix.rsplit_once('\n').map_or(prefix.len(), |(_, tail)| tail.len()) + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map_or(prefix.len(), |(_, tail)| tail.len())
+        + 1;
     (line, column)
 }
 
@@ -1460,13 +1621,20 @@ fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<Str
 
 #[test]
 fn runtime_feature_selection_preserves_exact_requirements() {
-    let features = thaw_bridge::required_runtime_features(
-        "__thaw_tls_ brotli Intl.NumberFormat"
+    let features = thaw_bridge::required_runtime_features("__thaw_tls_ brotli Intl.NumberFormat");
+    assert_eq!(
+        features.iter().copied().collect::<Vec<_>>(),
+        ["brotli", "intl", "tls"]
     );
-    assert_eq!(features.iter().copied().collect::<Vec<_>>(), ["brotli", "intl", "tls"]);
-    assert_eq!(napi_runtime_features(&features), ["quickjs", "quickjs-brotli", "quickjs-intl", "quickjs-tls"]);
+    assert_eq!(
+        napi_runtime_features(&features),
+        ["quickjs", "quickjs-brotli", "quickjs-intl", "quickjs-tls"]
+    );
     let features = ["icu4c", "intl"].into_iter().collect();
-    assert_eq!(napi_runtime_features(&features), ["quickjs", "quickjs-icu4c", "quickjs-intl"]);
+    assert_eq!(
+        napi_runtime_features(&features),
+        ["quickjs", "quickjs-icu4c", "quickjs-intl"]
+    );
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
@@ -1494,8 +1662,7 @@ fn ensure_static_system_libraries() -> Result<(), String> {
 fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
-    let endian = elf_endian(&bytes)
-        .map_err(|error| format!("`{}`: {error}", path.display()))?;
+    let endian = elf_endian(&bytes).map_err(|error| format!("`{}`: {error}", path.display()))?;
     let header = &bytes[..64];
     let offset = endian.u64(&header[32..])?;
     let entry_size = u64::from(endian.u16(&header[54..])?);
@@ -1504,13 +1671,23 @@ fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     if entry_size < 56 {
-        return Err(format!("`{}` has an invalid ELF program table", path.display()));
+        return Err(format!(
+            "`{}` has an invalid ELF program table",
+            path.display()
+        ));
     }
-    let table_size = count.checked_mul(entry_size).ok_or("ELF program table overflows")?;
-    elf_range(&bytes, offset, table_size)
-        .map_err(|error| format!("`{}` has an invalid ELF program table: {error}", path.display()))?;
+    let table_size = count
+        .checked_mul(entry_size)
+        .ok_or("ELF program table overflows")?;
+    elf_range(&bytes, offset, table_size).map_err(|error| {
+        format!(
+            "`{}` has an invalid ELF program table: {error}",
+            path.display()
+        )
+    })?;
     for index in 0..count {
-        let entry_offset = index.checked_mul(entry_size)
+        let entry_offset = index
+            .checked_mul(entry_size)
             .and_then(|step| offset.checked_add(step))
             .ok_or("ELF program header offset overflows")?;
         let entry = elf_range(&bytes, entry_offset, 4)?;
@@ -1576,9 +1753,8 @@ fn build_staticlib_with_options(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    staticlib_artifact_path(&stdout, pkg).ok_or_else(|| format!(
-        "could not find a staticlib for `{pkg}` in `cargo build` output"
-    ))
+    staticlib_artifact_path(&stdout, pkg)
+        .ok_or_else(|| format!("could not find a staticlib for `{pkg}` in `cargo build` output"))
 }
 
 fn staticlib_artifact_path(stdout: &str, pkg: &str) -> Option<PathBuf> {
@@ -1588,12 +1764,18 @@ fn staticlib_artifact_path(stdout: &str, pkg: &str) -> Option<PathBuf> {
             continue;
         };
         if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact")
-            || message.pointer("/target/name").and_then(serde_json::Value::as_str) != Some(target_name.as_str())
+            || message
+                .pointer("/target/name")
+                .and_then(serde_json::Value::as_str)
+                != Some(target_name.as_str())
         {
             continue;
         }
-        if let Some(path) = message.get("filenames").and_then(serde_json::Value::as_array)
-            .into_iter().flatten()
+        if let Some(path) = message
+            .get("filenames")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
             .filter_map(serde_json::Value::as_str)
             .map(PathBuf::from)
             .find(|path| path.extension().is_some_and(|extension| extension == "a"))
@@ -1612,7 +1794,13 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
         println!("prepared runtime archives are current (cache hit)");
         return Ok(());
     }
-    for package in ["thaw-arena", "thaw-runtime", "thaw-std", "thaw-jit", "thaw-js"] {
+    for package in [
+        "thaw-arena",
+        "thaw-runtime",
+        "thaw-std",
+        "thaw-jit",
+        "thaw-js",
+    ] {
         store_prepared_staticlib(package, false, &[])?;
     }
     store_prepared_staticlib("thaw-quickjs", true, &[])?;
@@ -1646,9 +1834,8 @@ fn store_prepared_staticlib(
             .map_err(|error| format!("failed to replace `{}`: {error}", cached.display()))?;
     }
     if destination.is_file() {
-        std::fs::remove_file(&destination).map_err(|error| {
-            format!("failed to replace `{}`: {error}", destination.display())
-        })?;
+        std::fs::remove_file(&destination)
+            .map_err(|error| format!("failed to replace `{}`: {error}", destination.display()))?;
     }
     let legacy = destination.with_extension("");
     if legacy.is_file() {
@@ -1747,8 +1934,7 @@ fn prepared_staticlib(
 #[cfg(unix)]
 fn cache_file_is_private(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let (Ok(file), Ok(process)) = (std::fs::metadata(path), std::fs::metadata("/proc/self"))
-    else {
+    let (Ok(file), Ok(process)) = (std::fs::metadata(path), std::fs::metadata("/proc/self")) else {
         return false;
     };
     file.uid() == process.uid() && file.mode() & 0o022 == 0
@@ -1764,8 +1950,8 @@ fn prepared_staticlib_path(
     no_default_features: bool,
     features: &[&str],
 ) -> Result<PathBuf, String> {
-    let directory = prepared_staticlib_root()?
-        .join(staticlib_variant(no_default_features, features));
+    let directory =
+        prepared_staticlib_root()?.join(staticlib_variant(no_default_features, features));
     Ok(directory.join(format!("lib{}.a.gz", package.replace('-', "_"))))
 }
 
@@ -1844,7 +2030,11 @@ mod prepared_cache_trust_tests {
         std::fs::write(&shared, b"EVIL").unwrap();
 
         let linked = prepared_staticlib(package, true, &[]).expect("prepared archive");
-        assert!(!linked.starts_with(std::env::temp_dir()), "{}", linked.display());
+        assert!(
+            !linked.starts_with(std::env::temp_dir()),
+            "{}",
+            linked.display()
+        );
         assert_eq!(std::fs::read(&linked).unwrap(), b"GOOD");
         assert_eq!(prepared_staticlib(package, true, &[]).unwrap(), linked);
         std::fs::remove_file(&shared).ok();
@@ -1908,7 +2098,10 @@ mod asset_symlink_tests {
         std::fs::write(base.join("secret.txt"), "secret").unwrap();
         std::os::unix::fs::symlink(base.join("secret.txt"), root.join("leak.txt")).unwrap();
         let error = generate_asset_shim(&root).unwrap_err();
-        assert!(error.contains("points outside the asset directory"), "{error}");
+        assert!(
+            error.contains("points outside the asset directory"),
+            "{error}"
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

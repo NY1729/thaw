@@ -53,11 +53,16 @@ impl Interp {
         proto_scope.declare("%home", Value::Object(proto.clone()), false);
         let mut fields: Vec<(Rc<str>, Option<a::Expr>)> = Vec::new();
         for m in &class.body {
-            if let a::ClassMember::ClassProp(p) = m {
-                if !p.is_static {
+            match m {
+                a::ClassMember::ClassProp(p) if !p.is_static => {
                     let k = self.prop_name(&p.key, &proto_scope)?;
                     fields.push((k, p.value.as_ref().map(|v| (**v).clone())));
                 }
+                a::ClassMember::PrivateProp(p) if !p.is_static => {
+                    let k: Rc<str> = format!("@@priv:{}", &*p.key.name).into();
+                    fields.push((k, p.value.as_ref().map(|v| (**v).clone())));
+                }
+                _ => {}
             }
         }
         let info = ClassInfo {
@@ -80,14 +85,27 @@ impl Interp {
             ),
             None => (Vec::new(), Vec::new()),
         };
+        let ctor_uses_new_target = {
+            let mut finder = ArgumentsFinder::default();
+            body.visit_with(&mut finder);
+            finder.new_target
+        };
+        let hoisted = hoisted_names(&body);
+        let param_names = simple_param_names(&params);
         let def = Rc::new(FuncDef {
             name: name.clone(),
             params,
             body: Body::Block(body),
             arrow: false,
             is_async: false,
+            is_gen: false,
             bind_self: false,
             uses_arguments: false,
+            uses_new_target: ctor_uses_new_target || parent.is_some(),
+            uses_this: true,
+            src: (self.run_id, class.span.lo.0, class.span.hi.0),
+            hoisted,
+            param_names,
             strict: true,
             class: Some(info),
         });
@@ -144,8 +162,33 @@ impl Interp {
                     };
                     put(&ctor_obj, &key, v);
                 }
-                a::ClassMember::PrivateMethod(_) | a::ClassMember::PrivateProp(_) => {
-                    return unsupported("private-name")
+                a::ClassMember::PrivateMethod(pm) => {
+                    let target = if pm.is_static { &ctor_obj } else { &proto };
+                    let mscope = if pm.is_static {
+                        static_scope.clone()
+                    } else {
+                        proto_scope.clone()
+                    };
+                    let key: Rc<str> = format!("@@priv:{}", &*pm.key.name).into();
+                    let shown: Rc<str> = format!("#{}", &*pm.key.name).into();
+                    let f = self.method_value(Some(shown), &pm.function, &mscope)?;
+                    match pm.kind {
+                        a::MethodKind::Method => put_hidden(target, &key, f),
+                        a::MethodKind::Getter => {
+                            define_accessor(target, &key, Some(f), None, false)
+                        }
+                        a::MethodKind::Setter => {
+                            define_accessor(target, &key, None, Some(f), false)
+                        }
+                    }
+                }
+                a::ClassMember::PrivateProp(p) if p.is_static => {
+                    let key: Rc<str> = format!("@@priv:{}", &*p.key.name).into();
+                    let v = match &p.value {
+                        Some(e) => self.eval(e, &static_scope)?,
+                        None => Value::Undefined,
+                    };
+                    put_hidden(&ctor_obj, &key, v);
                 }
                 a::ClassMember::StaticBlock(block) => {
                     let inner = Scope::new(Some(static_scope.clone()));
@@ -184,14 +227,14 @@ impl Interp {
                 Some(e) => self.eval(&e, &frame)?,
                 None => Value::Undefined,
             };
-            put(
-                match this {
-                    Value::Object(o) => o,
-                    _ => return Ok(()),
-                },
-                &key,
-                v,
-            );
+            let Value::Object(target) = this else {
+                return Ok(());
+            };
+            if key.starts_with("@@priv:") {
+                put_hidden(target, &key, v);
+            } else {
+                put(target, &key, v);
+            }
         }
         Ok(())
     }
@@ -207,8 +250,12 @@ impl Interp {
             }
             _ => None,
         };
+        let nt = self.rt.pending_nt.take();
         let Some((def, scope)) = class_parts else {
-            let r = self.call(ctor, this, args)?;
+            self.rt.pending_nt = nt;
+            let r = self.call(ctor, this, args);
+            self.rt.pending_nt = None;
+            let r = r?;
             // a native base constructor (Set, Map, Array, Promise, ...) builds its own object:
             // move its internal state into the pre-allocated `this`, keeping `this` identity and prototype
             if let (Value::Object(t), Value::Object(n)) = (this, &r) {
@@ -232,12 +279,15 @@ impl Interp {
         let result = (|| {
             if !info.derived {
                 self.run_fields(ctor, this)?;
+                self.rt.pending_nt = nt.clone();
                 self.call_closure(ctor, &def, &scope, this, args)
             } else if info.explicit_ctor {
+                self.rt.pending_nt = nt.clone();
                 self.call_closure(ctor, &def, &scope, this, args)
             } else {
                 let parent = info.parent.clone().unwrap_or(Value::Undefined);
                 if !matches!(parent, Value::Null) {
+                    self.rt.pending_nt = nt.clone();
                     self.init_instance(&parent, this, args)?;
                 }
                 self.run_fields(ctor, this)?;
@@ -262,7 +312,10 @@ impl Interp {
         let Some(parent) = parent else {
             return self.throw_error("SyntaxError", "'super' keyword unexpected here");
         };
-        self.init_instance(&parent, &this, args)?;
+        self.rt.pending_nt = self.lookup(scope, "%newtarget");
+        let r = self.init_instance(&parent, &this, args);
+        self.rt.pending_nt = None;
+        r?;
         self.run_fields(&class, &this)?;
         Ok(Value::Undefined)
     }

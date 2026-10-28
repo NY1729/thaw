@@ -30,6 +30,10 @@ impl Report {
 
 /// Parsed bundle pieces needed by the loader and the scan.
 pub struct BundleParts {
+    /// Constructs of a rewritten ES-module bundle that the CommonJS rewrite cannot keep sound.
+    pub esm_problems: BTreeSet<&'static str>,
+    /// The text that was parsed (the rewritten text for an ES-module bundle).
+    pub source: String,
     pub entry: String,
     pub factories: Vec<(String, a::Function)>,
     pub require_maps: HashMap<String, HashMap<String, String>>,
@@ -45,6 +49,15 @@ fn prop_key(p: &a::PropName) -> Option<String> {
 
 /// Extract factories, require maps and the entry key from a registry bundle.
 pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
+    if let Some((factories, problems)) = crate::esm::native_bundle_to_factories(source)? {
+        let mut parts = parse_factories(&factories)?;
+        parts.esm_problems = problems;
+        return Ok(parts);
+    }
+    parse_factories(source)
+}
+
+fn parse_factories(source: &str) -> Result<BundleParts, String> {
     let module = thaw_parser::parse_javascript(source)?;
     let (mut entry, mut factories, mut require_maps) = (String::new(), Vec::new(), HashMap::new());
     // The wrapper is `module.exports = (function(require){ ... })(globalThis.require);`.
@@ -137,6 +150,8 @@ pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
         return Err("not a registry bundle (no entry key / factories)".into());
     }
     Ok(BundleParts {
+        esm_problems: BTreeSet::new(),
+        source: source.to_string(),
         entry,
         factories,
         require_maps,
@@ -362,6 +377,8 @@ impl Visit for Walker {
                         self.called.insert(p.sym.to_string());
                     }
                 }
+                // direct eval sees the caller's local scope, which the global-scope `eval` cannot
+                a::Expr::Ident(i) if &*i.sym == "eval" => self.feature("direct-eval"),
                 a::Expr::Ident(i) if &*i.sym == "require" => {
                     let lit = match n.args.first().map(|x| &*x.expr) {
                         Some(a::Expr::Lit(a::Lit::Str(s))) => s.value.as_str().map(str::to_string),
@@ -418,6 +435,9 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         let mut w = Walker::default();
         func.visit_with(&mut w);
         walkers.push((key.clone(), w));
+    }
+    for problem in &parts.esm_problems {
+        add(&mut report, (*problem).to_string(), 1, &parts.entry);
     }
     let defined: HashSet<String> = walkers
         .iter()
