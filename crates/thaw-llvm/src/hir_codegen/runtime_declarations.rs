@@ -194,6 +194,24 @@ impl<'ctx> HirCompiler<'ctx> {
             strcmp_type,
             Some(Linkage::External),
         );
+        // thaw-intl (optional archive): declared unconditionally, referenced only by
+        // the `__thaw_intl_*` call sites, so an unused declaration costs nothing.
+        let f64_type = self.context.f64_type();
+        self.module.add_function(
+            "thaw_intl_compare",
+            i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_intl_number",
+            i8_ptr.fn_type(&[f64_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_intl_date",
+            i8_ptr.fn_type(&[f64_type.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_json_strict_equal",
             i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
