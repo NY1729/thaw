@@ -26,7 +26,7 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
-    pub(in crate::lower) fn initializer_closure_references(expression: &Expr, name: &str) -> bool {
+    fn initializer_closure_references(expression: &Expr, name: &str) -> bool {
         use swc_ecma_visit::{Visit, VisitWith};
 
         fn pattern_binds(pattern: &Pat, name: &str) -> bool {

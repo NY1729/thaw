@@ -280,6 +280,7 @@ fn classify(it: &mut Interp, c: Ctl) -> HostError {
 }
 
 const CALLBACK_KEY: &str = "__thaw_tjs_cb__";
+const TIMER_KEY: &str = "__thaw_tjs_timer__";
 const HANDLE_KEY: &str = "__thaw_tjs_handle__";
 const UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
 
@@ -702,6 +703,14 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
                 })
                 .unwrap_or(Value::Undefined)
         }
+        // `{"__thaw_tjs_timer__": id}`: a Timeout/Immediate returned earlier (still live, else its id).
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Number(_))] if k == TIMER_KEY) =>
+        {
+            let Some((_, Native::Number(id))) = fields.first() else {
+                return Value::Undefined;
+            };
+            it.timer_object(*id as u64)
+        }
         // The compiled side's `undefined` marker (absent optional argument, undefined result).
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Bool(true))] if k == UNDEFINED_KEY) => {
             Value::Undefined
@@ -722,7 +731,7 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
         return Err(HostError::NotPlainData("cyclic or too deep".into()));
     }
     Ok(match v {
-        Value::Undefined => Native::Undefined,
+        Value::Undefined | Value::Hole => Native::Undefined,
         Value::Null => Native::Null,
         Value::Bool(b) => Native::Bool(*b),
         Value::Number(n) => Native::Number(*n),
@@ -749,6 +758,13 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                         })
                         .collect::<Result<_, _>>()?,
                 ));
+            }
+            // a Timeout/Immediate crosses as its id and is resolved back to the live timer
+            if let Some(id) = it.timer_handle_id(v) {
+                return Ok(Native::Object(vec![(
+                    TIMER_KEY.to_string(),
+                    Native::Number(id as f64),
+                )]));
             }
             let mut fields = Vec::new();
             for k in it.own_keys(v) {
@@ -930,6 +946,44 @@ pub extern "C" fn thaw_tjs_unload(handle: i64) {
             *slot = None;
         }
     });
+}
+
+/// Terminal event loop for a routed build that holds no QuickJS context: runs every loaded
+/// package's timers/immediates/jobs until idle. Returns 1 if a package ended with an uncaught
+/// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)
+#[no_mangle]
+pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    let mut status = 0;
+    for handle in 0..count {
+        let ran = with_package(handle, |p| {
+            if !p.interp.work_pending() {
+                return Ok(0);
+            }
+            p.interp
+                .run_event_loop()
+                .map(|_| 0)
+                .map_err(|c| classify(&mut p.interp, c))
+        });
+        if let Err(e) = ran {
+            eprintln!("{e}");
+            status = 1;
+        }
+    }
+    status
+}
+
+/// 1 while any loaded package still has referenced timers/immediates or queued jobs.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_terminal_work_pending() -> u8 {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    (0..count).any(|h| {
+        PACKAGES.with(|ps| {
+            ps.borrow()
+                .get(h)
+                .is_some_and(|p| p.as_ref().is_some_and(|p| p.interp.work_pending()))
+        })
+    }) as u8
 }
 
 /// Free a string returned by this module.

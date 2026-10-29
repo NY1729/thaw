@@ -104,6 +104,9 @@ impl<'ctx> HirCompiler<'ctx> {
         match expr {
             HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_object_copy_class_identity") => Some(HirType::Bool),
             HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_is_unset_number") => Some(HirType::Bool),
+            // `thaw_json_typeof` returns a pointer into the runtime's own rodata; comparing it with a
+            // literal must be by content (pointer identity only held when the linker merged both).
+            HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_json_typeof") => Some(HirType::Str),
             HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_native_subclass_mark") => {
                 args.first().and_then(|base| self.expr_hir_type(base))
             }
