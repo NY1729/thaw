@@ -256,7 +256,28 @@ impl<'ctx> HirCompiler<'ctx> {
         let getter = format!("__thaw_getter_{name}");
         let setter = format!("__thaw_setter_{name}");
         let getter = fields.iter().position(|(field, _)| field == &getter);
-        if getter.is_none() && fields.iter().any(|(field, _)| field == &setter) {
+        let has_setter = fields.iter().any(|(field, _)| field == &setter);
+        // console.log prints an accessor property as `[Getter]`/`[Setter]`/`[Getter/Setter]`
+        // and never invokes it; JSON.stringify keeps calling it.
+        let accessor_kind = match (getter.is_some(), has_setter) {
+            _ if !self.console_omit_absent_fields => None,
+            (true, true) => Some(3),
+            (true, false) => Some(1),
+            (false, true) => Some(2),
+            (false, false) => None,
+        };
+        if let Some(kind) = accessor_kind {
+            let sentinel = self.builder.build_call(
+                self.module.get_function("thaw_json_accessor_sentinel").unwrap(),
+                &[self.context.i8_type().const_int(kind, false).into()], "console_accessor_sentinel",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("accessor sentinel returned no value")?;
+            let key = self.builder.build_global_string_ptr(name, "console_accessor_key")
+                .map_err(|error| error.to_string())?;
+            self.compile_json_object_set_native_with_undefined(
+                json, key.as_pointer_value(), sentinel, &HirType::Json, preserve_undefined, false,
+            )?;
+        } else if getter.is_none() && has_setter {
             if preserve_undefined {
                 let key = self.builder.build_global_string_ptr(name, "dynamic_setter_only_key")
                     .map_err(|error| error.to_string())?;
