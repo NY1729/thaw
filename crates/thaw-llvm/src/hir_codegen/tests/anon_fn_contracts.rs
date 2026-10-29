@@ -47,3 +47,30 @@ function main(): void {
         "K { f: [AsyncFunction: f] }\n[ [AsyncFunction (anonymous)] ]\n"
     );
 }
+
+#[test]
+fn function_values_stored_in_map_and_set_keep_their_labels() {
+    let source = r##"async function noawait(): Promise<number> { return 1; }
+function main(): void {
+  const m = new Map<string, any>();
+  m.set("a", async () => 3);
+  console.log(m);
+  const s = new Set<any>();
+  s.add(() => 1);
+  console.log(s);
+  const n = new Map<string, any>();
+  n.set("n", async function named() { await 0; return 1; });
+  console.log(n);
+  const p = new Map<string, any>();
+  p.set("p", noawait);
+  console.log(p);
+  const q = new Map<string, any>();
+  q.set("q", (x: number) => x + 1);
+  console.log(q);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "function_values_stored_in_map_and_set_keep_their_labels"),
+        "Map(1) { 'a' => [AsyncFunction (anonymous)] }\nSet(1) { [Function (anonymous)] }\nMap(1) { 'n' => [AsyncFunction: named] }\nMap(1) { 'p' => [AsyncFunction: noawait] }\nMap(1) { 'q' => [Function (anonymous)] }\n"
+    );
+}

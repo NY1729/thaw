@@ -3244,6 +3244,11 @@
       "source": "function mk(): any {\n  const o: any = { name: \"X\", message: \"hi\" };\n  Error.captureStackTrace(o);\n  return o.stack;\n}\nfunction wrap(): any { return mk(); }\nfunction main(): void {\n  const lines = wrap().split(\"\\n\");\n  console.log(lines[0], lines[1].includes(\"at mk \"), lines[2].includes(\"at wrap \"));\n}\n"
     },
     {
+      "name": "function values in Map and Set keep Node labels",
+      "expect": "matched",
+      "source": "async function noawait(): Promise<number> { return 1; }\nfunction main(): void {\n  const m = new Map<string, any>();\n  m.set(\"a\", async () => 3);\n  console.log(m);\n  const s = new Set<any>();\n  s.add(() => 1);\n  console.log(s);\n  const n = new Map<string, any>();\n  n.set(\"n\", async function named() { await 0; return 1; });\n  console.log(n);\n  const p = new Map<string, any>();\n  p.set(\"p\", noawait);\n  console.log(p);\n  const q = new Map<string, any>();\n  q.set(\"q\", (x: number) => x + 1);\n  console.log(q);\n}\n"
+    },
+    {
       "name": "infer fs.readFile callback params are contextually typed",
       "expect": "matched",
       "source": "import fs from \"node:fs\"; function main(): void { fs.writeFileSync(\"/tmp/thaw-infer-rf.txt\", \"hello\"); fs.readFile(\"/nonexistent-thaw-file\", (e, d) => { console.log(\"cb\", e!.code, d); fs.readFile(\"/tmp/thaw-infer-rf.txt\", (err, data) => { console.log(err, data.length > 0); fs.readFile(\"/tmp/thaw-infer-rf.txt\", \"utf8\", (err2, text) => console.log(err2, text)); }); }); }"
