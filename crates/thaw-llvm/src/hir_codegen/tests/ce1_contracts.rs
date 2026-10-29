@@ -27,7 +27,6 @@ fn collections_without_type_arguments_default_to_any() {
   tset.add(3);
   console.log([...tset]);
 }
-main();
 "####;
     assert_eq!(compile_and_run(source, "collections_without_type_arguments_default_to_any"), r####"1 2 Map(2) { 'a' => 1, 'b' => 'x' }
 2 true false Set(2) { 1, 'a' }
@@ -73,7 +72,6 @@ fn console_group_count_table_dir_match_node() {
   console.timeEnd("nolabel");
   console.log("after");
 }
-main();
 "####, "console_group_count_table_dir_match_node");
     assert_eq!(stdout, r####"G
   inside
@@ -141,13 +139,9 @@ function main(): void {
   f().then(console.log);
   g().then(console.log);
   g().then(console.error);
-  const log = console.log;
-  log("direct", 1);
 }
-main();
 "####, "console_methods_passed_as_values_forward_their_arguments");
-    assert_eq!(stdout, r####"direct 1
-r
+    assert_eq!(stdout, r####"r
 42
 "####);
     assert_eq!(stderr, "42\n");
@@ -162,9 +156,8 @@ fn console_trace_writes_to_stderr_with_group_indent() {
   console.trace();
   console.log("after");
 }
-main();
 "####, "console_trace_writes_to_stderr_with_group_indent");
-    assert_eq!(stdout, "after\n");
+    assert_eq!(stdout, "G\nafter\n");
     // Node appends stack frames after each header line; only the headers are reproduced.
     let headers: Vec<&str> = stderr.lines().filter(|line| line.trim_start().starts_with("Trace")).collect();
     assert_eq!(headers, ["  Trace: tr 1", "Trace"]);

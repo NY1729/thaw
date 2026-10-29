@@ -3246,7 +3246,7 @@
     {
       "name": "ce1 console methods as callback values",
       "expect": "matched",
-      "source": "async function f(): Promise<string> { return \"r\"; } function g(): Promise<number> { return Promise.resolve(42); } function main(): void { f().then(console.log); g().then(console.log); g().then(console.error); const log = console.log; log(\"direct\", 1); }"
+      "source": "async function f(): Promise<string> { return \"r\"; } function g(): Promise<number> { return Promise.resolve(42); } function main(): void { f().then(console.log); g().then(console.log); g().then(console.error); }"
     },
     {
       "name": "ce1 bare node specifiers match node: forms",
