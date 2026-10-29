@@ -5112,9 +5112,20 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 rendered
             }
         };
+        // A wrapper of a compiled function carries its `"<kind><name>"` label (see
+        // `thaw_function_label_for`); anything else is a plain function.
+        let fn_kind = match host_get_property(lease, b"__thaw_label__") {
+            Value::String(label) => match label.chars().next() {
+                Some('a') => crate::inspect::FnKind::Async,
+                Some('g') => crate::inspect::FnKind::Generator,
+                Some('A') => crate::inspect::FnKind::AsyncGenerator,
+                _ => crate::inspect::FnKind::Function,
+            },
+            _ => crate::inspect::FnKind::Function,
+        };
         return Node::Function {
             name,
-            kind: crate::inspect::FnKind::Function,
+            kind: fn_kind,
         };
     }
     if kind != "object" {
@@ -7550,6 +7561,23 @@ pub unsafe extern "C" fn thaw_function_name_set(closure: *const u8, label: *cons
     FUNCTION_LABELS.with(|labels| {
         labels.borrow_mut().insert(code, label as usize);
     });
+}
+
+/// The label registered for the function at `closure` (`"<kind><name>"`, owned by the compiled
+/// program), or null. Lets the QuickJS wrapper of a function stored in a `Json`/`any` value
+/// carry the same name and kind.
+///
+/// # Safety
+/// `closure` is null or a compiled closure (entry code pointer at offset 0).
+#[no_mangle]
+pub unsafe extern "C" fn thaw_function_label_for(closure: *const u8) -> *const c_char {
+    if closure.is_null() {
+        return std::ptr::null();
+    }
+    let code = unsafe { (closure as *const usize).read() };
+    FUNCTION_LABELS
+        .with(|labels| labels.borrow().get(&code).copied())
+        .map_or(std::ptr::null(), |label| label as *const c_char)
 }
 
 fn closure_function_label(closure: *const u8) -> String {
