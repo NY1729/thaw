@@ -506,6 +506,7 @@ fn lower_class_methods(
             MethodKind::Method => class_method_symbol(&class_name, &method_name),
         };
         let signature = &signatures[&symbol];
+        let declared_ret = deferred_generator_ret(&signature.ret, method.function.is_generator);
         if method.is_abstract || (declaration.class.is_abstract && !method.is_static) {
             continue;
         }
@@ -539,7 +540,7 @@ fn lower_class_methods(
             generic_interfaces,
             enum_values,
             enum_reverse_values,
-            signature.ret.clone(),
+            declared_ret.clone(),
             None,
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
@@ -622,7 +623,7 @@ fn lower_class_methods(
         if let Err(error) = lower_function_statements(
             &mut lowerer,
             &body.stmts,
-            &signature.ret,
+            &declared_ret,
             method.function.is_generator,
             &mut lowered_body,
         ) {
@@ -635,7 +636,7 @@ fn lower_class_methods(
             && hir_type_contains_dynamic(&signature.ret)
         {
             lowerer.ret_type.clone()
-        } else if signature.ret == HirType::Dynamic {
+        } else if declared_ret == HirType::Dynamic {
             // Mirrors the identical free-function case (`declared_ret ==
             // HirType::Dynamic => lowerer.infer_return_type(&body)`,
             // above in this same file) -- an unannotated method's
@@ -665,6 +666,8 @@ fn lower_class_methods(
         {
             let unbound_symbol = unbound_class_method_symbol(&symbol);
             let unbound_signature = signatures.get(&unbound_symbol).unwrap_or(signature);
+            let unbound_declared_ret =
+                deferred_generator_ret(&unbound_signature.ret, method.function.is_generator);
             let unbound_params = params[receiver_offset..].to_vec();
             let mut unbound = FnLowerer::new(
                 signatures,
@@ -672,7 +675,7 @@ fn lower_class_methods(
                 generic_interfaces,
                 enum_values,
                 enum_reverse_values,
-                unbound_signature.ret.clone(),
+                unbound_declared_ret.clone(),
                 None,
             );
             seed_global_scope(&mut unbound, global_types, immutable_globals);
@@ -723,15 +726,15 @@ fn lower_class_methods(
                 lower_function_statements(
                     &mut unbound,
                     &body.stmts,
-                    &unbound_signature.ret,
+                    &unbound_declared_ret,
                     method.function.is_generator,
                     &mut unbound_body,
                 )
                 .and_then(|()| {
-                    if unbound_signature.ret == HirType::Dynamic {
+                    if unbound_declared_ret == HirType::Dynamic {
                         unbound.infer_return_type(&unbound_body)
                     } else {
-                        Ok(unbound_signature.ret.clone())
+                        Ok(unbound_declared_ret.clone())
                     }
                 })
             } else {
@@ -743,10 +746,10 @@ fn lower_class_methods(
                     unbound_body = vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
                         "TypeError: cannot call a detached method that reads `this`".into(),
                     )))];
-                    if unbound_signature.ret == HirType::Dynamic {
+                    if unbound_declared_ret == HirType::Dynamic {
                         method_ret.clone()
                     } else {
-                        unbound_signature.ret.clone()
+                        unbound_declared_ret.clone()
                     }
                 }
             };
@@ -811,7 +814,7 @@ fn lower_fn_decl(
         );
     }
 
-    let declared_ret = signatures[&name].ret.clone();
+    let declared_ret = deferred_generator_ret(&signatures[&name].ret, func.is_generator);
 
     let body_block = func
         .body
@@ -1343,6 +1346,18 @@ fn lower_function_statements(
     Ok(())
 }
 
+/// A non-generator function returning an unannotated generator carries a
+/// signature return type that still holds `Dynamic` until the generator's
+/// own signature converges; treat it as an unresolved return so it is
+/// re-inferred instead of coercing the converged value to the stale type.
+fn deferred_generator_ret(ret: &HirType, is_generator: bool) -> HirType {
+    if !is_generator && is_generator_producer_type(ret) && hir_type_contains_dynamic(ret) {
+        HirType::Dynamic
+    } else {
+        ret.clone()
+    }
+}
+
 fn generator_cancel_guard(
     control: &str,
     values: &str,
@@ -1387,6 +1402,38 @@ fn seed_global_scope(
         .extend(immutable_globals.iter().cloned());
 }
 
+/// Whether a generator body reads a `yield` result (`const x = yield 1`,
+/// `x = yield`, ...) rather than only emitting values; only then does the
+/// resume value need a real (dynamic) channel instead of `undefined`.
+fn generator_reads_resume_value(body: Option<&[Stmt]>) -> bool {
+    struct Finder(bool);
+    impl Visit for Finder {
+        fn visit_expr_stmt(&mut self, statement: &swc_ecma_ast::ExprStmt) {
+            match statement.expr.as_ref() {
+                Expr::Yield(yielded) => yielded.arg.visit_with(self),
+                other => other.visit_with(self),
+            }
+        }
+        fn visit_yield_expr(&mut self, yielded: &swc_ecma_ast::YieldExpr) {
+            // `yield*` forwards the resume value to its delegate; only a plain
+            // `yield` can observe it.
+            if yielded.delegate {
+                yielded.arg.visit_with(self);
+            } else {
+                self.0 = true;
+            }
+        }
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
+        fn visit_arrow_expr(&mut self, _: &swc_ecma_ast::ArrowExpr) {}
+        fn visit_class(&mut self, _: &swc_ecma_ast::Class) {}
+    }
+    let mut finder = Finder(false);
+    for statement in body.unwrap_or_default() {
+        statement.visit_with(&mut finder);
+    }
+    finder.0
+}
+
 fn lower_generator_return_type(
     is_async: bool,
     return_type: &Option<Box<swc_ecma_ast::TsTypeAnn>>,
@@ -1394,13 +1441,19 @@ fn lower_generator_return_type(
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
     type_substitution: &HashMap<Symbol, HirType>,
+    body: Option<&[Stmt]>,
 ) -> Result<HirType, String> {
+    let default_input = if generator_reads_resume_value(body) {
+        HirType::Json
+    } else {
+        HirType::Undefined
+    };
     let Some(annotation) = return_type else {
         return Ok(generator_function_type(
             is_async,
             HirType::Dynamic,
             HirType::Dynamic,
-            HirType::Undefined,
+            default_input,
         ));
     };
     let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
@@ -1443,7 +1496,7 @@ fn lower_generator_return_type(
             )
         })
         .transpose()?
-        .unwrap_or(HirType::Undefined);
+        .unwrap_or(default_input);
     let yielded = resolve_ts_type_with_substitution(
         yielded,
         type_substitution,

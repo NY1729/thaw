@@ -63,6 +63,7 @@ fn collect_native_classes<'a>(
                 interfaces,
                 generic_interfaces,
                 &substitution,
+                method.function.body.as_ref().map(|body| body.stmts.as_slice()),
             )?
         } else {
             lower_fn_return_type(

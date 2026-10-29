@@ -135,10 +135,13 @@ impl<'a> FnLowerer<'a> {
                             return Err("generator `.next()` accepts at most one value".into());
                         }
                         let input = match call.args.first() {
-                            Some(argument) => self.lower_expr_with_expected_type(
-                                &argument.expr,
-                                Some(input_type),
-                            )?,
+                            Some(argument) => {
+                                let value = self.lower_expr_with_expected_type(
+                                    &argument.expr,
+                                    Some(input_type),
+                                )?;
+                                self.coerce_to_declared(input_type, value)?
+                            }
                             None => generator_placeholder(input_type).ok_or_else(|| {
                                 format!(
                                     "generator input type {input_type:?} has no default value"

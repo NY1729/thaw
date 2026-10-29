@@ -3387,6 +3387,26 @@
       "name": "infer destructuring assignment swap on module bindings and indexed targets",
       "expect": "matched",
       "source": "let a = 1, b = 2;\nlet [c, d] = [3, 4];\nfunction main(): void {\n  [a, b] = [b, a];\n  [c, d] = [d, c];\n  const xs = [3, 1, 2];\n  let i = 0, j = 2;\n  [xs[i], xs[j]] = [xs[j], xs[i]];\n  ({ a } = { a: 5 });\n  console.log(a, b, c, d, xs);\n}"
+    },
+    {
+      "name": "g034 generators class iterator",
+      "expect": "matched",
+      "source": "class C {\n  *items() { yield 1; yield 2; }\n  [Symbol.iterator]() { return this.items(); }\n  wrap() { return this.items(); }\n}\nclass D { *[Symbol.iterator]() { yield \"x\"; yield \"y\"; } }\nfunction main(): void {\n  console.log([...new C()], Array.from(new C()), [...new C().wrap()]);\n  console.log([...new D()]);\n  for (const v of new C()) console.log(v + 1);\n}"
+    },
+    {
+      "name": "g034 generators delegation throw",
+      "expect": "matched",
+      "source": "function* inner() { yield \"i\"; return \"ret\"; }\nfunction* d() { yield* [1, 2]; const r: string = yield* inner(); yield r; }\nfunction* g2() { try { yield 1; } catch (e) { console.log(\"caught\", e); yield \"after\"; } }\nfunction main(): void {\n  console.log([...d()]);\n  const gt = g2();\n  gt.next();\n  console.log(gt.throw(\"boom\"));\n  console.log(gt.next().done);\n}"
+    },
+    {
+      "name": "g034 generators iterate numeric",
+      "expect": "matched",
+      "source": "function* fib() { let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, a + b]; } }\nfunction* count() { yield 1; yield 2; yield 3; }\nfunction main(): void {\n  const out: number[] = [];\n  for (const v of fib()) { if (v > 50) break; out.push(v); }\n  console.log(out);\n  let sum = 0;\n  for (const v of count()) { if (v >= 2) sum += v * 2; }\n  console.log(sum, [...count()].map((v) => v + 1));\n}"
+    },
+    {
+      "name": "g034 generators resume value",
+      "expect": "matched",
+      "source": "function* g() { const x: number = yield 1; console.log(\"got\", x); try { yield 2; } finally { console.log(\"cleanup\"); } return 3; }\nfunction* acc() { let total = 0; while (total < 10) { const n: number = yield total; total += n; } return total; }\nfunction main(): void {\n  const it = g();\n  console.log(it.next(), it.next(5), it.return(7), it.next());\n  const a = acc();\n  a.next();\n  console.log(a.next(4).value, a.next(3).value, a.next(5));\n}"
     }
   ]
 }
