@@ -1068,7 +1068,10 @@ fn build_with_native_mode_routed(
     }
     if let Some(intl_lib) = intl_lib {
         // Needs thaw-arena's string allocator, which may only be pulled in by this archive.
-        linker.arg(intl_lib).arg(&arena_lib);
+        linker.arg(intl_lib);
+        if let Some((arena_lib, ..)) = &static_rt_libs {
+            linker.arg(arena_lib);
+        }
     }
     if let Some(quickjs_lib) = quickjs_lib {
         linker.arg(quickjs_lib);
