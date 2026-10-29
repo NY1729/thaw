@@ -534,3 +534,127 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
 }
+
+/// In-place `s += x` for loop-local string variables (see
+/// `thaw_string_append_owned` for the ownership protocol).
+impl<'ctx> HirCompiler<'ctx> {
+    /// Splits `name + a + b ...` (a left-nested concat chain) into `[a, b, ...]`.
+    fn string_append_operands<'a>(name: &str, value: &'a HirExpr) -> Option<Vec<&'a HirExpr>> {
+        let HirExpr::Call(callee, args) = value else {
+            return None;
+        };
+        if !matches!(callee.as_ref(), HirExpr::Var(f) if f == "__thaw_string_concat") {
+            return None;
+        }
+        let [left, right] = args.as_slice() else {
+            return None;
+        };
+        let mut operands = match left {
+            HirExpr::Var(v) if v == name => Vec::new(),
+            _ => Self::string_append_operands(name, left)?,
+        };
+        operands.push(right);
+        Some(operands)
+    }
+
+    /// Names with an `s = s + ...` statement anywhere in `cond`/`body`.
+    fn string_append_names(cond: &HirExpr, body: &[HirStmt]) -> Vec<String> {
+        const MARK: &str = "Call(Var(\"__thaw_string_concat\"), [";
+        let text = format!("{cond:?}{body:?}");
+        if !text.contains(MARK) || text.contains("Await") || text.contains("Yield") {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        for (index, _) in text.match_indices("Assign(\"") {
+            let rest = &text[index + 8..];
+            let Some(end) = rest.find('"') else { continue };
+            let name = &rest[..end];
+            if rest[end..].starts_with(&format!("\", {MARK}")) && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
+    /// Gives each plain, never-captured string variable appended to inside
+    /// this loop an ownership state, reset here (the loop preheader).
+    fn register_string_appends(
+        &mut self,
+        cond: &HirExpr,
+        body: &[HirStmt],
+    ) -> Result<Vec<PointerValue<'ctx>>, String> {
+        let mut registered = Vec::new();
+        if self.captured_names.is_none() {
+            return Ok(registered);
+        }
+        for name in Self::string_append_names(cond, body) {
+            let Some((cell, _)) = self.variables.get(&name).copied() else {
+                continue;
+            };
+            if self.captured_names.as_ref().is_some_and(|captured| captured.contains(&name))
+                || self.string_append_states.contains_key(&cell)
+                || self.arena_variables.contains(&name)
+                || self.global_variables.contains_key(&name)
+                || self.async_frame_cells.contains(&cell)
+                || !matches!(self.variable_hir_types.get(&name), Some(HirType::Str))
+                || cell.as_instruction().map(|i| i.get_opcode())
+                    != Some(inkwell::values::InstructionOpcode::Alloca)
+            {
+                continue;
+            }
+            let state = self.allocate_variable_cell(
+                self.context.i64_type().array_type(3).into(),
+                "string_append_state",
+            )?;
+            self.builder
+                .build_store(state, self.context.i64_type().const_zero())
+                .map_err(|e| e.to_string())?;
+            self.string_append_states.insert(cell, state);
+            registered.push(cell);
+        }
+        Ok(registered)
+    }
+
+    fn compile_owned_string_append(
+        &mut self,
+        name: &str,
+        value: &HirExpr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let Some((cell, ty)) = self.variables.get(name).copied() else {
+            return Ok(None);
+        };
+        let Some(state) = self.string_append_states.get(&cell).copied() else {
+            return Ok(None);
+        };
+        let Some(operands) = Self::string_append_operands(name, value) else {
+            return Ok(None);
+        };
+        // JS reads the old value first, then evaluates the operands.
+        let mut accumulated = self
+            .builder
+            .build_load(ty, cell, "append_left")
+            .map_err(|e| e.to_string())?;
+        let mut rights = Vec::with_capacity(operands.len());
+        for operand in operands {
+            rights.push(self.compile_expr(operand)?);
+        }
+        let append = self.module.get_function("thaw_string_append_owned").unwrap();
+        for right in rights {
+            accumulated = self
+                .builder
+                .build_call(
+                    append,
+                    &[accumulated.into(), right.into(), state.into()],
+                    "string_append",
+                )
+                .map_err(|e| e.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("string append returned no value")?;
+        }
+        self.builder
+            .build_store(cell, accumulated)
+            .map_err(|e| e.to_string())?;
+        Ok(Some(accumulated))
+    }
+}

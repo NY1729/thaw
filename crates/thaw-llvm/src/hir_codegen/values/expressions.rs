@@ -135,6 +135,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .variables
                     .get(name)
                     .ok_or_else(|| format!("unknown variable `{name}`"))?;
+                // A read can leave an alias of the string: the loop-local
+                // append buffer is no longer exclusively the variable's.
+                if let Some(state) = self.string_append_states.get(&ptr).copied() {
+                    self.builder
+                        .build_store(state, self.context.i64_type().const_zero())
+                        .map_err(|e| e.to_string())?;
+                }
                 self.builder
                     .build_load(ty, ptr, name)
                     .map_err(|e| e.to_string())
@@ -187,6 +194,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::Assign(name, value) => {
+                if let Some(result) = self.compile_owned_string_append(name, value)? {
+                    return Ok(result);
+                }
                 let (ptr, _ty) = *self
                     .variables
                     .get(name)

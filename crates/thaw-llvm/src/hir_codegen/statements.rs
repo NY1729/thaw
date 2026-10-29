@@ -884,6 +884,15 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn compile_while(&mut self, cond: &HirExpr, body: &[HirStmt]) -> Result<bool, String> {
+        let registered = self.register_string_appends(cond, body)?;
+        let result = self.compile_while_inner(cond, body);
+        for cell in registered {
+            self.string_append_states.remove(&cell);
+        }
+        result
+    }
+
+    fn compile_while_inner(&mut self, cond: &HirExpr, body: &[HirStmt]) -> Result<bool, String> {
         let function = self.current_function();
 
         let header_bb = self.context.append_basic_block(function, "whilecond");
