@@ -903,6 +903,27 @@ fn load_module(
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
     let mut module = thaw_hir::normalize_top_level_destructuring(&module)
         .map_err(|error| format!("failed to normalize `{}`: {error}", path.display()))?;
+    for item in &mut module.body {
+        let ModuleItem::ModuleDecl(decl) = item else {
+            continue;
+        };
+        let source = match decl {
+            ModuleDecl::Import(import) => Some(&mut import.src),
+            ModuleDecl::ExportNamed(export) => export.src.as_mut(),
+            ModuleDecl::ExportAll(export) => Some(&mut export.src),
+            _ => None,
+        };
+        if let Some(source) = source {
+            if let Some(prefixed) = source
+                .value
+                .as_str()
+                .and_then(thaw_registry::bare_node_builtin_specifier)
+            {
+                source.value = prefixed.as_str().into();
+                source.raw = None;
+            }
+        }
+    }
     let mut specifiers = dependency_specifiers(&module)?;
     let mut identifiers = IdentifierNames::default();
     module.visit_with(&mut identifiers);

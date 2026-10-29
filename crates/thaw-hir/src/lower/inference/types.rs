@@ -1009,7 +1009,11 @@ impl<'a> FnLowerer<'a> {
                         return Ok(target_type);
                     }
                     "console.log" | "console.info" | "console.debug" | "console.warn"
-                    | "console.error" | "console.assert" => return Ok(HirType::Void),
+                    | "console.error" | "console.assert" | "console.trace" | "console.dir"
+                    | "console.dirxml" | "console.table" | "console.count"
+                    | "console.countReset" | "console.time" | "console.timeEnd"
+                    | "console.timeLog" | "console.group" | "console.groupCollapsed"
+                    | "console.groupEnd" => return Ok(HirType::Void),
                     "__thaw_string_concat" => {
                         if args.len() != 2 {
                             return Err("string concatenation expects two operands".into());

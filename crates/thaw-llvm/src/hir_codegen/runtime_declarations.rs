@@ -163,6 +163,11 @@ impl<'ctx> HirCompiler<'ctx> {
             strlen_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_string_append_owned",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for name in ["thaw_string_register", "thaw_string_register_literal"] {
             self.module.add_function(
                 name,
@@ -182,6 +187,23 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_console_group",
+            self.context.void_type().fn_type(&[i32_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_console_label",
+            self.context.void_type().fn_type(&[i32_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["thaw_console_table_text", "thaw_console_dir_text"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module
             .add_function("strlen", strlen_type, Some(Linkage::External));
         let strcmp_type = i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
@@ -312,6 +334,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_function("thaw_json_parse", json_parse_type, Some(Linkage::External));
         self.module.add_function(
             "thaw_json_parse_error_property",
+            json_parse_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_parse_error_message",
             json_parse_type,
             Some(Linkage::External),
         );
@@ -460,6 +487,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_take_stringify_error",
             i8_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_error_message",
+            i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -4244,6 +4276,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_promise_state",
             self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_result_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

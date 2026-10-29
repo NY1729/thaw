@@ -1252,7 +1252,8 @@ thread_local! {
     static FROM_ENTRIES_ERROR: Cell<bool> = const { Cell::new(false) };
     static PARSE_ERROR: Cell<bool> = const { Cell::new(false) };
     static STRINGIFY_ERROR: Cell<bool> = const { Cell::new(false) };
-    static STRINGIFY_ANCESTORS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static STRINGIFY_ANCESTORS: RefCell<Vec<(usize, *const Value)>> = const { RefCell::new(Vec::new()) };
+    static STRINGIFY_CYCLE_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
     static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     static GRAPH_PLAIN_OBJECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     // `hdl` markers decoded without HostOperations: branded so they re-encode
@@ -1268,7 +1269,7 @@ impl Drop for StringifyAncestor {
         if let Some(identity) = self.0 {
             STRINGIFY_ANCESTORS.with(|ancestors| {
                 let popped = ancestors.borrow_mut().pop();
-                debug_assert_eq!(popped, Some(identity));
+                debug_assert_eq!(popped.map(|entry| entry.0), Some(identity));
             });
         }
     }
@@ -1278,23 +1279,205 @@ fn stringify_ancestor(value: &Value) -> Option<StringifyAncestor> {
     let Some(identity) = object_identity_key(value) else {
         return Some(StringifyAncestor(None));
     };
-    let cycle = STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow().contains(&identity));
-    if cycle {
+    let cycle = STRINGIFY_ANCESTORS.with(|ancestors| {
+        let ancestors = ancestors.borrow();
+        let start = ancestors.iter().position(|entry| entry.0 == identity)?;
+        Some(describe_circle(&ancestors[start..], value))
+    });
+    if let Some(message) = cycle {
         STRINGIFY_ERROR.with(|error| error.set(true));
+        STRINGIFY_CYCLE_MESSAGE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(message);
+            }
+        });
         return None;
     }
-    STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow_mut().push(identity));
+    STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow_mut().push((identity, value)));
     Some(StringifyAncestor(Some(identity)))
+}
+
+/// How V8 words `JSON.stringify`'s circular-structure `TypeError`: the cycle's start, up to
+/// two following links, an ellipsis when the circle is longer, the last link, and the key
+/// that closes it. `links` runs from the re-entered object (empty key) down to the object
+/// that holds the back reference; each entry is (constructor name, key leading to it).
+fn circle_message(links: &[(String, String)], closing_key: &str) -> String {
+    let link = |index: usize| {
+        format!(
+            "\n    |     {} -> object with constructor '{}'",
+            links[index].1, links[index].0
+        )
+    };
+    let mut message = format!(
+        "Converting circular structure to JSON\n    --> starting at object with constructor '{}'",
+        links[0].0
+    );
+    let prefix_end = links.len().min(3);
+    for index in 1..prefix_end {
+        message.push_str(&link(index));
+    }
+    if links.len() > prefix_end + 1 {
+        message.push_str("\n    |     ...");
+    }
+    for index in prefix_end.max(links.len().saturating_sub(1))..links.len() {
+        message.push_str(&link(index));
+    }
+    message.push_str(&format!("\n    --- {closing_key} closes the circle"));
+    message
+}
+
+fn describe_circle(circle: &[(usize, *const Value)], _again: &Value) -> String {
+    let ctor = |value: &Value| match value {
+        Value::Array(_) => "Array".to_string(),
+        Value::Object(fields) => shared_object_ref(fields)
+            .get(b"__thaw_class__".as_slice())
+            .and_then(Value::as_str)
+            .map_or_else(
+                || "Object".to_string(),
+                |name| plain_class_name(name).to_string(),
+            ),
+        _ => "Object".to_string(),
+    };
+    // The key under which `holder` reaches the object identified by `target`.
+    let key_of = |holder: &Value, target: usize| -> String {
+        let hit = |child: &Value| object_identity_key(child) == Some(target);
+        match holder {
+            Value::Array(items) => shared_array_ref(items)
+                .iter()
+                .position(hit)
+                .map_or_else(String::new, |index| format!("index {index}")),
+            Value::Object(fields) => shared_object_ref(fields)
+                .iter()
+                .find(|(_, child)| hit(child))
+                .map_or_else(String::new, |(key, _)| {
+                    format!("property '{}'", String::from_utf8_lossy(key))
+                }),
+            _ => String::new(),
+        }
+    };
+    // SAFETY: every pointer on the ancestor stack names a value still borrowed by an
+    // enclosing serializer frame.
+    let at = |index: usize| unsafe { &*circle[index].1 };
+    let links: Vec<(String, String)> = (0..circle.len())
+        .map(|index| {
+            let key = if index == 0 {
+                String::new()
+            } else {
+                key_of(at(index - 1), circle[index].0)
+            };
+            (ctor(at(index)), key)
+        })
+        .collect();
+    circle_message(&links, &key_of(at(circle.len() - 1), circle[0].0))
+}
+
+/// The same message for a graph owned by the JS host, found by walking it through the host
+/// operations (the host's own `JSON.stringify` reports only that a cycle exists).
+fn host_circle_message(root: &Rc<HostLease>) -> Option<String> {
+    struct Walk {
+        path: Vec<(u64, String, String)>,
+        done: HashSet<u64>,
+        found: Option<String>,
+    }
+    fn visit(walk: &mut Walk, lease: &Rc<HostLease>, key: String) {
+        if walk.found.is_some() || walk.done.contains(&lease.handle) {
+            return;
+        }
+        if let Some(start) = walk.path.iter().position(|entry| entry.0 == lease.handle) {
+            let links: Vec<(String, String)> = walk.path[start..]
+                .iter()
+                .enumerate()
+                .map(|(index, (_, ctor, key))| {
+                    (
+                        ctor.clone(),
+                        if index == 0 {
+                            String::new()
+                        } else {
+                            key.clone()
+                        },
+                    )
+                })
+                .collect();
+            walk.found = Some(circle_message(&links, &key));
+            return;
+        }
+        if host_query(lease, 0).as_deref() != Some("object") {
+            return;
+        }
+        let array = host_query(lease, 4).as_deref() == Some("1");
+        let ctor = if array {
+            "Array".to_string()
+        } else {
+            host_query(lease, 23)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Object".to_string())
+        };
+        walk.path.push((lease.handle, ctor, key));
+        let children: Vec<(String, Value)> = if array {
+            host_enumerate_values(lease, 3)
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| (format!("index {index}"), value))
+                .collect()
+        } else {
+            host_enumerable_entries(lease)
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        format!("property '{}'", String::from_utf8_lossy(&name)),
+                        value,
+                    )
+                })
+                .collect()
+        };
+        for (child_key, child) in children {
+            if let Value::Host(child) = &child {
+                visit(walk, child, child_key);
+            }
+        }
+        walk.path.pop();
+        walk.done.insert(lease.handle);
+    }
+    let mut walk = Walk {
+        path: Vec::new(),
+        done: HashSet::new(),
+        found: None,
+    };
+    visit(&mut walk, root, String::new());
+    walk.found
+}
+
+fn plain_class_name(name: &str) -> &str {
+    let plain = match name.strip_prefix("__thawmod") {
+        Some(rest) => rest.split_once('_').map_or(name, |(_, plain)| plain),
+        None => name,
+    };
+    plain.split("__thaw_").next().unwrap_or(plain)
 }
 
 fn begin_stringify() {
     STRINGIFY_ERROR.with(|error| error.set(false));
+    STRINGIFY_CYCLE_MESSAGE.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn stringify_cycle_message() -> String {
+    STRINGIFY_CYCLE_MESSAGE
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| "Converting circular structure to JSON".to_string())
 }
 
 fn stringify_cycle_error() -> *const c_char {
-    CString::new("\u{1}TypeError\u{1}Converting circular structure to JSON")
-        .expect("static error message")
+    CString::new(format!("\u{1}TypeError\u{1}{}", stringify_cycle_message()))
+        .unwrap_or_default()
         .into_raw()
+}
+
+/// The message of the cycle `JSON.stringify` just reported, for the `TypeError` the compiled
+/// call throws (V8's `--> starting at object ... closes the circle` text).
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_error_message() -> *const c_char {
+    thaw_arena::owned_string(stringify_cycle_message())
 }
 
 #[no_mangle]
@@ -5141,12 +5324,19 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     if let Some(node) = host_query(lease, 27).and_then(|probe| typed_probe_node(&probe)) {
         return node;
     }
+    // A container reached again while it is being formatted is a back reference
+    // (`<ref *1>` / `[Circular *1]`); the handle id is its canonical identity.
+    let id = ((lease.handle as usize) << 1) | 1;
+    if stack.contains(&id) {
+        return Node::Circular(id);
+    }
     // A host `Map`/`Set` prints like Node's (`Map(1) { 'a' => 1 }`).
     let collection = host_query(lease, 24);
     if matches!(collection.as_deref(), Some("map" | "set"))
         && HOST_INSPECT_DEPTH.with(Cell::get) < 4
     {
         HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        stack.push(id);
         let node = if collection.as_deref() == Some("map") {
             let keys = host_enumerate_values(lease, 4);
             let values = host_enumerate_values(lease, 6);
@@ -5156,7 +5346,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .map(|(key, value)| (inspect_node(key, stack), inspect_node(value, stack)))
                 .collect();
             Node::Map {
-                id: 0,
+                id,
                 ctor: None,
                 entries,
                 props: Vec::new(),
@@ -5167,12 +5357,13 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .map(|item| inspect_node(item, stack))
                 .collect();
             Node::Set {
-                id: 0,
+                id,
                 ctor: None,
                 items,
                 props: Vec::new(),
             }
         };
+        stack.pop();
         HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
         return node;
     }
@@ -5190,6 +5381,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
         }
     }
     HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    stack.push(id);
     let node = if array {
         let items = host_enumerate_values(lease, 3)
             .iter()
@@ -5197,7 +5389,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             .collect();
         Node::Array {
             ctor: None,
-            id: 0,
+            id,
             items,
             extra: Vec::new(),
         }
@@ -5216,13 +5408,10 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 Some(name) if !name.is_empty() => Ctor::Named(name),
                 _ => Ctor::Plain,
             };
-            Node::Object {
-                id: 0,
-                ctor,
-                entries,
-            }
+            Node::Object { id, ctor, entries }
         }
     };
+    stack.pop();
     HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
     node
 }
@@ -5358,7 +5547,35 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         }
         Value::Object(shared) => {
             let fields = shared_object_ref(shared);
-            if let Some(items @ Value::Array(_)) = fields.get(b"__thaw_array_items__".as_slice()) {
+            if let Some(state) = fields
+                .get(b"__thaw_promise_state__".as_slice())
+                .and_then(Value::as_f64)
+            {
+                // `console.log(promise)`: the codegen marshals the settled value into this wrapper.
+                let value = fields.get(b"value".as_slice());
+                let reason_tag = fields
+                    .get(b"__thaw_promise_reason_tag__".as_slice())
+                    .and_then(Value::as_f64);
+                let settled = match (state as u8, reason_tag) {
+                    (0, _) => None,
+                    (2, Some(tag)) => Some(match tag as u8 {
+                        1 => value.map_or(Node::Undefined, |value| inspect_node(value, stack)),
+                        3 => Node::Bool(matches!(
+                            fields.get(b"__thaw_promise_reason_bool__".as_slice()),
+                            Some(Value::Bool(true))
+                        )),
+                        6 => Node::Null,
+                        _ => Node::Undefined,
+                    }),
+                    _ => Some(value.map_or(Node::Undefined, |value| inspect_node(value, stack))),
+                };
+                Node::Promise {
+                    state: state as u8,
+                    value: settled.map(Box::new),
+                }
+            } else if let Some(items @ Value::Array(_)) =
+                fields.get(b"__thaw_array_items__".as_slice())
+            {
                 // console.log of an `extends Array` instance: its items plus own properties.
                 let mut node = inspect_node(items, stack);
                 if let Node::Array { ctor, extra, .. } = &mut node {
@@ -5650,7 +5867,7 @@ pub unsafe extern "C" fn thaw_json_inspect(value: *const Value) -> *const c_char
 }
 
 /// `util.inspect` of a byte buffer given as a JSON number array (`console.log(Buffer)`).
-/// `kind` 1 prints an `ArrayBuffer`, 2 a `DataView` (`bytes` is then its whole store).
+/// `kind` 1 prints an `ArrayBuffer`, 2 a `DataView`, 3 a plain `Uint8Array` (`bytes` is then its whole store).
 #[no_mangle]
 pub extern "C" fn thaw_json_buffer_inspect(
     value: *mut Value,
@@ -5670,6 +5887,16 @@ pub extern "C" fn thaw_json_buffer_inspect(
     thaw_arena::owned_string(match kind as u8 {
         1 => crate::inspect::format_array_buffer(&bytes, 0),
         2 => crate::inspect::format_data_view(&bytes, offset as usize, length as usize),
+        3 => crate::inspect::inspect(
+            &crate::inspect::Node::Typed {
+                name: "Uint8Array".into(),
+                items: bytes
+                    .iter()
+                    .map(|&byte| crate::inspect::Node::Number(f64::from(byte)))
+                    .collect(),
+            },
+            &crate::inspect::InspectOptions::default(),
+        ),
         _ => crate::inspect::inspect(
             &crate::inspect::Node::Buffer(bytes),
             &crate::inspect::InspectOptions::default(),
@@ -5739,6 +5966,203 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
 pub extern "C" fn thaw_console_format(args: *mut Value) -> *const c_char {
     let args = unsafe { &*args }.as_array().cloned().unwrap_or_default();
     thaw_arena::owned_string(console_format(&args))
+}
+
+/// The `util.inspect` options a `console.dir(value, options)` call can set.
+fn console_inspect_options(options: Option<&Value>) -> crate::inspect::InspectOptions {
+    let mut result = crate::inspect::InspectOptions::default();
+    let Some(map) = options.and_then(Value::as_object) else {
+        return result;
+    };
+    let number = |key: &str| map.get(key.as_bytes()).and_then(Value::as_f64);
+    match map.get(&b"depth"[..]) {
+        Some(Value::Null) => result.depth = None,
+        Some(Value::Number(n)) => result.depth = Some(n.as_f64().unwrap_or(2.0).max(0.0) as usize),
+        _ => {}
+    }
+    if let Some(n) = number("breakLength") {
+        result.break_length = n.clamp(0.0, (1u32 << 30) as f64) as usize;
+    }
+    if let Some(n) = number("compact") {
+        result.compact = n.max(0.0) as usize;
+    }
+    if let Some(n) = number("maxArrayLength") {
+        result.max_array_length = n.max(0.0) as usize;
+    }
+    if let Some(n) = number("maxStringLength") {
+        result.max_string_length = n.max(0.0) as usize;
+    }
+    if let Some(Value::Bool(flag)) = map.get(&b"showHidden"[..]) {
+        result.show_hidden = *flag;
+    }
+    result
+}
+
+/// `console.dir(value, options)`: `util.inspect` with the given options (strings stay quoted).
+/// `options` may be null.
+#[no_mangle]
+pub extern "C" fn thaw_console_dir_text(value: *mut Value, options: *mut Value) -> *const c_char {
+    let (value, options) = (unsafe { &*value }, unsafe { options.as_ref() });
+    thaw_arena::owned_string(crate::inspect::inspect(
+        &inspect_node(value, &mut Vec::new()),
+        &console_inspect_options(options),
+    ))
+}
+
+/// Node's `console.table` cell rendering (`depth: 0`, `maxArrayLength: 3`, no line breaking).
+fn console_table_cell(value: &Value) -> String {
+    if value.as_object().is_some_and(|fields| fields.len() > 2) {
+        return "[Object]".into();
+    }
+    crate::inspect::inspect(
+        &inspect_node(value, &mut Vec::new()),
+        &crate::inspect::InspectOptions {
+            depth: Some(0),
+            max_array_length: 3,
+            break_length: 1 << 30,
+            ..Default::default()
+        },
+    )
+}
+
+/// Own enumerable keys of a table row, as Node's `Object.keys` lists them.
+fn console_table_keys(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(_) => (0..value.as_array().map_or(0, Vec::len))
+            .map(|i| i.to_string())
+            .collect(),
+        Value::Object(_) => value
+            .as_object()
+            .map(|fields| {
+                fields
+                    .keys()
+                    .map(|key| String::from_utf8_lossy(key).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn console_table_get(value: &Value, key: &str) -> Option<Value> {
+    match value {
+        Value::Array(_) => value.as_array()?.get(key.parse::<usize>().ok()?).cloned(),
+        Value::Object(_) => value.as_object()?.get(key.as_bytes()).cloned(),
+        _ => None,
+    }
+}
+
+/// `console.table(data, columns)`: Node's box-drawing table; a non-object prints like `console.log`.
+/// ponytail: Map/Set inputs and double-width characters are not modelled.
+fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
+    if !matches!(data, Value::Array(_) | Value::Object(_)) {
+        return console_format(std::slice::from_ref(data));
+    }
+    let index_keys = console_table_keys(data);
+    let properties: Option<Vec<String>> = columns.and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .map(|item| console_format(std::slice::from_ref(item)))
+            .collect()
+    });
+    let rows = index_keys.len();
+    let mut table: Vec<(String, Vec<String>)> = Vec::new();
+    let mut primitives = vec![String::new(); rows];
+    let mut has_primitives = false;
+    for (row, index) in index_keys.iter().enumerate() {
+        let item = console_table_get(data, index).unwrap_or(Value::Null);
+        let primitive = !matches!(item, Value::Array(_) | Value::Object(_));
+        if properties.is_none() && primitive {
+            has_primitives = true;
+            primitives[row] = console_table_cell(&item);
+            continue;
+        }
+        for key in properties
+            .clone()
+            .unwrap_or_else(|| console_table_keys(&item))
+        {
+            let slot = table
+                .iter()
+                .position(|(name, _)| *name == key)
+                .unwrap_or_else(|| {
+                    table.push((key.clone(), vec![String::new(); rows]));
+                    table.len() - 1
+                });
+            if !primitive {
+                if let Some(cell) = console_table_get(&item, &key) {
+                    table[slot].1[row] = console_table_cell(&cell);
+                }
+            }
+        }
+    }
+    // JS objects list canonical integer keys first, in ascending order.
+    let is_index = |key: &str| {
+        key.parse::<u32>()
+            .is_ok_and(|n| n.to_string() == key && n != u32::MAX)
+    };
+    table.sort_by_key(|(key, _)| {
+        if is_index(key) {
+            (0, key.parse::<u32>().unwrap_or(0))
+        } else {
+            (1, 0)
+        }
+    });
+    let mut head = vec!["(index)".to_string()];
+    let mut columns_out = vec![index_keys];
+    for (key, cells) in table {
+        head.push(key);
+        columns_out.push(cells);
+    }
+    if has_primitives {
+        head.push("Values".into());
+        columns_out.push(primitives);
+    }
+    let width = |text: &str| text.chars().count();
+    let widths: Vec<usize> = head
+        .iter()
+        .zip(&columns_out)
+        .map(|(title, cells)| {
+            cells
+                .iter()
+                .map(|cell| width(cell))
+                .chain([width(title)])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let divider = |left: &str, middle: &str, right: &str| {
+        let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+        format!("{left}{}{right}", parts.join(middle))
+    };
+    let render = |cells: Vec<&str>| {
+        let mut line = String::from("│");
+        for (cell, w) in cells.iter().zip(&widths) {
+            line.push_str(&format!(" {cell}{} │", " ".repeat(w - width(cell))));
+        }
+        line
+    };
+    let mut lines = vec![
+        divider("┌", "┬", "┐"),
+        render(head.iter().map(String::as_str).collect()),
+        divider("├", "┼", "┤"),
+    ];
+    for row in 0..rows {
+        lines.push(render(
+            columns_out
+                .iter()
+                .map(|column| column[row].as_str())
+                .collect(),
+        ));
+    }
+    lines.push(divider("└", "┴", "┘"));
+    lines.join("\n")
+}
+
+/// `console.table(value, columns)`; `columns` may be null.
+#[no_mangle]
+pub extern "C" fn thaw_console_table_text(value: *mut Value, columns: *mut Value) -> *const c_char {
+    let (value, columns) = (unsafe { &*value }, unsafe { columns.as_ref() });
+    thaw_arena::owned_string(console_table_text(value, columns))
 }
 
 fn console_format(args: &[Value]) -> String {
@@ -6058,6 +6482,19 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
                     None => out.extend_from_slice(serialized.as_bytes()),
                 }
             } else {
+                // The host reports only "circular reference"; word it like V8 does.
+                let circular = HOST_ERROR.with(|error| {
+                    error
+                        .borrow()
+                        .as_deref()
+                        .is_some_and(|text| text.contains("circular reference"))
+                });
+                if circular {
+                    let reported = HOST_ERROR.with(|error| error.borrow_mut().take());
+                    let message = host_circle_message(lease)
+                        .map(|message| format!("\u{1}TypeError\u{1}{message}"));
+                    HOST_ERROR.with(|error| *error.borrow_mut() = message.or(reported));
+                }
                 out.extend_from_slice(b"null");
             }
         }
@@ -12271,7 +12708,7 @@ mod tests {
         thaw_json_object_set_json(object, CString::new("self").unwrap().as_ptr(), object);
         assert_eq!(
             read_c_string(thaw_json_stringify_public(object)),
-            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+            "\u{1}TypeError\u{1}Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'self' closes the circle"
         );
         assert_eq!(thaw_json_take_stringify_error(), 1);
         assert_eq!(thaw_json_take_stringify_error(), 0);
@@ -12302,7 +12739,7 @@ mod tests {
         thaw_json_array_push_json(array, array);
         assert_eq!(
             read_c_string(thaw_json_stringify_number_space(array, 2.0)),
-            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+            "\u{1}TypeError\u{1}Converting circular structure to JSON\n    --> starting at object with constructor 'Array'\n    --- index 0 closes the circle"
         );
         assert_eq!(thaw_json_take_stringify_error(), 1);
 
@@ -12316,7 +12753,7 @@ mod tests {
                 std::ptr::null(),
                 CString::new("  ").unwrap().as_ptr()
             )),
-            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+            "\u{1}TypeError\u{1}Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'self' closes the circle"
         );
         assert_eq!(thaw_json_take_stringify_error(), 1);
     }
@@ -13694,5 +14131,49 @@ mod tests {
 
         let wtf8 = wtf8_encode_utf16(&[0xD800, 0]);
         assert_string_after_destroy(leak(Value::Wtf8(wtf8.clone())), &wtf8);
+    }
+
+    #[test]
+    fn stringify_cycle_error_names_the_circle_like_v8() {
+        fn cyclic(depth: usize) -> Value {
+            // root -> a0 -> a1 ... -> root, each hop under a distinct key
+            let root = Value::shared_object(indexmap::IndexMap::new());
+            let mut tail = root.clone();
+            for hop in 0..depth {
+                let next = Value::shared_object(indexmap::IndexMap::new());
+                if let Value::Object(fields) = &tail {
+                    unsafe { (*fields.get()).insert(format!("k{hop}").into_bytes(), next.clone()) };
+                }
+                tail = next;
+            }
+            if let Value::Object(fields) = &tail {
+                unsafe { (*fields.get()).insert(b"back".to_vec(), root.clone()) };
+            }
+            root
+        }
+        let message = |value: &Value| {
+            begin_stringify();
+            let mut out = Vec::new();
+            write_json_value(value, &mut out, None, 0);
+            assert_eq!(thaw_json_take_stringify_error(), 1);
+            let text = STRINGIFY_CYCLE_MESSAGE
+                .with(|slot| slot.borrow_mut().take())
+                .unwrap();
+            // Leak the cycle: `Rc` cannot free it, and the test is short-lived.
+            std::mem::forget(value.clone());
+            text
+        };
+        assert_eq!(
+            message(&cyclic(0)),
+            "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'back' closes the circle"
+        );
+        assert_eq!(
+            message(&cyclic(2)),
+            "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
+        );
+        assert_eq!(
+            message(&cyclic(5)),
+            "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    |     ...\n    |     property 'k4' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
+        );
     }
 }

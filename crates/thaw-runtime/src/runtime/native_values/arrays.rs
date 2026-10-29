@@ -1045,12 +1045,47 @@ pub unsafe extern "C" fn thaw_array_push_values(
     let Some(payload_bytes) = new_len.checked_mul(element_width) else {
         return std::ptr::null_mut();
     };
-    let output = thaw_arena::thaw_arena_alloc(8 + payload_bytes, element_width.min(8));
+    // Spare capacity left by an earlier push on this buffer: append in place.
+    // Only buffers this function allocated are registered, and the handle
+    // that owns the buffer is updated by the caller, so aliases of the
+    // handle see the grown array exactly as with a fresh buffer.
+    if !array.is_null() && thaw_arena::allocation_capacity(array) >= 8 + payload_bytes {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values,
+                array.cast_mut().add(8 + old_len * element_width),
+                count * element_width,
+            );
+            array.cast_mut().cast::<u64>().write(new_len as u64);
+        }
+        return array.cast_mut();
+    }
+    // Amortised doubling so n pushes copy O(n) bytes, not O(n^2).
+    let capacity = new_len.max(old_len.saturating_mul(2)).max(4);
+    let output = capacity
+        .checked_mul(element_width)
+        .and_then(|bytes| bytes.checked_add(8))
+        .map_or(std::ptr::null_mut(), |bytes| {
+            thaw_arena::alloc_with_capacity(bytes, element_width.min(8))
+        });
     if output.is_null() {
         return std::ptr::null_mut();
     }
+    unsafe { fill_pushed(output, array, old_len, element_width, values, count) };
+    output
+}
+
+/// Writes `[new_len][old elements][pushed values]` into `output`.
+unsafe fn fill_pushed(
+    output: *mut u8,
+    array: *const u8,
+    old_len: usize,
+    element_width: usize,
+    values: *const u8,
+    count: usize,
+) {
     unsafe {
-        output.cast::<u64>().write(new_len as u64);
+        output.cast::<u64>().write((old_len + count) as u64);
         if old_len != 0 {
             std::ptr::copy_nonoverlapping(array.add(8), output.add(8), old_len * element_width);
         }
@@ -1062,7 +1097,6 @@ pub unsafe extern "C" fn thaw_array_push_values(
             );
         }
     }
-    output
 }
 
 #[no_mangle]
@@ -1081,7 +1115,13 @@ pub unsafe extern "C" fn thaw_jit_array_append(
         2 => u64::from(value != 0.0),
         _ => return std::ptr::null_mut(),
     };
-    unsafe { thaw_array_push_values(array, 8, (&slot as *const u64).cast(), 1) }
+    // Functional: the old buffer must stay untouched, so never grow in place.
+    let old_len = unsafe { native_array_length(array) }.unwrap_or(0);
+    let output = thaw_arena::thaw_arena_alloc(8 + (old_len + 1) * 8, 8);
+    if !output.is_null() {
+        unsafe { fill_pushed(output, array, old_len, 8, (&slot as *const u64).cast(), 1) };
+    }
+    output
 }
 
 #[no_mangle]
@@ -2922,6 +2962,29 @@ mod array_read_ptr_tests {
             assert_eq!(wtf8_bytes(thaw_number_array_join(numbers, std::ptr::null(), separator)), &[b'1', 0, 0xed, 0xa0, 0x80, b'2']);
             assert_eq!(wtf8_bytes(thaw_bool_array_join(bools, std::ptr::null(), separator)), b"false\0\xed\xa0\x80true");
             assert_eq!(wtf8_bytes(thaw_object_array_join(array, std::ptr::null(), separator)), b"[object Object]\0\xed\xa0\x80[object Object]");
+        }
+    }
+
+    #[test]
+    fn push_values_grows_amortised_and_in_place_within_capacity() {
+        unsafe {
+            let mut array = thaw_array_push_values(std::ptr::null(), 8, (&0u64 as *const u64).cast(), 1);
+            let mut reallocations = 0;
+            for value in 1..1000u64 {
+                let next = thaw_array_push_values(array, 8, (&value as *const u64).cast(), 1);
+                assert!(!next.is_null());
+                reallocations += usize::from(next != array);
+                array = next;
+            }
+            assert!(reallocations <= 12, "{reallocations} reallocations for 1000 pushes");
+            assert_eq!(array.cast::<u64>().read(), 1000);
+            for index in 0..1000u64 {
+                assert_eq!(array.add(8 + index as usize * 8).cast::<u64>().read(), index);
+            }
+            // The functional JIT append never mutates its input.
+            let grown = thaw_jit_array_append(0, array, 1.0);
+            assert_eq!(array.cast::<u64>().read(), 1000);
+            assert_eq!(grown.cast::<u64>().read(), 1001);
         }
     }
 

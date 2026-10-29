@@ -102,7 +102,7 @@ fn lower_top_level_initializers(
                     let (init, function_init) =
                         lowerer.lower_global_initializer(&name, init_expr, &expected)?;
                     let ty = if expected == HirType::Dynamic {
-                        lowerer.infer_expr_type(&init)?
+                        lowerer.infer_expr_type_inner(&init)?
                     } else {
                         expected
                     };
@@ -366,7 +366,7 @@ fn lower_global_decls(
                 .as_deref()
                 .expect("top-level initializers were validated above");
             let (init, function_init) = lowerer.lower_global_initializer(&name, init_expr, &expected)?;
-            let inferred = lowerer.infer_expr_type(&init)?;
+            let inferred = lowerer.infer_expr_type_inner(&init)?;
             // A function global whose return type was still the `Dynamic` placeholder when it was
             // first inferred (an unannotated method read) takes the now-resolved type.
             let resolved_function = matches!((&expected, &inferred),

@@ -793,29 +793,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_load(self.context.ptr_type(AddressSpace::default()), pointer, "getter_closure")
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let function_pointer = self
-            .builder
-            .build_load(
-                self.context.ptr_type(AddressSpace::default()),
-                closure,
-                "getter_code",
-            )
-            .map_err(|error| error.to_string())?
-            .into_pointer_value();
-        let call = self
-            .builder
-            .build_indirect_call(
-                self.function_type(params, ret)?,
-                function_pointer,
-                &[closure.into(), object.into()],
-                "getter_call",
-            )
-            .map_err(|error| error.to_string())?;
-        let value = call
-            .try_as_basic_value()
-            .basic()
+        // The registered-accessor call wraps the receiver the way the getter's `this` parameter
+        // expects (a `NonArrowReceiver` payload, not the raw object pointer).
+        let value = self
+            .compile_registered_accessor_call(closure, params, ret, &[object.into()], "getter_call")?
             .ok_or("native object getter did not return a value")?;
-        self.branch_on_pending_exception()?;
         Ok((value, ret.clone()))
     }
 
