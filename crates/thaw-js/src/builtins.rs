@@ -49,14 +49,14 @@ pub(crate) const PRELUDE: &str = r#"
   def(AP, 'findIndex', function (f, t) { for (var i = 0; i < this.length; i++) if (f.call(t, this[i], i, this)) return i; return -1; });
   def(AP, 'reduce', function (f, init) {
     var i = 0, acc = init;
-    if (arguments.length < 2) { if (this.length === 0) throw new TypeError('Reduce of empty array with no initial value'); acc = this[0]; i = 1; }
-    for (; i < this.length; i++) acc = f(acc, this[i], i, this);
+    if (arguments.length < 2) { while (i < this.length && !(i in this)) i++; if (i >= this.length) throw new TypeError('Reduce of empty array with no initial value'); acc = this[i]; i++; }
+    for (; i < this.length; i++) if (i in this) acc = f(acc, this[i], i, this);
     return acc;
   });
   def(AP, 'reduceRight', function (f, init) {
     var i = this.length - 1, acc = init;
-    if (arguments.length < 2) { if (this.length === 0) throw new TypeError('Reduce of empty array with no initial value'); acc = this[i]; i--; }
-    for (; i >= 0; i--) acc = f(acc, this[i], i, this);
+    if (arguments.length < 2) { while (i >= 0 && !(i in this)) i--; if (i < 0) throw new TypeError('Reduce of empty array with no initial value'); acc = this[i]; i--; }
+    for (; i >= 0; i--) if (i in this) acc = f(acc, this[i], i, this);
     return acc;
   });
   def(AP, 'fill', function (v, s, e) {
@@ -65,8 +65,8 @@ pub(crate) const PRELUDE: &str = r#"
     for (var i = s; i < e; i++) this[i] = v; return this;
   });
   def(AP, 'sort', function (cmp) {
-    var a = this, defined = [], undef = 0;
-    for (var i = 0; i < a.length; i++) { if (a[i] === undefined) undef++; else defined.push(a[i]); }
+    var a = this, defined = [], undef = 0, holes = 0;
+    for (var i = 0; i < a.length; i++) { if (!(i in a)) holes++; else if (a[i] === undefined) undef++; else defined.push(a[i]); }
     var f = cmp === undefined ? function (x, y) { x = String(x); y = String(y); return x < y ? -1 : x > y ? 1 : 0; } : cmp;
     var n = defined.length, src = defined, dst = new Array(n);
     for (var w = 1; w < n; w *= 2) {
@@ -80,6 +80,7 @@ pub(crate) const PRELUDE: &str = r#"
     }
     for (var m = 0; m < n; m++) a[m] = src[m];
     for (var u = 0; u < undef; u++) a[n + u] = undefined;
+    for (var h = 0; h < holes; h++) delete a[n + undef + h];
     return a;
   });
   def(Object, 'fromEntries', function (entries) { var o = {}; for (var e of entries) o[e[0]] = e[1]; return o; });
@@ -133,18 +134,127 @@ pub(crate) fn civil_to_ms(n: &[f64]) -> f64 {
         + get(6, 0.0)
 }
 
-fn char_to_byte(s: &str, ci: usize) -> usize {
-    if s.is_ascii() {
-        return ci.min(s.len());
-    }
-    s.char_indices().nth(ci).map_or(s.len(), |(b, _)| b)
-}
-
 fn byte_to_char(s: &str, bi: usize) -> usize {
     if s.is_ascii() {
         return bi;
     }
     s[..bi].chars().count()
+}
+
+/// Strings are stored as UTF-8 but behave as UTF-16 sequences. A lone surrogate (which `str`
+/// cannot hold) is kept as the private-use char `U+10F800 + (unit - 0xD800)`.
+const LONE: u32 = 0x10F800;
+
+pub(crate) fn str_units(s: &str) -> Vec<u16> {
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if (c as u32) >= LONE {
+            out.push((c as u32 - LONE + 0xD800) as u16);
+        } else {
+            let mut b = [0u16; 2];
+            out.extend_from_slice(c.encode_utf16(&mut b));
+        }
+    }
+    out
+}
+
+pub(crate) fn units_str(u: &[u16]) -> String {
+    char::decode_utf16(u.iter().copied())
+        .map(|r| {
+            r.unwrap_or_else(|e| {
+                char::from_u32(LONE + u32::from(e.unpaired_surrogate()) - 0xD800)
+                    .unwrap_or('\u{FFFD}')
+            })
+        })
+        .collect()
+}
+
+/// `s.length` in UTF-16 code units.
+pub(crate) fn str_len(s: &str) -> usize {
+    if s.is_ascii() {
+        s.len()
+    } else {
+        s.chars()
+            .map(|c| {
+                if (c as u32) >= 0x10000 && (c as u32) < LONE {
+                    2
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+}
+
+/// UTF-16 unit index -> byte offset (a unit inside a surrogate pair maps to the pair's start).
+pub(crate) fn unit_to_byte(s: &str, ui: usize) -> usize {
+    if s.is_ascii() {
+        return ui.min(s.len());
+    }
+    let mut u = 0;
+    for (b, c) in s.char_indices() {
+        if u >= ui {
+            return b;
+        }
+        u += if (c as u32) >= 0x10000 && (c as u32) < LONE {
+            2
+        } else {
+            1
+        };
+    }
+    s.len()
+}
+
+pub(crate) fn byte_to_unit(s: &str, bi: usize) -> usize {
+    if s.is_ascii() {
+        return bi;
+    }
+    str_len(&s[..bi])
+}
+
+/// `s.slice(a, b)` by UTF-16 unit indices (already clamped to `0..=len`).
+pub(crate) fn str_slice(s: &str, a: usize, b: usize) -> String {
+    if s.is_ascii() {
+        return s[a..b].to_string();
+    }
+    units_str(&str_units(s)[a..b])
+}
+
+pub(crate) fn str_unit_at(s: &str, i: usize) -> Option<u16> {
+    if s.is_ascii() {
+        return s.as_bytes().get(i).map(|b| u16::from(*b));
+    }
+    str_units(s).get(i).copied()
+}
+
+/// `s += t`, re-pairing a trailing lone high surrogate with a leading lone low surrogate.
+pub(crate) fn push_joined(s: &mut String, t: &str) {
+    let hi = |c: char| (LONE..LONE + 0x400).contains(&(c as u32));
+    let lo = |c: char| (LONE + 0x400..LONE + 0x800).contains(&(c as u32));
+    if let (Some(a), Some(b)) = (s.chars().next_back(), t.chars().next()) {
+        if hi(a) && lo(b) {
+            let (h, l) = (a as u32 - LONE + 0xD800, b as u32 - LONE + 0xD800);
+            s.pop();
+            s.extend(char::from_u32(
+                0x10000 + ((h - 0xD800) << 10) + (l - 0xDC00),
+            ));
+            s.push_str(&t[b.len_utf8()..]);
+            return;
+        }
+    }
+    s.push_str(t);
+}
+
+/// Output form: lone surrogates print as U+FFFD.
+pub(crate) fn lossy_out(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(|c| (c as u32) >= LONE) {
+        s.chars()
+            .map(|c| if (c as u32) >= LONE { '\u{FFFD}' } else { c })
+            .collect::<String>()
+            .into()
+    } else {
+        s.into()
+    }
 }
 
 fn this_str(it: &mut Interp, this: &Value) -> Rc<str> {
@@ -224,12 +334,11 @@ impl Interp {
         } else {
             0
         };
-        let nchars = s.chars().count();
-        if last > nchars {
+        if last > str_len(s) {
             put_hidden(re_obj, "lastIndex", Value::Number(0.0));
             return Ok(Value::Null);
         }
-        let start = char_to_byte(s, last);
+        let start = unit_to_byte(s, last);
         let found = re
             .find_from(s, start)
             .next()
@@ -244,7 +353,7 @@ impl Interp {
             put_hidden(
                 re_obj,
                 "lastIndex",
-                Value::Number(byte_to_char(s, m.end()) as f64),
+                Value::Number(byte_to_unit(s, m.end()) as f64),
             );
         }
         let mut items = vec![Value::str(&s[m.range()])];
@@ -256,7 +365,7 @@ impl Interp {
             put(
                 ao,
                 "index",
-                Value::Number(byte_to_char(s, m.start()) as f64),
+                Value::Number(byte_to_unit(s, m.start()) as f64),
             );
             put(ao, "input", Value::Str(s.clone()));
             let named: Vec<(String, Option<std::ops::Range<usize>>)> =
@@ -551,10 +660,20 @@ impl Interp {
         (from, to.max(from))
     }
 
+    /// Like [`Self::array_items`] but array holes stay `Value::Hole` (callers must not leak them).
+    pub(crate) fn array_items_raw(&self, v: &Value) -> Vec<Value> {
+        if let Value::Object(o) = v {
+            if let Kind::Array(items) = &*o.kind.borrow() {
+                return items.clone();
+            }
+        }
+        self.array_items(v)
+    }
+
     pub(crate) fn array_items(&self, v: &Value) -> Vec<Value> {
         match v {
             Value::Object(o) => match &*o.kind.borrow() {
-                Kind::Array(items) => items.clone(),
+                Kind::Array(items) => items.iter().map(|v| unhole(Some(v))).collect(),
                 // an array-like: `{ length: n, 0: ..., 1: ... }` (data properties only)
                 Kind::Plain => match find_own(o, "length") {
                     Some((Slot::Data(Value::Number(n)), _)) if (0.0..1e7).contains(&n) => (0..n
@@ -776,6 +895,14 @@ impl Interp {
         let object = self.native(|it, _, args| {
             Ok(match arg(args, 0) {
                 v @ Value::Object(_) => v,
+                v @ (Value::Number(_) | Value::Str(_) | Value::Bool(_)) => {
+                    let proto = match v {
+                        Value::Number(_) => it.number_proto.clone(),
+                        Value::Str(_) => it.string_proto.clone(),
+                        _ => it.bool_proto.clone(),
+                    };
+                    Value::Object(new_obj(Some(proto), Kind::Wrapper(v)))
+                }
                 _ => Value::Object(it.plain()),
             })
         });
@@ -1013,8 +1140,8 @@ impl Interp {
                 }
             }
             Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| i < items.len()) || *key == *"length"),
-                Value::Str(s) => key.parse::<usize>().is_ok_and(|i| i < s.chars().count()),
+                Value::Object(o) => find_own(o, &key).is_some() || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"),
+                Value::Str(s) => key.parse::<usize>().is_ok_and(|i| i < str_len(s)),
                 _ => false,
             }))
         });
@@ -1034,7 +1161,7 @@ impl Interp {
         self.set_native(&op, "propertyIsEnumerable", |it, this, args| {
             let key = it.to_str(&arg(args, 0));
             Ok(Value::Bool(match this {
-                Value::Object(o) => find_own(o, &key).is_some_and(|(_, e)| e) || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| i < items.len())),
+                Value::Object(o) => find_own(o, &key).is_some_and(|(_, e)| e) || matches!(&*o.kind.borrow(), Kind::Array(items) if key.parse::<usize>().is_ok_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole)))),
                 _ => false,
             }))
         });
@@ -1052,7 +1179,7 @@ impl Interp {
                 }
             }
             Ok(Value::str(match this {
-                Value::Undefined => "[object Undefined]",
+                Value::Undefined | Value::Hole => "[object Undefined]",
                 Value::Null => "[object Null]",
                 Value::Number(_) => "[object Number]",
                 Value::Bool(_) => "[object Boolean]",
@@ -1068,6 +1195,9 @@ impl Interp {
                     Kind::Promise(_) => "[object Promise]",
                     Kind::ArrayBuffer(_) => "[object ArrayBuffer]",
                     Kind::Typed(t) => t.ty.tag(),
+                    Kind::Wrapper(Value::Number(_)) => "[object Number]",
+                    Kind::Wrapper(Value::Str(_)) => "[object String]",
+                    Kind::Wrapper(_) => "[object Boolean]",
                     Kind::Plain if find_in_chain(o, "__time").is_some() => "[object Date]",
                     Kind::Plain if is_error_instance(it, o) => "[object Error]",
                     Kind::Plain | Kind::Global | Kind::Generator(_) | Kind::Proxy(_) => {
@@ -1159,7 +1289,7 @@ impl Interp {
         let ap = self.array_proto.clone();
         let array = self.native(|it, _, args| {
             Ok(match args {
-                [Value::Number(n)] => it.array(vec![Value::Undefined; *n as usize]),
+                [Value::Number(n)] => it.array(vec![Value::Hole; *n as usize]),
                 _ => it.array(args.to_vec()),
             })
         });
@@ -1296,7 +1426,7 @@ impl Interp {
         for (name, last) in [("indexOf", false), ("lastIndexOf", true)] {
             self.set_native(&ap, name, move |it, this, args| {
                 let needle = arg(args, 0);
-                let items = it.array_items(this);
+                let items = it.array_items_raw(this);
                 let len = items.len() as f64;
                 let pos = if last {
                     let from = match arg(args, 1) {
@@ -1356,16 +1486,16 @@ impl Interp {
             Ok(Value::Bool(items.iter().skip(from).any(same_zero)))
         });
         self.set_native(&ap, "slice", |it, this, args| {
-            let items = it.array_items(this);
+            let items = it.array_items_raw(this);
             let (from, to) = it.range(args, items.len());
             Ok(it.array(items[from..to].to_vec()))
         });
         self.set_native(&ap, "concat", |it, this, args| {
-            let mut items = it.array_items(this);
+            let mut items = it.array_items_raw(this);
             for v in args {
                 match v {
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
-                        items.extend(it.array_items(v))
+                        items.extend(it.array_items_raw(v))
                     }
                     Value::Object(_) => {
                         let key = it.well_known_key("isConcatSpreadable");
@@ -1397,12 +1527,12 @@ impl Interp {
             put_hidden(o, "prototype", Value::Object(sp.clone()));
             put_hidden(&sp, "constructor", string.clone());
             self.set_native(o, "fromCharCode", |it, _, args| {
-                let s: String = args
-                    .iter()
-                    .map(|v| char::from_u32(it.num(v) as u32 & 0xFFFF).unwrap_or('\u{FFFD}'))
-                    .collect();
-                Ok(Value::Str(s.into()))
+                let units: Vec<u16> = args.iter().map(|v| it.num(v) as i64 as u16).collect();
+                Ok(Value::Str(units_str(&units).into()))
             });
+        }
+        if let Value::Object(o) = &string {
+            put_hidden(o, "@@wrap", Value::Bool(true));
         }
         g.declare("String", string, true);
         self.set_native(&sp, "toString", |it, this, _| {
@@ -1414,12 +1544,8 @@ impl Interp {
         self.set_native(&sp, "charAt", |it, this, args| {
             let s = this_str(it, this);
             let i = it.num(&arg(args, 0));
-            Ok(Value::Str(if i >= 0.0 {
-                s.chars()
-                    .nth(i as usize)
-                    .map(String::from)
-                    .unwrap_or_default()
-                    .into()
+            Ok(Value::Str(if i >= 0.0 && (i as usize) < str_len(&s) {
+                str_slice(&s, i as usize, i as usize + 1).into()
             } else {
                 "".into()
             }))
@@ -1428,9 +1554,7 @@ impl Interp {
             let s = this_str(it, this);
             let i = it.num(&arg(args, 0));
             Ok(Value::Number(if i >= 0.0 {
-                s.chars()
-                    .nth(i as usize)
-                    .map_or(f64::NAN, |c| c as u32 as f64)
+                str_unit_at(&s, i as usize).map_or(f64::NAN, f64::from)
             } else {
                 f64::NAN
             }))
@@ -1439,18 +1563,18 @@ impl Interp {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
             let from = match arg(args, 1) {
                 Value::Undefined => 0,
-                v => char_to_byte(&s, it.num(&v).max(0.0) as usize),
+                v => unit_to_byte(&s, it.num(&v).max(0.0) as usize),
             };
             Ok(Value::Number(
                 s[from..]
                     .find(&*n)
-                    .map_or(-1.0, |b| byte_to_char(&s, from + b) as f64),
+                    .map_or(-1.0, |b| byte_to_unit(&s, from + b) as f64),
             ))
         });
         self.set_native(&sp, "lastIndexOf", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
             Ok(Value::Number(
-                s.rfind(&*n).map_or(-1.0, |b| byte_to_char(&s, b) as f64),
+                s.rfind(&*n).map_or(-1.0, |b| byte_to_unit(&s, b) as f64),
             ))
         });
         self.set_native(&sp, "includes", |it, this, args| {
@@ -1459,7 +1583,7 @@ impl Interp {
         });
         self.set_native(&sp, "startsWith", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
-            let from = char_to_byte(
+            let from = unit_to_byte(
                 &s,
                 it.num(&arg(args, 1)).max(0.0) as usize
                     * (!matches!(arg(args, 1), Value::Undefined) as usize),
@@ -1469,10 +1593,10 @@ impl Interp {
         self.set_native(&sp, "endsWith", |it, this, args| {
             let (s, n) = (this_str(it, this), it.to_str(&arg(args, 0)));
             let end = match arg(args, 1) {
-                Value::Undefined => s.chars().count(),
-                v => (it.num(&v).max(0.0) as usize).min(s.chars().count()),
+                Value::Undefined => str_len(&s),
+                v => (it.num(&v).max(0.0) as usize).min(str_len(&s)),
             };
-            let head: String = s.chars().take(end).collect();
+            let head = &s[..unit_to_byte(&s, end)];
             Ok(Value::Bool(head.ends_with(&*n)))
         });
         self.set_native(&sp, "toUpperCase", |it, this, _| {
@@ -1508,7 +1632,7 @@ impl Interp {
                     Value::Undefined => " ".into(),
                     v => it.to_str(&v),
                 };
-                let len = s.chars().count();
+                let len = str_len(&s);
                 if target <= len || fill.is_empty() {
                     return Ok(Value::Str(s));
                 }
@@ -1524,14 +1648,13 @@ impl Interp {
             });
         }
         self.set_native(&sp, "slice", |it, this, args| {
-            let chars: Vec<char> = this_str(it, this).chars().collect();
-            let (from, to) = it.range(args, chars.len());
-            Ok(Value::Str(
-                chars[from..to].iter().collect::<String>().into(),
-            ))
+            let s = this_str(it, this);
+            let (from, to) = it.range(args, str_len(&s));
+            Ok(Value::Str(str_slice(&s, from, to).into()))
         });
         self.set_native(&sp, "substring", |it, this, args| {
-            let chars: Vec<char> = this_str(it, this).chars().collect();
+            let s = this_str(it, this);
+            let n_units = str_len(&s);
             let clamp = |it: &mut Interp, v: Value, d: usize| match v {
                 Value::Undefined => d,
                 v => {
@@ -1539,39 +1662,34 @@ impl Interp {
                     if n.is_nan() || n < 0.0 {
                         0
                     } else {
-                        (n as usize).min(chars.len())
+                        (n as usize).min(n_units)
                     }
                 }
             };
-            let (a, b) = (
-                clamp(it, arg(args, 0), 0),
-                clamp(it, arg(args, 1), chars.len()),
-            );
+            let (a, b) = (clamp(it, arg(args, 0), 0), clamp(it, arg(args, 1), n_units));
             let (from, to) = (a.min(b), a.max(b));
-            Ok(Value::Str(
-                chars[from..to].iter().collect::<String>().into(),
-            ))
+            Ok(Value::Str(str_slice(&s, from, to).into()))
         });
         self.set_native(&sp, "substr", |it, this, args| {
-            let chars: Vec<char> = this_str(it, this).chars().collect();
+            let s = this_str(it, this);
+            let total = str_len(&s);
             let n = it.num(&arg(args, 0));
             let from = if n < 0.0 {
-                (chars.len() as f64 + n).max(0.0) as usize
+                (total as f64 + n).max(0.0) as usize
             } else {
-                (n as usize).min(chars.len())
+                (n as usize).min(total)
             };
             let len = match arg(args, 1) {
-                Value::Undefined => chars.len() - from,
-                v => (it.num(&v).max(0.0) as usize).min(chars.len() - from),
+                Value::Undefined => total - from,
+                v => (it.num(&v).max(0.0) as usize).min(total - from),
             };
-            Ok(Value::Str(
-                chars[from..from + len].iter().collect::<String>().into(),
-            ))
+            Ok(Value::Str(str_slice(&s, from, from + len).into()))
         });
         self.set_native(&sp, "concat", |it, this, args| {
             let mut s = this_str(it, this).to_string();
             for v in args {
-                s.push_str(&it.to_str(v));
+                let t = it.to_str(v);
+                push_joined(&mut s, &t);
             }
             Ok(Value::Str(s.into()))
         });
@@ -1633,7 +1751,7 @@ impl Interp {
             };
             Ok(Value::Number(
                 re.find(&s)
-                    .map_or(-1.0, |m| byte_to_char(&s, m.start()) as f64),
+                    .map_or(-1.0, |m| byte_to_unit(&s, m.start()) as f64),
             ))
         });
         self.set_native(&sp, "split", |it, this, args| {
@@ -1678,7 +1796,11 @@ impl Interp {
             } else {
                 let sep = it.to_str(&sep);
                 if sep.is_empty() {
-                    parts.extend(s.chars().map(|c| Value::Str(c.to_string().into())));
+                    parts.extend(
+                        str_units(&s)
+                            .iter()
+                            .map(|u| Value::Str(units_str(&[*u]).into())),
+                    );
                 } else {
                     parts.extend(s.split(&*sep).map(Value::str));
                 }
@@ -1771,6 +1893,9 @@ impl Interp {
             put_hidden(o, "prototype", Value::Object(self.number_proto.clone()));
             put_hidden(&self.number_proto.clone(), "constructor", number.clone());
         }
+        if let Value::Object(o) = &number {
+            put_hidden(o, "@@wrap", Value::Bool(true));
+        }
         g.declare("Number", number, true);
         self.set_native(&self.number_proto.clone(), "toString", |it, this, args| {
             let n = it.num(this);
@@ -1805,6 +1930,9 @@ impl Interp {
         if let Value::Object(o) = &boolean {
             put_hidden(o, "prototype", Value::Object(self.bool_proto.clone()));
             put_hidden(&self.bool_proto.clone(), "constructor", boolean.clone());
+        }
+        if let Value::Object(o) = &boolean {
+            put_hidden(o, "@@wrap", Value::Bool(true));
         }
         g.declare("Boolean", boolean, true);
         g.declare(
@@ -2034,6 +2162,9 @@ pub(crate) fn json_quote(s: &str, out: &mut String) {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) >= LONE => {
+                out.push_str(&format!("\\u{:04x}", c as u32 - LONE + 0xD800))
+            }
             c => out.push(c),
         }
     }
@@ -2129,7 +2260,7 @@ impl Interp {
         fn element(it: &mut Interp, this: &Value, i: usize) -> R<Option<Value>> {
             if let Value::Object(o) = this {
                 if let Kind::Array(items) = &*o.kind.borrow() {
-                    return Ok(items.get(i).cloned());
+                    return Ok(items.get(i).filter(|v| !matches!(v, Value::Hole)).cloned());
                 }
             }
             Ok(Some(it.get_index(this, i)?))
@@ -2161,7 +2292,7 @@ impl Interp {
                     Some(v) => {
                         out.push(it.call(&f, &t, &[v, Value::Number(i as f64), this.clone()])?)
                     }
-                    None => out.push(Value::Undefined),
+                    None => out.push(Value::Hole),
                 }
             }
             Ok(it.array(out))

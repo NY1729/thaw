@@ -1,0 +1,10 @@
+console.log(Array(3).join('-'), [,].length, [, ,].length, Object.entries([1, , 3]), [3, , 1].sort());
+const [p, q = 'd', r] = [1, , 3]; console.log(p, q, r);
+console.log(Math.max(...[1, , 3]), [1, , 3].slice(0, 2), [1, , 3].concat([4]), [1, , 3].indexOf(undefined), [1, , 3].includes(undefined));
+const a = [1, 2, 3]; a.length = 0; console.log(a, a.length);
+const o = new String('ab'); for (const k in o) console.log(k);
+console.log(Object.keys(new String('ab')), Object.prototype.hasOwnProperty.call([1, , 3], 1));
+console.log(JSON.stringify({ a: [, 1] }), [, 'a'].toString(), String([null, , undefined]));
+console.log([1, , 3].reverse(), [1, , 3].reduceRight((s, x) => s + x), [1, , 3].every(x => typeof x === 'number'));
+console.log(new Number(5) === new Number(5), new Number(5) == new Number(5), Number(new Number(7)), `${new String('t')}`, new Boolean(true) && 'yes');
+console.log(Object(1) instanceof Number, typeof Object('a'));
