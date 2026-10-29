@@ -1,0 +1,8 @@
+6 object true false true 5 5 5.00
+object 2 b abc true false AB true
+1 object true false true
+[Number: 5] [String: 'ab'] [Boolean: false] [ [Number: 5], [String: 'ab'], [Boolean: false] ]
+[5,"ab",false] 5 2
+[object Number] [object String]
+6 true
+number string boolean

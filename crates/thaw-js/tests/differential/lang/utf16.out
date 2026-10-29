@@ -1,0 +1,11 @@
+2 1 55357 56832 128512 56832
+4 3 true b true 3
+4 3 a b b
+2 true true
+1 55357 true
+1 2 2
+1 3 x😀y--
+1 %F0%9F%98%80 "😀" "\ud83d"
+true 2 1 55357 "\ud83d" true
+true true
+[ 55357, 56832 ] [ 'a', 'b' ]

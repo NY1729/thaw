@@ -6374,6 +6374,24 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        // An object literal written where `any` is expected: its unannotated callbacks
+        // are contextually `any`.
+        if matches!(expr, Expr::Object(_))
+            && matches!(expected, Some(HirType::Json | HirType::JsValue | HirType::Dynamic))
+        {
+            let saved = std::mem::replace(&mut self.implicit_any_callbacks, true);
+            let lowered = self.lower_expr_with_expected_type_inner(expr, expected);
+            self.implicit_any_callbacks = saved;
+            return lowered;
+        }
+        self.lower_expr_with_expected_type_inner(expr, expected)
+    }
+
+    fn lower_expr_with_expected_type_inner(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
         let expected_object_fields = expected.and_then(expected_object_fields);
         if let (Some((args, type_args)), Some(HirType::Array(element))) =
             (Self::array_constructor_parts(expr), expected)
@@ -6399,6 +6417,11 @@ impl<'a> FnLowerer<'a> {
             }
             if matches!(expr, Expr::Array(_)) {
                 return self.lower_expr(expr);
+            }
+        }
+        if matches!(expected, Some(HirType::Json | HirType::JsValue | HirType::Dynamic)) {
+            if let Some(lowered) = self.lower_implicit_any_callback(expr) {
+                return lowered;
             }
         }
         if let Some(expected) = expected {

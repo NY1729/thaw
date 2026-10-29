@@ -162,7 +162,7 @@ impl Interp {
             v = self.call(&r, holder, &[Value::Str(key.into()), v])?;
         }
         match &v {
-            Value::Undefined => Ok(false),
+            Value::Undefined | Value::Hole => Ok(false),
             Value::Null => {
                 out.push_str("null");
                 Ok(true)
@@ -189,6 +189,13 @@ impl Interp {
             Value::Object(o) => {
                 if v.is_callable() || matches!(&*o.kind.borrow(), Kind::Symbol { .. }) {
                     return Ok(false);
+                }
+                let wrapped = match &*o.kind.borrow() {
+                    Kind::Wrapper(p) => Some(p.clone()),
+                    _ => None,
+                };
+                if let Some(p) = wrapped {
+                    return self.json_ser(holder, key, p, ser, cur, out);
                 }
                 let is_arr = matches!(&*o.kind.borrow(), Kind::Array(_));
                 if let Some(at) = ser.stack.iter().position(|(s, _)| Rc::ptr_eq(s, o)) {

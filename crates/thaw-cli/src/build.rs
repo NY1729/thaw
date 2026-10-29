@@ -20,6 +20,35 @@ fn build(
     )
 }
 
+thread_local! {
+    /// Backend optimisation level forced for builds on this thread (`thaw build --fast-compile`,
+    /// node-compat cases). `None` defers to `THAW_CODEGEN_OPT`.
+    static CODEGEN_OPT_OVERRIDE: std::cell::Cell<Option<inkwell::OptimizationLevel>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn set_codegen_opt_override(level: Option<inkwell::OptimizationLevel>) {
+    CODEGEN_OPT_OVERRIDE.with(|cell| cell.set(level));
+}
+
+/// Backend optimisation level for the object file: the thread override, else
+/// `THAW_CODEGEN_OPT` (`none|less|default|aggressive`, default `default`).
+fn codegen_opt_level() -> Result<inkwell::OptimizationLevel, String> {
+    use inkwell::OptimizationLevel;
+    if let Some(level) = CODEGEN_OPT_OVERRIDE.with(std::cell::Cell::get) {
+        return Ok(level);
+    }
+    match std::env::var("THAW_CODEGEN_OPT").as_deref() {
+        Err(_) | Ok("default") => Ok(OptimizationLevel::Default),
+        Ok("none") => Ok(OptimizationLevel::None),
+        Ok("less") => Ok(OptimizationLevel::Less),
+        Ok("aggressive") => Ok(OptimizationLevel::Aggressive),
+        Ok(other) => Err(format!(
+            "THAW_CODEGEN_OPT must be none, less, default or aggressive, not `{other}`"
+        )),
+    }
+}
+
 fn path_builtin_name(name: &str) -> Option<&'static str> {
     match name {
         "path" | "node:path" => Some("node:path"),
@@ -362,6 +391,7 @@ fn report_thaw_js_mixed(ir: &str) {
 const THAW_JS_MIXED: &str = "thaw-js routing needs QuickJS";
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_with_native_mode(
     input: &Path,
     output: &Path,
@@ -376,26 +406,40 @@ fn build_with_native_mode(
     install_missing: bool,
     icu4c: bool,
 ) -> Result<(), String> {
-    build_with_thaw_js_routing(
-        input,
-        output,
-        extra_links,
-        bridge_dts,
-        ffi_metadata,
-        registry_dir,
-        use_packages,
-        static_link,
-        assets,
-        embed_native_addons,
-        install_missing,
-        icu4c,
-        thaw_js_routing_enabled(),
+    build_with_native_mode_shared(
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c, false,
+    )
+}
+
+/// `build_with_native_mode`, plus `--shared-rt` (opt-in dynamic core runtime).
+#[allow(clippy::too_many_arguments)]
+fn build_with_native_mode_shared(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
+    embed_native_addons: bool,
+    install_missing: bool,
+    icu4c: bool,
+    shared_rt: bool,
+) -> Result<(), String> {
+    build_with_thaw_js_routing_shared(
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt,
+        None, thaw_js_routing_enabled(),
     )
 }
 
 /// `build_with_native_mode_routed`, retried without routing when the routed build turns out to need
 /// QuickJS as well.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_with_thaw_js_routing(
     input: &Path,
     output: &Path,
@@ -411,49 +455,48 @@ fn build_with_thaw_js_routing(
     icu4c: bool,
     routing: bool,
 ) -> Result<(), String> {
+    build_with_thaw_js_routing_shared(
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c, false, None, routing,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_thaw_js_routing_shared(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
+    embed_native_addons: bool,
+    install_missing: bool,
+    icu4c: bool,
+    shared_rt: bool,
+    lib_mode: Option<&LibBuildMode>,
+    routing: bool,
+) -> Result<(), String> {
     let result = build_with_native_mode_routed(
-        input,
-        output,
-        extra_links,
-        bridge_dts,
-        ffi_metadata,
-        registry_dir,
-        use_packages,
-        static_link,
-        assets,
-        embed_native_addons,
-        install_missing,
-        icu4c,
+        input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+        static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode,
         routing,
     );
     match result {
         // Whatever a routed build could not express (it needed QuickJS as well, or the compiler
         // rejected a construct) is built the ordinary way: never a build failure or a wrong result
         // that the unrouted path would not have had.
-        Err(error)
-            if routing && {
-                if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
-                    eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
-                }
-                true
-            } =>
-        {
-            build_with_native_mode_routed(
-                input,
-                output,
-                extra_links,
-                bridge_dts,
-                ffi_metadata,
-                registry_dir,
-                use_packages,
-                static_link,
-                assets,
-                embed_native_addons,
-                install_missing,
-                icu4c,
-                false,
-            )
-        }
+        Err(error) if routing && {
+            if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+                eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
+            }
+            true
+        } => build_with_native_mode_routed(
+            input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
+            static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode, false,
+        ),
         result => result,
     }
 }
@@ -480,8 +523,14 @@ fn build_with_native_mode_routed(
     // resolved at runtime via `dlopen`, so this only selects the feature
     // (no linker changes, and a program still runs without ICU4C).
     icu4c: bool,
+    shared_rt: bool,
+    // `thaw lib build`: compile `input` as a shared library instead of an executable.
+    lib_mode: Option<&LibBuildMode>,
     thaw_js_routing: bool,
 ) -> Result<(), String> {
+    if shared_rt && static_link {
+        return Err("--shared-rt cannot be combined with --static".into());
+    }
     if static_link && !embed_native_addons {
         return Err("--static and --external-native cannot be used together".into());
     }
@@ -595,7 +644,7 @@ fn build_with_native_mode_routed(
     native_addons.sort();
     native_addons.dedup();
     let mut forced_jit_fallbacks = std::collections::HashSet::new();
-    let (module, registry_native_libs, mut runtime_features, shim_source, manifest) = loop {
+    let (module, registry_native_libs, mut runtime_features, shim_source, mut manifest) = loop {
         let (
             registry_shim,
             registry_native_libs,
@@ -866,10 +915,7 @@ fn build_with_native_mode_routed(
             manifest,
         );
     };
-    let marker = format!("{ARTIFACT_MARKER}{manifest}");
-    thaw_hir::set_thaw_js_routed(
-        thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty(),
-    );
+    thaw_hir::set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program
@@ -905,11 +951,14 @@ fn build_with_native_mode_routed(
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
+    compiler.set_codegen_opt(codegen_opt_level()?);
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
     compiler
         .set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
+    if let Some(lib) = lib_mode {
+        compiler.set_library_mode(lib.exports.clone());
+    }
     compiler.compile_program(&program)?;
-    compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
     if thaw_js_routing && compiler.uses_thaw_js() && uses_quickjs {
@@ -918,9 +967,46 @@ fn build_with_native_mode_routed(
         }
         return Err(THAW_JS_MIXED.to_string());
     }
+    runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
+    runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
+    if icu4c { runtime_features.extend(["intl", "icu4c"]); }
+    // `--shared-rt` links `libthaw_rt.so.1`, the core runtime (no JS engine, default
+    // features). Anything else falls back to the static archives, with a notice.
+    let shared_rt_active = shared_rt
+        && !static_link
+        && !uses_quickjs
+        && !uses_napi
+        && !compiler.uses_thaw_js()
+        && runtime_features.is_empty();
+    if shared_rt && !shared_rt_active {
+        let reason = if uses_quickjs || uses_napi || compiler.uses_thaw_js() {
+            "JS engine in use"
+        } else {
+            "runtime feature in use"
+        };
+        eprintln!("thaw: --shared-rt: {reason}, falling back to the static runtime");
+    }
+    if shared_rt_active {
+        manifest["shared_rt"] = serde_json::json!(true);
+    }
+    if let Some(lib) = lib_mode {
+        if uses_quickjs || uses_napi || compiler.uses_thaw_js() || !runtime_features.is_empty() {
+            return Err(format!(
+                "not-libraryizable: package needs a JS engine or a runtime feature (L2): quickjs={uses_quickjs} napi={uses_napi} thaw_js={} features={runtime_features:?}",
+                compiler.uses_thaw_js()
+            ));
+        }
+        compiler.embed_package_metadata(&lib.metadata)?;
+    } else {
+        let marker = format!("{ARTIFACT_MARKER}{manifest}");
+        compiler.embed_artifact_metadata(marker.as_bytes())?;
+    }
 
     let obj_path = scratch.path.join("input.o");
     compiler.write_object_file(&obj_path)?;
+    if let Some(lib) = lib_mode {
+        return link_library(&obj_path, output, lib);
+    }
 
     // Always link the runtime support crates: thaw-arena backs array/object allocation
     // (Phase 1/2), thaw-runtime backs the Lambda event loop for
@@ -928,15 +1014,16 @@ fn build_with_native_mode_routed(
     // thaw-quickjs backs `loadScript`/`callDynamic` (the QuickJS-NG
     // fallback path, docs/design/bridge.md section 7). It is built and
     // linked only when LLVM found a call into that host.
-    let arena_lib = build_staticlib("thaw-arena")?;
-    let runtime_lib = build_staticlib("thaw-runtime")?;
-    let std_lib = build_staticlib("thaw-std")?;
-    let jit_lib = build_staticlib("thaw-jit")?;
-    runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
-    runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
-    if icu4c {
-        runtime_features.extend(["intl", "icu4c"]);
-    }
+    let shared_rt_lib = shared_rt_active.then(build_rt_shared_library).transpose()?;
+    let static_rt_libs = match shared_rt_lib {
+        Some(_) => None,
+        None => Some((
+            build_staticlib("thaw-arena")?,
+            build_staticlib("thaw-runtime")?,
+            build_staticlib("thaw-std")?,
+            build_staticlib("thaw-jit")?,
+        )),
+    };
     // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
     // dependency objects. Linking a second standalone QuickJS archive would
     // define every host symbol twice.
@@ -978,30 +1065,43 @@ fn build_with_native_mode_routed(
     if static_link {
         linker.arg("-static").arg("-Wl,--no-dynamic-linker");
     }
-    linker.arg(&obj_path).arg(&arena_lib);
-    // `std_lib`/`runtime_lib` have a genuine two-way symbol dependency:
-    // thaw-std's `json.rs` calls a couple of thaw-runtime date/string
-    // helpers, and thaw-runtime's `AnyKey`/any-array search call
-    // thaw-std's `Json` comparison helpers (see thaw-std's own doc
-    // comment on `thaw_json_strict_equal`). A single left-to-right
-    // archive scan only resolves the *forward* direction (an archive
-    // can't be reopened for a symbol that only becomes outstanding once
-    // a *later* archive is scanned) -- listed twice each here, a
-    // portable fix needing no `--start-group`/`--end-group`
-    // linker-specific support, so the second `std_lib` pass picks up
-    // what the first `runtime_lib` pass left outstanding.
-    linker
-        .arg(&std_lib)
-        .arg(&runtime_lib)
-        .arg(&std_lib)
-        .arg(&runtime_lib)
-        .arg(&jit_lib);
+    linker.arg(&obj_path);
+    // thaw-jit is not linked here: libthaw_rt.so carries it (one copy of thaw-arena for all).
+    if let Some(rt_lib) = &shared_rt_lib {
+        linker.arg(rt_lib).arg(format!(
+            "-Wl,-rpath,{}",
+            rt_lib.parent().unwrap_or(Path::new("/")).display()
+        ));
+    }
+    if let Some((arena_lib, runtime_lib, std_lib, jit_lib)) = &static_rt_libs {
+        linker.arg(arena_lib);
+        // `std_lib`/`runtime_lib` have a genuine two-way symbol dependency:
+        // thaw-std's `json.rs` calls a couple of thaw-runtime date/string
+        // helpers, and thaw-runtime's `AnyKey`/any-array search call
+        // thaw-std's `Json` comparison helpers (see thaw-std's own doc
+        // comment on `thaw_json_strict_equal`). A single left-to-right
+        // archive scan only resolves the *forward* direction (an archive
+        // can't be reopened for a symbol that only becomes outstanding once
+        // a *later* archive is scanned) -- listed twice each here, a
+        // portable fix needing no `--start-group`/`--end-group`
+        // linker-specific support, so the second `std_lib` pass picks up
+        // what the first `runtime_lib` pass left outstanding.
+        linker
+            .arg(std_lib)
+            .arg(runtime_lib)
+            .arg(std_lib)
+            .arg(runtime_lib)
+            .arg(jit_lib);
+    }
     if let Some(thaw_js_lib) = thaw_js_lib {
         linker.arg(thaw_js_lib);
     }
     if let Some(intl_lib) = intl_lib {
         // Needs thaw-arena's string allocator, which may only be pulled in by this archive.
-        linker.arg(intl_lib).arg(&arena_lib);
+        linker.arg(intl_lib);
+        if let Some((arena_lib, ..)) = &static_rt_libs {
+            linker.arg(arena_lib);
+        }
     }
     if let Some(quickjs_lib) = quickjs_lib {
         linker.arg(quickjs_lib);
@@ -1014,7 +1114,9 @@ fn build_with_native_mode_routed(
     // way -- another trailing pass over `std_lib`/`runtime_lib` after both
     // archives, for the same backward-reference reason as the doubled
     // pair above.
-    linker.arg(&std_lib).arg(&runtime_lib);
+    if let Some((_, runtime_lib, std_lib, _)) = &static_rt_libs {
+        linker.arg(std_lib).arg(runtime_lib);
+    }
     linker
         // QuickJS-NG's C code calls libm math functions directly; `rustc`
         // normally adds `-lm` automatically when it does the final link,
@@ -1730,6 +1832,11 @@ fn build_staticlib_with_options(
     if let Some(path) = prepared_staticlib(pkg, no_default_features, features) {
         return Ok(path);
     }
+    // Concurrent node-compat cases may all miss the prepared archive; one cargo build at a time.
+    static CARGO_FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _cargo_turn = CARGO_FALLBACK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut command = Command::new("cargo");
     command
         .args(["build", "--release", "-p", pkg, "--message-format=json"])
@@ -1760,6 +1867,85 @@ fn build_staticlib_with_options(
     let stdout = String::from_utf8_lossy(&output.stdout);
     staticlib_artifact_path(&stdout, pkg)
         .ok_or_else(|| format!("could not find a staticlib for `{pkg}` in `cargo build` output"))
+}
+
+/// `--shared-rt`: the core runtime as `libthaw_rt.so.1` (crate `thaw-rt-dylib`), copied into
+/// `thaw-libs/cache/<fingerprint>/shared/<rt_abi_hash>/` so the program can `rpath` it.
+fn build_rt_shared_library() -> Result<PathBuf, String> {
+    // The crate is a staticlib: rustc's own cdylib version script would export every
+    // `#[no_mangle]` symbol of the dependencies, so the shared object is linked here, with
+    // `thaw_rt.map` as the only version script.
+    let archive = build_staticlib("thaw-rt-dylib")?;
+    let bytes = std::fs::read(&archive)
+        .map_err(|e| format!("failed to read `{}`: {e}", archive.display()))?;
+    let abi_hash = rt_abi_hash_of_bytes(&bytes)?;
+    let dir = prepared_staticlib_root()?
+        .join("cache")
+        .join(runtime_fingerprint())
+        .join("shared")
+        .join(&abi_hash);
+    let lib = dir.join("libthaw_rt.so.1");
+    if !lib.is_file() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create `{}`: {e}", dir.display()))?;
+        // Link under a private name, then rename: concurrent builds never see a partial file.
+        let map = dir.join(format!("thaw_rt.map.tmp-{}-{}", std::process::id(), unique_suffix()));
+        std::fs::write(&map, include_str!("../../thaw-rt-dylib/thaw_rt.map"))
+            .map_err(|e| format!("failed to write `{}`: {e}", map.display()))?;
+        let tmp = dir.join(format!("libthaw_rt.so.1.tmp-{}-{}", std::process::id(), unique_suffix()));
+        let output = Command::new("cc")
+            .args(["-shared", "-Wl,--whole-archive"])
+            .arg(&archive)
+            .args([
+                "-Wl,--no-whole-archive",
+                "-Wl,-z,defs",
+                "-Wl,-Bsymbolic",
+                "-Wl,--no-undefined-version",
+                "-Wl,--build-id=none",
+                "-Wl,-soname,libthaw_rt.so.1",
+                "-Wl,--gc-sections",
+                "-Wl,--strip-all",
+                "-lm",
+                "-ldl",
+                "-lpthread",
+            ])
+            .arg(format!("-Wl,--version-script={}", map.display()))
+            .arg("-o")
+            .arg(&tmp)
+            .output()
+            .map_err(|e| format!("failed to invoke `cc` for libthaw_rt.so.1: {e}"))?;
+        let _ = std::fs::remove_file(&map);
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "linking libthaw_rt.so.1 failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        std::fs::rename(&tmp, &lib)
+            .map_err(|e| format!("failed to install `{}`: {e}", lib.display()))?;
+    }
+    Ok(lib)
+}
+
+/// Distinguishes temp files made by concurrent builds inside one process.
+fn unique_suffix() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The ABI hash the runtime embeds as `THAW_ABI_HASH=<16 hex>;` (see `thaw-rt-dylib/src/cabi.rs`).
+fn rt_abi_hash_of_bytes(bytes: &[u8]) -> Result<String, String> {
+    const MARKER: &[u8] = b"THAW_ABI_HASH=";
+    let position = bytes
+        .windows(MARKER.len())
+        .position(|window| window == MARKER)
+        .ok_or("runtime library has no THAW_ABI_HASH marker")?;
+    let hash = bytes
+        .get(position + MARKER.len()..position + MARKER.len() + 16)
+        .filter(|hash| hash.iter().all(u8::is_ascii_hexdigit))
+        .ok_or("runtime library has a malformed THAW_ABI_HASH marker")?;
+    Ok(String::from_utf8_lossy(hash).into_owned())
 }
 
 fn staticlib_artifact_path(stdout: &str, pkg: &str) -> Option<PathBuf> {
