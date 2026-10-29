@@ -71,6 +71,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("lib") => {
+            if let Err(err) = run_lib(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("inspect") => {
             if let Err(err) = run_inspect(&args[2..]) {
                 eprintln!("error: {err}");
@@ -679,6 +685,9 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
         println!("{line}");
     }
     println!("napi: {}", manifest["napi"].as_bool().unwrap_or(false));
+    if manifest["shared_rt"].as_bool() == Some(true) {
+        println!("shared-rt: libthaw_rt.so.1");
+    }
     Ok(())
 }
 
@@ -832,6 +841,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
     let mut install_missing = true;
     let mut icu4c = false;
     let mut fast_compile = false;
+    let mut shared_rt = std::env::var("THAW_SHARED_RT").as_deref() == Ok("1");
     let mut registry_was_explicit = false;
 
     let mut i = 0;
@@ -884,6 +894,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
             "--icu4c" => icu4c = true,
             // Backend without instruction-selection optimisation: faster to compile, slower code.
             "--fast-compile" => fast_compile = true,
+            "--shared-rt" => shared_rt = true,
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -943,7 +954,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
     }
 
     set_codegen_opt_override(fast_compile.then_some(inkwell::OptimizationLevel::None));
-    let result = build_with_native_mode(
+    let result = build_with_native_mode_shared(
         &input,
         &output,
         &extra_links,
@@ -956,6 +967,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
         embed_native_addons,
         install_missing,
         icu4c,
+        shared_rt,
     );
     if let Some(dir) = generated_input.as_deref().and_then(Path::parent) {
         let _ = std::fs::remove_dir_all(dir);
@@ -1246,6 +1258,7 @@ include!("registry_integration/calls.rs");
 include!("ffi_metadata.rs");
 
 include!("build.rs");
+include!("lib_cmd.rs");
 
 include!("x.rs");
 

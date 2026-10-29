@@ -1,0 +1,11 @@
+const n = new Number(5);
+console.log(n + 1, typeof n, n == 5, n === 5, n instanceof Number, n.valueOf(), n.toString(), n.toFixed(2));
+const s = new String('ab');
+console.log(typeof s, s.length, s[1], s + 'c', s == 'ab', s === 'ab', s.toUpperCase(), s instanceof String);
+const b = new Boolean(false);
+console.log(b ? 1 : 2, typeof b, b == false, b.valueOf(), !!b);
+console.log(n, s, b, [n, s, b]);
+console.log(JSON.stringify([n, s, b]), String(n), Number(s.length));
+console.log(Object.prototype.toString.call(n), Object.prototype.toString.call(s));
+console.log(new Number(2) * new Number(3), new Number(1) < new Number(2));
+console.log(typeof Number('5'), typeof String(1), typeof Boolean(1));

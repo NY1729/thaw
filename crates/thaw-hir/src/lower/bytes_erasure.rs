@@ -53,6 +53,7 @@ fn is_bytes_expr(expr: &HirExpr) -> bool {
                 matches!(
                     name.as_str(),
                     "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
+                        | "__thaw_arraybuffer_alloc" | "__thaw_dataview_new" | "__thaw_arraybuffer_transfer"
                         | "__thaw_bytes_from_array" | "__thaw_bytes_concat" | "__thaw_bytes_slice"
                         | "__thaw_bytes_subarray" | "__thaw_bytes_clone" | "__thaw_bytes_as_u8"
                         | "__thaw_bytes_narrow_list" | "__thaw_bytes_buffer"

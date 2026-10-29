@@ -225,7 +225,8 @@ fn run_node_compat_case(
     let thaw_source = case_dir.join("main.ts");
     let output = case_dir.join("app");
     std::fs::write(&thaw_source, source).map_err(|error| error.to_string())?;
-    let build = build_with_native_mode(
+    let shared_rt = std::env::var("THAW_SHARED_RT").as_deref() == Ok("1");
+    let build = build_with_native_mode_shared(
         &thaw_source,
         &output,
         &[],
@@ -238,6 +239,7 @@ fn run_node_compat_case(
         true,
         false,
         false,
+        shared_rt,
     );
     let outcome = build.and_then(|_| {
         command_output_with_timeout(
