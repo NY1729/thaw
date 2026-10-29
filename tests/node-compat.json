@@ -3149,6 +3149,36 @@
       "source": "function wrap<T>(x: T): { v: T } { return { v: x }; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const y = wrap(b).v;\n  y[0] = 65;\n  console.log(b.toString());\n}\n"
     },
     {
+      "name": "native ArrayBuffer and DataView accessors, errors and inspect",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ab = new ArrayBuffer(8);\n  console.log(ab.byteLength);\n  console.log(ab);\n  const dv = new DataView(ab, 0, 8);\n  dv.setInt8(0, -2);\n  dv.setUint8(1, 255);\n  dv.setInt16(2, -1234, true);\n  dv.setUint16(2, 65000);\n  dv.setInt32(4, -123456789, true);\n  console.log(dv.getInt8(0), dv.getUint8(0), dv.getUint8(1), dv.getInt16(2), dv.getInt16(2, true), dv.getUint16(2, true));\n  console.log(dv.getInt32(4, true), dv.getUint32(4, true), dv.getInt32(4));\n  dv.setFloat32(0, 1.5);\n  console.log(dv.getFloat32(0), dv.getFloat32(0, true));\n  dv.setFloat64(0, Math.PI, true);\n  console.log(dv.getFloat64(0, true), dv.getFloat64(0));\n  dv.setBigInt64(0, -5n, true);\n  console.log(dv.getBigInt64(0, true), dv.getBigInt64(0));\n  console.log(dv.byteLength, dv.byteOffset, dv.buffer.byteLength);\n  console.log(dv);\n  const u = new Uint8Array(ab);\n  u[0] = 7;\n  console.log(dv.getUint8(0), u.length);\n  dv.setUint8(3, 99);\n  console.log(u[3]);\n  const b = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);\n  const dv2 = new DataView(b.buffer, b.byteOffset, 8);\n  console.log(dv2.getUint32(0), dv2.getUint16(6, true));\n  dv2.setUint8(0, 200);\n  console.log(b[0]);\n  console.log(ab instanceof ArrayBuffer, dv instanceof DataView, ab instanceof DataView, u instanceof ArrayBuffer);\n  console.log(ArrayBuffer.isView(dv), ArrayBuffer.isView(u), ArrayBuffer.isView(ab));\n  const s = ab.slice(2, 6);\n  console.log(s.byteLength, s);\n  try { dv.getInt32(6); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { dv.setInt8(-1, 1); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new DataView(ab, 9); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new DataView(ab, 0, 20); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new ArrayBuffer(-1); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  console.log(new ArrayBuffer(0), new ArrayBuffer(60));\n  console.log(new DataView(new ArrayBuffer(4), 1, 2));\n}\n"
+    },
+    {
+      "name": "buffer concat of a list captured by a js callback closure",
+      "expect": "matched",
+      "source": "import { Readable } from \"node:stream\";\nfunction main(): void {\n  const chunks: Buffer[] = [];\n  const hex = \"68656c6c6f\";\n  const nums = [104, 105];\n  const r = Readable.from([Buffer.from(\"ab\"), Buffer.from(\"cd\")]);\n  r.on(\"data\", (c: Buffer) => { chunks.push(c); });\n  r.on(\"end\", () => {\n    const all = Buffer.concat(chunks);\n    console.log(all.length, all.toString());\n    const h = Buffer.from(hex, \"hex\");\n    console.log(h.length, h.toString());\n    const n = Buffer.from(nums);\n    console.log(n.length, n);\n    console.log(Buffer.from(hex).length);\n  });\n}\n"
+    },
+    {
+      "name": "buffer from captured string and buffer in a js callback closure",
+      "expect": "matched",
+      "source": "import { Readable } from \"node:stream\";\nfunction main(): void {\n  const b = Buffer.from(\"xyz\");\n  const t = \"hello\";\n  const r = Readable.from([Buffer.from(\"ab\")]);\n  r.on(\"data\", (c: Buffer) => { console.log(c.length); });\n  r.on(\"end\", () => {\n    const copy = Buffer.from(b);\n    console.log(copy.length, copy.toString());\n    console.log(Buffer.from(t).length, Buffer.from(t, \"base64\").length, Buffer.concat([b, b]).toString());\n    console.log(Buffer.concat([b]).length);\n  });\n}\n"
+    },
+    {
+      "name": "native ArrayBuffer transfer, detached and annotated views",
+      "expect": "matched",
+      "source": "function main(): void {\n  const ab = new ArrayBuffer(8);\n  console.log(ab.byteLength, ab.detached, ab.resizable, ab.maxByteLength);\n  const moved = ab.transfer(16);\n  console.log(moved.byteLength, ab.byteLength, ab.detached, moved.detached);\n  const fixed = moved.transferToFixedLength(4);\n  console.log(fixed.byteLength, moved.detached);\n  const keep = new ArrayBuffer(3);\n  new Uint8Array(keep)[1] = 7;\n  const copy = keep.transfer();\n  console.log(copy.byteLength, new Uint8Array(copy)[1], keep.byteLength);\n  const ann: ArrayBuffer = new ArrayBuffer(4);\n  const u = new Uint8Array(ann);\n  u[0] = 5;\n  const d2: DataView = new DataView(ann);\n  console.log(d2.getUint8(0), ann.byteLength);\n  const sliced: ArrayBuffer = ann.slice(1);\n  console.log(sliced.byteLength);\n  const n = new Uint8Array(ann);\n  console.log(n.length, n[0]);\n}\n"
+    },
+    {
+      "name": "anon async and generator labels in an array",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log([async () => 1, async function () { await 0; }, function* () {}, async function* () {}]);\n}\n"
+    },
+    {
+      "name": "named and sync anonymous labels unchanged",
+      "expect": "matched",
+      "source": "function main(): void {\n  const named = async () => 5;\n  const gen = function* () {};\n  console.log(named);\n  console.log(gen);\n  console.log(() => 6);\n  console.log(async () => 1);\n  console.log(function* () {});\n}\n"
+    },
+    {
       "name": "icu localeCompare default and locale argument",
       "expect": "matched",
       "source": "function main(): void { console.log(\"a\".localeCompare(\"B\"), \"B\".localeCompare(\"a\"), \"a\".localeCompare(\"a\"), \"ä\".localeCompare(\"z\", \"de\"), \"ä\".localeCompare(\"z\", \"sv\"), \"résumé\".localeCompare(\"resume\", \"fr\")); console.log([\"b\",\"A\",\"a\",\"B\",\"ä\",\"z\",\"Z\"].sort((x, y) => x.localeCompare(y, \"en\")).join(\",\")); }"

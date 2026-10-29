@@ -172,7 +172,7 @@ fn dev_input_arg(args: &[String]) -> Result<Option<&str>, String> {
             continue;
         }
         match args[index].as_str() {
-            "--static" | "--external-native" | "--no-install" | "--icu4c" => index += 1,
+            "--static" | "--external-native" | "--no-install" | "--icu4c" | "--shared-rt" => index += 1,
             input => return Ok(Some(input)),
         }
     }

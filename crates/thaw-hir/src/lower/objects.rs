@@ -3621,11 +3621,24 @@ impl<'a> FnLowerer<'a> {
                 }
                 match &obj_ty {
                     HirType::Array(_)
-                        if matches!(prop.sym.as_ref(), "byteLength" | "byteOffset" | "buffer")
-                            && self.infer_expr_type_inner(&obj)? == HirType::Bytes =>
+                        if matches!(
+                            prop.sym.as_ref(),
+                            "byteLength" | "byteOffset" | "buffer" | "maxByteLength" | "resizable" | "detached"
+                        ) && self.infer_expr_type_inner(&obj)? == HirType::Bytes =>
                     {
-                        Ok(if prop.sym == *"byteLength" {
+                        Ok(if prop.sym == *"byteLength" || prop.sym == *"maxByteLength" {
                             HirExpr::ArrayLen(Box::new(obj))
+                        } else if prop.sym == *"resizable" {
+                            HirExpr::EvalThen(Box::new(obj), Box::new(HirExpr::Lit(HirLit::Bool(false))))
+                        } else if prop.sym == *"detached" {
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_bytes_kind".into())),
+                                    vec![obj, HirExpr::Lit(HirLit::F64(2.0))],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                            )
                         } else if prop.sym == *"buffer" {
                             HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_buffer".into())), vec![obj])
                         } else {

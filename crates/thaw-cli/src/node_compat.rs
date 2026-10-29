@@ -135,7 +135,8 @@ fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
         let thaw_source = case_dir.join("main.ts");
         let output = case_dir.join("app");
         std::fs::write(&thaw_source, source).map_err(|error| error.to_string())?;
-        let build = build_with_native_mode(
+        let shared_rt = std::env::var("THAW_SHARED_RT").as_deref() == Ok("1");
+        let build = build_with_native_mode_shared(
             &thaw_source,
             &output,
             &[],
@@ -148,6 +149,7 @@ fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
             true,
             false,
             false,
+            shared_rt,
         );
         let outcome = build.and_then(|_| {
             command_output_with_timeout(

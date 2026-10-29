@@ -145,6 +145,10 @@ const BYTE_VIEW_BUFFER: u64 = 1;
 /// The whole backing store as an `ArrayBuffer` (`buf.buffer`): `slice` copies and
 /// `Buffer.from` / `new Uint8Array` over it share.
 const BYTE_VIEW_ARRAY_BUFFER: u64 = 2;
+/// A `DataView` over a range of the backing store.
+const BYTE_VIEW_DATAVIEW: u64 = 4;
+/// An `ArrayBuffer` whose contents were moved out by `transfer()`.
+const BYTE_VIEW_DETACHED: u64 = 8;
 
 unsafe fn is_byte_view(ptr: *const u8) -> bool {
     !ptr.is_null() && (unsafe { ptr.add(8).cast::<u64>().read_unaligned() } & !BYTE_VIEW_FLAG_MASK) == BYTE_VIEW_MAGIC
@@ -1178,4 +1182,232 @@ pub unsafe extern "C" fn thaw_bytes_byte_offset(buffer: *const u8) -> f64 {
 /// `buffer` must be null or a byte view record.
 pub unsafe extern "C" fn thaw_bytes_store_length(buffer: *const u8) -> f64 {
     unsafe { coerce_view(buffer).as_ref() }.map_or(0.0, |view| unsafe { (*view.store).len } as f64)
+}
+
+#[no_mangle]
+/// `new ArrayBuffer(len)`: a zeroed store viewed as an `ArrayBuffer`.
+pub extern "C" fn thaw_arraybuffer_alloc(len: f64) -> *mut u8 {
+    let len = if len.is_finite() && len > 0.0 { len as usize } else { 0 };
+    unsafe { alloc_byte_owner(len, BYTE_VIEW_ARRAY_BUFFER) }
+}
+
+#[no_mangle]
+/// `new DataView(buffer, byteOffset, byteLength)` over an `ArrayBuffer` / `buf.buffer`
+/// view. A `NaN` offset or length means "omitted"; the caller range-checks.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_dataview_new(buffer: *const u8, offset: f64, len: f64) -> *mut u8 {
+    let Some(source) = (unsafe { coerce_view(buffer).as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let start = if offset.is_nan() { 0 } else { (offset.max(0.0) as usize).min(source.len) };
+    let count = if len.is_nan() { source.len - start } else { (len.max(0.0) as usize).min(source.len - start) };
+    let view = unsafe { new_byte_view(buffer, start, count) };
+    if let Some(view) = unsafe { view.cast::<ByteView>().as_mut() } {
+        view.tag = BYTE_VIEW_MAGIC | BYTE_VIEW_DATAVIEW;
+    }
+    view
+}
+
+/// `DataView.prototype.get*`: `kind` is `1`/`2`/`4`/`8` (unsigned ints), `-1`/`-2`/`-4`
+/// (signed ints) or `-5`/`-9` (`Float32` / `Float64`; the width is `|kind| - 1` for floats).
+/// The caller range-checks `offset`; out of range reads as `0`.
+///
+/// # Safety
+///
+/// `view` must be a byte view record.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_dataview_get(view: *const u8, kind: f64, offset: f64, little: f64) -> f64 {
+    let Some(bytes) = (unsafe { view_bytes(view) }) else { return 0.0 };
+    let (width, signed, float) = dataview_kind(kind);
+    let Some(chunk) = dataview_range(bytes.len(), offset, width).map(|start| &bytes[start..start + width]) else {
+        return 0.0;
+    };
+    let mut le = [0u8; 8];
+    le[..width].copy_from_slice(chunk);
+    if little == 0.0 {
+        le[..width].reverse();
+    }
+    if float && width == 2 {
+        return f16_bits_to_f64(u16::from_le_bytes([le[0], le[1]]));
+    }
+    decode_scalar(&le[..width], if float { 2 } else { u32::from(signed) })
+}
+
+/// `DataView.prototype.set*`; see `thaw_dataview_get` for `kind`.
+///
+/// # Safety
+///
+/// `view` must be a byte view record.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_dataview_set(view: *mut u8, kind: f64, offset: f64, value: f64, little: f64) {
+    let Some(bytes) = (unsafe { view_bytes_mut(view) }) else { return };
+    let (width, _, float) = dataview_kind(kind);
+    let Some(start) = dataview_range(bytes.len(), offset, width) else { return };
+    let mut le = if float {
+        if width == 2 {
+            f64_to_f16_bits(value).to_le_bytes().to_vec()
+        } else if width == 4 { (value as f32).to_le_bytes().to_vec() } else { value.to_le_bytes().to_vec() }
+    } else {
+        // ToInt/ToUint: truncate, then wrap modulo 2^64 (the low `width` bytes are what is kept).
+        let truncated = value.trunc();
+        let wrapped = if !value.is_finite() {
+            0
+        } else if truncated.abs() < 9.0e18 {
+            truncated as i64 as u64
+        } else {
+            truncated.rem_euclid(18446744073709551616.0) as u64
+        };
+        wrapped.to_le_bytes()[..width].to_vec()
+    };
+    if little == 0.0 {
+        le.reverse();
+    }
+    bytes[start..start + width].copy_from_slice(&le);
+}
+
+fn dataview_kind(kind: f64) -> (usize, bool, bool) {
+    match kind as i32 {
+        -3 => (2, true, true),
+        -5 => (4, true, true),
+        -9 => (8, true, true),
+        k if k < 0 => (-k as usize, true, false),
+        k => (k as usize, false, false),
+    }
+}
+
+fn dataview_range(len: usize, offset: f64, width: usize) -> Option<usize> {
+    (offset >= 0.0 && offset.is_finite()).then_some(offset as usize).filter(|start| start.checked_add(width).is_some_and(|end| end <= len))
+}
+
+#[no_mangle]
+/// Console / type-test support: `field` 2 is whether an `ArrayBuffer` is detached, `field` 0 is the inspect kind (`0` Buffer / `Uint8Array`, `1`
+/// `ArrayBuffer`, `2` `DataView`), `field` 1 the view length.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_console_info(buffer: *const u8, field: f64) -> f64 {
+    let Some(view) = (unsafe { coerce_view(buffer).as_ref() }) else { return 0.0 };
+    if field == 2.0 {
+        return f64::from(u8::from(view.tag & BYTE_VIEW_DETACHED != 0));
+    }
+    if field != 0.0 {
+        return view.len as f64;
+    }
+    let flags = view_flags(view);
+    if flags & BYTE_VIEW_DATAVIEW != 0 { 2.0 } else if flags & BYTE_VIEW_ARRAY_BUFFER != 0 { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+/// Console support: the bytes to list for `buffer` (a `DataView` shows its whole store).
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_console_target(buffer: *const u8) -> *mut u8 {
+    let is_dataview = unsafe { coerce_view(buffer).as_ref() }.is_some_and(|view| view_flags(view) & BYTE_VIEW_DATAVIEW != 0);
+    if is_dataview { unsafe { thaw_bytes_buffer(buffer) } } else { buffer.cast_mut() }
+}
+
+/// IEEE half precision, round to nearest even (Rust's `f16` is still unstable).
+fn f64_to_f16_bits(value: f64) -> u16 {
+    let sign = ((value.to_bits() >> 48) & 0x8000) as u16;
+    let magnitude = value.abs();
+    if value.is_nan() {
+        return sign | 0x7e00;
+    }
+    if magnitude >= 65520.0 {
+        return sign | 0x7c00;
+    }
+    let exponent = ((magnitude.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    if exponent < -14 {
+        // Subnormal (or zero): a multiple of 2^-24; rounding up to 1024 lands on the smallest normal.
+        return sign | (magnitude * 16777216.0).round_ties_even() as u16;
+    }
+    let mut mantissa = ((magnitude / 2f64.powi(exponent) - 1.0) * 1024.0).round_ties_even() as u16;
+    let mut biased = (exponent + 15) as u16;
+    if mantissa == 1024 {
+        mantissa = 0;
+        biased += 1;
+    }
+    if biased >= 31 {
+        return sign | 0x7c00;
+    }
+    sign | (biased << 10) | mantissa
+}
+
+fn f16_bits_to_f64(bits: u16) -> f64 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = i32::from((bits >> 10) & 31);
+    let mantissa = f64::from(bits & 1023);
+    sign * match exponent {
+        0 => mantissa * 2f64.powi(-24),
+        31 if mantissa == 0.0 => f64::INFINITY,
+        31 => f64::NAN,
+        _ => (1.0 + mantissa / 1024.0) * 2f64.powi(exponent - 15),
+    }
+}
+
+#[no_mangle]
+/// `ab.transfer(newLength?)` / `ab.transferToFixedLength(newLength?)`: the contents move into a
+/// fresh `ArrayBuffer` (a `NaN` length keeps the size) and `buffer` becomes detached.
+///
+/// # Safety
+///
+/// `buffer` must be an `ArrayBuffer` view record.
+pub unsafe extern "C" fn thaw_arraybuffer_transfer(buffer: *mut u8, length: f64) -> *mut u8 {
+    let Some(source) = (unsafe { coerce_view(buffer).cast_mut().as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    let size = if length.is_nan() { source.len } else { length.max(0.0) as usize };
+    let output = unsafe { alloc_byte_owner(size, BYTE_VIEW_ARRAY_BUFFER) };
+    if let Some(target) = unsafe { view_bytes_mut(output) } {
+        let copied = size.min(source.len);
+        target[..copied].copy_from_slice(unsafe { std::slice::from_raw_parts(source.base, copied) });
+    }
+    source.len = 0;
+    source.tag |= BYTE_VIEW_DETACHED;
+    output
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn half_precision_conversion_rounds_like_ieee() {
+        for (value, bits) in [
+            (1.0, 0x3c00),
+            (-2.0, 0xc000),
+            (65504.0, 0x7bff),
+            (65520.0, 0x7c00),
+            (1.337, 0x3d59),
+            (5.960464477539063e-8, 0x0001),
+            (6.103515625e-5, 0x0400),
+            (-0.0, 0x8000),
+            (f64::INFINITY, 0x7c00),
+        ] {
+            assert_eq!(f64_to_f16_bits(value), bits, "{value}");
+        }
+        assert_eq!(f16_bits_to_f64(0x3d59), 1.3369140625);
+        assert!(f16_bits_to_f64(f64_to_f16_bits(f64::NAN)).is_nan());
+    }
+
+    #[test]
+    fn dataview_wraps_integers_and_checks_ranges() {
+        unsafe {
+            let buffer = thaw_arraybuffer_alloc(8.0);
+            let view = thaw_dataview_new(buffer, 2.0, 4.0);
+            thaw_dataview_set(view, -1.0, 0.0, -2.0, 1.0);
+            thaw_dataview_set(view, -4.0, 0.0, 4294967295.0 + 3.0, 0.0);
+            assert_eq!(thaw_dataview_get(view, 1.0, 0.0, 0.0), 0.0);
+            assert_eq!(thaw_dataview_get(view, -4.0, 0.0, 0.0), 2.0);
+            assert_eq!(thaw_dataview_get(view, -4.0, 1.0, 0.0), 0.0, "out of range reads 0");
+            assert_eq!(thaw_bytes_console_info(view, 0.0), 2.0);
+            assert_eq!(thaw_bytes_console_info(buffer, 0.0), 1.0);
+        }
+    }
 }
