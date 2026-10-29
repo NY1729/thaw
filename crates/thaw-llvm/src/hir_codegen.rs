@@ -950,6 +950,11 @@ impl<'ctx> HirCompiler<'ctx> {
             for (quickjs, thaw_js) in [
                 ("thaw_js_retain_handle", "thaw_tjs_retain_handle"),
                 ("thaw_js_release_handle", "thaw_tjs_release_handle"),
+                ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
+                (
+                    "thaw_js_terminal_work_pending",
+                    "thaw_tjs_terminal_work_pending",
+                ),
             ] {
                 if let Some(function) = self.module.get_function(quickjs) {
                     function.as_global_value().set_name(thaw_js);
