@@ -191,6 +191,19 @@ pub unsafe extern "C" fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
     }
 }
 
+/// The settled payload pointer without driving anything (null while pending or when the
+/// producer stored none): what `console.log(promise)` reads to show `Promise { value }`.
+///
+/// # Safety
+///
+/// `promise` must be null or point to a live `ThawPromise`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_result_ptr(promise: *const ThawPromise) -> *const u8 {
+    unsafe { promise.as_ref() }
+        .and_then(|promise| promise.result)
+        .unwrap_or(std::ptr::null())
+}
+
 /// Marks a promise as observed by a non-coroutine consumer such as the JS
 /// bridge, which polls settlement instead of registering a continuation.
 ///

@@ -333,6 +333,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_parse_error_message",
+            json_parse_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_take_parse_error",
             self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
@@ -477,6 +482,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_take_stringify_error",
             i8_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_error_message",
+            i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -4261,6 +4271,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_promise_state",
             self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_result_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
