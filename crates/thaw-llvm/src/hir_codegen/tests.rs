@@ -766,3 +766,4 @@ include!("tests/bufu8_contracts.rs");
 include!("tests/lim3_contracts.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");
+include!("tests/anon_fn_contracts.rs");

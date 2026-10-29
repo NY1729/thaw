@@ -3202,6 +3202,11 @@
       "name": "icu locale methods default locale and local time zone",
       "expect": "matched",
       "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(), d.toLocaleDateString(), d.toLocaleTimeString()); console.log((1234567.891).toLocaleString(), \"a\".localeCompare(\"B\")); }"
+    },
+    {
+      "name": "function values in Map and Set keep Node labels",
+      "expect": "matched",
+      "source": "async function noawait(): Promise<number> { return 1; }\nfunction main(): void {\n  const m = new Map<string, any>();\n  m.set(\"a\", async () => 3);\n  console.log(m);\n  const s = new Set<any>();\n  s.add(() => 1);\n  console.log(s);\n  const n = new Map<string, any>();\n  n.set(\"n\", async function named() { await 0; return 1; });\n  console.log(n);\n  const p = new Map<string, any>();\n  p.set(\"p\", noawait);\n  console.log(p);\n  const q = new Map<string, any>();\n  q.set(\"q\", (x: number) => x + 1);\n  console.log(q);\n}\n"
     }
   ]
 }

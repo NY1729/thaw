@@ -4045,6 +4045,30 @@ fn register_native_callback(
         // case passes through and what the `Json`-callee dynamic-call path
         // recovers via `JsonAsNative`, so the function stays callable.
         let visible_param_count = param_count - u64::from(method_mode);
+        // The source function's `console.log` label (`"<kind><name>"`; empty when unregistered).
+        // The wrapper takes its name from it and `host_inspect_node` its kind, so a function
+        // stored in a `Json`/`any` value prints like the original instead of as `callback`.
+        let source_label = {
+            unsafe extern "C" {
+                fn thaw_closure_alias_resolve(closure: *const u8) -> *const u8;
+                fn thaw_function_label_for(closure: *const u8) -> *const std::os::raw::c_char;
+            }
+            let pointer = if closure == 0 {
+                std::ptr::null()
+            } else {
+                unsafe {
+                    thaw_function_label_for(thaw_closure_alias_resolve(closure as *const u8))
+                }
+            };
+            if pointer.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(pointer) }.to_string_lossy().into_owned()
+            }
+        };
+        let label_js = serde_json::to_string(&source_label).unwrap_or_else(|_| "\"\"".into());
+        let name_js = serde_json::to_string(&source_label.chars().skip(1).collect::<String>())
+            .unwrap_or_else(|_| "\"\"".into());
         let wrapper_source = format!(
             "(function() {{ \
              var raw = globalThis['{raw_name}']; \
@@ -4098,6 +4122,8 @@ fn register_native_callback(
              if (!deferred) releaseHeld(); \
              }} \
              }}; \
+             Object.defineProperty(callback, 'name', {{ value: {name_js} }}); \
+             Object.defineProperty(callback, '__thaw_label__', {{ value: {label_js} }}); \
              return callback; \
              }})()"
         );
