@@ -66,3 +66,4 @@ include!("tests/types.rs");
 include!("tests/values.rs");
 
 include!("tests/storage.rs");
+include!("tests/storage_scale.rs");
