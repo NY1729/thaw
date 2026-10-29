@@ -10,7 +10,7 @@ include!("node_compat.rs");
 include!("completeness.rs");
 include!("js_infer_report.rs");
 
-const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--icu4c] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
+const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--icu4c] [--fast-compile] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -840,6 +840,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
     let mut embed_native_addons = true;
     let mut install_missing = true;
     let mut icu4c = false;
+    let mut fast_compile = false;
     let mut shared_rt = std::env::var("THAW_SHARED_RT").as_deref() == Ok("1");
     let mut registry_was_explicit = false;
 
@@ -891,6 +892,8 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
             "--external-native" => embed_native_addons = false,
             "--no-install" => install_missing = false,
             "--icu4c" => icu4c = true,
+            // Backend without instruction-selection optimisation: faster to compile, slower code.
+            "--fast-compile" => fast_compile = true,
             "--shared-rt" => shared_rt = true,
             other => {
                 if input.is_some() {
@@ -950,6 +953,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
         assets = Some(build_vite_project(&directory)?);
     }
 
+    set_codegen_opt_override(fast_compile.then_some(inkwell::OptimizationLevel::None));
     let result = build_with_native_mode_shared(
         &input,
         &output,

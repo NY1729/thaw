@@ -1022,6 +1022,60 @@ struct RenameReferences<'a> {
 }
 
 impl RenameReferences<'_> {
+    /// A destructuring-assignment target (`[a, b] = [b, a]`) names existing bindings, so
+    /// they follow the same renaming as a plain `a = b` target.
+    fn rename_assignment_pattern(&self, pattern: &mut thaw_parser::ast::Pat) {
+        use thaw_parser::ast::Pat;
+        match pattern {
+            Pat::Ident(binding) => self.rename_ident(&mut binding.id),
+            Pat::Array(array) => {
+                for element in array.elems.iter_mut().flatten() {
+                    self.rename_assignment_pattern(element);
+                }
+            }
+            Pat::Object(object) => {
+                for property in &mut object.props {
+                    self.rename_assignment_property(property);
+                }
+            }
+            Pat::Rest(rest) => self.rename_assignment_pattern(&mut rest.arg),
+            Pat::Assign(assign) => self.rename_assignment_pattern(&mut assign.left),
+            _ => {}
+        }
+    }
+
+    fn rename_assignment_property(&self, property: &mut thaw_parser::ast::ObjectPatProp) {
+        use thaw_parser::ast::{ObjectPatProp, Pat};
+        match &mut *property {
+            ObjectPatProp::KeyValue(entry) => self.rename_assignment_pattern(&mut entry.value),
+            ObjectPatProp::Rest(rest) => self.rename_assignment_pattern(&mut rest.arg),
+            ObjectPatProp::Assign(entry) => {
+                let original = entry.key.id.clone();
+                self.rename_ident(&mut entry.key.id);
+                if entry.key.id.sym == original.sym {
+                    return;
+                }
+                // `{ a = 1 }` keeps reading property `a` but now assigns the renamed binding.
+                let target = Pat::Ident(entry.key.clone());
+                let value = match entry.value.take() {
+                    Some(default) => Pat::Assign(thaw_parser::ast::AssignPat {
+                        span: entry.span,
+                        left: Box::new(target),
+                        right: default,
+                    }),
+                    None => target,
+                };
+                *property = ObjectPatProp::KeyValue(thaw_parser::ast::KeyValuePatProp {
+                    key: thaw_parser::ast::PropName::Ident(thaw_parser::ast::IdentName::new(
+                        original.sym,
+                        original.span,
+                    )),
+                    value: Box::new(value),
+                });
+            }
+        }
+    }
+
     fn rename_ident(&self, ident: &mut thaw_parser::ast::Ident) {
         if self.shadowed.contains(ident.sym.as_ref()) {
             return;
@@ -1520,6 +1574,21 @@ impl VisitMut for RenameReferences<'_> {
         ) = &mut assignment.left
         {
             self.rename_ident(&mut binding.id);
+        }
+        if let thaw_parser::ast::AssignTarget::Pat(pattern) = &mut assignment.left {
+            match pattern {
+                thaw_parser::ast::AssignTargetPat::Array(array) => {
+                    for element in array.elems.iter_mut().flatten() {
+                        self.rename_assignment_pattern(element);
+                    }
+                }
+                thaw_parser::ast::AssignTargetPat::Object(object) => {
+                    for property in &mut object.props {
+                        self.rename_assignment_property(property);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
