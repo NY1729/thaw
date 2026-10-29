@@ -71,7 +71,6 @@ impl StoragePlan {
         module: &Module,
         connect: fn(&mut StorageGraph) -> StorageCallConnections,
     ) -> Result<Self, String> {
-        let __t0 = std::time::Instant::now(); // PROBE
         let mut tables = ValueKinds::default();
         module.visit_with(&mut tables);
         let mut observed = ObservedMembers {
@@ -80,7 +79,6 @@ impl StoragePlan {
             ..ObservedMembers::default()
         };
         module.visit_with(&mut observed);
-        eprintln!("PROBE observe {:?}", __t0.elapsed()); // PROBE
         observed.resolve_flows();
         let mut instantiated_classes = HashSet::new();
         for class in &observed.tables.instantiated {
@@ -99,7 +97,6 @@ impl StoragePlan {
             instantiated: &instantiated_classes,
             observed: &observed,
         };
-        let __t1 = std::time::Instant::now(); // PROBE
         module.visit_with(&mut uninit);
         let uninit_names = uninit.names;
         let uninit_sinks = observed
@@ -117,8 +114,6 @@ impl StoragePlan {
             ..StorageGraph::default()
         };
         module.visit_with(&mut graph);
-        eprintln!("PROBE graph-visit {:?} calls={} edges={} callables={}", __t1.elapsed(), graph.calls.len(), graph.edges.len(), graph.callables.len()); // PROBE
-        let __t2 = std::time::Instant::now(); // PROBE
         let graph_uninit_sinks = graph.uninit_sinks.clone();
         let graph_sink_slots = graph.sink_slots.clone();
         let graph_sink_results = graph.sink_results.clone();
@@ -128,7 +123,6 @@ impl StoragePlan {
             quickjs_function_value_slots,
             quickjs_function_sources,
         } = connect(&mut graph);
-        eprintln!("PROBE connect {:?}", __t2.elapsed()); // PROBE
         let mut pending: Vec<_> = graph.seeds.iter().copied().collect();
         let mut dynamic = graph.seeds;
         while let Some(node) = pending.pop() {
@@ -152,7 +146,6 @@ impl StoragePlan {
                 (start, callable.params.iter().copied().map(storage_key).collect())
             })
             .collect();
-        eprintln!("PROBE propagate {:?}", __t2.elapsed()); // PROBE
         let mut names = FunctionNames::default();
         module.visit_with(&mut names);
         Ok(Self {
