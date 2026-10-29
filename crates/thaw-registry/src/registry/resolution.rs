@@ -199,6 +199,20 @@ fn runtime_env_prelude(env: &BTreeMap<String, String>) -> String {
     )
 }
 
+/// `import fs from "fs"` means the same module as `"node:fs"`. `path` and `events`
+/// already resolve bare and `test` is only a builtin with its `node:` prefix, so they
+/// are left alone. Returns the prefixed specifier for any other bare builtin.
+pub fn bare_node_builtin_specifier(specifier: &str) -> Option<String> {
+    if specifier.starts_with("path") || matches!(specifier, "events" | "test" | "test/reporters") {
+        return None;
+    }
+    let names: Vec<String> = serde_json::from_str(NODE_BUILTIN_MODULES_JSON).ok()?;
+    names
+        .iter()
+        .any(|name| name == specifier)
+        .then(|| format!("node:{specifier}"))
+}
+
 /// Resolves the deliberately small built-in surface exposed to user imports.
 /// The implementation is the same CommonJS polyfill already used while
 /// bundling npm dependencies, paired with a Thaw-friendly declaration whose

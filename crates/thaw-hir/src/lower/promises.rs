@@ -402,6 +402,11 @@ impl<'a> FnLowerer<'a> {
             Expr::Fn(function) => {
                 return self.lower_function_expression(function, Some((parameter_types, expected_return)));
             }
+            Expr::Member(member) if self.console_method_value(member).is_some() => {
+                let method = self.console_method_value(member).unwrap_or_default();
+                let forwarder = console_forwarder(&method, parameter_types.len(), false);
+                return self.lower_contextual_arrow(&forwarder, parameter_types, expected_return);
+            }
             Expr::Ident(ident) => {
                 let mut name = self.resolve_binding(ident.sym.as_ref());
                 if let Some(arrow) = self.generic_arrows.get(&name).cloned() {

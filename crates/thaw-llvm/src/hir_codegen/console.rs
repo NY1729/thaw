@@ -25,6 +25,86 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i32_type().const_int(0, false).into())
     }
 
+    /// `console.trace(...data)`: `Trace: <data>` on stderr (the stack frames are not reproduced).
+    fn compile_console_trace(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let prefix = self
+            .builder
+            .build_global_string_ptr(if args.is_empty() { "Trace" } else { "Trace: " }, "console_trace_prefix")
+            .map_err(|error| error.to_string())?;
+        self.compile_console_text(prefix.as_pointer_value(), args.is_empty(), "console_trace_prefix", 2)?;
+        if !args.is_empty() {
+            self.compile_console_log(args, true)?;
+        }
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.group` (`delta` 1, after the optional label is logged) / `console.groupEnd` (-1).
+    fn compile_console_group(&mut self, delta: i64) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_console_group").unwrap(),
+                &[self.context.i32_type().const_int(delta as u64, true).into()],
+                "console_group",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.count` / `countReset` / `time` / `timeEnd` / `timeLog` on a (string) label.
+    fn compile_console_label(&mut self, name: &str, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [label] = args else {
+            return Err(format!("`{name}` expects a label"));
+        };
+        let label = self.compile_expr(label)?;
+        let kind = match name {
+            "console.count" => 0,
+            "console.countReset" => 1,
+            "console.time" => 2,
+            "console.timeEnd" => 3,
+            _ => 4,
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_console_label").unwrap(),
+                &[self.context.i32_type().const_int(kind, false).into(), label.into()],
+                "console_label",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.table(data, columns?)` / `console.dir(value, options?)`: the runtime renders the
+    /// text from `any` values; it is written to stdout.
+    fn compile_console_json_text(&mut self, name: &str, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let mut operands = Vec::new();
+        for arg in args {
+            operands.push(self.compile_expr(arg)?);
+        }
+        let Some(value) = operands.first().copied() else {
+            return Err(format!("`{name}` expects a value"));
+        };
+        let extra = operands.get(1).copied().unwrap_or_else(|| pointer_type.const_null().into());
+        let function = if name == "console.table" { "thaw_console_table_text" } else { "thaw_console_dir_text" };
+        let text = self
+            .builder
+            .build_call(self.module.get_function(function).unwrap(), &[value.into(), extra.into()], "console_json_text")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("console formatter returned no value")?
+            .into_pointer_value();
+        self.compile_console_text(text, true, "console_json_text", 1)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[text.into()],
+                "destroy_console_json_text",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
     fn compile_console_assert(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let mut values = args
             .iter()
