@@ -2502,6 +2502,39 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
+            // `[xs[i], xs[j]] = [xs[j], xs[i]]`: park the value in a temporary and run the
+            // ordinary `target = temp` assignment, so every assignable shape keeps its rules.
+            Pat::Expr(target) => {
+                let swc_ecma_ast::Expr::Member(member) = target.as_ref() else {
+                    return Err("unsupported destructuring assignment target".into());
+                };
+                let (value, ty) = match ty {
+                    HirType::Optional(payload)
+                        if matches!(**payload, HirType::F64 | HirType::Str | HirType::Bool) =>
+                    {
+                        (self.coerce_primitive_array_argument(value, payload)?, payload.as_ref().clone())
+                    }
+                    other => (value, other.clone()),
+                };
+                let name = format!("__thaw_assign_target_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                statements.push(HirStmt::Let(name.clone(), ty, value));
+                let assignment = Expr::Assign(swc_ecma_ast::AssignExpr {
+                    span: swc_common::DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Member(
+                        member.clone(),
+                    )),
+                    right: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        name.into(),
+                        swc_common::DUMMY_SP,
+                    ))),
+                });
+                let lowered = self.lower_expr(&assignment)?;
+                statements.push(HirStmt::Expr(lowered));
+                Ok(())
+            }
             _ => Err("unsupported destructuring assignment target".into()),
         }
     }
