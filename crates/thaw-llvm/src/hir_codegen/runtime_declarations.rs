@@ -163,6 +163,11 @@ impl<'ctx> HirCompiler<'ctx> {
             strlen_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_string_append_owned",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for name in ["thaw_string_register", "thaw_string_register_literal"] {
             self.module.add_function(
                 name,
