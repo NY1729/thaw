@@ -16,7 +16,7 @@ enum HKey {
 
 fn hkey(v: &Value) -> HKey {
     match v {
-        Value::Undefined => HKey::Undefined,
+        Value::Undefined | Value::Hole => HKey::Undefined,
         Value::Null => HKey::Null,
         Value::Bool(b) => HKey::Bool(*b),
         Value::Number(n) if n.is_nan() => HKey::Number(f64::NAN.to_bits()),
@@ -176,7 +176,9 @@ impl Interp {
             ),
             Value::Object(o) => {
                 let pairs = match &*o.kind.borrow() {
-                    Kind::Array(items) => return Some(items.clone()),
+                    Kind::Array(items) => {
+                        return Some(items.iter().map(|v| unhole(Some(v))).collect())
+                    }
                     Kind::Set(set) => return Some(set.items.clone()),
                     Kind::Typed(t) => {
                         return Some(t.to_vec().into_iter().map(Value::Number).collect())

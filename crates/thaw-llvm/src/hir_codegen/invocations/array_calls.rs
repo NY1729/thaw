@@ -111,6 +111,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_index_of"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
+                | "__thaw_arraybuffer_alloc"
+                | "__thaw_dataview_new"
+                | "__thaw_arraybuffer_transfer"
+                | "__thaw_dataview_get"
+                | "__thaw_dataview_set"
+                | "__thaw_bytes_kind"
                 | "__thaw_bytes_alloc_fill"
                 | "__thaw_bytes_set_from_string"
         );
@@ -755,6 +761,84 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Buffer.byteLength returned no value".to_string());
+            }
+            "__thaw_arraybuffer_alloc" => {
+                let [size] = args else {
+                    return Err("`__thaw_arraybuffer_alloc` expects one operand".into());
+                };
+                let size = self.compile_expr(size)?;
+                let result = self
+                    .builder
+                    .build_call(self.module.get_function("thaw_arraybuffer_alloc").unwrap(), &[size.into()], "arraybuffer_alloc")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("`__thaw_arraybuffer_alloc` returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_dataview_new" => {
+                let [source, offset, length] = args else {
+                    return Err("`__thaw_dataview_new` expects a buffer, an offset and a length".into());
+                };
+                let record = self.compile_bytes_record(source)?;
+                let offset = self.compile_expr(offset)?;
+                let length = self.compile_expr(length)?;
+                let result = self
+                    .builder
+                    .build_call(self.module.get_function("thaw_dataview_new").unwrap(), &[record.into(), offset.into(), length.into()], "dataview_new")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("`__thaw_dataview_new` returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_arraybuffer_transfer" => {
+                let [receiver, length] = args else {
+                    return Err("`__thaw_arraybuffer_transfer` expects a buffer and a length".into());
+                };
+                let record = self.compile_bytes_record(receiver)?;
+                let length = self.compile_expr(length)?;
+                let result = self
+                    .builder
+                    .build_call(self.module.get_function("thaw_arraybuffer_transfer").unwrap(), &[record.into(), length.into()], "arraybuffer_transfer")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("`__thaw_arraybuffer_transfer` returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_kind" => {
+                // `(view)` is the inspect kind; `(view, field)` another `thaw_bytes_console_info` field.
+                let record = self.compile_bytes_record(args.first().ok_or("`__thaw_bytes_kind` expects an operand")?)?;
+                let zero = match args.get(1) {
+                    Some(field) => self.compile_expr(field)?.into_float_value(),
+                    None => self.context.f64_type().const_zero(),
+                };
+                return self
+                    .builder
+                    .build_call(self.module.get_function("thaw_bytes_console_info").unwrap(), &[record.into(), zero.into()], "bytes_kind")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "`__thaw_bytes_kind` returned no value".to_string());
+            }
+            "__thaw_dataview_get" | "__thaw_dataview_set" => {
+                let record = self.compile_bytes_record(args.first().ok_or("DataView access needs a view")?)?;
+                let mut call_args = vec![record.into()];
+                for arg in &args[1..] {
+                    call_args.push(self.compile_expr(arg)?.into());
+                }
+                let runtime = if name == "__thaw_dataview_get" { "thaw_dataview_get" } else { "thaw_dataview_set" };
+                let result = self
+                    .builder
+                    .build_call(self.module.get_function(runtime).unwrap(), &call_args, "dataview_access")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic();
+                return Ok(result.unwrap_or_else(|| self.context.f64_type().const_zero().into()));
             }
             "__thaw_bytes_alloc" => {
                 let [size] = args else {
