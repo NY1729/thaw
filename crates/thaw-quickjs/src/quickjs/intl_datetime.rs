@@ -435,7 +435,7 @@ fn intl_datetime_resolved_options_json(locale_tag: &str) -> String {
             DataMarkerAttributes::try_from_str(name).ok().is_some_and(|attributes| {
                 DataProvider::<icu_decimal::provider::DecimalDigitsV1>::load(
                     provider,
-                    DataRequest { id: DataIdentifierBorrowed::for_marker_attributes(&attributes), ..Default::default() },
+                    DataRequest { id: DataIdentifierBorrowed::for_marker_attributes(attributes), ..Default::default() },
                 ).is_ok()
             })
         }).unwrap_or(default_numbering);

@@ -1007,6 +1007,7 @@ fn build_with_native_mode_routed(
         .uses_thaw_js()
         .then(|| build_staticlib("thaw-js"))
         .transpose()?;
+    let intl_lib = compiler.uses_intl().then(|| build_staticlib("thaw-intl")).transpose()?;
     let napi_lib = uses_napi
         .then(|| {
             if !uses_quickjs {
@@ -1064,6 +1065,10 @@ fn build_with_native_mode_routed(
     }
     if let Some(thaw_js_lib) = thaw_js_lib {
         linker.arg(thaw_js_lib);
+    }
+    if let Some(intl_lib) = intl_lib {
+        // Needs thaw-arena's string allocator, which may only be pulled in by this archive.
+        linker.arg(intl_lib).arg(&arena_lib);
     }
     if let Some(quickjs_lib) = quickjs_lib {
         linker.arg(quickjs_lib);
@@ -1948,6 +1953,7 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
         "thaw-std",
         "thaw-jit",
         "thaw-js",
+        "thaw-intl",
     ] {
         store_prepared_staticlib(package, false, &[])?;
     }
