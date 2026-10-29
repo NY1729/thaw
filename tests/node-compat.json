@@ -3149,6 +3149,16 @@
       "source": "function wrap<T>(x: T): { v: T } { return { v: x }; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const y = wrap(b).v;\n  y[0] = 65;\n  console.log(b.toString());\n}\n"
     },
     {
+      "name": "anon async and generator labels in an array",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log([async () => 1, async function () { await 0; }, function* () {}, async function* () {}]);\n}\n"
+    },
+    {
+      "name": "named and sync anonymous labels unchanged",
+      "expect": "matched",
+      "source": "function main(): void {\n  const named = async () => 5;\n  const gen = function* () {};\n  console.log(named);\n  console.log(gen);\n  console.log(() => 6);\n  console.log(async () => 1);\n  console.log(function* () {});\n}\n"
+    },
+    {
       "name": "icu localeCompare default and locale argument",
       "expect": "matched",
       "source": "function main(): void { console.log(\"a\".localeCompare(\"B\"), \"B\".localeCompare(\"a\"), \"a\".localeCompare(\"a\"), \"ä\".localeCompare(\"z\", \"de\"), \"ä\".localeCompare(\"z\", \"sv\"), \"résumé\".localeCompare(\"resume\", \"fr\")); console.log([\"b\",\"A\",\"a\",\"B\",\"ä\",\"z\",\"Z\"].sort((x, y) => x.localeCompare(y, \"en\")).join(\",\")); }"
