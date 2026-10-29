@@ -1,0 +1,15 @@
+const e = '😀';
+console.log(e.length, [...e].length, e.charCodeAt(0), e.charCodeAt(1), e.codePointAt(0), e.codePointAt(1));
+const t = 'a😀b';
+console.log(t.length, t.indexOf('b'), t.slice(1, 3) === e, t.substring(3), t.substr(1, 2) === e, t.lastIndexOf('b'));
+console.log(t.split('').length, Array.from(t).length, t.charAt(0), t.charAt(3), t[3]);
+console.log(String.fromCodePoint(0x1F600).length, String.fromCodePoint(0x1F600) === e, String.fromCharCode(0xd83d, 0xde00) === e);
+const lone = t.charAt(1);
+console.log(lone.length, lone.charCodeAt(0), lone + t.charAt(2) === e);
+console.log('é'.length, 'é'.normalize('NFD').length, 'İ'.toLowerCase().length);
+console.log(/😀/.exec(t).index, t.search(/b/), 'x😀y'.padEnd(6, '-'));
+console.log(escape === undefined ? 0 : 1, encodeURIComponent(e), JSON.stringify(e), JSON.stringify(lone));
+const x = '\ud83d\ude00', y = '\ud83d';
+console.log(x === '😀', x.length, y.length, y.charCodeAt(0), JSON.stringify(y), (y + '\ude00') === x);
+console.log(`${y}${'\ude00'}` === x, [y, '\ude00'].join('') === x);
+console.log(x.split('').map(c => c.charCodeAt(0)), 'ab'.split(''));

@@ -5639,9 +5639,15 @@ pub unsafe extern "C" fn thaw_json_inspect(value: *const Value) -> *const c_char
 }
 
 /// `util.inspect` of a byte buffer given as a JSON number array (`console.log(Buffer)`).
+/// `kind` 1 prints an `ArrayBuffer`, 2 a `DataView` (`bytes` is then its whole store).
 #[no_mangle]
-pub extern "C" fn thaw_json_buffer_inspect(value: *mut Value) -> *const c_char {
-    let bytes = unsafe { &*value }
+pub extern "C" fn thaw_json_buffer_inspect(
+    value: *mut Value,
+    kind: f64,
+    offset: f64,
+    length: f64,
+) -> *const c_char {
+    let bytes: Vec<u8> = unsafe { &*value }
         .as_array()
         .map(|items| {
             items
@@ -5650,10 +5656,14 @@ pub extern "C" fn thaw_json_buffer_inspect(value: *mut Value) -> *const c_char {
                 .collect()
         })
         .unwrap_or_default();
-    thaw_arena::owned_string(crate::inspect::inspect(
-        &crate::inspect::Node::Buffer(bytes),
-        &crate::inspect::InspectOptions::default(),
-    ))
+    thaw_arena::owned_string(match kind as u8 {
+        1 => crate::inspect::format_array_buffer(&bytes, 0),
+        2 => crate::inspect::format_data_view(&bytes, offset as usize, length as usize),
+        _ => crate::inspect::inspect(
+            &crate::inspect::Node::Buffer(bytes),
+            &crate::inspect::InspectOptions::default(),
+        ),
+    })
 }
 
 /// `console.log` of a live JS value: the typed-array probe's JSON when it is one, else

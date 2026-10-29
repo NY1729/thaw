@@ -115,6 +115,8 @@ include!("tests/ffi_metadata.rs");
 
 include!("tests/native_addons.rs");
 
+include!("tests/shared_libs.rs");
+
 #[test]
 fn prepared_runtime_variants_have_stable_names() {
     assert_eq!(staticlib_variant(false, &[]), "default");

@@ -2075,7 +2075,25 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(selected.as_basic_value().into_pointer_value())
     }
 
+    /// Creates the closure and labels its kind (`[AsyncFunction (anonymous)]`); a named
+    /// binding re-registers the same code pointer with its name in `compile_expr_named`.
+    /// Plain anonymous functions stay unregistered (`[Function (anonymous)]` by default).
     fn compile_lambda(
+        &mut self,
+        captures: &[HirParam],
+        params: &[HirParam],
+        ret: &HirType,
+        body: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let closure = self.compile_lambda_closure(captures, params, ret, body)?;
+        let kind = named_function_kind(ret, body);
+        if kind != 'f' && closure.is_pointer_value() {
+            self.compile_register_function_label(closure, &kind.to_string())?;
+        }
+        Ok(closure)
+    }
+
+    fn compile_lambda_closure(
         &mut self,
         captures: &[HirParam],
         params: &[HirParam],

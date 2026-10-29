@@ -31,6 +31,7 @@ fn main() {
         "crates/thaw-js",
         "crates/thaw-parser",
         "crates/thaw-quickjs",
+        "crates/thaw-rt-dylib",
         "crates/thaw-napi",
         "vendor/rquickjs-sys",
     ];
