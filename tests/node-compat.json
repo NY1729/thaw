@@ -3167,6 +3167,71 @@
       "name": "native ArrayBuffer transfer, detached and annotated views",
       "expect": "matched",
       "source": "function main(): void {\n  const ab = new ArrayBuffer(8);\n  console.log(ab.byteLength, ab.detached, ab.resizable, ab.maxByteLength);\n  const moved = ab.transfer(16);\n  console.log(moved.byteLength, ab.byteLength, ab.detached, moved.detached);\n  const fixed = moved.transferToFixedLength(4);\n  console.log(fixed.byteLength, moved.detached);\n  const keep = new ArrayBuffer(3);\n  new Uint8Array(keep)[1] = 7;\n  const copy = keep.transfer();\n  console.log(copy.byteLength, new Uint8Array(copy)[1], keep.byteLength);\n  const ann: ArrayBuffer = new ArrayBuffer(4);\n  const u = new Uint8Array(ann);\n  u[0] = 5;\n  const d2: DataView = new DataView(ann);\n  console.log(d2.getUint8(0), ann.byteLength);\n  const sliced: ArrayBuffer = ann.slice(1);\n  console.log(sliced.byteLength);\n  const n = new Uint8Array(ann);\n  console.log(n.length, n[0]);\n}\n"
+    },
+    {
+      "name": "anon async and generator labels in an array",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log([async () => 1, async function () { await 0; }, function* () {}, async function* () {}]);\n}\n"
+    },
+    {
+      "name": "named and sync anonymous labels unchanged",
+      "expect": "matched",
+      "source": "function main(): void {\n  const named = async () => 5;\n  const gen = function* () {};\n  console.log(named);\n  console.log(gen);\n  console.log(() => 6);\n  console.log(async () => 1);\n  console.log(function* () {});\n}\n"
+    },
+    {
+      "name": "icu localeCompare default and locale argument",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a\".localeCompare(\"B\"), \"B\".localeCompare(\"a\"), \"a\".localeCompare(\"a\"), \"ä\".localeCompare(\"z\", \"de\"), \"ä\".localeCompare(\"z\", \"sv\"), \"résumé\".localeCompare(\"resume\", \"fr\")); console.log([\"b\",\"A\",\"a\",\"B\",\"ä\",\"z\",\"Z\"].sort((x, y) => x.localeCompare(y, \"en\")).join(\",\")); }"
+    },
+    {
+      "name": "icu localeCompare options sensitivity numeric caseFirst",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a\".localeCompare(\"A\", \"en\", { sensitivity: \"base\" }), \"a\".localeCompare(\"á\", \"en\", { sensitivity: \"base\" }), \"a\".localeCompare(\"á\", \"en\", { sensitivity: \"accent\" }), \"a10\".localeCompare(\"a2\", \"en\", { numeric: true }), \"a10\".localeCompare(\"a2\", \"en\"), \"a\".localeCompare(\"A\", \"en\", { caseFirst: \"upper\" }), \"a b\".localeCompare(\"ab\", \"en\", { ignorePunctuation: true })); }"
+    },
+    {
+      "name": "icu Number toLocaleString decimal locales",
+      "expect": "matched",
+      "source": "function main(): void { const n = 1234567.891; console.log(n.toLocaleString(\"en-US\"), n.toLocaleString(\"de-DE\"), n.toLocaleString(\"fr-FR\"), n.toLocaleString(\"ja-JP\"), n.toLocaleString(\"es-ES\"), (1234.5).toLocaleString(\"es-ES\"), (-0.5).toLocaleString(\"en-US\"), (0).toLocaleString(\"en-US\")); }"
+    },
+    {
+      "name": "icu Number toLocaleString digits options",
+      "expect": "matched",
+      "source": "function main(): void { const n = 1234.5678; console.log(n.toLocaleString(\"en-US\", { maximumFractionDigits: 1 }), n.toLocaleString(\"en-US\", { minimumFractionDigits: 6 }), n.toLocaleString(\"en-US\", { maximumFractionDigits: 0 }), n.toLocaleString(\"en-US\", { useGrouping: false }), (5).toLocaleString(\"en-US\", { minimumIntegerDigits: 3 }), n.toLocaleString(\"en-US\", { maximumSignificantDigits: 3 }), (0.000123456).toLocaleString(\"en-US\", { maximumSignificantDigits: 2 }), (2.5).toLocaleString(\"en-US\", { maximumFractionDigits: 0 }), (1.005).toLocaleString(\"en-US\", { maximumFractionDigits: 2 })); }"
+    },
+    {
+      "name": "icu Number toLocaleString currency and percent",
+      "expect": "matched",
+      "source": "function main(): void { console.log((1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"USD\" }), (1234.5).toLocaleString(\"de-DE\", { style: \"currency\", currency: \"EUR\" }), (1234.5).toLocaleString(\"ja-JP\", { style: \"currency\", currency: \"JPY\" }), (1234.5).toLocaleString(\"fr-FR\", { style: \"currency\", currency: \"EUR\" }), (1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"EUR\", currencyDisplay: \"code\" }), (1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"USD\", currencyDisplay: \"name\" }), (0.256).toLocaleString(\"en-US\", { style: \"percent\" }), (0.256).toLocaleString(\"de-DE\", { style: \"percent\", minimumFractionDigits: 1 }), (-1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"USD\" })); }"
+    },
+    {
+      "name": "icu Number toLocaleString NaN and Infinity",
+      "expect": "matched",
+      "source": "function main(): void { console.log(NaN.toLocaleString(\"en-US\"), Infinity.toLocaleString(\"en-US\"), (-Infinity).toLocaleString(\"de-DE\")); }"
+    },
+    {
+      "name": "icu Date toLocaleString default fields per locale",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(\"en-US\", { timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"en-US\", { timeZone: \"UTC\" })); console.log(d.toLocaleTimeString(\"en-US\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"en-GB\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"de-DE\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"fr-FR\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"ja-JP\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"es-ES\", { timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"ko-KR\", { timeZone: \"UTC\" })); console.log(d.toLocaleTimeString(\"de-DE\", { timeZone: \"UTC\" })); }"
+    },
+    {
+      "name": "icu Date toLocaleDateString component options",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 6, 4, 9, 3, 7)); console.log(d.toLocaleDateString(\"en-US\", { year: \"numeric\", month: \"long\", day: \"numeric\", timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"en-US\", { weekday: \"long\", year: \"numeric\", month: \"short\", day: \"numeric\", timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"de-DE\", { year: \"numeric\", month: \"long\", day: \"numeric\", timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"fr-FR\", { weekday: \"long\", day: \"numeric\", month: \"long\", year: \"numeric\", timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"ja-JP\", { year: \"numeric\", month: \"2-digit\", day: \"2-digit\", timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"en-US\", { month: \"long\", timeZone: \"UTC\" }), d.toLocaleDateString(\"en-US\", { month: \"short\", day: \"numeric\", timeZone: \"UTC\" })); }"
+    },
+    {
+      "name": "icu Date toLocaleTimeString options hour12 hourCycle and timeZone",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleTimeString(\"en-US\", { timeZone: \"America/New_York\" }), d.toLocaleTimeString(\"en-US\", { timeZone: \"Asia/Tokyo\", hour12: false }), d.toLocaleTimeString(\"en-US\", { timeZone: \"UTC\", hour: \"2-digit\", minute: \"2-digit\" }), d.toLocaleTimeString(\"de-DE\", { timeZone: \"Europe/Berlin\", hour: \"2-digit\", minute: \"2-digit\" }), d.toLocaleTimeString(\"en-US\", { timeZone: \"UTC\", hourCycle: \"h23\" }), d.toLocaleString(\"en-GB\", { timeZone: \"Asia/Kolkata\" })); }"
+    },
+    {
+      "name": "icu Date toLocaleString dateStyle timeStyle and timeZoneName",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(\"en-US\", { dateStyle: \"medium\", timeStyle: \"short\", timeZone: \"UTC\" })); console.log(d.toLocaleString(\"en-US\", { dateStyle: \"full\", timeZone: \"UTC\" })); console.log(d.toLocaleString(\"de-DE\", { dateStyle: \"long\", timeStyle: \"medium\", timeZone: \"UTC\" })); console.log(d.toLocaleString(\"en-US\", { timeStyle: \"long\", timeZone: \"UTC\" })); console.log(d.toLocaleTimeString(\"en-US\", { timeZone: \"America/New_York\", timeZoneName: \"short\" })); console.log(d.toLocaleString(\"en-US\", { timeZone: \"Asia/Tokyo\", timeZoneName: \"long\" })); }"
+    },
+    {
+      "name": "icu locale methods default locale and local time zone",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(), d.toLocaleDateString(), d.toLocaleTimeString()); console.log((1234567.891).toLocaleString(), \"a\".localeCompare(\"B\")); }"
     }
   ]
 }

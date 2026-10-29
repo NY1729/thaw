@@ -271,10 +271,15 @@ fn compile_and_run_raw_as(
     let runtime_lib = build_staticlib("thaw-runtime");
     let std_lib = build_staticlib("thaw-std");
     let quickjs_lib = build_staticlib("thaw-quickjs");
+    // Like thaw-cli: the locale runtime is linked only when the program calls it.
+    let intl_lib = compiler.uses_intl().then(|| build_staticlib("thaw-intl"));
 
-    let link_status = cc_command()
-        .arg(&obj_path)
-        .arg(&arena_lib)
+    let mut linker = cc_command();
+    linker.arg(&obj_path).arg(&arena_lib);
+    if let Some(intl_lib) = &intl_lib {
+        linker.arg(intl_lib).arg(&arena_lib);
+    }
+    let link_status = linker
         // `std_lib`/`runtime_lib` have a genuine two-way symbol
         // dependency now (see the sibling `compile_and_invoke_lambda`'s
         // own comment on this same pattern) -- listed twice each so a
@@ -762,3 +767,4 @@ include!("tests/arraybuffer_contracts.rs");
 include!("tests/lim3_contracts.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");
+include!("tests/anon_fn_contracts.rs");
