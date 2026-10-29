@@ -82,6 +82,23 @@ thread_local! {
     /// `reset_if_grown` reclaims again.
     static BYTES_SINCE_RESET: Cell<usize> = const { Cell::new(0) };
     static NEXT_AUTO_RESET: Cell<usize> = const { Cell::new(AUTO_RESET_FLOOR) };
+    /// Spare-capacity allocations (arrays grown by `push`): address -> total
+    /// bytes. Addresses are reused after a reset, so every reset clears it.
+    static CAPACITIES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+/// Total bytes of a spare-capacity allocation registered at `pointer`, or 0.
+pub fn allocation_capacity(pointer: *const u8) -> usize {
+    CAPACITIES.with(|c| c.borrow().get(&(pointer as usize)).copied().unwrap_or(0))
+}
+
+/// Allocates like `thaw_arena_alloc` and records `size` as growable capacity.
+pub fn alloc_with_capacity(size: usize, align: usize) -> *mut u8 {
+    let pointer = thaw_arena_alloc(size, align);
+    if !pointer.is_null() {
+        CAPACITIES.with(|c| c.borrow_mut().insert(pointer as usize, size));
+    }
+    pointer
 }
 
 /// Smallest allocation volume between two automatic resets. Each reset marks
@@ -571,6 +588,7 @@ pub extern "C" fn thaw_arena_reset() {
         return;
     };
     BYTES_SINCE_RESET.with(|bytes| bytes.set(0));
+    CAPACITIES.with(|c| c.borrow_mut().clear());
     let roots = ROOTS.with(|roots| roots.borrow().clone());
     if !is_tracing() {
         strings::reset_lengths(false);

@@ -223,6 +223,77 @@ pub unsafe extern "C" fn thaw_string_register_literal(
     pointer
 }
 
+/// Appends `right` to `left` for a loop-local `s += right`, growing in place
+/// when `left` is the buffer this call previously produced for the same
+/// variable. `state` is `[owned, length, capacity]`; codegen zeroes `owned`
+/// at loop entry and again on every read of the variable, so an owned buffer
+/// is never reachable from anywhere but the variable and in-place growth
+/// cannot change a string some alias still holds.
+/// # Safety
+/// `left`/`right` must be live native strings; `state` three writable words.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_string_append_owned(
+    left: *const c_char,
+    right: *const c_char,
+    state: *mut usize,
+) -> *const c_char {
+    let right_bytes = unsafe { NativeStr::from_ptr(right) }.to_bytes();
+    let [owned, length, capacity] = (unsafe { std::slice::from_raw_parts_mut(state, 3) }) else {
+        unreachable!()
+    };
+    let right_clean = !right_bytes.contains(&0);
+    if *owned != 0 && *owned == left as usize && right_clean {
+        let total = *length + right_bytes.len();
+        if total < *capacity {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    right_bytes.as_ptr(),
+                    left.cast_mut().cast::<u8>().add(*length),
+                    right_bytes.len(),
+                );
+                left.cast_mut().cast::<u8>().add(total).write(0);
+            }
+            *length = total;
+            return left;
+        }
+    }
+    let left_bytes = unsafe { NativeStr::from_ptr(left) }.to_bytes();
+    let total = left_bytes.len() + right_bytes.len();
+    let was_owned = *owned != 0 && *owned == left as usize;
+    let clean = right_clean && !left_bytes.contains(&0);
+    // Spare room only for NUL-free results; doubling once the buffer proved
+    // to be growing, a small margin on the first append.
+    let spare = if !clean {
+        0
+    } else if was_owned {
+        total
+    } else {
+        total / 8 + 16
+    };
+    let output = super::thaw_arena_alloc(total + spare + 1, 1);
+    if output.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(left_bytes.as_ptr(), output, left_bytes.len());
+        std::ptr::copy_nonoverlapping(
+            right_bytes.as_ptr(),
+            output.add(left_bytes.len()),
+            right_bytes.len(),
+        );
+        output.add(total).write(0);
+        thaw_string_register(output.cast(), total);
+    }
+    if clean {
+        *owned = output as usize;
+        *length = total;
+        *capacity = total + spare + 1;
+    } else {
+        *owned = 0;
+    }
+    output.cast()
+}
+
 /// # Safety
 /// `pointer` must reference a live native or C string.
 #[no_mangle]
@@ -492,6 +563,34 @@ pub fn utf16_map_segments(units: &[u16], mut map: impl FnMut(&str, &mut Vec<u16>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_owned_grows_in_place_only_for_the_owned_buffer() {
+        let mut state = [0usize; 3];
+        let x = c"x".as_ptr();
+        let mut current = arena_string(b"").cast_const();
+        let mut moves = 0;
+        let mut alias = current;
+        for step in 0..500 {
+            let next = unsafe { thaw_string_append_owned(current, x, state.as_mut_ptr()) };
+            moves += usize::from(next != current);
+            if step == 100 {
+                // A read revokes ownership: the alias must keep its length.
+                state[0] = 0;
+                alias = next;
+            }
+            current = next;
+        }
+        assert!(moves < 30, "{moves} copies for 500 appends");
+        assert_eq!(unsafe { NativeStr::from_ptr(current) }.to_bytes().len(), 500);
+        assert_eq!(unsafe { NativeStr::from_ptr(alias) }.to_bytes().len(), 101);
+        // Embedded NULs are never grown in place and keep their length.
+        let mut state = [0usize; 3];
+        let nul = arena_string(b"a\0b").cast_const();
+        let joined = unsafe { thaw_string_append_owned(nul, nul, state.as_mut_ptr()) };
+        assert_eq!(unsafe { NativeStr::from_ptr(joined) }.to_bytes(), b"a\0ba\0b");
+        assert_eq!(state[0], 0);
+    }
 
     #[test]
     fn exception_byte_lengths_survive_arena_reset_until_packet_release() {
