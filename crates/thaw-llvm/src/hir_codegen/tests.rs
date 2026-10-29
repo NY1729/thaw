@@ -246,12 +246,6 @@ fn compile_and_run_raw_as(
     envs: &[(&str, &str)],
     commonjs: bool,
 ) -> std::process::Output {
-    // The shared source map keeps the spans resolvable, so `Error.stack` frames get `file:line:col`.
-    let (module, _) = thaw_parser::parse_typescript_with_shared_source_map_named(
-        source,
-        thaw_parser::common::FileName::Custom("input.ts".into()),
-    )
-    .unwrap();
     compile_and_run_raw_with_opt(
         source,
         test_name,
@@ -269,7 +263,12 @@ fn compile_and_run_raw_with_opt(
     commonjs: bool,
     codegen_opt: inkwell::OptimizationLevel,
 ) -> std::process::Output {
-    let module = thaw_parser::parse_typescript(source).unwrap();
+    // The shared source map keeps the spans resolvable, so `Error.stack` frames get `file:line:col`.
+    let (module, _) = thaw_parser::parse_typescript_with_shared_source_map_named(
+        source,
+        thaw_parser::common::FileName::Custom("input.ts".into()),
+    )
+    .unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
     let context = Context::create();
