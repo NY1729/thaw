@@ -27,7 +27,7 @@ fn storage_analysis_scales_to_240_pairs() {
     // The timing run does not also replay the quadratic reference algorithm.
     STORAGE_REFERENCE_CHECK.with(|check| check.set(false));
     let mut elapsed_240 = None;
-    for pairs in [60] { // PROBE
+    for pairs in [60, 120, 240] {
         let module = thaw_parser::parse_typescript(&scale_program(pairs)).expect("parse error");
         let started = std::time::Instant::now();
         lower_module(&module).expect("lowering error");
