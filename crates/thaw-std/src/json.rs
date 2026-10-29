@@ -12434,7 +12434,7 @@ mod tests {
         thaw_json_object_set_json(object, CString::new("self").unwrap().as_ptr(), object);
         assert_eq!(
             read_c_string(thaw_json_stringify_public(object)),
-            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+            "\u{1}TypeError\u{1}Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'self' closes the circle"
         );
         assert_eq!(thaw_json_take_stringify_error(), 1);
         assert_eq!(thaw_json_take_stringify_error(), 0);
@@ -12465,7 +12465,7 @@ mod tests {
         thaw_json_array_push_json(array, array);
         assert_eq!(
             read_c_string(thaw_json_stringify_number_space(array, 2.0)),
-            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+            "\u{1}TypeError\u{1}Converting circular structure to JSON\n    --> starting at object with constructor 'Array'\n    --- index 0 closes the circle"
         );
         assert_eq!(thaw_json_take_stringify_error(), 1);
 
@@ -12479,7 +12479,7 @@ mod tests {
                 std::ptr::null(),
                 CString::new("  ").unwrap().as_ptr()
             )),
-            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+            "\u{1}TypeError\u{1}Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'self' closes the circle"
         );
         assert_eq!(thaw_json_take_stringify_error(), 1);
     }
