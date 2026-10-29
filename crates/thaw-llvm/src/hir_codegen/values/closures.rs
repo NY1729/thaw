@@ -2104,6 +2104,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let frame_functions = self
                 .frame_async_functions
                 .keys()
+                .chain(self.promise_returning_functions.iter())
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
             let suspends = match body {
