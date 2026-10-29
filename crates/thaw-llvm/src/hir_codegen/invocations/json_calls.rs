@@ -67,7 +67,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function("thaw_json_destroy").unwrap(),
                     &[result.into()], "discard_invalid_json",
                 ).map_err(|error| error.to_string())?;
-                self.compile_throw_builtin_error("SyntaxError", "Unexpected token in JSON")?;
+                let message = self.builder.build_call(
+                    self.module.get_function("thaw_json_parse_error_message").unwrap(),
+                    &[source.into()], "json_parse_error_message",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON parse message returned no value")?.into_pointer_value();
+                self.compile_throw_builtin_error_with("SyntaxError", message)?;
                 self.builder.position_at_end(valid);
                 self.mark_fresh_owned_json_result(result)?;
                 return Ok(result);
@@ -1141,7 +1146,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         }
         self.release_live_native_projection_ledgers_before_throw()?;
-        self.compile_throw_builtin_error("TypeError", "Converting circular structure to JSON")?;
+        let message = self.builder.build_call(
+            self.module.get_function("thaw_json_stringify_error_message").unwrap(),
+            &[], "json_stringify_error_message",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("JSON stringify message returned no value")?.into_pointer_value();
+        self.compile_throw_builtin_error_with("TypeError", message)?;
         self.builder.position_at_end(valid);
         let host_error = self.builder.build_call(
             self.module.get_function("thaw_json_take_host_error").unwrap(),

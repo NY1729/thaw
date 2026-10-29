@@ -4643,6 +4643,10 @@ impl<'a> FnLowerer<'a> {
             Expr::Object(obj_lit) => self.lower_object_lit(obj_lit, None),
 
             Expr::Member(member) => {
+                // `console.log` as a value: forward one argument to the method.
+                if let Some(method) = self.console_method_value(member) {
+                    return self.lower_expr(&Expr::Arrow(console_forwarder(&method, 1, true)));
+                }
                 let read = self.lower_member_read(member)?;
                 self.bind_extracted_method(read)
             }
@@ -4910,13 +4914,22 @@ impl<'a> FnLowerer<'a> {
                             .as_ref()
                             .map(|type_args| type_args.params.as_slice())
                             .unwrap_or_default();
+                        // Without type arguments TypeScript takes them from the declared
+                        // type, else infers `any`; a non-empty argument infers from itself.
+                        let hint = self.expected_collection_hint.take();
                         if matches!(class.sym.as_ref(), "Map" | "WeakMap") {
                             let explicit_types = match params {
                                 [key, value] => Some((
                                     lower_ts_type(key, self.interfaces, self.generic_interfaces)?,
                                     lower_ts_type(value, self.interfaces, self.generic_interfaces)?,
                                 )),
-                                [] if !is_weak && !args.is_empty() => None,
+                                [] if args.is_empty() => Some(match hint {
+                                    Some(HirType::Map(key, value) | HirType::WeakMap(key, value)) => {
+                                        (*key, *value)
+                                    }
+                                    _ => (HirType::Json, HirType::Json),
+                                }),
+                                [] if !is_weak => None,
                                 _ => {
                                     return Err(format!(
                                         "`new {}<K, V>()` requires explicit type arguments",
@@ -5155,7 +5168,11 @@ impl<'a> FnLowerer<'a> {
                                 self.interfaces,
                                 self.generic_interfaces,
                             )?),
-                            [] if !is_weak && !args.is_empty() => None,
+                            [] if args.is_empty() => Some(match hint {
+                                Some(HirType::Set(element) | HirType::WeakSet(element)) => *element,
+                                _ => HirType::Json,
+                            }),
+                            [] if !is_weak => None,
                             _ => {
                                 return Err(format!(
                                     "`new {}<T>()` requires an explicit type argument",
@@ -6425,6 +6442,7 @@ impl<'a> FnLowerer<'a> {
                         || self.signatures.contains_key(&name))
                     .then_some(usize::MAX)
                 }
+                Expr::Member(member) => self.console_method_value(member).map(|_| usize::MAX),
                 _ => None,
             };
             if let Some((params, ret)) =
@@ -6490,9 +6508,15 @@ impl<'a> FnLowerer<'a> {
         if matches!(expr, Expr::Arrow(_)) && expected == Some(&HirType::JsValue) {
             self.expected_arrow_return_hint = expected.cloned();
         }
+        if let (Expr::New(_), Some(HirType::Map(..) | HirType::Set(_) | HirType::WeakMap(..) | HirType::WeakSet(_))) =
+            (peel_parens(expr), expected)
+        {
+            self.expected_collection_hint = expected.cloned();
+        }
         let result = self.lower_expr(expr);
         self.expected_return_hint = None;
         self.expected_arrow_return_hint = None;
+        self.expected_collection_hint = None;
         result
     }
 
@@ -6587,6 +6611,76 @@ fn object_literal_holds_array(object: &swc_ecma_ast::ObjectLit) -> bool {
         },
         _ => false,
     })
+}
+
+/// `console.<method>` used as a value (not called): the method name, when `console` is the global.
+impl FnLowerer<'_> {
+    pub(in crate::lower) fn console_method_value(&self, member: &swc_ecma_ast::MemberExpr) -> Option<String> {
+        const METHODS: [&str; 18] = [
+            "log", "info", "debug", "warn", "error", "assert", "dir", "dirxml", "table", "count",
+            "countReset", "time", "timeEnd", "timeLog", "trace", "group", "groupCollapsed",
+            "groupEnd",
+        ];
+        let (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(property)) =
+            (member.obj.as_ref(), &member.prop)
+        else {
+            return None;
+        };
+        (object.sym == *"console"
+            && !self.scope.contains_key(&self.resolve_binding("console"))
+            && METHODS.contains(&property.sym.as_ref()))
+            .then(|| property.sym.to_string())
+    }
+}
+
+/// `(a0, a1, ..) => console.<method>(a0, a1, ..)`; `any` annotates the parameters when no
+/// contextual signature supplies their types.
+pub(in crate::lower) fn console_forwarder(method: &str, arity: usize, any: bool) -> swc_ecma_ast::ArrowExpr {
+    use swc_common::{SyntaxContext, DUMMY_SP};
+    use swc_ecma_ast::*;
+    let name = |index: usize| format!("__thaw_console_arg{index}");
+    let params = (0..arity)
+        .map(|index| {
+            Pat::Ident(BindingIdent {
+                id: Ident::new_no_ctxt(name(index).into(), DUMMY_SP),
+                type_ann: any.then(|| {
+                    Box::new(TsTypeAnn {
+                        span: DUMMY_SP,
+                        type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                            span: DUMMY_SP,
+                            kind: TsKeywordTypeKind::TsAnyKeyword,
+                        })),
+                    })
+                }),
+            })
+        })
+        .collect();
+    let call = Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+            span: DUMMY_SP,
+            obj: Box::new(Expr::Ident(Ident::new_no_ctxt("console".into(), DUMMY_SP))),
+            prop: MemberProp::Ident(IdentName::new(method.into(), DUMMY_SP)),
+        }))),
+        args: (0..arity)
+            .map(|index| ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Ident(Ident::new_no_ctxt(name(index).into(), DUMMY_SP))),
+            })
+            .collect(),
+        type_args: None,
+    });
+    ArrowExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        params,
+        body: Box::new(ArrowFunctionBody::Expr(Box::new(call))),
+        is_async: false,
+        is_generator: false,
+        type_params: None,
+        return_type: None,
+    }
 }
 
 pub(in crate::lower) fn peel_parens(mut expr: &Expr) -> &Expr {

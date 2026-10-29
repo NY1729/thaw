@@ -1995,6 +1995,7 @@ impl<'a> FnLowerer<'a> {
                     && !receiver_is_dynamic
                     && !own_callable
                     && !defer_native
+                    && self.console_method_value(member).is_none()
                 {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
@@ -4047,6 +4048,10 @@ impl<'a> FnLowerer<'a> {
                 | "console.warn"
                 | "console.error"
                 | "console.assert"
+                | "console.trace"
+                | "console.group"
+                | "console.groupCollapsed"
+                | "console.dirxml"
         ) {
             args = args.into_iter().map(|arg| match arg {
                 HirExpr::TypedIndex(array, index, element)
@@ -4093,6 +4098,29 @@ impl<'a> FnLowerer<'a> {
                 }
                 other => Ok(other),
             }).collect::<Result<Vec<_>, _>>()?;
+        }
+
+        match callee_name.as_str() {
+            // A label argument: always a string (`"default"` when omitted).
+            "console.count" | "console.countReset" | "console.time" | "console.timeEnd"
+            | "console.timeLog" => {
+                let label = if args.is_empty() {
+                    HirExpr::Lit(HirLit::Str("default".into()))
+                } else {
+                    let first = args.remove(0);
+                    self.coerce_primitive_to_string(first)?
+                };
+                args = vec![label];
+            }
+            // `console.table(data, columns?)` / `console.dir(value, options?)` take `any` values.
+            "console.table" | "console.dir" => {
+                args.truncate(2);
+                args = args
+                    .into_iter()
+                    .map(|arg| self.coerce_to_declared(&HirType::Json, arg))
+                    .collect::<Result<Vec<_>, String>>()?;
+            }
+            _ => {}
         }
 
         if callee_name == "console.assert" {

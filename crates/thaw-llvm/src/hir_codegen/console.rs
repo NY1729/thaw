@@ -18,10 +18,94 @@ impl<'ctx> HirCompiler<'ctx> {
                     };
                     Ok((Some(ty.clone()), self.compile_expr(value)?))
                 }
+                // An inline `new Promise<T>(..)` has no recorded type of its own.
+                HirExpr::PromiseNew(_, resolved, ..) | HirExpr::PromiseNewMixed(_, resolved, _) => {
+                    Ok((Some(HirType::Promise(Box::new(resolved.clone()))), self.compile_expr(arg)?))
+                }
                 _ => Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)),
             })
             .collect::<Result<Vec<_>, String>>()?;
         self.compile_console_values(values, descriptor)?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.trace(...data)`: `Trace: <data>` on stderr (the stack frames are not reproduced).
+    fn compile_console_trace(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let prefix = self
+            .builder
+            .build_global_string_ptr(if args.is_empty() { "Trace" } else { "Trace: " }, "console_trace_prefix")
+            .map_err(|error| error.to_string())?;
+        self.compile_console_text(prefix.as_pointer_value(), args.is_empty(), "console_trace_prefix", 2)?;
+        if !args.is_empty() {
+            self.compile_console_log(args, true)?;
+        }
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.group` (`delta` 1, after the optional label is logged) / `console.groupEnd` (-1).
+    fn compile_console_group(&mut self, delta: i64) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_console_group").unwrap(),
+                &[self.context.i32_type().const_int(delta as u64, true).into()],
+                "console_group",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.count` / `countReset` / `time` / `timeEnd` / `timeLog` on a (string) label.
+    fn compile_console_label(&mut self, name: &str, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [label] = args else {
+            return Err(format!("`{name}` expects a label"));
+        };
+        let label = self.compile_expr(label)?;
+        let kind = match name {
+            "console.count" => 0,
+            "console.countReset" => 1,
+            "console.time" => 2,
+            "console.timeEnd" => 3,
+            _ => 4,
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_console_label").unwrap(),
+                &[self.context.i32_type().const_int(kind, false).into(), label.into()],
+                "console_label",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    /// `console.table(data, columns?)` / `console.dir(value, options?)`: the runtime renders the
+    /// text from `any` values; it is written to stdout.
+    fn compile_console_json_text(&mut self, name: &str, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let mut operands = Vec::new();
+        for arg in args {
+            operands.push(self.compile_expr(arg)?);
+        }
+        let Some(value) = operands.first().copied() else {
+            return Err(format!("`{name}` expects a value"));
+        };
+        let extra = operands.get(1).copied().unwrap_or_else(|| pointer_type.const_null().into());
+        let function = if name == "console.table" { "thaw_console_table_text" } else { "thaw_console_dir_text" };
+        let text = self
+            .builder
+            .build_call(self.module.get_function(function).unwrap(), &[value.into(), extra.into()], "console_json_text")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("console formatter returned no value")?
+            .into_pointer_value();
+        self.compile_console_text(text, true, "console_json_text", 1)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[text.into()],
+                "destroy_console_json_text",
+            )
+            .map_err(|error| error.to_string())?;
         Ok(self.context.i32_type().const_int(0, false).into())
     }
 
@@ -103,6 +187,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             | HirType::Array(_)
                             | HirType::Tuple(_)
                             | HirType::Object(_)
+                            | HirType::Null
+                            | HirType::Undefined
+                            | HirType::I64
+                            | HirType::Optional(_)
+                            | HirType::Nullable(_)
+                            | HirType::Nullish(_)
                     )
                 )
             })
@@ -270,13 +360,8 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(HirType::Function(_, _) | HirType::CallableFunction(..))
         ) {
             self.compile_console_function(value, newline, descriptor)?;
-        } else if matches!(hir_type, Some(HirType::Promise(_))) {
-            self.compile_console_literal(
-                "Promise { <pending> }",
-                newline,
-                "console_promise",
-                descriptor,
-            )?;
+        } else if let Some(HirType::Promise(inner)) = &hir_type {
+            self.compile_console_promise(value.into_pointer_value(), inner, newline, descriptor)?;
         } else if hir_type == Some(HirType::JsValue) {
             self.compile_console_js_value(value.into_int_value(), newline, descriptor)?;
         } else if hir_type == Some(HirType::I64) {
@@ -660,6 +745,127 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    /// `console.log(promise)`: `Promise { <pending> }`, `Promise { value }` or
+    /// `Promise { <rejected> reason }` by the promise's actual state. The settled value is
+    /// marshalled into a Json wrapper the inspector recognises (`__thaw_promise_state__`).
+    fn compile_console_promise(
+        &mut self,
+        promise: PointerValue<'ctx>,
+        inner: &HirType,
+        newline: bool,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        let call = |this: &mut Self, name: &str, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>]| {
+            this.builder
+                .build_call(this.module.get_function(name).unwrap(), args, "console_promise_call")
+                .map_err(|error| error.to_string())
+        };
+        let object = call(self, "thaw_json_object_new", &[])?
+            .try_as_basic_value().basic().ok_or("object_new returned no value")?;
+        let state = call(self, "thaw_promise_state", &[promise.into()])?
+            .try_as_basic_value().basic().ok_or("promise state returned no value")?.into_int_value();
+        let state_number = self.builder
+            .build_unsigned_int_to_float(state, self.context.f64_type(), "console_promise_state_number")
+            .map_err(|error| error.to_string())?;
+        let state_key = self.builder
+            .build_global_string_ptr("__thaw_promise_state__", "console_promise_state_key")
+            .map_err(|error| error.to_string())?.as_pointer_value();
+        let value_key = self.builder
+            .build_global_string_ptr("value", "console_promise_value_key")
+            .map_err(|error| error.to_string())?.as_pointer_value();
+        call(self, "thaw_json_object_set_number", &[object.into(), state_key.into(), state_number.into()])?;
+        let function = self.current_function();
+        let fulfilled = self.context.append_basic_block(function, "console_promise_fulfilled");
+        let check_rejected = self.context.append_basic_block(function, "console_promise_check_rejected");
+        let rejected = self.context.append_basic_block(function, "console_promise_rejected");
+        let done = self.context.append_basic_block(function, "console_promise_marshalled");
+        let is_fulfilled = self.builder
+            .build_int_compare(IntPredicate::EQ, state, self.context.i8_type().const_int(1, false), "console_promise_is_fulfilled")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(is_fulfilled, fulfilled, check_rejected)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(fulfilled);
+        if matches!(inner, HirType::Void | HirType::Undefined) {
+            let undefined = self.compile_napi_undefined_json()?;
+            call(self, "thaw_json_object_set_json_owned", &[object.into(), value_key.into(), undefined.into()])?;
+        } else {
+            let result = call(self, "thaw_promise_result_ptr", &[promise.into()])?
+                .try_as_basic_value().basic().ok_or("promise result returned no value")?.into_pointer_value();
+            let llvm_type = self.basic_type(inner)?;
+            let loaded = self.builder.build_load(llvm_type, result, "console_promise_value")
+                .map_err(|error| error.to_string())?;
+            self.compile_json_object_set_native_with_undefined(object, value_key, loaded, inner, true, false)?;
+        }
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(check_rejected);
+        let is_rejected = self.builder
+            .build_int_compare(IntPredicate::EQ, state, self.context.i8_type().const_int(2, false), "console_promise_is_rejected")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(is_rejected, rejected, done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(rejected);
+        // The reason: a typed scalar (number, bool, undefined, null) keeps its own kind; anything
+        // else is the trusted native text (a string or a framed Error) the promise kept.
+        let tag = call(self, "thaw_promise_exception_tag", &[promise.into()])?
+            .try_as_basic_value().basic().ok_or("exception tag returned no value")?.into_int_value();
+        let i64_type = self.context.i64_type();
+        let mut is_scalar = self.context.bool_type().const_zero();
+        for scalar_tag in [1u64, 3, 5, 6] {
+            let matches = self.builder
+                .build_int_compare(IntPredicate::EQ, tag, i64_type.const_int(scalar_tag, false), "console_promise_scalar_tag")
+                .map_err(|error| error.to_string())?;
+            is_scalar = self.builder.build_or(is_scalar, matches, "console_promise_is_scalar")
+                .map_err(|error| error.to_string())?;
+        }
+        let scalar = self.context.append_basic_block(function, "console_promise_reason_scalar");
+        let textual = self.context.append_basic_block(function, "console_promise_reason_text");
+        self.builder.build_conditional_branch(is_scalar, scalar, textual).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(textual);
+        let text = call(self, "thaw_promise_exception_native_text_copy", &[promise.into()])?
+            .try_as_basic_value().basic().ok_or("native text copy returned no value")?.into_pointer_value();
+        let has_text = self.builder.build_is_not_null(text, "console_promise_has_reason_text")
+            .map_err(|error| error.to_string())?;
+        let with_text = self.context.append_basic_block(function, "console_promise_reason_with_text");
+        self.builder.build_conditional_branch(has_text, with_text, done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(with_text);
+        call(self, "thaw_json_object_set_string", &[object.into(), value_key.into(), text.into()])?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(scalar);
+        let tag_key = self.builder
+            .build_global_string_ptr("__thaw_promise_reason_tag__", "console_promise_tag_key")
+            .map_err(|error| error.to_string())?.as_pointer_value();
+        let tag_number = self.builder
+            .build_unsigned_int_to_float(tag, self.context.f64_type(), "console_promise_tag_number")
+            .map_err(|error| error.to_string())?;
+        call(self, "thaw_json_object_set_number", &[object.into(), tag_key.into(), tag_number.into()])?;
+        let number = call(self, "thaw_promise_exception_f64", &[promise.into()])?
+            .try_as_basic_value().basic().ok_or("exception f64 returned no value")?;
+        call(self, "thaw_json_object_set_number", &[object.into(), value_key.into(), number.into_float_value().into()])?;
+        let flag = call(self, "thaw_promise_exception_bool", &[promise.into()])?
+            .try_as_basic_value().basic().ok_or("exception bool returned no value")?;
+        let flag_key = self.builder
+            .build_global_string_ptr("__thaw_promise_reason_bool__", "console_promise_bool_key")
+            .map_err(|error| error.to_string())?.as_pointer_value();
+        let flag = self.builder
+            .build_int_z_extend_or_bit_cast(flag.into_int_value(), self.context.i8_type(), "console_promise_bool")
+            .map_err(|error| error.to_string())?;
+        call(self, "thaw_json_object_set_bool", &[object.into(), flag_key.into(), flag.into()])?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let text = call(self, "thaw_json_console_string", &[object.into()])?
+            .try_as_basic_value().basic().ok_or("JSON console formatter returned no value")?.into_pointer_value();
+        call(self, "thaw_json_destroy", &[object.into()])?;
+        self.compile_console_text(text, newline, "console_promise", descriptor)?;
+        call(self, "thaw_cstring_destroy", &[text.into()])?;
+        Ok(())
+    }
+
     fn compile_console_literal(
         &mut self,
         text: &str,
@@ -1016,12 +1222,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Function(_, _) | HirType::CallableFunction(..) => {
                 self.compile_console_function(value, newline, descriptor)?
             }
-            HirType::Promise(_) => self.compile_console_literal(
-                "Promise { <pending> }",
-                newline,
-                "console_union_promise",
-                descriptor,
-            )?,
+            HirType::Promise(inner) => {
+                self.compile_console_promise(value.into_pointer_value(), inner, newline, descriptor)?
+            }
             HirType::JsValue => {
                 self.compile_console_js_value(value.into_int_value(), newline, descriptor)?
             }
@@ -1367,12 +1570,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Function(_, _) | HirType::CallableFunction(..) => {
                 self.compile_console_function(payload, newline, descriptor)?
             }
-            HirType::Promise(_) => self.compile_console_literal(
-                "Promise { <pending> }",
-                newline,
-                "console_optional_promise",
-                descriptor,
-            )?,
+            HirType::Promise(inner) => {
+                self.compile_console_promise(payload.into_pointer_value(), inner, newline, descriptor)?
+            }
             HirType::JsValue => {
                 self.compile_console_js_value(payload.into_int_value(), newline, descriptor)?
             }
