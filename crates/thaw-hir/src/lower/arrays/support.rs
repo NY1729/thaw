@@ -635,7 +635,7 @@ impl<'a> FnLowerer<'a> {
             )
         };
         let merge_step = vec![
-            assign(&take, number(0.0)),
+            assign(take, number(0.0)),
             HirStmt::If(
                 lt(variable(i), variable(mid)),
                 vec![HirStmt::If(
