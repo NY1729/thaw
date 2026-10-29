@@ -182,6 +182,23 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_console_group",
+            self.context.void_type().fn_type(&[i32_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_console_label",
+            self.context.void_type().fn_type(&[i32_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["thaw_console_table_text", "thaw_console_dir_text"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module
             .add_function("strlen", strlen_type, Some(Linkage::External));
         let strcmp_type = i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);

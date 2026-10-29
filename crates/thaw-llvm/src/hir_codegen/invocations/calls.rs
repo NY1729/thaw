@@ -977,10 +977,21 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_array_set_presence(target, new_presence)?;
                 return Ok(target.into());
             }
-            "console.log" | "console.info" | "console.debug" => {
+            "console.log" | "console.info" | "console.debug" | "console.dirxml" => {
                 return self.compile_console_log(args, false)
             }
             "console.warn" | "console.error" => return self.compile_console_log(args, true),
+            "console.trace" => return self.compile_console_trace(args),
+            "console.group" | "console.groupCollapsed" => {
+                if !args.is_empty() {
+                    self.compile_console_log(args, false)?;
+                }
+                return self.compile_console_group(1);
+            }
+            "console.groupEnd" => return self.compile_console_group(-1),
+            "console.count" | "console.countReset" | "console.time" | "console.timeEnd"
+            | "console.timeLog" => return self.compile_console_label(name, args),
+            "console.table" | "console.dir" => return self.compile_console_json_text(name, args),
             "console.assert" => return self.compile_console_assert(args),
             "__thaw_date_now" => {
                 if !args.is_empty() {

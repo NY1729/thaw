@@ -72,18 +72,144 @@ fn arena_wtf8(bytes: &[u8]) -> Option<*const u8> {
     (!pointer.is_null()).then_some(pointer.cast())
 }
 
+/// `console.group` nesting (in spaces) and whether the next console fragment starts a line.
+static CONSOLE_INDENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CONSOLE_AT_LINE_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn console_write_all(descriptor: i32, bytes: &[u8]) {
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        let count = unsafe { libc::write(descriptor, remaining.as_ptr().cast(), remaining.len()) };
+        if count > 0 {
+            remaining = &remaining[count as usize..];
+        } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// Writes console text, indenting every line by the current `console.group` depth.
+fn console_emit(descriptor: i32, bytes: &[u8], newline: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    unsafe { libc::fflush(std::ptr::null_mut()) };
+    let indent = CONSOLE_INDENT.load(Relaxed);
+    if indent == 0 {
+        console_write_all(descriptor, bytes);
+        if newline {
+            console_write_all(descriptor, b"\n");
+        }
+        CONSOLE_AT_LINE_START.store(newline, Relaxed);
+        return;
+    }
+    let pad = vec![b' '; indent];
+    let mut out = Vec::with_capacity(bytes.len() + indent + 1);
+    if CONSOLE_AT_LINE_START.load(Relaxed) {
+        out.extend_from_slice(&pad);
+    }
+    for &byte in bytes {
+        out.push(byte);
+        if byte == b'\n' {
+            out.extend_from_slice(&pad);
+        }
+    }
+    if newline {
+        out.push(b'\n');
+    }
+    console_write_all(descriptor, &out);
+    CONSOLE_AT_LINE_START.store(newline, Relaxed);
+}
+
 /// Writes native text without treating embedded NULs as terminators.
 /// # Safety
 /// `value` must reference a live native or C string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_console_write(value: *const c_char, descriptor: i32, newline: bool) {
-    unsafe { libc::fflush(std::ptr::null_mut()) };
-    let bytes = unsafe { wtf8_bytes(value) };
-    for mut remaining in [bytes, if newline { &b"\n"[..] } else { &[] }] {
-        while !remaining.is_empty() {
-            let count = unsafe { libc::write(descriptor, remaining.as_ptr().cast(), remaining.len()) };
-            if count > 0 { remaining = &remaining[count as usize..]; }
-            else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { return; }
+    console_emit(descriptor, unsafe { wtf8_bytes(value) }, newline);
+}
+
+/// `console.group()` (`delta` 1) / `console.groupEnd()` (`delta` -1).
+#[no_mangle]
+pub extern "C" fn thaw_console_group(delta: i32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let indent = CONSOLE_INDENT.load(Relaxed);
+    CONSOLE_INDENT.store(if delta > 0 { indent + 2 } else { indent.saturating_sub(2) }, Relaxed);
+}
+
+static CONSOLE_COUNTS: std::sync::Mutex<Vec<(Vec<u8>, u64)>> = std::sync::Mutex::new(Vec::new());
+static CONSOLE_TIMERS: std::sync::Mutex<Vec<(Vec<u8>, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+/// Node's `formatTime` for `console.timeEnd` / `console.timeLog`.
+fn console_format_time(mut ms: f64) -> String {
+    let (mut hours, mut minutes, mut seconds) = (0.0_f64, 0.0_f64, 0.0_f64);
+    if ms >= 1000.0 {
+        if ms >= 60_000.0 {
+            if ms >= 3_600_000.0 {
+                hours = (ms / 3_600_000.0).floor();
+                ms %= 3_600_000.0;
+            }
+            minutes = (ms / 60_000.0).floor();
+            ms %= 60_000.0;
+        }
+        seconds = ms / 1000.0;
+    }
+    if hours != 0.0 || minutes != 0.0 {
+        let text = format!("{seconds:.3}");
+        let (whole, fraction) = text.split_once('.').unwrap_or((&text, "000"));
+        let head = if hours != 0.0 { format!("{hours}:{minutes:02}") } else { format!("{minutes}") };
+        return format!(
+            "{head}:{whole:0>2}.{fraction} ({}m:ss.mmm)",
+            if hours != 0.0 { "h:m" } else { "" }
+        );
+    }
+    if seconds != 0.0 {
+        return format!("{seconds:.3}s");
+    }
+    format!("{}ms", (ms * 1000.0).round() / 1000.0)
+}
+
+/// `console.count` (0) / `countReset` (1) / `time` (2) / `timeEnd` (3) / `timeLog` (4) on `label`.
+/// # Safety
+/// `label` must reference a live native string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_console_label(kind: i32, label: *const c_char) {
+    let label = unsafe { wtf8_bytes(label) }.to_vec();
+    let mut line = label.clone();
+    line.extend_from_slice(b": ");
+    match kind {
+        0 | 1 => {
+            let mut counts = CONSOLE_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = counts.iter().position(|(name, _)| *name == label);
+            if kind == 1 {
+                if let Some(slot) = slot {
+                    counts.remove(slot);
+                }
+                return;
+            }
+            let slot = slot.unwrap_or_else(|| {
+                counts.push((label.clone(), 0));
+                counts.len() - 1
+            });
+            counts[slot].1 += 1;
+            line.extend_from_slice(counts[slot].1.to_string().as_bytes());
+            drop(counts);
+            console_emit(1, &line, true);
+        }
+        2 => {
+            let mut timers = CONSOLE_TIMERS.lock().unwrap_or_else(|e| e.into_inner());
+            if !timers.iter().any(|(name, _)| *name == label) {
+                timers.push((label, std::time::Instant::now()));
+            }
+        }
+        _ => {
+            let mut timers = CONSOLE_TIMERS.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(slot) = timers.iter().position(|(name, _)| *name == label) else { return };
+            let elapsed = timers[slot].1.elapsed().as_secs_f64() * 1000.0;
+            if kind == 3 {
+                timers.remove(slot);
+            }
+            drop(timers);
+            line.extend_from_slice(console_format_time(elapsed).as_bytes());
+            console_emit(1, &line, true);
         }
     }
 }
