@@ -5470,6 +5470,9 @@ fn aggregate_error_inspect_node(
 fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     use crate::inspect::{Ctor, Node};
     if is_napi_undefined(value) {
+        if let Some(label) = sentinel_accessor_label(value) {
+            return Node::Raw(label.to_string());
+        }
         return match sentinel_function_name(value) {
             Some(label) => function_label_node(&label),
             None => Node::Undefined,
@@ -7788,6 +7791,9 @@ thread_local! {
     /// `[Function: name]`. Keyed by sentinel identity, cleared when an identity is reused.
     static SENTINEL_FUNCTION_NAMES: RefCell<std::collections::HashMap<usize, String>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Accessor-property sentinels (`[Getter]`, `[Setter]`, `[Getter/Setter]`) by identity.
+    static SENTINEL_ACCESSOR_LABELS: RefCell<std::collections::HashMap<usize, &'static str>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 fn napi_undefined_value() -> Value {
@@ -7888,6 +7894,29 @@ fn function_sentinel_value(name: &str) -> Value {
         });
     }
     value
+}
+
+/// An accessor property in a `console.log` value: Node prints its kind instead of calling it.
+/// `kind` is 1 (getter only), 2 (setter only) or 3 (both).
+#[no_mangle]
+pub extern "C" fn thaw_json_accessor_sentinel(kind: u8) -> *mut Value {
+    let label = match kind {
+        1 => "[Getter]",
+        2 => "[Setter]",
+        _ => "[Getter/Setter]",
+    };
+    let value = napi_undefined_value();
+    if let Some(identity) = object_identity_key(&value) {
+        SENTINEL_ACCESSOR_LABELS.with(|labels| {
+            labels.borrow_mut().insert(identity, label);
+        });
+    }
+    leak(value)
+}
+
+fn sentinel_accessor_label(value: &Value) -> Option<&'static str> {
+    let identity = object_identity_key(value)?;
+    SENTINEL_ACCESSOR_LABELS.with(|labels| labels.borrow().get(&identity).copied())
 }
 
 fn sentinel_function_name(value: &Value) -> Option<String> {
