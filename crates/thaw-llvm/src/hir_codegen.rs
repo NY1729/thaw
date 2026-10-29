@@ -478,6 +478,8 @@ pub struct HirCompiler<'ctx> {
     async_return_frames: HashMap<PointerValue<'ctx>, (PointerValue<'ctx>, HirType)>,
     next_lambda: usize,
     uses_napi: bool,
+    /// Backend optimisation level for `write_object_file` (`Default` unless `set_codegen_opt`).
+    codegen_opt: OptimizationLevel,
     uses_thaw_js: bool,
     uses_intl: bool,
     /// The program is a thaw-js routed build (it falls back to an unrouted one if it needs QuickJS), so
@@ -857,6 +859,7 @@ impl<'ctx> HirCompiler<'ctx> {
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,
             owned_json_discard_frames: Vec::new(),
+            codegen_opt: OptimizationLevel::Default,
         }
     }
 
@@ -1007,6 +1010,12 @@ impl<'ctx> HirCompiler<'ctx> {
     /// for the process entry point.
     pub fn set_commonjs_entry(&mut self, commonjs: bool) {
         self.commonjs_entry = commonjs;
+    }
+
+    /// Selects the backend optimisation level used by `write_object_file`. `None` skips
+    /// instruction-selection optimisation (fast compile, slower generated code).
+    pub fn set_codegen_opt(&mut self, level: OptimizationLevel) {
+        self.codegen_opt = level;
     }
 
     /// Whether the generated module actually calls the QuickJS fallback host.
@@ -2501,7 +2510,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &triple,
                 cpu.to_str().unwrap(),
                 features.to_str().unwrap(),
-                OptimizationLevel::Default,
+                self.codegen_opt,
                 RelocMode::Default,
                 CodeModel::Default,
             )
