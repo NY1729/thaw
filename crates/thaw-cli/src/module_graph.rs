@@ -898,7 +898,7 @@ fn load_module(
     } else {
         thaw_parser::common::FileName::Real(path.clone())
     };
-    let module = thaw_parser::parse_typescript_with_source_map_named(&source, source_name)
+    let module = thaw_parser::parse_typescript_with_shared_source_map_named(&source, source_name)
         .map(|(module, _)| module)
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
     let mut module = thaw_hir::normalize_top_level_destructuring(&module)
@@ -1347,7 +1347,7 @@ impl VisitMut for RenameReferences<'_> {
                             "Promise.resolve().then(() => {{ __thaw_lazy_module_{dependency}(); return __thaw_namespace_{dependency}; }})"
                         );
                         if let Ok((mut parsed, _)) =
-                            thaw_parser::parse_typescript_with_source_map_named(
+                            thaw_parser::parse_typescript_with_shared_source_map_named(
                                 &snippet,
                                 thaw_parser::common::FileName::Custom(
                                     "generated dynamic import initializer.ts".into(),
@@ -2893,7 +2893,7 @@ pub(crate) fn bundle_with_named_source_transform(
         let helper_source = format!(
             "function {helper}(callable: JsValue, specifier: string): JsValue {{ return callDynamicValueHandle(callable, JSON.parse(JSON.stringify([specifier]))); }}"
         );
-        let (helper_module, _) = thaw_parser::parse_typescript_with_source_map_named(
+        let (helper_module, _) = thaw_parser::parse_typescript_with_shared_source_map_named(
             &helper_source,
             thaw_parser::common::FileName::Custom(
                 "generated created-require result helper.ts".into(),
@@ -2908,7 +2908,7 @@ pub(crate) fn bundle_with_named_source_transform(
     // uninitialized. Promise continuations run after startup initialization.
     let namespace_group = modules.len();
     bundled_items.extend(
-        thaw_parser::parse_typescript_with_source_map_named(
+        thaw_parser::parse_typescript_with_shared_source_map_named(
             &format!("function __thaw_lazy_module_{namespace_group}(): void {{}}"),
             thaw_parser::common::FileName::Custom("generated namespace initializer.ts".into()),
         )?
@@ -2988,7 +2988,7 @@ pub(crate) fn bundle_with_named_source_transform(
         } else {
             format!("function __thaw_lazy_module_{index}(): void {{}}")
         };
-        let generated = thaw_parser::parse_typescript_with_source_map_named(
+        let generated = thaw_parser::parse_typescript_with_shared_source_map_named(
             &snippet,
             thaw_parser::common::FileName::Custom("generated namespace object.ts".into()),
         )?
@@ -3011,7 +3011,7 @@ pub(crate) fn bundle_with_named_source_transform(
             })
             .collect::<Result<Vec<_>, String>>()?;
         getters.sort();
-        let generated = thaw_parser::parse_typescript_with_source_map_named(
+        let generated = thaw_parser::parse_typescript_with_shared_source_map_named(
             &format!(
                 "const __thaw_namespace_{index} = {{{}}};",
                 getters.join(",")

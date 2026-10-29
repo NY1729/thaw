@@ -854,7 +854,7 @@ fn build_with_native_mode_routed(
             &transform,
         )?;
         if !shim_source.is_empty() {
-            let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map_named(
+            let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_shared_source_map_named(
                 &shim_source,
                 thaw_parser::common::FileName::Custom(
                     "generated registry and bridge shims.ts".into(),
