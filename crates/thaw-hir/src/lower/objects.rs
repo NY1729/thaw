@@ -530,6 +530,10 @@ impl<'a> FnLowerer<'a> {
                         contextual
                             .as_ref()
                             .and_then(|(params, _)| params.get(index).cloned())
+                            .or_else(|| {
+                                (self.implicit_any_callbacks && matches!(parameter.pat, Pat::Ident(_)))
+                                    .then_some(HirType::JsValue)
+                            })
                             .ok_or(error)
                     })
         }).collect::<Result<Vec<_>, _>>()?);
@@ -777,6 +781,18 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_dynamic_accessor_object_lit_with_expected_fields(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+        live_json: bool,
+        expected_fields: Option<&[(Symbol, HirType)]>,
+    ) -> Result<HirExpr, String> {
+        let saved = std::mem::replace(&mut self.implicit_any_callbacks, true);
+        let lowered = self.lower_dynamic_accessor_object_lit_inner(obj_lit, live_json, expected_fields);
+        self.implicit_any_callbacks = saved;
+        lowered
+    }
+
+    fn lower_dynamic_accessor_object_lit_inner(
         &mut self,
         obj_lit: &SwcObjectLit,
         live_json: bool,
@@ -1144,6 +1160,11 @@ impl<'a> FnLowerer<'a> {
         value: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        if expected.is_none() && self.implicit_any_callbacks {
+            if let Some(lowered) = self.lower_implicit_any_callback(value) {
+                return lowered;
+            }
+        }
         // `{ inc: o.inc }` borrows a receiver-aware method: the new object becomes its `this`.
         if let (None, Expr::Member(member)) = (expected, value) {
             return self.lower_member_read(member);
@@ -3476,7 +3497,8 @@ impl<'a> FnLowerer<'a> {
                         let key = self.lower_expr(&computed.expr)?;
                         let key = match self.infer_expr_type(&key)? {
                             HirType::Str | HirType::Symbol | HirType::Dynamic => key,
-                            HirType::F64 => self.coerce_primitive_to_string(key)?,
+                            // A live `any` key (a Proxy trap's property parameter) is its string form.
+                            HirType::F64 | HirType::JsValue => self.coerce_primitive_to_string(key)?,
                             other => {
                                 return Err(format!(
                                     "dynamic value index expression must be string, number, or symbol, got {other:?}"
