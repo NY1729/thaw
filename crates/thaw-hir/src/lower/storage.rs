@@ -1,3 +1,4 @@
+use rustc_hash::{FxHashMap, FxHashSet};
 use swc_common::{Span, Spanned};
 
 #[derive(Default)]
@@ -57,6 +58,20 @@ struct StorageCallConnections {
 
 impl StoragePlan {
     fn analyze(module: &Module) -> Result<Self, String> {
+        let plan = Self::analyze_with(module, StorageGraph::connect_calls)?;
+        #[cfg(test)]
+        if STORAGE_REFERENCE_CHECK.with(Cell::get) {
+            let reference = Self::analyze_with(module, StorageGraph::connect_calls_reference)?;
+            plan.assert_same_as(&reference);
+        }
+        Ok(plan)
+    }
+
+    fn analyze_with(
+        module: &Module,
+        connect: fn(&mut StorageGraph) -> StorageCallConnections,
+    ) -> Result<Self, String> {
+        let __t0 = std::time::Instant::now(); // PROBE
         let mut tables = ValueKinds::default();
         module.visit_with(&mut tables);
         let mut observed = ObservedMembers {
@@ -65,6 +80,7 @@ impl StoragePlan {
             ..ObservedMembers::default()
         };
         module.visit_with(&mut observed);
+        eprintln!("PROBE observe {:?}", __t0.elapsed()); // PROBE
         observed.resolve_flows();
         let mut instantiated_classes = HashSet::new();
         for class in &observed.tables.instantiated {
@@ -83,6 +99,7 @@ impl StoragePlan {
             instantiated: &instantiated_classes,
             observed: &observed,
         };
+        let __t1 = std::time::Instant::now(); // PROBE
         module.visit_with(&mut uninit);
         let uninit_names = uninit.names;
         let uninit_sinks = observed
@@ -100,6 +117,8 @@ impl StoragePlan {
             ..StorageGraph::default()
         };
         module.visit_with(&mut graph);
+        eprintln!("PROBE graph-visit {:?} calls={} edges={} callables={}", __t1.elapsed(), graph.calls.len(), graph.edges.len(), graph.callables.len()); // PROBE
+        let __t2 = std::time::Instant::now(); // PROBE
         let graph_uninit_sinks = graph.uninit_sinks.clone();
         let graph_sink_slots = graph.sink_slots.clone();
         let graph_sink_results = graph.sink_results.clone();
@@ -108,7 +127,8 @@ impl StoragePlan {
             quickjs_function_value_nodes,
             quickjs_function_value_slots,
             quickjs_function_sources,
-        } = graph.connect_calls();
+        } = connect(&mut graph);
+        eprintln!("PROBE connect {:?}", __t2.elapsed()); // PROBE
         let mut pending: Vec<_> = graph.seeds.iter().copied().collect();
         let mut dynamic = graph.seeds;
         while let Some(node) = pending.pop() {
@@ -132,6 +152,7 @@ impl StoragePlan {
                 (start, callable.params.iter().copied().map(storage_key).collect())
             })
             .collect();
+        eprintln!("PROBE propagate {:?}", __t2.elapsed()); // PROBE
         let mut names = FunctionNames::default();
         module.visit_with(&mut names);
         Ok(Self {
@@ -157,6 +178,23 @@ impl StoragePlan {
             quickjs_function_sources,
             jit_calls,
         })
+    }
+
+    /// Checks that the optimised fixpoint produced the same plan as the reference one.
+    #[cfg(test)]
+    fn assert_same_as(&self, reference: &Self) {
+        assert_eq!(self.dynamic, reference.dynamic, "dynamic storage differs from the reference fixpoint");
+        assert_eq!(self.argument_parameters, reference.argument_parameters, "argument parameters differ from the reference fixpoint");
+        assert_eq!(self.quickjs_function_value_nodes, reference.quickjs_function_value_nodes, "QuickJS function-value nodes differ from the reference fixpoint");
+        assert_eq!(self.quickjs_function_value_slots, reference.quickjs_function_value_slots, "QuickJS function-value slots differ from the reference fixpoint");
+        assert_eq!(self.quickjs_function_sources, reference.quickjs_function_sources, "QuickJS function sources differ from the reference fixpoint");
+        let jit = |plan: &Self| {
+            plan.jit_calls
+                .iter()
+                .map(|call| (call.symbols.iter().cloned().collect::<BTreeSet<_>>(), call.arguments.clone(), call.result))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(jit(self), jit(reference), "JIT calls differ from the reference fixpoint");
     }
 
     fn jit_calls_requiring_dynamic_storage(&self) -> HashSet<Symbol> {
@@ -449,7 +487,89 @@ impl StorageGraph {
         self.edges.entry(left).or_default().push(right);
         self.edges.entry(right).or_default().push(left);
     }
+    /// Links every call's result and arguments to the callables and native classes reachable
+    /// from its callee, to a fixpoint. The reachable set of each callee is memoised and only
+    /// grows: a round re-searches just the callees whose set contains an endpoint of an edge
+    /// the previous round added, and walks only from those endpoints. The result equals
+    /// `connect_calls_reference`, which the storage analysis checks in tests.
     fn connect_calls(&mut self) -> StorageCallConnections {
+        let mut connected_calls: HashSet<usize> = HashSet::new();
+        let mut calls_by_callee: FxHashMap<(u32, u32), Vec<usize>> = FxHashMap::default();
+        for (index, call) in self.calls.iter().enumerate() {
+            calls_by_callee.entry(storage_key(call.callee)).or_default().push(index);
+        }
+        let mut callees: Vec<(u32, u32)> = calls_by_callee.keys().copied().collect();
+        callees.sort_unstable();
+        let mut reach: FxHashMap<(u32, u32), FxHashSet<(u32, u32)>> = FxHashMap::default();
+        // Endpoints of the edges the previous round added; the first round seeds every callee.
+        let mut touched: Vec<(u32, u32)> = Vec::new();
+        let mut first_round = true;
+        loop {
+            let mut links = Vec::new();
+            for &callee in &callees {
+                let seen = reach.entry(callee).or_default();
+                let mut pending = Vec::new();
+                let mut fresh = Vec::new();
+                if first_round {
+                    seen.insert(callee);
+                    pending.push(callee);
+                    fresh.push(callee);
+                } else {
+                    pending.extend(touched.iter().copied().filter(|node| seen.contains(node)));
+                }
+                while let Some(node) = pending.pop() {
+                    let Some(neighbors) = self.edges.get(&node) else { continue };
+                    for &next in neighbors {
+                        if self.captures.contains(&(node, next)) { continue; }
+                        if seen.insert(next) {
+                            fresh.push(next);
+                            pending.push(next);
+                        }
+                    }
+                }
+                let indices = &calls_by_callee[&callee];
+                for &node in &fresh {
+                    if let Some(class) = self.native_results.get(&node) {
+                        for &index in indices {
+                            links.push((storage_key(self.calls[index].result), storage_key(*class)));
+                        }
+                    }
+                    if let Some(callable) = self.callables.get(&node) {
+                        for &index in indices {
+                            connected_calls.insert(index);
+                            let call = &self.calls[index];
+                            links.push((storage_key(call.result), callable.result));
+                            let mut spread_seen = false;
+                            for (position, &(actual, spread)) in call.arguments.iter().enumerate() {
+                                if spread || spread_seen {
+                                    let start = if spread_seen { 0 } else { position.min(callable.params.len()) };
+                                    for formal in &callable.params[start..] {
+                                        if !self.readonly_formals.contains(&storage_key(*formal)) { links.push((storage_key(actual), storage_key(*formal))); }
+                                    }
+                                    spread_seen = true;
+                                } else if let Some(formal) = callable.params.get(position).or_else(|| callable.rest.then(|| callable.params.last()).flatten()) {
+                                    if self.readonly_formals.contains(&storage_key(*formal)) { continue; }
+                                    links.push((storage_key(actual), storage_key(*formal)));
+                                    if call.source_function == Some(node) && position < callable.params.len() - usize::from(callable.rest) {
+                                        self.argument_parameters.entry(storage_key(actual)).or_default().insert(storage_key(*formal));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if links.is_empty() { break; }
+            touched = links.iter().flat_map(|&(left, right)| [left, right]).collect::<FxHashSet<_>>().into_iter().collect();
+            first_round = false;
+            for (left, right) in links { self.link_keys(left, right); }
+        }
+        self.finish_call_connections(&connected_calls)
+    }
+
+    /// The original fixpoint, kept as the reference the optimised `connect_calls` is checked against.
+    #[cfg(test)]
+    fn connect_calls_reference(&mut self) -> StorageCallConnections {
         let mut connected = HashSet::new();
         let mut native_connected = HashSet::new();
         loop {
@@ -491,6 +611,13 @@ impl StorageGraph {
             if links.is_empty() { break; }
             for (left, right) in links { self.link_keys(left, right); }
         }
+        let connected_calls: HashSet<usize> = connected.iter().map(|(index, _)| *index).collect();
+        self.finish_call_connections(&connected_calls)
+    }
+
+    /// Records the links of calls the fixpoint could not resolve and collects the JIT,
+    /// QuickJS function-value and storage results derived from the connected graph.
+    fn finish_call_connections(&mut self, connected_calls: &HashSet<usize>) -> StorageCallConnections {
         let jit_calls = self.calls.iter().filter_map(|call| {
             let symbols = self.reachable_jit_symbols(call.callee);
             (!symbols.is_empty()).then(|| JitStorageCall {
@@ -519,7 +646,7 @@ impl StorageGraph {
             .copied()
             .collect();
         let unresolved: Vec<_> = self.calls.iter().enumerate()
-            .filter(|(index, _)| !connected.iter().any(|(call, _)| call == index))
+            .filter(|(index, _)| !connected_calls.contains(index))
             .map(|(_, call)| (call.callee, call.result, call.arguments.clone())).collect();
         for (callee, result, arguments) in unresolved {
             self.contain(callee, result);
@@ -532,6 +659,7 @@ impl StorageGraph {
             quickjs_function_sources,
         }
     }
+
 
     fn reachable_quickjs_function_values(&self) -> HashSet<(u32, u32)> {
         let mut values = HashSet::new();
@@ -1229,6 +1357,12 @@ fn is_sink_slot(span: Span) -> bool {
 fn is_dynamic_read(span: Span) -> bool {
     !span.is_dummy()
         && ACTIVE_STORAGE_PLAN.with(|active| active.borrow().dynamic_reads.contains(&storage_key(span)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether `StoragePlan::analyze` also replays the reference fixpoint and asserts that both agree.
+    static STORAGE_REFERENCE_CHECK: Cell<bool> = const { Cell::new(true) };
 }
 
 thread_local! {
