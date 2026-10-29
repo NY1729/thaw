@@ -119,18 +119,36 @@ pub(crate) enum Node {
     /// An Error's stack text; continuation lines indent with the nesting level like Node's `formatError`.
     ErrorStack(String),
     Circular(usize),
+    /// A native promise: `state` 0 pending, 1 fulfilled, 2 rejected, with its settled value.
+    Promise {
+        state: u8,
+        value: Option<Box<Node>>,
+    },
 }
 
 /// Node's name, tag suffix and depth-cutoff label for a `Map`/`Set`: a subclass
 /// shows `Counter(1) [Map] {` and `[Counter [Map]]`.
 fn collection_label(base: &str, ctor: &Option<String>) -> (String, String, String) {
     match ctor {
-        Some(name) if name != base => (
+        Some(name) if name != base && shows_tag(name, base) => (
             name.clone(),
             format!(" [{base}]"),
             format!("{name} [{base}]"),
         ),
-        _ => (base.to_string(), String::new(), base.to_string()),
+        Some(name) => (name.clone(), String::new(), name.clone()),
+        None => (base.to_string(), String::new(), base.to_string()),
+    }
+}
+
+/// Node's `getPrefix` tag rule: `[Map]` is omitted when the constructor name already
+/// contains the tag as a whole word (`DefMap`, `SetThing`) and shown otherwise (`Setx`).
+fn shows_tag(constructor: &str, tag: &str) -> bool {
+    match constructor.find(tag) {
+        None => true,
+        Some(position) => constructor[position + tag.len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_lowercase),
     }
 }
 
@@ -403,7 +421,7 @@ impl Ctx<'_> {
                 let index = self.circular_index(*id);
                 format!("[Circular *{index}]")
             }
-            Node::Typed { .. } => self.format_raw(node, recurse_times),
+            Node::Typed { .. } | Node::Promise { .. } => self.format_raw(node, recurse_times),
             Node::Array { id, .. }
             | Node::Object { id, .. }
             | Node::Map { id, .. }
@@ -479,6 +497,7 @@ impl Ctx<'_> {
             Object,
             Map(&'n [(Node, Node)]),
             Set(&'n [Node]),
+            Promise(u8, Option<&'n Node>),
         }
         let typed_items: Vec<Option<Node>>;
         let kind;
@@ -520,6 +539,14 @@ impl Ctx<'_> {
                 kind = Kind::Array(&typed_items);
                 keys = &[];
                 ctx_style = name.clone();
+            }
+            Node::Promise { state, value } => {
+                id = 0;
+                braces = ["Promise {".to_string(), "}".into()];
+                extras = Extras::Object;
+                kind = Kind::Promise(*state, value.as_deref());
+                keys = &[];
+                ctx_style = "Promise".into();
             }
             Node::Set {
                 id: node_id,
@@ -610,6 +637,13 @@ impl Ctx<'_> {
             }
             Kind::Set(items) => self.format_set(items, recurse_times),
             Kind::Map(entries) => self.format_map(entries, recurse_times),
+            Kind::Promise(0, _) => vec!["<pending>".to_string()],
+            Kind::Promise(state, value) => {
+                self.indentation_lvl += 2;
+                let text = value.map_or_else(|| "undefined".to_string(), |node| self.format_value(node, recurse_times));
+                self.indentation_lvl -= 2;
+                vec![if *state == 2 { format!("<rejected> {text}") } else { text }]
+            }
             Kind::Object => Vec::new(),
         };
         for (key, value) in keys {
@@ -1386,6 +1420,44 @@ mod unit_tests {
             entries: vec![("self".encode_utf16().collect(), Node::Circular(1))],
         };
         assert_eq!(show(&node), "<ref *1> { self: [Circular *1] }");
+    }
+
+    #[test]
+    fn promises_show_their_state_like_node() {
+        let promise = |state, value: Option<Node>| Node::Promise {
+            state,
+            value: value.map(Box::new),
+        };
+        assert_eq!(show(&promise(0, None)), "Promise { <pending> }");
+        assert_eq!(show(&promise(1, Some(num(1.0)))), "Promise { 1 }");
+        assert_eq!(show(&promise(2, Some(num(3.0)))), "Promise { <rejected> 3 }");
+        assert_eq!(
+            show(&promise(1, Some(obj(vec![("a", arr(vec![num(1.0), num(2.0)]))])))),
+            "Promise { { a: [ 1, 2 ] } }"
+        );
+        assert_eq!(show(&promise(2, Some(s("why")))), "Promise { <rejected> 'why' }");
+    }
+
+    #[test]
+    fn collection_subclass_tag_is_omitted_when_the_name_contains_it() {
+        let map = |name: &str| Node::Map {
+            id: 0,
+            ctor: Some(name.to_string()),
+            entries: vec![(s("a"), num(1.0))],
+            props: Vec::new(),
+        };
+        assert_eq!(show(&map("DefMap")), "DefMap(1) { 'a' => 1 }");
+        assert_eq!(show(&map("MyMapX")), "MyMapX(1) { 'a' => 1 }");
+        assert_eq!(show(&map("XMapper")), "XMapper(1) [Map] { 'a' => 1 }");
+        assert_eq!(show(&map("Plain")), "Plain(1) [Map] { 'a' => 1 }");
+        let set = |name: &str| Node::Set {
+            id: 0,
+            ctor: Some(name.to_string()),
+            items: vec![num(1.0)],
+            props: Vec::new(),
+        };
+        assert_eq!(show(&set("SetThing")), "SetThing(1) { 1 }");
+        assert_eq!(show(&set("Setx")), "Setx(1) [Set] { 1 }");
     }
 
     #[test]

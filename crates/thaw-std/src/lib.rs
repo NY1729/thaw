@@ -11,3 +11,4 @@ mod http;
 mod inspect;
 mod inspect_width;
 mod json;
+mod json_parse_error;
