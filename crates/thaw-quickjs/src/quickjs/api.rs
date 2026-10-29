@@ -4085,6 +4085,11 @@ fn register_native_callback(
              while (held.length) globalThis.__thaw_release_dynamic_value(held.pop()); \
              }}; \
              var deferred = false; \
+             if (!{graph_mode}) {{ \
+             for (var p = args.length; p < {visible_param_count}; p++) {{ \
+             if ((mask & (1 << p)) !== 0) args.length = p + 1; \
+             }} \
+             }} \
              try {{ \
              for (var i = 0; i < args.length; i++) {{ \
              if (!{graph_mode} && (mask & (1 << i)) !== 0) {{ \

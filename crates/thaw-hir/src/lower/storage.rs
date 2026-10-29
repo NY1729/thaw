@@ -1,3 +1,4 @@
+use rustc_hash::FxHashMap;
 use swc_common::{Span, Spanned};
 
 #[derive(Default)]
@@ -57,6 +58,19 @@ struct StorageCallConnections {
 
 impl StoragePlan {
     fn analyze(module: &Module) -> Result<Self, String> {
+        let plan = Self::analyze_with(module, StorageGraph::connect_calls)?;
+        #[cfg(test)]
+        if STORAGE_REFERENCE_CHECK.with(Cell::get) {
+            let reference = Self::analyze_with(module, StorageGraph::connect_calls_reference)?;
+            plan.assert_same_as(&reference);
+        }
+        Ok(plan)
+    }
+
+    fn analyze_with(
+        module: &Module,
+        connect: fn(&mut StorageGraph) -> StorageCallConnections,
+    ) -> Result<Self, String> {
         let mut tables = ValueKinds::default();
         module.visit_with(&mut tables);
         let mut observed = ObservedMembers {
@@ -108,7 +122,7 @@ impl StoragePlan {
             quickjs_function_value_nodes,
             quickjs_function_value_slots,
             quickjs_function_sources,
-        } = graph.connect_calls();
+        } = connect(&mut graph);
         let mut pending: Vec<_> = graph.seeds.iter().copied().collect();
         let mut dynamic = graph.seeds;
         while let Some(node) = pending.pop() {
@@ -157,6 +171,23 @@ impl StoragePlan {
             quickjs_function_sources,
             jit_calls,
         })
+    }
+
+    /// Checks that the optimised fixpoint produced the same plan as the reference one.
+    #[cfg(test)]
+    fn assert_same_as(&self, reference: &Self) {
+        assert_eq!(self.dynamic, reference.dynamic, "dynamic storage differs from the reference fixpoint");
+        assert_eq!(self.argument_parameters, reference.argument_parameters, "argument parameters differ from the reference fixpoint");
+        assert_eq!(self.quickjs_function_value_nodes, reference.quickjs_function_value_nodes, "QuickJS function-value nodes differ from the reference fixpoint");
+        assert_eq!(self.quickjs_function_value_slots, reference.quickjs_function_value_slots, "QuickJS function-value slots differ from the reference fixpoint");
+        assert_eq!(self.quickjs_function_sources, reference.quickjs_function_sources, "QuickJS function sources differ from the reference fixpoint");
+        let jit = |plan: &Self| {
+            plan.jit_calls
+                .iter()
+                .map(|call| (call.symbols.iter().cloned().collect::<BTreeSet<_>>(), call.arguments.clone(), call.result))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(jit(self), jit(reference), "JIT calls differ from the reference fixpoint");
     }
 
     fn jit_calls_requiring_dynamic_storage(&self) -> HashSet<Symbol> {
@@ -449,7 +480,141 @@ impl StorageGraph {
         self.edges.entry(left).or_default().push(right);
         self.edges.entry(right).or_default().push(left);
     }
+    /// Links every call's result and arguments to the callables and native classes reachable
+    /// from its callee, to a fixpoint. Each round condenses the (capture-free) graph into its
+    /// strongly connected components and propagates, bottom-up, a bitset of the callables and
+    /// native classes each component reaches, so all callees share one linear pass instead of
+    /// each walking the merged graph. A call is linked once per newly reached callable. The
+    /// result equals `connect_calls_reference`, which the storage analysis checks in tests.
     fn connect_calls(&mut self) -> StorageCallConnections {
+        const NONE: usize = usize::MAX;
+        let mut connected_calls: HashSet<usize> = HashSet::new();
+        // Bits of the callables / native classes each call has already been linked to.
+        let mut done: Vec<Vec<u64>> = vec![Vec::new(); self.calls.len()];
+        loop {
+            let mut ids: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+            let mut keys: Vec<(u32, u32)> = Vec::new();
+            let mut intern = |key: (u32, u32)| *ids.entry(key).or_insert_with(|| { keys.push(key); keys.len() - 1 });
+            for call in &self.calls { intern(storage_key(call.callee)); }
+            let mut interesting: Vec<usize> = Vec::new();
+            for &key in self.callables.keys().chain(self.native_results.keys()) {
+                interesting.push(intern(key));
+            }
+            interesting.sort_unstable();
+            interesting.dedup();
+            for (&node, neighbors) in &self.edges {
+                intern(node);
+                for &next in neighbors { intern(next); }
+            }
+            let count = keys.len();
+            let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); count];
+            for (&node, neighbors) in &self.edges {
+                let from = ids[&node];
+                adjacency[from] = neighbors.iter()
+                    .filter(|&&next| !self.captures.contains(&(node, next)))
+                    .map(|next| ids[next])
+                    .collect();
+                adjacency[from].sort_unstable();
+                adjacency[from].dedup();
+            }
+            let words = interesting.len().div_ceil(64);
+            let mut bit_of = vec![NONE; count];
+            for (bit, &node) in interesting.iter().enumerate() { bit_of[node] = bit; }
+            // Iterative Tarjan: components are finished sinks first, so their successors' bitsets exist.
+            let mut order = vec![NONE; count];
+            let mut low = vec![0usize; count];
+            let mut on_stack = vec![false; count];
+            let mut component = vec![NONE; count];
+            let mut component_bits: Vec<Vec<u64>> = Vec::new();
+            let (mut stack, mut next_order) = (Vec::new(), 0usize);
+            for root in 0..count {
+                if order[root] != NONE { continue; }
+                order[root] = next_order; low[root] = next_order; next_order += 1;
+                stack.push(root); on_stack[root] = true;
+                let mut frames = vec![(root, 0usize)];
+                while let Some(&(node, cursor)) = frames.last() {
+                    if let Some(&next) = adjacency[node].get(cursor) {
+                        frames.last_mut().unwrap().1 += 1;
+                        if order[next] == NONE {
+                            order[next] = next_order; low[next] = next_order; next_order += 1;
+                            stack.push(next); on_stack[next] = true;
+                            frames.push((next, 0));
+                        } else if on_stack[next] {
+                            low[node] = low[node].min(order[next]);
+                        }
+                        continue;
+                    }
+                    frames.pop();
+                    if let Some(&(parent, _)) = frames.last() { low[parent] = low[parent].min(low[node]); }
+                    if low[node] != order[node] { continue; }
+                    let id = component_bits.len();
+                    let mut members = Vec::new();
+                    loop {
+                        let member = stack.pop().unwrap();
+                        on_stack[member] = false;
+                        component[member] = id;
+                        members.push(member);
+                        if member == node { break; }
+                    }
+                    let mut bits = vec![0u64; words];
+                    for &member in &members {
+                        if bit_of[member] != NONE { bits[bit_of[member] / 64] |= 1 << (bit_of[member] % 64); }
+                        for &next in &adjacency[member] {
+                            if component[next] != id {
+                                for (word, other) in bits.iter_mut().zip(&component_bits[component[next]]) { *word |= other; }
+                            }
+                        }
+                    }
+                    component_bits.push(bits);
+                }
+            }
+            let mut links = Vec::new();
+            for index in 0..self.calls.len() {
+                let reached = &component_bits[component[ids[&storage_key(self.calls[index].callee)]]];
+                if done[index].is_empty() { done[index] = vec![0u64; words]; }
+                for word in 0..words {
+                    let mut fresh = reached[word] & !done[index][word];
+                    done[index][word] |= fresh;
+                    while fresh != 0 {
+                        let bit = word * 64 + fresh.trailing_zeros() as usize;
+                        fresh &= fresh - 1;
+                        let node = keys[interesting[bit]];
+                        if let Some(class) = self.native_results.get(&node) {
+                            links.push((storage_key(self.calls[index].result), storage_key(*class)));
+                        }
+                        if let Some(callable) = self.callables.get(&node) {
+                            connected_calls.insert(index);
+                            let call = &self.calls[index];
+                            links.push((storage_key(call.result), callable.result));
+                            let mut spread_seen = false;
+                            for (position, &(actual, spread)) in call.arguments.iter().enumerate() {
+                                if spread || spread_seen {
+                                    let start = if spread_seen { 0 } else { position.min(callable.params.len()) };
+                                    for formal in &callable.params[start..] {
+                                        if !self.readonly_formals.contains(&storage_key(*formal)) { links.push((storage_key(actual), storage_key(*formal))); }
+                                    }
+                                    spread_seen = true;
+                                } else if let Some(formal) = callable.params.get(position).or_else(|| callable.rest.then(|| callable.params.last()).flatten()) {
+                                    if self.readonly_formals.contains(&storage_key(*formal)) { continue; }
+                                    links.push((storage_key(actual), storage_key(*formal)));
+                                    if call.source_function == Some(node) && position < callable.params.len() - usize::from(callable.rest) {
+                                        self.argument_parameters.entry(storage_key(actual)).or_default().insert(storage_key(*formal));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if links.is_empty() { break; }
+            for (left, right) in links { self.link_keys(left, right); }
+        }
+        self.finish_call_connections(&connected_calls)
+    }
+
+    /// The original fixpoint, kept as the reference the optimised `connect_calls` is checked against.
+    #[cfg(test)]
+    fn connect_calls_reference(&mut self) -> StorageCallConnections {
         let mut connected = HashSet::new();
         let mut native_connected = HashSet::new();
         loop {
@@ -491,6 +656,13 @@ impl StorageGraph {
             if links.is_empty() { break; }
             for (left, right) in links { self.link_keys(left, right); }
         }
+        let connected_calls: HashSet<usize> = connected.iter().map(|(index, _)| *index).collect();
+        self.finish_call_connections(&connected_calls)
+    }
+
+    /// Records the links of calls the fixpoint could not resolve and collects the JIT,
+    /// QuickJS function-value and storage results derived from the connected graph.
+    fn finish_call_connections(&mut self, connected_calls: &HashSet<usize>) -> StorageCallConnections {
         let jit_calls = self.calls.iter().filter_map(|call| {
             let symbols = self.reachable_jit_symbols(call.callee);
             (!symbols.is_empty()).then(|| JitStorageCall {
@@ -519,7 +691,7 @@ impl StorageGraph {
             .copied()
             .collect();
         let unresolved: Vec<_> = self.calls.iter().enumerate()
-            .filter(|(index, _)| !connected.iter().any(|(call, _)| call == index))
+            .filter(|(index, _)| !connected_calls.contains(index))
             .map(|(_, call)| (call.callee, call.result, call.arguments.clone())).collect();
         for (callee, result, arguments) in unresolved {
             self.contain(callee, result);
@@ -532,6 +704,7 @@ impl StorageGraph {
             quickjs_function_sources,
         }
     }
+
 
     fn reachable_quickjs_function_values(&self) -> HashSet<(u32, u32)> {
         let mut values = HashSet::new();
@@ -1229,6 +1402,12 @@ fn is_sink_slot(span: Span) -> bool {
 fn is_dynamic_read(span: Span) -> bool {
     !span.is_dummy()
         && ACTIVE_STORAGE_PLAN.with(|active| active.borrow().dynamic_reads.contains(&storage_key(span)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether `StoragePlan::analyze` also replays the reference fixpoint and asserts that both agree.
+    static STORAGE_REFERENCE_CHECK: Cell<bool> = const { Cell::new(true) };
 }
 
 thread_local! {
