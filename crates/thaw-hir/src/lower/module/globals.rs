@@ -1,3 +1,73 @@
+/// A top-level function value that calls itself (`const fib = (n: number): number => ... fib(n - 1)`,
+/// `const f = function g(n: number): number { ... g(n - 1) }`) is lowered before its global enters
+/// `scope`, so the body's self-call found no function. Give the name its function type up front;
+/// returns the binding names pushed, for `unseed_recursive_global`.
+fn seed_recursive_global(lowerer: &mut FnLowerer<'_>, name: &str, init: &Expr, expected: &HirType) -> Vec<String> {
+    let mut init = init;
+    while let Expr::Paren(inner) = init {
+        init = &inner.expr;
+    }
+    let (internal, recursive) = match init {
+        Expr::Arrow(_) => (None, FnLowerer::initializer_closure_references(init, name)),
+        Expr::Fn(function) => (
+            function.ident.as_ref().map(|ident| ident.sym.to_string()).filter(|_| named_function_is_recursive(function)),
+            FnLowerer::initializer_closure_references(init, name) || named_function_is_recursive(function),
+        ),
+        _ => return Vec::new(),
+    };
+    if !recursive {
+        return Vec::new();
+    }
+    let arrow = match init {
+        Expr::Arrow(arrow) => arrow.clone(),
+        Expr::Fn(function) if function.function.type_params.is_none() => match function_expression_as_arrow(function) {
+            Ok(arrow) => arrow,
+            Err(_) => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    let ty = if matches!(expected, HirType::Function(..)) {
+        expected.clone()
+    } else {
+        if arrow.is_generator || arrow.type_params.is_some() {
+            return Vec::new();
+        }
+        let Some(annotation) = arrow.return_type.as_ref() else { return Vec::new() };
+        let params = arrow
+            .params
+            .iter()
+            .map(|parameter| {
+                lower_param(parameter, lowerer.interfaces, lowerer.generic_interfaces, false, &HashMap::new())
+                    .map(|parameter| parameter.ty)
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let ret = lower_ts_type(&annotation.type_ann, lowerer.interfaces, lowerer.generic_interfaces);
+        match (params, ret) {
+            (Ok(params), Ok(ret)) => HirType::Function(params, Box::new(ret)),
+            _ => return Vec::new(),
+        }
+    };
+    lowerer.scope.insert(name.to_string(), ty);
+    let mut pushed = vec![name.to_string()];
+    lowerer.bindings.entry(name.to_string()).or_default().push(name.to_string());
+    if let Some(internal) = internal.filter(|internal| internal != name) {
+        lowerer.bindings.entry(internal.clone()).or_default().push(name.to_string());
+        pushed.push(internal);
+    }
+    pushed
+}
+
+fn unseed_recursive_global(lowerer: &mut FnLowerer<'_>, pushed: Vec<String>) {
+    for key in pushed {
+        if let Some(stack) = lowerer.bindings.get_mut(&key) {
+            stack.pop();
+            if stack.is_empty() {
+                lowerer.bindings.remove(&key);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_top_level_initializers(
     module: &Module,
@@ -99,13 +169,16 @@ fn lower_top_level_initializers(
                         .expect("top-level initializers were validated above");
                     // An `any` global's literal initializer gets the same dynamic-element
                     // treatment as a local `any` declaration.
+                    let seeded = seed_recursive_global(&mut lowerer, &name, init_expr, &expected);
                     let init = if expected == HirType::Json {
-                        lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))?
+                        lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))
                     } else {
-                        lowerer.lower_expr(init_expr)?
+                        lowerer.lower_expr(init_expr)
                     };
+                    unseed_recursive_global(&mut lowerer, seeded);
+                    let init = init?;
                     let ty = if expected == HirType::Dynamic {
-                        lowerer.infer_expr_type(&init)?
+                        lowerer.infer_expr_type_inner(&init)?
                     } else {
                         expected
                     };
@@ -366,12 +439,15 @@ fn lower_global_decls(
                 .init
                 .as_deref()
                 .expect("top-level initializers were validated above");
+            let seeded = seed_recursive_global(&mut lowerer, &name, init_expr, &expected);
             let init = if expected == HirType::Json {
-                lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))?
+                lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))
             } else {
-                lowerer.lower_expr(init_expr)?
+                lowerer.lower_expr(init_expr)
             };
-            let inferred = lowerer.infer_expr_type(&init)?;
+            unseed_recursive_global(&mut lowerer, seeded);
+            let init = init?;
+            let inferred = lowerer.infer_expr_type_inner(&init)?;
             // A function global whose return type was still the `Dynamic` placeholder when it was
             // first inferred (an unannotated method read) takes the now-resolved type.
             let resolved_function = matches!((&expected, &inferred),
