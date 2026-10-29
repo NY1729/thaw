@@ -634,6 +634,11 @@ fn lower_ts_type(
             // its value is a real QuickJS object at runtime, so an annotation
             // naming one is an opaque `JsValue`. Type arguments, if any, are
             // ignored.
+            // `ArrayBuffer` / `DataView` are native byte views (`new ArrayBuffer(n)`, `buf.buffer`),
+            // like `Buffer` / `Uint8Array`.
+            if matches!(ref_name, Some("ArrayBuffer" | "DataView")) {
+                return Ok(HirType::Bytes);
+            }
             if ref_name.is_some_and(is_opaque_global_type) {
                 return Ok(HirType::JsValue);
             }
