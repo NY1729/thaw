@@ -1333,7 +1333,10 @@ fn describe_circle(circle: &[(usize, *const Value)], _again: &Value) -> String {
         Value::Object(fields) => shared_object_ref(fields)
             .get(b"__thaw_class__".as_slice())
             .and_then(Value::as_str)
-            .map_or_else(|| "Object".to_string(), |name| plain_class_name(name).to_string()),
+            .map_or_else(
+                || "Object".to_string(),
+                |name| plain_class_name(name).to_string(),
+            ),
         _ => "Object".to_string(),
     };
     // The key under which `holder` reaches the object identified by `target`.
@@ -1386,7 +1389,14 @@ fn host_circle_message(root: &Rc<HostLease>) -> Option<String> {
                 .iter()
                 .enumerate()
                 .map(|(index, (_, ctor, key))| {
-                    (ctor.clone(), if index == 0 { String::new() } else { key.clone() })
+                    (
+                        ctor.clone(),
+                        if index == 0 {
+                            String::new()
+                        } else {
+                            key.clone()
+                        },
+                    )
                 })
                 .collect();
             walk.found = Some(circle_message(&links, &key));
@@ -1414,7 +1424,10 @@ fn host_circle_message(root: &Rc<HostLease>) -> Option<String> {
             host_enumerable_entries(lease)
                 .into_iter()
                 .map(|(name, value)| {
-                    (format!("property '{}'", String::from_utf8_lossy(&name)), value)
+                    (
+                        format!("property '{}'", String::from_utf8_lossy(&name)),
+                        value,
+                    )
                 })
                 .collect()
         };
@@ -6253,7 +6266,10 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
             } else {
                 // The host reports only "circular reference"; word it like V8 does.
                 let circular = HOST_ERROR.with(|error| {
-                    error.borrow().as_deref().is_some_and(|text| text.contains("circular reference"))
+                    error
+                        .borrow()
+                        .as_deref()
+                        .is_some_and(|text| text.contains("circular reference"))
                 });
                 if circular {
                     let reported = HOST_ERROR.with(|error| error.borrow_mut().take());
@@ -13866,7 +13882,9 @@ mod tests {
             let mut out = Vec::new();
             write_json_value(value, &mut out, None, 0);
             assert_eq!(thaw_json_take_stringify_error(), 1);
-            let text = STRINGIFY_CYCLE_MESSAGE.with(|slot| slot.borrow_mut().take()).unwrap();
+            let text = STRINGIFY_CYCLE_MESSAGE
+                .with(|slot| slot.borrow_mut().take())
+                .unwrap();
             // Leak the cycle: `Rc` cannot free it, and the test is short-lived.
             std::mem::forget(value.clone());
             text
@@ -13884,5 +13902,4 @@ mod tests {
             "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    |     ...\n    |     property 'k4' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
         );
     }
-
 }

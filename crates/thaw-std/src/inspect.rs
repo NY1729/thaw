@@ -640,9 +640,16 @@ impl Ctx<'_> {
             Kind::Promise(0, _) => vec!["<pending>".to_string()],
             Kind::Promise(state, value) => {
                 self.indentation_lvl += 2;
-                let text = value.map_or_else(|| "undefined".to_string(), |node| self.format_value(node, recurse_times));
+                let text = value.map_or_else(
+                    || "undefined".to_string(),
+                    |node| self.format_value(node, recurse_times),
+                );
                 self.indentation_lvl -= 2;
-                vec![if *state == 2 { format!("<rejected> {text}") } else { text }]
+                vec![if *state == 2 {
+                    format!("<rejected> {text}")
+                } else {
+                    text
+                }]
             }
             Kind::Object => Vec::new(),
         };
@@ -1430,12 +1437,21 @@ mod unit_tests {
         };
         assert_eq!(show(&promise(0, None)), "Promise { <pending> }");
         assert_eq!(show(&promise(1, Some(num(1.0)))), "Promise { 1 }");
-        assert_eq!(show(&promise(2, Some(num(3.0)))), "Promise { <rejected> 3 }");
         assert_eq!(
-            show(&promise(1, Some(obj(vec![("a", arr(vec![num(1.0), num(2.0)]))])))),
+            show(&promise(2, Some(num(3.0)))),
+            "Promise { <rejected> 3 }"
+        );
+        assert_eq!(
+            show(&promise(
+                1,
+                Some(obj(vec![("a", arr(vec![num(1.0), num(2.0)]))]))
+            )),
             "Promise { { a: [ 1, 2 ] } }"
         );
-        assert_eq!(show(&promise(2, Some(s("why")))), "Promise { <rejected> 'why' }");
+        assert_eq!(
+            show(&promise(2, Some(s("why")))),
+            "Promise { <rejected> 'why' }"
+        );
     }
 
     #[test]
