@@ -3261,7 +3261,7 @@
     {
       "name": "infer fs.readFile callback params are contextually typed",
       "expect": "matched",
-      "source": "import fs from \"node:fs\"; function main(): void { fs.readFile(\"/nonexistent-thaw-file\", (e, d) => console.log(\"cb\", e!.code, d)); fs.writeFileSync(\"/tmp/thaw-infer-rf.txt\", \"hello\"); fs.readFile(\"/tmp/thaw-infer-rf.txt\", (err, data) => console.log(err, data.length > 0)); fs.readFile(\"/tmp/thaw-infer-rf.txt\", \"utf8\", (err, text) => console.log(err, text)); }"
+      "source": "import fs from \"node:fs\"; function main(): void { fs.writeFileSync(\"/tmp/thaw-infer-rf.txt\", \"hello\"); fs.readFile(\"/nonexistent-thaw-file\", (e, d) => { console.log(\"cb\", e!.code, d); fs.readFile(\"/tmp/thaw-infer-rf.txt\", (err, data) => { console.log(err, data.length > 0); fs.readFile(\"/tmp/thaw-infer-rf.txt\", \"utf8\", (err2, text) => console.log(err2, text)); }); }); }"
     },
     {
       "name": "infer string replace callback params",
