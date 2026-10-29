@@ -99,11 +99,8 @@ fn lower_top_level_initializers(
                         .expect("top-level initializers were validated above");
                     // An `any` global's literal initializer gets the same dynamic-element
                     // treatment as a local `any` declaration.
-                    let init = if expected == HirType::Json {
-                        lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))?
-                    } else {
-                        lowerer.lower_expr(init_expr)?
-                    };
+                    let (init, function_init) =
+                        lowerer.lower_global_initializer(&name, init_expr, &expected)?;
                     let ty = if expected == HirType::Dynamic {
                         lowerer.infer_expr_type(&init)?
                     } else {
@@ -116,11 +113,13 @@ fn lower_top_level_initializers(
                     };
                     steps.push(HirInitStep::StoreGlobal(name.clone(), init));
                     lowerer.scope.insert(name.clone(), ty);
-                    lowerer
-                        .bindings
-                        .entry(name.clone())
-                        .or_default()
-                        .push(name.clone());
+                    if !function_init {
+                        lowerer
+                            .bindings
+                            .entry(name.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
                     if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
                         lowerer.immutable_bindings.insert(name);
                     }
@@ -366,11 +365,7 @@ fn lower_global_decls(
                 .init
                 .as_deref()
                 .expect("top-level initializers were validated above");
-            let init = if expected == HirType::Json {
-                lowerer.lower_expr_with_expected_type(init_expr, Some(&expected))?
-            } else {
-                lowerer.lower_expr(init_expr)?
-            };
+            let (init, function_init) = lowerer.lower_global_initializer(&name, init_expr, &expected)?;
             let inferred = lowerer.infer_expr_type(&init)?;
             // A function global whose return type was still the `Dynamic` placeholder when it was
             // first inferred (an unannotated method read) takes the now-resolved type.
@@ -395,11 +390,13 @@ fn lower_global_decls(
                 mutable: declaration.kind != swc_ecma_ast::VarDeclKind::Const,
             });
             lowerer.scope.insert(name.clone(), scope_type);
-            lowerer
-                .bindings
-                .entry(name.clone())
-                .or_default()
-                .push(name.clone());
+            if !function_init {
+                lowerer
+                    .bindings
+                    .entry(name.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
             if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
                 lowerer.immutable_bindings.insert(name);
             }
