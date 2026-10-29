@@ -1,0 +1,26 @@
+[package]
+name = "thaw-rt-dylib"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Built as a staticlib; thaw-cli links it into `libthaw_rt.so.1` (see thaw_rt.map).
+# `libthaw_rt.so`: the Thaw runtime (arena + runtime + std) as one shared
+# object, so that several compiled Thaw programs and shared libraries can
+# share one copy. Only this crate depends on all three runtime crates.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+thaw-arena = { path = "../thaw-arena" }
+thaw-jit = { path = "../thaw-jit" }
+thaw-runtime = { path = "../thaw-runtime" }
+thaw-std = { path = "../thaw-std" }
+
+[build-dependencies]
+sha2 = "0.10"
+
+[features]
+default = []
+# Reserved for the thaw-js variant (M6). Declared empty, not wired.
+thaw-js = []
