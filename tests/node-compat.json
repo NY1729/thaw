@@ -3274,6 +3274,26 @@
       "source": "function mk(): any {\n  const o: any = { name: \"X\", message: \"hi\" };\n  Error.captureStackTrace(o);\n  return o.stack;\n}\nfunction wrap(): any { return mk(); }\nfunction main(): void {\n  const lines = wrap().split(\"\\n\");\n  console.log(lines[0], lines[1].includes(\"at mk \"), lines[2].includes(\"at wrap \"));\n}\n"
     },
     {
+      "name": "ce1 Map Set WeakMap WeakSet without type arguments",
+      "expect": "matched",
+      "source": "function main(): void { const m = new Map(); m.set(\"a\", 1); m.set(\"b\", \"x\"); console.log(m.get(\"a\"), m.size, m); const s = new Set(); s.add(1); s.add(\"a\"); console.log(s.size, s.has(1), s.has(\"zz\"), s); const k = {}; const w = new WeakMap(); w.set(k, 1); console.log(w.get(k), w.has(k), w.has({})); const ws = new WeakSet(); ws.add(k); console.log(ws.has(k), ws.has({})); const typed: Map<string, number> = new Map(); typed.set(\"x\", 2); console.log(typed.get(\"x\"), typed); const tset: Set<number> = new Set(); tset.add(3); console.log([...tset]); }"
+    },
+    {
+      "name": "ce1 console group count table dir",
+      "expect": "matched",
+      "source": "function main(): void { console.group(\"G\"); console.log(\"inside\"); console.group(); console.log(\"deeper\\nmultiline\"); console.error(\"to stderr\"); console.groupEnd(); console.groupEnd(); console.groupEnd(); console.log(\"out\"); console.group(\"A\", \"b\"); console.log(); console.log(\"a\", \"b\"); console.groupEnd(); console.count(); console.count(\"x\"); console.count(); console.countReset(); console.count(); console.countReset(\"never\"); console.table([{ a: 1, b: \"x\" }, { a: 2, c: true }]); console.table([[1, 2], [3, 4]]); console.table([1, 2]); console.table(\"str\"); console.table([{ a: 1, b: { x: 1 } }, { a: \"long string here\", b: [1, 2, 3, 4, 5] }], [\"a\"]); console.table({ r1: { c: 1 }, r2: { c: 2 } }); console.dir({ a: { b: { c: { d: 1 } } } }, { depth: 0 }); console.dir({ a: { b: { c: { d: 1 } } } }, { depth: null }); console.dir(\"s\"); console.dir([1, 2]); console.timeEnd(\"nolabel\"); console.log(\"after\"); }"
+    },
+    {
+      "name": "ce1 console methods as callback values",
+      "expect": "matched",
+      "source": "async function f(): Promise<string> { return \"r\"; } function g(): Promise<number> { return Promise.resolve(42); } function main(): void { f().then(console.log); g().then(console.log); g().then(console.error); }"
+    },
+    {
+      "name": "ce1 bare node specifiers match node: forms",
+      "expect": "matched",
+      "source": "import fs from \"fs\"; import util from \"util\"; import os from \"os\"; import assert from \"assert\"; import crypto from \"crypto\"; import { Readable } from \"stream\"; import { existsSync } from \"fs\"; import * as nodeUtil from \"util\"; function main(): void { console.log(fs.existsSync(\"/etc\"), existsSync(\"/definitely/not/here\")); console.log(util.inspect({ a: 1 }), nodeUtil.format(\"%s-%d\", \"x\", 4)); assert.strictEqual(1, 1); console.log(typeof os.platform(), crypto.createHash(\"md5\").update(\"a\").digest(\"hex\")); Readable.from([\"a\", \"b\"]).on(\"data\", (d: string) => console.log(d)); }"
+    },
+    {
       "name": "function values in Map and Set keep Node labels",
       "expect": "matched",
       "source": "async function noawait(): Promise<number> { return 1; }\nfunction main(): void {\n  const m = new Map<string, any>();\n  m.set(\"a\", async () => 3);\n  console.log(m);\n  const s = new Set<any>();\n  s.add(() => 1);\n  console.log(s);\n  const n = new Map<string, any>();\n  n.set(\"n\", async function named() { await 0; return 1; });\n  console.log(n);\n  const p = new Map<string, any>();\n  p.set(\"p\", noawait);\n  console.log(p);\n  const q = new Map<string, any>();\n  q.set(\"q\", (x: number) => x + 1);\n  console.log(q);\n}\n"
