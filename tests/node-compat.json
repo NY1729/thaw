@@ -3254,6 +3254,11 @@
       "source": "interface Item { id: number; name: string }\nfunction main(): void {\n  const start = Date.now();\n  const nums: number[] = [];\n  for (let i = 0; i < 100000; i++) nums.push(i * 2);\n  const strs: string[] = [];\n  for (let i = 0; i < 20000; i++) strs.push(\"s\" + i);\n  const items: Item[] = [];\n  for (let i = 0; i < 20000; i++) items.push({ id: i, name: \"n\" + i });\n  let s = \"\";\n  for (let i = 0; i < 100000; i++) s += \"x\";\n  const desc: number[] = [];\n  for (let i = 0; i < 20000; i++) desc.push((i * 7919) % 20011);\n  desc.sort((x, y) => y - x);\n  const elapsed = Date.now() - start;\n  console.log(nums.length, strs.length, items.length, s.length, desc[0], desc[19999]);\n  console.log(\"rss under 400MB:\", process.memoryUsage().rss < 400 * 1024 * 1024);\n  console.log(\"time under 20s:\", elapsed < 20000);\n}\n"
     },
     {
+      "name": "function values in Map and Set keep Node labels",
+      "expect": "matched",
+      "source": "async function noawait(): Promise<number> { return 1; }\nfunction main(): void {\n  const m = new Map<string, any>();\n  m.set(\"a\", async () => 3);\n  console.log(m);\n  const s = new Set<any>();\n  s.add(() => 1);\n  console.log(s);\n  const n = new Map<string, any>();\n  n.set(\"n\", async function named() { await 0; return 1; });\n  console.log(n);\n  const p = new Map<string, any>();\n  p.set(\"p\", noawait);\n  console.log(p);\n  const q = new Map<string, any>();\n  q.set(\"q\", (x: number) => x + 1);\n  console.log(q);\n}\n"
+    },
+    {
       "name": "infer fs.readFile callback params are contextually typed",
       "expect": "matched",
       "source": "import fs from \"node:fs\"; function main(): void { fs.writeFileSync(\"/tmp/thaw-infer-rf.txt\", \"hello\"); fs.readFile(\"/nonexistent-thaw-file\", (e, d) => { console.log(\"cb\", e!.code, d); fs.readFile(\"/tmp/thaw-infer-rf.txt\", (err, data) => { console.log(err, data.length > 0); fs.readFile(\"/tmp/thaw-infer-rf.txt\", \"utf8\", (err2, text) => console.log(err2, text)); }); }); }"
