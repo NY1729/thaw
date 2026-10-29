@@ -1,0 +1,12 @@
+# Version script for libthaw_rt.so.1 (linked by thaw-cli, see build_rt_shared_library).
+# THAW_RT_ABI_1: everything generated code calls. Internal; rebuilt on upgrade.
+# THAW_1.0: the public C ABI (v1). Only these four names are stable.
+# Exact names win over the `thaw_*` pattern in GNU ld.
+THAW_RT_ABI_1 {
+  global: thaw_*; __thaw_*;
+  local: *;
+};
+
+THAW_1.0 {
+  global: thaw_rt_abi_version; thaw_rt_abi_hash; thaw_rt_init; thaw_rt_shutdown;
+} THAW_RT_ABI_1;

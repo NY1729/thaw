@@ -79,6 +79,7 @@ const PENDING_EXCEPTION_SYMBOL: &str = "__thaw_pending_exception";
 /// Lowest stack address compiled code may reach (0 = no guard, e.g. off the main thread); set at
 /// process entry by `thaw_stack_guard_limit` and checked in every function prologue.
 const STACK_LIMIT_SYMBOL: &str = "__thaw_stack_limit";
+const LIBRARY_METADATA_SYMBOL: &str = "__thaw_pkg_metadata";
 const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// The exact rejection text currently being delivered to a Promise callback.
 /// This scoped provenance lets structural casts distinguish their own string
@@ -407,6 +408,14 @@ macro_rules! isolated_codegen_scope {
     }};
 }
 
+/// One C-callable export of a shared library build (`thaw lib build`): the compiled function
+/// `hir_name` (all parameters and the result `number`) becomes `double c_symbol(double, ...)`.
+#[derive(Clone, Debug)]
+pub struct LibraryExport {
+    pub hir_name: String,
+    pub c_symbol: String,
+}
+
 pub struct HirCompiler<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -478,6 +487,8 @@ pub struct HirCompiler<'ctx> {
     async_return_frames: HashMap<PointerValue<'ctx>, (PointerValue<'ctx>, HirType)>,
     next_lambda: usize,
     uses_napi: bool,
+    /// Backend optimisation level for `write_object_file` (`Default` unless `set_codegen_opt`).
+    codegen_opt: OptimizationLevel,
     uses_thaw_js: bool,
     uses_intl: bool,
     /// The program is a thaw-js routed build (it falls back to an unrouted one if it needs QuickJS), so
@@ -525,6 +536,8 @@ pub struct HirCompiler<'ctx> {
     /// statement. Only an exact final SSA result in the same LLVM function is
     /// eligible for discard cleanup.
     owned_json_discard_frames: Vec<OwnedJsonDiscardFrame<'ctx>>,
+    library_exports: Vec<LibraryExport>,
+    pic: bool,
 }
 
 // Prove that a generated typed QuickJS wrapper returns a newly retained
@@ -857,6 +870,9 @@ impl<'ctx> HirCompiler<'ctx> {
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,
             owned_json_discard_frames: Vec::new(),
+            codegen_opt: OptimizationLevel::Default,
+            library_exports: Vec::new(),
+            pic: false,
         }
     }
 
@@ -935,13 +951,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let has_main = self.module.get_function(USER_MAIN_SYMBOL).is_some();
         let handler_hir = program.functions.iter().find(|f| f.name == "handler");
 
-        match (has_main, handler_hir) {
-            (true, Some(_)) => {
-                return Err("a program can define `main` or `handler`, not both".to_string())
+        if !self.library_exports.is_empty() {
+            self.emit_library_exports(program)?;
+        } else {
+            match (has_main, handler_hir) {
+                (true, Some(_)) => {
+                    return Err("a program can define `main` or `handler`, not both".to_string())
+                }
+                (true, None) => self.emit_c_main_entry(),
+                (false, Some(handler)) => self.emit_lambda_entry(handler)?,
+                (false, None) => self.emit_c_main_entry(),
             }
-            (true, None) => self.emit_c_main_entry(),
-            (false, Some(handler)) => self.emit_lambda_entry(handler)?,
-            (false, None) => self.emit_c_main_entry(),
         }
 
         // A routed build holds no QuickJS values: its `JsValue` handles live in the thaw-js heap, whose
@@ -950,6 +970,11 @@ impl<'ctx> HirCompiler<'ctx> {
             for (quickjs, thaw_js) in [
                 ("thaw_js_retain_handle", "thaw_tjs_retain_handle"),
                 ("thaw_js_release_handle", "thaw_tjs_release_handle"),
+                ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
+                (
+                    "thaw_js_terminal_work_pending",
+                    "thaw_tjs_terminal_work_pending",
+                ),
             ] {
                 if let Some(function) = self.module.get_function(quickjs) {
                     function.as_global_value().set_name(thaw_js);
@@ -1007,6 +1032,12 @@ impl<'ctx> HirCompiler<'ctx> {
     /// for the process entry point.
     pub fn set_commonjs_entry(&mut self, commonjs: bool) {
         self.commonjs_entry = commonjs;
+    }
+
+    /// Selects the backend optimisation level used by `write_object_file`. `None` skips
+    /// instruction-selection optimisation (fast compile, slower generated code).
+    pub fn set_codegen_opt(&mut self, level: OptimizationLevel) {
+        self.codegen_opt = level;
     }
 
     /// Whether the generated module actually calls the QuickJS fallback host.
@@ -1564,6 +1595,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
+                    // A call through a function-typed value whose result is a Promise
+                    // (`const sleep = (ms) => new Promise(..)`) suspends like a named source.
+                    || matches!(inner.as_ref(), HirExpr::Call(callee, _)
+                        if matches!(self.expr_hir_type(callee),
+                            Some(HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret))
+                                if matches!(ret.as_ref(), HirType::Promise(_))))
                     // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
                     || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                         if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), body)
@@ -2486,6 +2523,26 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    /// Library mode (`thaw lib build`): no C `main`; each export gets a C wrapper, everything else
+    /// the program defines turns internal. Must be called before `compile_program`. Also selects
+    /// position-independent code.
+    pub fn set_library_mode(&mut self, exports: Vec<LibraryExport>) {
+        self.library_exports = exports;
+        self.pic = true;
+    }
+
+    /// `embed_artifact_metadata` for a library: symbol `__thaw_pkg_metadata`, section `.thaw.pkg`.
+    pub fn embed_package_metadata(&self, metadata: &[u8]) -> Result<(), String> {
+        let value = self.context.const_string(metadata, true);
+        let global = self
+            .module
+            .add_global(value.get_type(), None, LIBRARY_METADATA_SYMBOL);
+        global.set_initializer(&value);
+        global.set_constant(true);
+        global.set_section(Some(".thaw.pkg"));
+        Ok(())
+    }
+
     /// Compiles this module to a native object file for the host target.
     pub fn write_object_file(&self, path: &Path) -> Result<(), String> {
         Target::initialize_native(&InitializationConfig::default())?;
@@ -2501,8 +2558,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 &triple,
                 cpu.to_str().unwrap(),
                 features.to_str().unwrap(),
-                OptimizationLevel::Default,
-                RelocMode::Default,
+                self.codegen_opt,
+                if self.pic {
+                    RelocMode::PIC
+                } else {
+                    RelocMode::Default
+                },
                 CodeModel::Default,
             )
             .ok_or("failed to create a target machine for the host triple")?;

@@ -246,12 +246,30 @@ fn compile_and_run_raw_as(
     envs: &[(&str, &str)],
     commonjs: bool,
 ) -> std::process::Output {
+    compile_and_run_raw_with_opt(
+        source,
+        test_name,
+        envs,
+        commonjs,
+        inkwell::OptimizationLevel::Default,
+    )
+}
+
+/// `compile_and_run_raw_as` with the backend optimisation level chosen by the caller.
+fn compile_and_run_raw_with_opt(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+    commonjs: bool,
+    codegen_opt: inkwell::OptimizationLevel,
+) -> std::process::Output {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, test_name);
     compiler.set_commonjs_entry(commonjs);
+    compiler.set_codegen_opt(codegen_opt);
     compiler.compile_program(&program).unwrap();
 
     let dir = std::env::temp_dir().join(format!(
@@ -577,6 +595,7 @@ include!("tests/nb4_contracts.rs");
 include!("tests/d4_contracts.rs");
 include!("tests/nb_contracts.rs");
 include!("tests/kb_contracts.rs");
+include!("tests/codegen_opt_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {
@@ -765,7 +784,9 @@ include!("tests/oobread_contracts.rs");
 include!("tests/bufu8_contracts.rs");
 include!("tests/arraybuffer_contracts.rs");
 include!("tests/lim3_contracts.rs");
+include!("tests/library_mode.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");
 include!("tests/anon_fn_contracts.rs");
 include!("tests/audit_inspect_contracts.rs");
+include!("tests/inference_audit_contracts.rs");
