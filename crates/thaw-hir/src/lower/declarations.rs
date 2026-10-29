@@ -440,6 +440,9 @@ fn lower_class_constructor(
             .iter()
             .map(|parameter| HirExpr::Var(parameter.name.clone())),
     );
+    let class_site = constructor.map_or(declaration.class.span, |constructor| constructor.span);
+    record_fn_loc(&constructor_symbol, class_site);
+    record_fn_loc(&initializer_symbol, class_site);
     let constructor = HirFunction {
         name: constructor_symbol.clone(),
         params: abi_params.clone(),
@@ -644,6 +647,7 @@ fn lower_class_methods(
         } else {
             signature.ret.clone()
         };
+        record_fn_loc(&symbol, method.span);
         functions.push(HirFunction {
             name: symbol.clone(),
             params: params.clone(),
@@ -746,6 +750,7 @@ fn lower_class_methods(
                     }
                 }
             };
+            record_fn_loc(&unbound_symbol, method.span);
             functions.push(HirFunction {
                 name: unbound_symbol,
                 params: unbound_params,
@@ -951,6 +956,7 @@ fn lower_fn_decl(
         declared_ret
     };
 
+    record_fn_loc(&name, func.span);
     Ok(HirFunction {
         name,
         params,

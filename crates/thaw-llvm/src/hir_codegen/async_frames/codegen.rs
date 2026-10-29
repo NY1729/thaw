@@ -34,6 +34,8 @@ impl<'ctx> HirCompiler<'ctx> {
             resume_ty,
             Some(Linkage::Internal),
         );
+        // A resumed async function is on the stack under the event loop, named like its ramp.
+        self.mark_for_stack_frames(resume, &func.name);
 
         let entry = self.context.append_basic_block(ramp, "entry");
         self.builder.position_at_end(entry);
