@@ -488,6 +488,7 @@ pub struct HirCompiler<'ctx> {
     next_lambda: usize,
     uses_napi: bool,
     uses_thaw_js: bool,
+    uses_intl: bool,
     /// The program is a thaw-js routed build (it falls back to an unrouted one if it needs QuickJS), so
     /// a plain callback coerced to a dynamic value is a thaw-js callback.
     thaw_js_routed: bool,
@@ -851,6 +852,7 @@ impl<'ctx> HirCompiler<'ctx> {
             next_lambda: 0,
             uses_napi: false,
             uses_thaw_js: false,
+            uses_intl: false,
             thaw_js_routed: false,
             thaw_js_call_arguments: false,
             uses_quickjs: false,
@@ -1035,6 +1037,12 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Whether the program calls into the experimental thaw-js runtime (`DynamicBackend::ThawJs`).
     pub fn set_thaw_js_routed(&mut self, routed: bool) {
         self.thaw_js_routed = routed;
+    }
+
+    /// Whether the program calls the native locale runtime (thaw-intl), which the
+    /// linker must then be given.
+    pub fn uses_intl(&self) -> bool {
+        self.uses_intl
     }
 
     pub fn uses_thaw_js(&self) -> bool {

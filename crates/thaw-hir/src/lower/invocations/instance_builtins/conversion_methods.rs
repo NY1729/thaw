@@ -291,23 +291,31 @@ impl<'a> FnLowerer<'a> {
                             receiver_type,
                             "timestamp".to_string(),
                         );
-                        // thaw's calendar math is UTC-only and has no locale
-                        // database, so the locale date/time spellings reuse
-                        // the corresponding UTC rendering.
-                        let intrinsic = match property.sym.as_ref() {
-                            "toLocaleDateString" => "__thaw_date_to_date_string",
-                            "toLocaleTimeString" => "__thaw_date_to_time_string",
-                            _ => "__thaw_date_to_string",
+                        let kind = match property.sym.as_ref() {
+                            "toLocaleDateString" => 1.0,
+                            "toLocaleTimeString" => 2.0,
+                            _ => 0.0,
                         };
+                        let label = format!(".{}()", property.sym);
+                        let (locales, options) =
+                            self.lower_intl_arguments(&call.args, INTL_DATE_OPTIONS, &label)?;
                         return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var(intrinsic.to_string())),
-                            vec![timestamp],
+                            Box::new(HirExpr::Var("__thaw_intl_date".to_string())),
+                            vec![timestamp, locales, options, HirExpr::Lit(HirLit::F64(kind))],
                         ));
                     }
                     if property.sym != *"toLocaleString" {
                         return Err(format!(
                             "native `.{}()` is only supported on a Date",
                             property.sym
+                        ));
+                    }
+                    if receiver_type == HirType::F64 {
+                        let (locales, options) =
+                            self.lower_intl_arguments(&call.args, INTL_NUMBER_OPTIONS, ".toLocaleString()")?;
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_intl_number".to_string())),
+                            vec![receiver, locales, options],
                         ));
                     }
                     // String/Number/Boolean/Array: approximate locale
