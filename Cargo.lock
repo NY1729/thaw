@@ -3177,6 +3177,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-intl"
+version = "0.1.0"
+dependencies = [
+ "fixed_decimal",
+ "icu_calendar",
+ "icu_collator",
+ "icu_datetime",
+ "icu_decimal",
+ "icu_experimental",
+ "icu_locale",
+ "icu_plurals",
+ "icu_provider",
+ "icu_time",
+ "jiff",
+ "serde_json",
+ "thaw-arena",
+ "thaw-icu-data",
+ "writeable",
+]
+
+[[package]]
 name = "thaw-jit"
 version = "0.1.0"
 dependencies = [
