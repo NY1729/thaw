@@ -2818,6 +2818,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_accessor_sentinel",
+            i8_ptr.fn_type(&[self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_function_name_set",
             self.context
                 .void_type()
