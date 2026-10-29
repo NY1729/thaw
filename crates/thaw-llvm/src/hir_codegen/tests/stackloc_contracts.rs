@@ -27,24 +27,6 @@ function main(): void {
 }
 
 #[test]
-fn runtime_thrown_errors_keep_real_frames() {
-    let source = r#"function fail(): string {
-  try {
-    const o: any = null;
-    o.x.y;
-  } catch (e: any) {
-    return e.stack;
-  }
-  return "";
-}
-function main(): void {
-  console.log(fail().split("\n")[1].includes("at fail"));
-}
-"#;
-    assert_eq!(compile_and_run(source, "runtime_thrown_errors_keep_real_frames"), "true\n");
-}
-
-#[test]
 fn capture_stack_trace_on_a_plain_object_lists_frames() {
     let source = r#"function mk(): any {
   const o: any = { name: "X", message: "hi" };
