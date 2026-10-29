@@ -437,6 +437,12 @@ impl<'a> FnLowerer<'a> {
                         // `app.use(a).use(b)` with `app: any` is as chainable as with a
                         // `JsValue` `app`.
                         let receiver = self.infer_member_receiver_type(&inner_member.obj);
+                        // `x.toString()` on a live value is its string form, not another handle.
+                        if receiver == Some(HirType::JsValue)
+                            && member_property_name(&inner_member.prop).as_deref() == Some("toString")
+                        {
+                            return Some(HirType::Str);
+                        }
                         let live_json_method = receiver == Some(HirType::Json)
                             && member_property_name(&inner_member.prop)
                                 .is_some_and(|method| !Self::is_native_instance_builtin(&method));
@@ -464,10 +470,9 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let intrinsic = match (property, expected) {
-            // A chained receiver (`c.toString().toUpperCase()`) must stay a live handle.
-            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
             ("toString", _) => "__thaw_call_selected_dynamic_method",
             (_, Some(HirType::Dynamic)) => "__thaw_call_selected_dynamic_method_raw",
+            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
             _ => "__thaw_call_selected_dynamic_method",
         };
         // The receiver must always come back as a genuine handle here,
