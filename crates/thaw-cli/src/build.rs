@@ -20,6 +20,35 @@ fn build(
     )
 }
 
+thread_local! {
+    /// Backend optimisation level forced for builds on this thread (`thaw build --fast-compile`,
+    /// node-compat cases). `None` defers to `THAW_CODEGEN_OPT`.
+    static CODEGEN_OPT_OVERRIDE: std::cell::Cell<Option<inkwell::OptimizationLevel>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn set_codegen_opt_override(level: Option<inkwell::OptimizationLevel>) {
+    CODEGEN_OPT_OVERRIDE.with(|cell| cell.set(level));
+}
+
+/// Backend optimisation level for the object file: the thread override, else
+/// `THAW_CODEGEN_OPT` (`none|less|default|aggressive`, default `default`).
+fn codegen_opt_level() -> Result<inkwell::OptimizationLevel, String> {
+    use inkwell::OptimizationLevel;
+    if let Some(level) = CODEGEN_OPT_OVERRIDE.with(std::cell::Cell::get) {
+        return Ok(level);
+    }
+    match std::env::var("THAW_CODEGEN_OPT").as_deref() {
+        Err(_) | Ok("default") => Ok(OptimizationLevel::Default),
+        Ok("none") => Ok(OptimizationLevel::None),
+        Ok("less") => Ok(OptimizationLevel::Less),
+        Ok("aggressive") => Ok(OptimizationLevel::Aggressive),
+        Ok(other) => Err(format!(
+            "THAW_CODEGEN_OPT must be none, less, default or aggressive, not `{other}`"
+        )),
+    }
+}
+
 fn path_builtin_name(name: &str) -> Option<&'static str> {
     match name {
         "path" | "node:path" => Some("node:path"),
@@ -905,6 +934,7 @@ fn build_with_native_mode_routed(
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
+    compiler.set_codegen_opt(codegen_opt_level()?);
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
     compiler
         .set_thaw_js_routed(thaw_js_routing && !thaw_js_routed_packages(&shim_source).is_empty());
@@ -1730,6 +1760,11 @@ fn build_staticlib_with_options(
     if let Some(path) = prepared_staticlib(pkg, no_default_features, features) {
         return Ok(path);
     }
+    // Concurrent node-compat cases may all miss the prepared archive; one cargo build at a time.
+    static CARGO_FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _cargo_turn = CARGO_FALLBACK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut command = Command::new("cargo");
     command
         .args(["build", "--release", "-p", pkg, "--message-format=json"])
