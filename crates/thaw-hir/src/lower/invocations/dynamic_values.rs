@@ -464,9 +464,10 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let intrinsic = match (property, expected) {
+            // A chained receiver (`c.toString().toUpperCase()`) must stay a live handle.
+            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
             ("toString", _) => "__thaw_call_selected_dynamic_method",
             (_, Some(HirType::Dynamic)) => "__thaw_call_selected_dynamic_method_raw",
-            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
             _ => "__thaw_call_selected_dynamic_method",
         };
         // The receiver must always come back as a genuine handle here,
