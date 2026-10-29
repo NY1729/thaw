@@ -119,10 +119,43 @@ impl<'a> FnLowerer<'a> {
                 if matches!(property.sym.as_ref(), "replace" | "replaceAll") {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "replace receiver")?;
-                    let (arguments, spread_bindings) = self.lower_native_spread_values(
-                        &call.args,
-                        &format!("String.{}", property.sym),
-                    )?;
+                    // `(substring: string, ...args: any[]) => string`: an unannotated replacer
+                    // callback takes its parameter types from that signature.
+                    let replacer_context = match call.args.as_slice() {
+                        [search, replacer]
+                            if search.spread.is_none() && replacer.spread.is_none() =>
+                        {
+                            let count = match replacer.expr.as_ref() {
+                                Expr::Arrow(arrow) => Some(arrow.params.len()),
+                                Expr::Fn(function) => Some(function.function.params.len()),
+                                _ => None,
+                            };
+                            count.map(|count| {
+                                let mut params = vec![HirType::Json; count];
+                                if let Some(first) = params.first_mut() {
+                                    *first = HirType::Str;
+                                }
+                                HirType::Function(params, Box::new(HirType::Str))
+                            })
+                        }
+                        _ => None,
+                    };
+                    let (arguments, spread_bindings) = if let Some(replacer_type) = &replacer_context {
+                        let (mut arguments, bindings) = self.lower_native_spread_values(
+                            &call.args[..1],
+                            &format!("String.{}", property.sym),
+                        )?;
+                        arguments.push(self.lower_expr_with_expected_type(
+                            &call.args[1].expr,
+                            Some(replacer_type),
+                        )?);
+                        (arguments, bindings)
+                    } else {
+                        self.lower_native_spread_values(
+                            &call.args,
+                            &format!("String.{}", property.sym),
+                        )?
+                    };
                     let [search, replacement] = arguments.as_slice() else {
                         return Err(format!(
                             "native `.{}()` expects exactly two arguments",

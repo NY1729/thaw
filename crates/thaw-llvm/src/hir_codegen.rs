@@ -1586,6 +1586,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
+                    // A call through a function-typed value whose result is a Promise
+                    // (`const sleep = (ms) => new Promise(..)`) suspends like a named source.
+                    || matches!(inner.as_ref(), HirExpr::Call(callee, _)
+                        if matches!(self.expr_hir_type(callee),
+                            Some(HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret))
+                                if matches!(ret.as_ref(), HirType::Promise(_))))
                     // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
                     || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                         if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), body)

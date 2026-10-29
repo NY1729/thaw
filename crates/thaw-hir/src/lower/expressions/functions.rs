@@ -10,7 +10,9 @@ impl<'a> FnLowerer<'a> {
         let function_var_names = std::mem::take(&mut self.function_var_names);
         let source_return = self.source_ret_type.take();
         let source_scope = self.source_scope.clone();
+        let implicit_any_callbacks = std::mem::take(&mut self.implicit_any_callbacks);
         let result = lower(self);
+        self.implicit_any_callbacks = implicit_any_callbacks;
         self.source_ret_type = source_return;
         self.source_scope = source_scope;
         self.function_var_names = function_var_names;
@@ -173,6 +175,169 @@ impl<'a> FnLowerer<'a> {
                     .into(),
             ),
             _ => Ok(value),
+        }
+    }
+
+    /// Lowers a top-level `const`/`let` initializer. A function-valued global is visible
+    /// inside its own body (`const fib = (n) => ... fib(n - 1)`, `const f = function g() { g() }`),
+    /// so it is bound before lowering; the flag says the caller must not bind it again.
+    fn lower_global_initializer(
+        &mut self,
+        name: &Symbol,
+        init: &Expr,
+        expected: &HirType,
+    ) -> Result<(HirExpr, bool), String> {
+        // An unannotated `const f = (n: number): number => ...` is still `Dynamic` here;
+        // its fully written-out signature gives the type its own body sees.
+        let self_type = match expected {
+            HirType::Function(..) | HirType::CallableFunction(..) => Some(expected.clone()),
+            HirType::Dynamic => self.written_out_function_type(init),
+            _ => None,
+        };
+        let function_init = matches!(init, Expr::Arrow(_) | Expr::Fn(_)) && self_type.is_some();
+        let mut internal_name = None;
+        if let (true, Some(self_type)) = (function_init, &self_type) {
+            self.scope.insert(name.clone(), self_type.clone());
+            self.bindings.entry(name.clone()).or_default().push(name.clone());
+            if let Expr::Fn(function) = init {
+                internal_name = function
+                    .ident
+                    .as_ref()
+                    .map(|ident| ident.sym.to_string())
+                    .filter(|internal| internal != name);
+                if let Some(internal) = &internal_name {
+                    self.bindings.entry(internal.clone()).or_default().push(name.clone());
+                }
+            }
+        }
+        let lowered = if let Some(lowered) = self.lower_contextual_function_initializer(init, expected) {
+            lowered
+        } else if *expected == HirType::Json {
+            self.lower_expr_with_expected_type(init, Some(expected))
+        } else {
+            self.lower_expr(init)
+        };
+        if let Some(stack) = internal_name.and_then(|internal| self.bindings.get_mut(&internal)) {
+            stack.pop();
+        }
+        Ok((lowered?, function_init))
+    }
+
+    /// The type of a non-generic, non-async-generator function expression whose every
+    /// parameter and its return type are annotated (`(n: number): number => ...`).
+    fn written_out_function_type(&self, init: &Expr) -> Option<HirType> {
+        let (params, return_type, generator, generic) = match init {
+            Expr::Arrow(arrow) => (
+                arrow.params.iter().collect::<Vec<_>>(),
+                arrow.return_type.as_ref()?,
+                arrow.is_generator,
+                arrow.type_params.is_some(),
+            ),
+            Expr::Fn(function) => (
+                function.function.params.iter().map(|param| &param.pat).collect(),
+                function.function.return_type.as_ref()?,
+                function.function.is_generator,
+                function.function.type_params.is_some(),
+            ),
+            _ => return None,
+        };
+        if generator || generic {
+            return None;
+        }
+        let mut types = Vec::with_capacity(params.len());
+        for param in params {
+            let Pat::Ident(binding) = param else { return None };
+            if binding.id.optional {
+                return None;
+            }
+            let annotation = binding.type_ann.as_ref()?;
+            types.push(lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces).ok()?);
+        }
+        let ret = lower_ts_type(&return_type.type_ann, self.interfaces, self.generic_interfaces).ok()?;
+        Some(HirType::Function(types, Box::new(ret)))
+    }
+
+    /// A function-valued initializer whose unannotated parameters take their types from
+    /// the declared function type (`const f: (a: number) => number = (x) => x`), the way
+    /// a local `const` already does. `None` when every parameter is annotated (nothing
+    /// to infer) or the shapes do not pair up.
+    fn lower_contextual_function_initializer(
+        &mut self,
+        init: &Expr,
+        expected: &HirType,
+    ) -> Option<Result<HirExpr, String>> {
+        let unannotated = |pat: &Pat| matches!(pat, Pat::Ident(binding) if binding.type_ann.is_none());
+        let needs_context = match init {
+            Expr::Arrow(arrow) => arrow.params.iter().any(unannotated),
+            Expr::Fn(function) => function.function.params.iter().any(|param| unannotated(&param.pat)),
+            Expr::Object(object) => object.props.iter().any(|prop| match prop {
+                swc_ecma_ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
+                    Prop::Method(method) => method.function.params.iter().any(|param| unannotated(&param.pat)),
+                    Prop::KeyValue(KeyValueProp { value, .. }) => match value.as_ref() {
+                        Expr::Arrow(arrow) => arrow.params.iter().any(unannotated),
+                        Expr::Fn(function) => function.function.params.iter().any(|param| unannotated(&param.pat)),
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            }),
+            _ => false,
+        };
+        if !needs_context {
+            return None;
+        }
+        if matches!(init, Expr::Object(_)) {
+            return matches!(expected, HirType::Object(_))
+                .then(|| self.lower_expr_with_expected_type(init, Some(expected)));
+        }
+        let (params, ret) = match expected {
+            HirType::Function(params, ret) => (params.clone(), ret.as_ref().clone()),
+            HirType::CallableFunction(params, _, rest, ret) => {
+                let mut params = params.clone();
+                if let Some(rest) = rest {
+                    params.push(HirType::Array(rest.clone()));
+                }
+                (params, ret.as_ref().clone())
+            }
+            _ => return None,
+        };
+        self.stored_arrow_initializer = true;
+        let lowered = match init {
+            Expr::Arrow(arrow) => self.lower_contextual_arrow(arrow, &params, Some(&ret)),
+            Expr::Fn(function) => self.lower_function_expression(function, Some((&params, Some(&ret)))),
+            _ => unreachable!("checked above"),
+        };
+        self.stored_arrow_initializer = false;
+        Some(lowered)
+    }
+
+    /// An unannotated callback written where `any` is expected: its parameters are
+    /// contextually `any` (live `JsValue`s), as in TypeScript. `None` when there is
+    /// nothing to infer or a parameter is not a plain identifier.
+    fn lower_implicit_any_callback(&mut self, expr: &Expr) -> Option<Result<HirExpr, String>> {
+        let simple = |pat: &Pat| matches!(pat, Pat::Ident(_));
+        let unannotated = |pat: &Pat| matches!(pat, Pat::Ident(binding) if binding.type_ann.is_none());
+        match expr {
+            Expr::Arrow(arrow)
+                if arrow.params.iter().all(simple)
+                    && arrow.params.iter().any(unannotated)
+                    && !arrow.is_generator
+                    && arrow.type_params.is_none() =>
+            {
+                let params = vec![HirType::JsValue; arrow.params.len()];
+                Some(self.lower_contextual_arrow(arrow, &params, None))
+            }
+            Expr::Fn(function)
+                if function.function.params.iter().all(|param| simple(&param.pat))
+                    && function.function.params.iter().any(|param| unannotated(&param.pat))
+                    && !function.function.is_generator
+                    && function.function.type_params.is_none() =>
+            {
+                let params = vec![HirType::JsValue; function.function.params.len()];
+                Some(self.lower_function_expression(function, Some((&params, None))))
+            }
+            _ => None,
         }
     }
 

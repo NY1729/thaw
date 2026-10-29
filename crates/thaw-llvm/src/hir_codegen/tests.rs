@@ -769,3 +769,4 @@ include!("tests/library_mode.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");
 include!("tests/anon_fn_contracts.rs");
+include!("tests/inference_audit_contracts.rs");
