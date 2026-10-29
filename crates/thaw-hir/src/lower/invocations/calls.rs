@@ -1681,6 +1681,11 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"ArrayBuffer" && property.sym == *"isView" {
+                        if let Some(native) = self.lower_native_array_buffer_is_view(call)? {
+                            return Ok(native);
+                        }
+                    }
                     if Self::is_static_builtin_call(object.sym.as_ref(), property.sym.as_ref()) {
                         return self.lower_static_builtin_call(object, property, call);
                     }
@@ -1984,7 +1989,9 @@ impl<'a> FnLowerer<'a> {
                     ));
                 let defer_native = self.peek_type_without_lowering(&member.obj).is_none()
                     && matches!(member.obj.as_ref(), Expr::Call(_) | Expr::New(_));
-                if Self::is_native_instance_builtin(property.sym.as_ref())
+                if (Self::is_native_instance_builtin(property.sym.as_ref())
+                    || (Self::is_native_view_only_method(property.sym.as_ref())
+                        && self.receiver_is_bytes(&member.obj)))
                     && !receiver_is_dynamic
                     && !own_callable
                     && !defer_native

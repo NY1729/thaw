@@ -758,6 +758,7 @@ include!("tests/errrest2_contracts.rs");
 
 include!("tests/oobread_contracts.rs");
 include!("tests/bufu8_contracts.rs");
+include!("tests/arraybuffer_contracts.rs");
 include!("tests/lim3_contracts.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");

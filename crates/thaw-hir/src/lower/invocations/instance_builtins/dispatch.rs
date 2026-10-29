@@ -717,6 +717,10 @@ impl<'a> FnLowerer<'a> {
             other if Self::bytes_bigint_accessor(other).is_some() => {
                 self.lower_native_bytes_bigint_accessor(member, property, call)
             }
+            "transfer" | "transferToFixedLength" => self.lower_native_arraybuffer_transfer(member, property, call),
+            other if Self::dataview_accessor(other).is_some() => {
+                self.lower_native_dataview_access(member, property, call)
+            }
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }
     }
