@@ -2080,6 +2080,7 @@ fn lower_generic_instance(
         signature,
         types,
     );
+    record_fn_loc(&specialized_name, fn_decl.function.span);
     Ok(HirFunction {
         name: specialized_name,
         params,
