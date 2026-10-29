@@ -81,9 +81,20 @@ pub enum Value {
     Str(Rc<str>),
     BigInt(Rc<num_bigint::BigInt>),
     Object(Obj),
+    /// An empty array slot (`[1,,3]`, `new Array(3)`, `delete a[i]`). Only ever stored inside
+    /// `Kind::Array`; every read path maps it to `undefined`.
+    Hole,
 }
 
 pub type Obj = Rc<ObjData>;
+
+/// An array slot as seen by user code: holes read as `undefined`.
+pub(crate) fn unhole(v: Option<&Value>) -> Value {
+    match v {
+        None | Some(Value::Hole) => Value::Undefined,
+        Some(v) => v.clone(),
+    }
+}
 
 pub struct ObjData {
     props: RefCell<Vec<Prop>>,
@@ -163,6 +174,8 @@ enum Kind {
     Proxy(Rc<proxy::ProxyData>),
     ArrayBuffer(typed::Bytes),
     Typed(typed::TypedArr),
+    /// `new Number(1)` / `new String('a')` / `new Boolean(true)`.
+    Wrapper(Value),
 }
 
 type NativeFn = Rc<dyn Fn(&mut Interp, &Value, &[Value]) -> R<Value>>;
@@ -427,7 +440,7 @@ impl Value {
     }
     fn truthy(&self) -> bool {
         match self {
-            Value::Undefined | Value::Null => false,
+            Value::Undefined | Value::Hole | Value::Null => false,
             Value::Bool(b) => *b,
             Value::Number(n) => !(*n == 0.0 || n.is_nan()),
             Value::Str(s) => !s.is_empty(),
@@ -791,7 +804,7 @@ impl Interp {
 
     pub fn to_str(&mut self, v: &Value) -> Rc<str> {
         match v {
-            Value::Undefined => "undefined".into(),
+            Value::Undefined | Value::Hole => "undefined".into(),
             Value::Null => "null".into(),
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             Value::Number(n) => number_to_string(*n).into(),
@@ -815,7 +828,7 @@ impl Interp {
 
     pub fn num(&mut self, v: &Value) -> f64 {
         match v {
-            Value::Undefined => f64::NAN,
+            Value::Undefined | Value::Hole => f64::NAN,
             Value::Null => 0.0,
             Value::Bool(b) => *b as u8 as f64,
             Value::Number(n) => *n,
@@ -836,18 +849,16 @@ impl Interp {
             },
             _ => Vec::new(),
         };
-        items
-            .iter()
-            .map(|v| {
-                if matches!(v, Value::Undefined | Value::Null) {
-                    Rc::from("")
-                } else {
-                    self.to_str(v)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(sep)
-            .into()
+        let mut out = String::new();
+        for (i, v) in items.iter().enumerate() {
+            if i > 0 {
+                builtins::push_joined(&mut out, sep);
+            }
+            if !matches!(v, Value::Undefined | Value::Null | Value::Hole) {
+                builtins::push_joined(&mut out, &self.to_str(v));
+            }
+        }
+        out.into()
     }
 
     /// `console.log`-style rendering (a small subset of Node's util.inspect).
@@ -883,6 +894,12 @@ impl Interp {
                     | Kind::Proxy(_)
                     | Kind::Symbol { .. } => K::Plain,
                     Kind::Promise(_) => K::Prom,
+                    Kind::Wrapper(p) => K::Bytes(match p {
+                        Value::Number(n) => format!("[Number: {}]", number_to_string(*n)),
+                        Value::Str(s) => format!("[String: '{s}']"),
+                        Value::Bool(b) => format!("[Boolean: {b}]"),
+                        _ => "[Object]".into(),
+                    }),
                     Kind::ArrayBuffer(b) => {
                         let b = b.borrow();
                         let shown: Vec<String> =
@@ -939,14 +956,27 @@ impl Interp {
                 };
                 match kind {
                     K::Arr(items) if items.is_empty() => "[]".into(),
-                    K::Arr(items) => format!(
-                        "[ {} ]",
-                        items
-                            .iter()
-                            .map(|i| self.inspect(i, false))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
+                    K::Arr(items) => {
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut i = 0;
+                        while i < items.len() {
+                            if matches!(items[i], Value::Hole) {
+                                let n = items[i..]
+                                    .iter()
+                                    .take_while(|v| matches!(v, Value::Hole))
+                                    .count();
+                                parts.push(format!(
+                                    "<{n} empty item{}>",
+                                    if n == 1 { "" } else { "s" }
+                                ));
+                                i += n;
+                            } else {
+                                parts.push(self.inspect(&items[i], false));
+                                i += 1;
+                            }
+                        }
+                        format!("[ {} ]", parts.join(", "))
+                    }
                     K::Fun => match self.get(v, "name") {
                         Ok(Value::Str(n)) if !n.is_empty() => format!("[Function: {n}]"),
                         _ => "[Function (anonymous)]".into(),
@@ -1015,10 +1045,17 @@ impl Interp {
                 }
                 let mut keys: Vec<Rc<str>> = Vec::new();
                 if let Kind::Array(items) = &*o.kind.borrow() {
-                    keys.extend((0..items.len()).map(|i| Rc::from(i.to_string())));
+                    keys.extend(
+                        (0..items.len())
+                            .filter(|&i| !matches!(items[i], Value::Hole))
+                            .map(|i| Rc::from(i.to_string())),
+                    );
                 }
                 if let Kind::Typed(t) = &*o.kind.borrow() {
                     keys.extend((0..t.len).map(|i| Rc::from(i.to_string())));
+                }
+                if let Kind::Wrapper(Value::Str(s)) = &*o.kind.borrow() {
+                    keys.extend((0..builtins::str_len(s)).map(|i| Rc::from(i.to_string())));
                 }
                 let own: Vec<Rc<str>> = o
                     .props
@@ -1030,7 +1067,7 @@ impl Interp {
                 keys.extend(order_keys(own));
                 keys
             }
-            Value::Str(s) => (0..s.chars().count())
+            Value::Str(s) => (0..builtins::str_len(s))
                 .map(|i| Rc::from(i.to_string()))
                 .collect(),
             _ => Vec::new(),
@@ -1055,7 +1092,7 @@ impl Interp {
 
     pub fn get(&mut self, target: &Value, key: &str) -> R<Value> {
         let start = match target {
-            Value::Undefined | Value::Null => {
+            Value::Undefined | Value::Hole | Value::Null => {
                 let what = if matches!(target, Value::Null) {
                     "null"
                 } else {
@@ -1068,13 +1105,12 @@ impl Interp {
             }
             Value::Str(s) => {
                 if key == "length" {
-                    return Ok(Value::Number(s.chars().count() as f64));
+                    return Ok(Value::Number(builtins::str_len(s) as f64));
                 }
                 if let Ok(i) = key.parse::<usize>() {
-                    return Ok(s
-                        .chars()
-                        .nth(i)
-                        .map_or(Value::Undefined, |c| Value::Str(c.to_string().into())));
+                    return Ok(builtins::str_unit_at(s, i).map_or(Value::Undefined, |u| {
+                        Value::Str(builtins::units_str(&[u]).into())
+                    }));
                 }
                 self.string_proto.clone()
             }
@@ -1099,7 +1135,19 @@ impl Interp {
                         return Ok(Value::Number(items.len() as f64));
                     }
                     if let Ok(i) = key.parse::<usize>() {
-                        return Ok(items.get(i).cloned().unwrap_or(Value::Undefined));
+                        return Ok(unhole(items.get(i)));
+                    }
+                }
+                if let Kind::Wrapper(Value::Str(s)) = &*o.kind.borrow() {
+                    if key == "length" {
+                        return Ok(Value::Number(builtins::str_len(s) as f64));
+                    }
+                    if let Some(u) = key
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|i| builtins::str_unit_at(s, i))
+                    {
+                        return Ok(Value::Str(builtins::units_str(&[u]).into()));
                     }
                 }
                 if let Kind::Typed(t) = &*o.kind.borrow() {
@@ -1176,7 +1224,7 @@ impl Interp {
         if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
             if let Ok(i) = key.parse::<usize>() {
                 if i >= items.len() {
-                    items.resize(i + 1, Value::Undefined); // ponytail: holes read as undefined
+                    items.resize(i + 1, Value::Hole);
                 }
                 items[i] = value;
                 return Ok(());
@@ -1186,7 +1234,7 @@ impl Interp {
                     Value::Number(n) if n >= 0.0 => n as usize,
                     _ => 0,
                 };
-                items.resize(n, Value::Undefined);
+                items.resize(n, Value::Hole);
                 return Ok(());
             }
         }
@@ -1254,7 +1302,17 @@ impl Interp {
         }
         self.depth += 1;
         let result = match callee {
-            Callee::Native(n) => n(self, this, args),
+            Callee::Native(n) => {
+                // natives on a wrapper object's prototype chain see the wrapped primitive
+                let prim = match this {
+                    Value::Object(o) => match &*o.kind.borrow() {
+                        Kind::Wrapper(p) => Some(p.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                n(self, prim.as_ref().unwrap_or(this), args)
+            }
             Callee::Closure(def, scope) => self.call_closure(f, &def, &scope, this, args),
             Callee::Class(n) => self.throw_error(
                 "TypeError",
@@ -1369,6 +1427,9 @@ impl Interp {
             let r = self.call(f, &Value::Undefined, args);
             self.rt.constructing = false;
             let r = r?;
+            if !matches!(r, Value::Object(_)) && find_own(fo, "@@wrap").is_some() {
+                return Ok(Value::Object(new_obj(Some(proto), Kind::Wrapper(r))));
+            }
             return Ok(r);
         }
         let this = Value::Object(new_obj(Some(proto), Kind::Plain));
@@ -2130,7 +2191,13 @@ impl Interp {
         match e {
             a::Expr::Lit(l) => Ok(match l {
                 a::Lit::Num(n) => Value::Number(n.value),
-                a::Lit::Str(s) => Value::str(s.value.as_str().unwrap_or("")), // ponytail: lone surrogates lost
+                a::Lit::Str(s) => match s.value.as_str() {
+                    Some(x) => Value::str(x),
+                    None => Value::Str(
+                        builtins::units_str(&s.value.to_ill_formed_utf16().collect::<Vec<u16>>())
+                            .into(),
+                    ),
+                },
                 a::Lit::Bool(b) => Value::Bool(b.value),
                 a::Lit::Null(_) => Value::Null,
                 a::Lit::Regex(r) => return self.new_regexp(&r.exp, &r.flags),
@@ -2150,10 +2217,13 @@ impl Interp {
             a::Expr::Tpl(t) => {
                 let mut s = String::new();
                 for (i, q) in t.quasis.iter().enumerate() {
-                    s.push_str(q.cooked.as_ref().and_then(|c| c.as_str()).unwrap_or(""));
+                    builtins::push_joined(
+                        &mut s,
+                        q.cooked.as_ref().and_then(|c| c.as_str()).unwrap_or(""),
+                    );
                     if let Some(e) = t.exprs.get(i) {
                         let v = self.eval(e, scope)?;
-                        s.push_str(&self.to_str(&v));
+                        builtins::push_joined(&mut s, &self.to_str(&v));
                     }
                 }
                 Ok(Value::Str(s.into()))
@@ -2163,7 +2233,7 @@ impl Interp {
                 for el in &arr.elems {
                     match el {
                         Some(el) => items.extend(self.eval_args(std::slice::from_ref(el), scope)?),
-                        None => items.push(Value::Undefined),
+                        None => items.push(Value::Hole),
                     }
                 }
                 Ok(self.array(items))
@@ -2477,7 +2547,7 @@ impl Interp {
                     other => self.eval(other, scope)?,
                 };
                 Ok(Value::str(match &v {
-                    Value::Undefined => "undefined",
+                    Value::Undefined | Value::Hole => "undefined",
                     Value::Null => "object",
                     Value::Bool(_) => "boolean",
                     Value::Number(_) => "number",
@@ -2502,6 +2572,12 @@ impl Interp {
                     }
                     if o.frozen.get() || o.ext.get() == 2 {
                         return Ok(Value::Bool(false));
+                    }
+                    if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+                        if let Some(slot) = key.parse::<usize>().ok().and_then(|i| items.get_mut(i))
+                        {
+                            *slot = Value::Hole;
+                        }
                     }
                     o.remove_prop(&key);
                 }
@@ -2657,7 +2733,7 @@ impl Interp {
     fn get_index(&mut self, obj: &Value, i: usize) -> R<Value> {
         if let Value::Object(o) = obj {
             match &*o.kind.borrow() {
-                Kind::Array(items) => return Ok(items.get(i).cloned().unwrap_or(Value::Undefined)),
+                Kind::Array(items) => return Ok(unhole(items.get(i))),
                 Kind::Typed(t) => return Ok(t.get(i).map_or(Value::Undefined, Value::Number)),
                 _ => {}
             }
@@ -2737,7 +2813,7 @@ impl Interp {
                 let (lp, rp) = (l.clone(), r.clone());
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
                     let mut s = self.to_str(&lp).to_string();
-                    s.push_str(&self.to_str(&rp));
+                    builtins::push_joined(&mut s, &self.to_str(&rp));
                     Value::Str(s.into())
                 } else {
                     Value::Number(self.num(&lp) + self.num(&rp))

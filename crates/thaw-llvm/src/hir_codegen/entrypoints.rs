@@ -1115,7 +1115,7 @@ impl<'ctx> HirCompiler<'ctx> {
             IntPredicate::NE, native_before, native_before.get_type().const_zero(),
             "terminal_native_before_progress",
         ).unwrap();
-        if self.uses_quickjs || self.uses_quickjs_handles {
+        if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
             let status = self.builder.build_call(
                 self.module.get_function("thaw_js_run_event_loop").unwrap(), &[],
                 "terminal_quickjs_jobs",
