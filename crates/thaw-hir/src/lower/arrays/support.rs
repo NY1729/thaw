@@ -585,18 +585,10 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("__thaw_array_slice".into())),
             vec![variable(&receiver_name), number(0.0), number(f64::INFINITY)],
         );
-        let inner_index = variable(&inner_name);
-        let next_index = add_one(inner_index.clone());
-        let left_value = HirExpr::TypedIndex(
-            Box::new(variable(&array_name)),
-            Box::new(inner_index.clone()),
-            element_type.clone(),
-        );
-        let right_value = HirExpr::TypedIndex(
-            Box::new(variable(&array_name)),
-            Box::new(next_index.clone()),
-            element_type.clone(),
-        );
+        // Stable bottom-up merge sort (O(n log n) comparator calls) over the
+        // compacted working copy: runs of `width` are merged into `tmp` and
+        // copied back. The comparator sees (earlier, later) pairs and the
+        // later element wins only when it returns > 0, as in V8.
         let compare = HirExpr::Call(
             Box::new(variable(&comparator_name)),
             vec![
@@ -605,21 +597,124 @@ impl<'a> FnLowerer<'a> {
             ],
         );
         let should_swap = HirExpr::BinOp(BinOp::Gt, Box::new(compare), Box::new(number(0.0)));
-        let inner_limit = HirExpr::BinOp(
-            BinOp::Sub,
-            Box::new(variable(&length_name)),
-            Box::new(variable(&outer_name)),
-        );
-        let inner_condition = HirExpr::BinOp(
-            BinOp::Lt,
-            Box::new(add_one(variable(&inner_name))),
-            Box::new(inner_limit),
-        );
-        let outer_condition = HirExpr::BinOp(
-            BinOp::Lt,
-            Box::new(variable(&outer_name)),
-            Box::new(variable(&length_name)),
-        );
+        let tmp_name = format!("__thaw_sort_tmp_{}", self.next_binding);
+        self.next_binding += 1;
+        let names: Vec<String> = ["width", "lo", "mid", "hi", "k", "take", "copy"]
+            .iter()
+            .map(|label| {
+                self.next_binding += 1;
+                format!("__thaw_sort_{label}_{}", self.next_binding)
+            })
+            .collect();
+        let [width, lo, mid, hi, k, take, copy_index] = &names[..] else {
+            unreachable!()
+        };
+        self.scope.insert(tmp_name.clone(), array_type.clone());
+        for name in &names {
+            self.scope.insert(name.clone(), HirType::F64);
+        }
+        // `inner_name` = i (left cursor), `outer_name` is unused by the merge.
+        let i = &inner_name;
+        let j = format!("__thaw_sort_j_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(j.clone(), HirType::F64);
+        let elem = |array: &str, index: &str| {
+            HirExpr::TypedIndex(
+                Box::new(variable(array)),
+                Box::new(variable(index)),
+                element_type.clone(),
+            )
+        };
+        let assign = |name: &str, value: HirExpr| HirStmt::Expr(HirExpr::Assign(name.to_string(), Box::new(value)));
+        let lt = |l: HirExpr, r: HirExpr| HirExpr::BinOp(BinOp::Lt, Box::new(l), Box::new(r));
+        let clamp_to_length = |name: &str| {
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::Gt, Box::new(variable(name)), Box::new(variable(&length_name))),
+                vec![assign(name, variable(&length_name))],
+                Vec::new(),
+            )
+        };
+        let merge_step = vec![
+            assign(take, number(0.0)),
+            HirStmt::If(
+                lt(variable(i), variable(mid)),
+                vec![HirStmt::If(
+                    lt(variable(&j), variable(hi)),
+                    vec![
+                        HirStmt::Let(left_name.clone(), element_type.clone(), elem(&array_name, i)),
+                        HirStmt::Let(right_name.clone(), element_type.clone(), elem(&array_name, &j)),
+                        HirStmt::If(should_swap, Vec::new(), vec![assign(take, number(1.0))]),
+                    ],
+                    vec![assign(take, number(1.0))],
+                )],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::EqEqEq, Box::new(variable(take)), Box::new(number(1.0))),
+                vec![
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(variable(&tmp_name)),
+                        Box::new(variable(k)),
+                        Box::new(elem(&array_name, i)),
+                    )),
+                    assign(i, add_one(variable(i))),
+                ],
+                vec![
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(variable(&tmp_name)),
+                        Box::new(variable(k)),
+                        Box::new(elem(&array_name, &j)),
+                    )),
+                    assign(&j, add_one(variable(&j))),
+                ],
+            ),
+            assign(k, add_one(variable(k))),
+        ];
+        let merge_run = vec![
+            assign(mid, HirExpr::BinOp(BinOp::Add, Box::new(variable(lo)), Box::new(variable(width)))),
+            clamp_to_length(mid),
+            assign(
+                hi,
+                HirExpr::BinOp(
+                    BinOp::Add,
+                    Box::new(variable(lo)),
+                    Box::new(HirExpr::BinOp(BinOp::Mul, Box::new(variable(width)), Box::new(number(2.0)))),
+                ),
+            ),
+            clamp_to_length(hi),
+            assign(i, variable(lo)),
+            assign(&j, variable(mid)),
+            assign(k, variable(lo)),
+            HirStmt::While(lt(variable(k), variable(hi)), merge_step),
+            assign(
+                lo,
+                HirExpr::BinOp(
+                    BinOp::Add,
+                    Box::new(variable(lo)),
+                    Box::new(HirExpr::BinOp(BinOp::Mul, Box::new(variable(width)), Box::new(number(2.0)))),
+                ),
+            ),
+        ];
+        let copy_back = vec![
+            assign(copy_index, number(0.0)),
+            HirStmt::While(
+                lt(variable(copy_index), variable(&length_name)),
+                vec![
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(variable(&array_name)),
+                        Box::new(variable(copy_index)),
+                        Box::new(elem(&tmp_name, copy_index)),
+                    )),
+                    assign(copy_index, add_one(variable(copy_index))),
+                ],
+            ),
+        ];
+        let mut pass = vec![assign(lo, number(0.0)), HirStmt::While(lt(variable(lo), variable(&length_name)), merge_run)];
+        pass.extend(copy_back);
+        pass.push(assign(
+            width,
+            HirExpr::BinOp(BinOp::Mul, Box::new(variable(width)), Box::new(number(2.0))),
+        ));
         let result = if copy {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_densify".into())),
@@ -638,44 +733,24 @@ impl<'a> FnLowerer<'a> {
                     vec![variable(&array_name)],
                 ),
             ),
-            HirStmt::Let(outer_name.clone(), HirType::F64, number(0.0)),
-            HirStmt::While(
-                outer_condition,
-                vec![
-                    HirStmt::Let(inner_name.clone(), HirType::F64, number(0.0)),
-                    HirStmt::While(
-                        inner_condition,
-                        vec![
-                            HirStmt::Let(left_name.clone(), element_type.clone(), left_value),
-                            HirStmt::Let(right_name.clone(), element_type.clone(), right_value),
-                            HirStmt::If(
-                                should_swap,
-                                vec![
-                                    HirStmt::Expr(HirExpr::IndexAssign(
-                                        Box::new(variable(&array_name)),
-                                        Box::new(variable(&inner_name)),
-                                        Box::new(variable(&right_name)),
-                                    )),
-                                    HirStmt::Expr(HirExpr::IndexAssign(
-                                        Box::new(variable(&array_name)),
-                                        Box::new(add_one(variable(&inner_name))),
-                                        Box::new(variable(&left_name)),
-                                    )),
-                                ],
-                                Vec::new(),
-                            ),
-                            HirStmt::Expr(HirExpr::Assign(
-                                inner_name.clone(),
-                                Box::new(add_one(variable(&inner_name))),
-                            )),
-                        ],
-                    ),
-                    HirStmt::Expr(HirExpr::Assign(
-                        outer_name.clone(),
-                        Box::new(add_one(variable(&outer_name))),
-                    )),
-                ],
+            HirStmt::Let(
+                tmp_name.clone(),
+                array_type.clone(),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                    vec![variable(&array_name), number(0.0), number(f64::INFINITY)],
+                ),
             ),
+            HirStmt::Let(width.clone(), HirType::F64, number(1.0)),
+            HirStmt::Let(lo.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(mid.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(hi.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(k.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(take.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(copy_index.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(inner_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(j.clone(), HirType::F64, number(0.0)),
+            HirStmt::While(lt(variable(width), variable(&length_name)), pass),
         ];
         if !copy {
             let write_index = format!("__thaw_sort_write_{}", self.next_binding);

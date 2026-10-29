@@ -453,6 +453,11 @@ pub struct HirCompiler<'ctx> {
     /// Only prepromoted JsValue cells have a pending first-capture retain.
     /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
     pending_js_capture_claims: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    /// Names some closure in the program captures; `None` disables in-place
+    /// string appends (unknown program).
+    captured_names: Option<std::collections::BTreeSet<String>>,
+    /// Loop-local string variable cell -> its `[owned, len, cap]` append state.
+    string_append_states: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
     async_frame_slot_owners: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     stack_promise_slots: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
@@ -837,6 +842,8 @@ impl<'ctx> HirCompiler<'ctx> {
             encoding_class_instance_fields: false,
             arena_variables: HashSet::new(),
             pending_js_capture_claims: HashMap::new(),
+            captured_names: None,
+            string_append_states: HashMap::new(),
             async_frame_cells: HashSet::new(),
             async_frame_slot_owners: HashMap::new(),
             stack_promise_slots: HashMap::new(),
@@ -923,6 +930,12 @@ impl<'ctx> HirCompiler<'ctx> {
         for func in &program.functions {
             self.declare_function(func)?;
         }
+        self.captured_names = Some(
+            thaw_hir::closure_captured_names_deep(program)
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect(),
+        );
         let quickjs_before_init = self.uses_quickjs;
         self.emit_top_level_init(program)?;
         if !quickjs_before_init

@@ -30,10 +30,43 @@ pub fn closure_captured_names_in_while(cond: &HirExpr, body: &[HirStmt]) -> BTre
     names
 }
 
+thread_local! {
+    static DEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Every name any closure anywhere in `program` captures, descending into
+/// closure bodies (a closure's own locals can be captured by an inner one).
+/// Names are not scoped, so the result over-approximates -- safe for a caller
+/// that only needs "this variable is certainly never captured".
+pub fn closure_captured_names_deep(program: &HirProgram) -> BTreeSet<Symbol> {
+    DEEP.with(|deep| deep.set(true));
+    let mut names = BTreeSet::new();
+    for function in &program.functions {
+        for stmt in &function.body {
+            collect_closure_captures_stmt(stmt, &mut names);
+        }
+    }
+    for step in &program.initializers {
+        match step {
+            HirInitStep::StoreGlobal(_, expr) => collect_closure_captures_expr(expr, &mut names),
+            HirInitStep::Statement(stmt) => collect_closure_captures_stmt(stmt, &mut names),
+            _ => {}
+        }
+    }
+    for global in &program.globals {
+        collect_closure_captures_expr(&global.init, &mut names);
+    }
+    DEEP.with(|deep| deep.set(false));
+    names
+}
+
 fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
     match expr {
-        HirExpr::Lambda(captures, _, _, _) => {
+        HirExpr::Lambda(captures, _, _, body) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
+            if DEEP.with(std::cell::Cell::get) {
+                collect_closure_captures_expr(body, names);
+            }
         }
         HirExpr::Var(_) | HirExpr::PostfixUpdate(_, _) => {}
         HirExpr::NonArrowThis { payload, .. } => collect_closure_captures_expr(payload, names),
