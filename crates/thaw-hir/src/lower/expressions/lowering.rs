@@ -2319,14 +2319,30 @@ impl<'a> FnLowerer<'a> {
                     // path, above), handled by the ordinary dynamic-
                     // value dispatch below; only `Uint8Array`/`Array`
                     // need this dedicated native-shape check.
-                    if matches!(class.sym.as_ref(), "Uint8Array" | "Array")
+                    if matches!(class.sym.as_ref(), "Uint8Array" | "Array" | "ArrayBuffer" | "DataView")
                         && self.infer_expr_type_inner(&value)? == HirType::Bytes
                     {
                         let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
+                        // A native view's kind: 0 Buffer / Uint8Array, 1 ArrayBuffer, 2 DataView.
+                        let result = match class.sym.as_ref() {
+                            "Array" => HirExpr::Lit(HirLit::Bool(false)),
+                            other => HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_bytes_kind".into())),
+                                    vec![HirExpr::Var(name.clone())],
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(match other {
+                                    "ArrayBuffer" => 1.0,
+                                    "DataView" => 2.0,
+                                    _ => 0.0,
+                                }))),
+                            ),
+                        };
                         return self.wrap_call_argument_bindings(
-                            HirExpr::Lit(HirLit::Bool(class.sym == *"Uint8Array")),
+                            result,
                             &[(name, value_type.clone(), value)],
                         );
                     }
@@ -4804,6 +4820,11 @@ impl<'a> FnLowerer<'a> {
                                 "`new {}()` does not support spread arguments",
                                 class.sym
                             ));
+                        }
+                        if let Some(native) =
+                            self.lower_native_arraybuffer_constructor(class.sym.as_ref(), args)?
+                        {
+                            return Ok(native);
                         }
                         if self.is_buffer_view_constructor(class.sym.as_ref(), args)? {
                             return self.lower_buffer_view_constructor(args);

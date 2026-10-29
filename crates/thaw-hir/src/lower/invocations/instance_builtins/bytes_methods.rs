@@ -25,7 +25,7 @@ impl<'a> FnLowerer<'a> {
         class: &str,
         args: &[swc_ecma_ast::ExprOrSpread],
     ) -> Result<bool, String> {
-        if class != "Uint8Array" || !(2..=3).contains(&args.len()) {
+        if class != "Uint8Array" || !(1..=3).contains(&args.len()) {
             return Ok(false);
         }
         let source = self.lower_expr(&args[0].expr)?;
@@ -38,8 +38,13 @@ impl<'a> FnLowerer<'a> {
         args: &[swc_ecma_ast::ExprOrSpread],
     ) -> Result<HirExpr, String> {
         let source = self.lower_expr(&args[0].expr)?;
-        let offset = self.lower_expr(&args[1].expr)?;
-        let offset = self.coerce_primitive_to_number(offset)?;
+        let offset = match args.get(1) {
+            Some(argument) => {
+                let offset = self.lower_expr(&argument.expr)?;
+                self.coerce_primitive_to_number(offset)?
+            }
+            None => HirExpr::Lit(HirLit::F64(f64::NAN)),
+        };
         let length = match args.get(2) {
             Some(argument) => {
                 let length = self.lower_expr(&argument.expr)?;
@@ -258,7 +263,9 @@ impl<'a> FnLowerer<'a> {
         let text = |value: &str| HirExpr::Lit(HirLit::Str(value.to_string()));
         let mut all = vec![text("\u{1}RangeError\u{1}")];
         all.extend(parts);
-        all.push(text(&format!("\u{3}{code}")));
+        if !code.is_empty() {
+            all.push(text(&format!("\u{3}{code}")));
+        }
         let message = all
             .into_iter()
             .reduce(|left, right| {
@@ -549,6 +556,233 @@ impl<'a> FnLowerer<'a> {
             )
         };
         self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// `new ArrayBuffer(n)` / `new DataView(buffer, byteOffset?, byteLength?)` over a native
+    /// byte view; `None` for any other shape (the dynamic constructor path handles those).
+    #[inline(never)]
+    fn lower_native_arraybuffer_constructor(
+        &mut self,
+        class: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<Option<HirExpr>, String> {
+        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+        let text = |value: &str| HirExpr::Lit(HirLit::Str(value.to_string()));
+        let to_text = |value: &HirExpr| {
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_number_to_string".into())), vec![value.clone()])
+        };
+        let branch = |cond: HirExpr, then: HirExpr, other: HirExpr| {
+            HirExpr::Conditional(Box::new(cond), Box::new(then), Box::new(other), HirType::F64)
+        };
+        let mut bindings = Vec::new();
+        let result = match (class, args.len()) {
+            ("ArrayBuffer", 0 | 1) => {
+                let size = match args.first() {
+                    Some(argument) => {
+                        let size = self.lower_expr(&argument.expr)?;
+                        self.coerce_primitive_to_number(size)?
+                    }
+                    None => number(0.0),
+                };
+                let size = self.bind_bytes_number("__thaw_arraybuffer_size", size, &mut bindings);
+                let check = branch(
+                    HirExpr::BinOp(BinOp::Lt, Box::new(size.clone()), Box::new(number(0.0))),
+                    Self::bytes_range_throw(vec![text("Invalid array buffer length")], ""),
+                    number(0.0),
+                );
+                HirExpr::EvalThen(
+                    Box::new(check),
+                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_arraybuffer_alloc".into())), vec![size])),
+                )
+            }
+            ("DataView", 1..=3) => {
+                let source = self.lower_expr(&args[0].expr)?;
+                if self.infer_expr_type_inner(&source)? != HirType::Bytes {
+                    return Ok(None);
+                }
+                let mut operand = |lowerer: &mut Self, index: usize, default: f64| -> Result<HirExpr, String> {
+                    let value = match args.get(index) {
+                        Some(argument) => {
+                            let value = lowerer.lower_expr(&argument.expr)?;
+                            lowerer.coerce_primitive_to_number(value)?
+                        }
+                        None => number(default),
+                    };
+                    Ok(lowerer.bind_bytes_number("__thaw_dataview_arg", value, &mut bindings))
+                };
+                let offset = operand(self, 1, 0.0)?;
+                let length = operand(self, 2, f64::NAN)?;
+                let source = self.bind_native_bytes_receiver(source, &mut bindings);
+                let total = HirExpr::ArrayLen(Box::new(source.clone()));
+                let compare = |op: BinOp, left: HirExpr, right: HirExpr| HirExpr::BinOp(op, Box::new(left), Box::new(right));
+                let start_error = Self::bytes_range_throw(
+                    vec![text("Start offset "), to_text(&offset), text(" is outside the bounds of the buffer")],
+                    "",
+                );
+                let length_error =
+                    Self::bytes_range_throw(vec![text("Invalid DataView length "), to_text(&length)], "");
+                let check = branch(
+                    compare(BinOp::Lt, offset.clone(), number(0.0)),
+                    start_error.clone(),
+                    branch(
+                        compare(BinOp::Gt, offset.clone(), total.clone()),
+                        start_error,
+                        branch(
+                            compare(
+                                BinOp::Gt,
+                                compare(BinOp::Add, offset.clone(), length.clone()),
+                                total,
+                            ),
+                            length_error.clone(),
+                            branch(compare(BinOp::Lt, length.clone(), number(0.0)), length_error, number(0.0)),
+                        ),
+                    ),
+                );
+                HirExpr::EvalThen(
+                    Box::new(check),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_dataview_new".into())),
+                        vec![source, offset, length],
+                    )),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(self.wrap_call_argument_bindings(result, &bindings)?))
+    }
+
+    /// `ArrayBuffer.isView(value)` for a native byte view (everything but an `ArrayBuffer`).
+    #[inline(never)]
+    fn lower_native_array_buffer_is_view(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let [argument] = call.args.as_slice() else {
+            return Ok(None);
+        };
+        if argument.spread.is_some() {
+            return Ok(None);
+        }
+        let value = self.lower_expr(&argument.expr)?;
+        if self.infer_expr_type_inner(&value)? != HirType::Bytes {
+            return Ok(None);
+        }
+        let name = format!("__thaw_is_view_source_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Bytes);
+        let is_array_buffer = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_kind".into())), vec![HirExpr::Var(name.clone())])),
+            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+        );
+        let result = HirExpr::Conditional(
+            Box::new(is_array_buffer),
+            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            HirType::Bool,
+        );
+        Ok(Some(self.wrap_call_argument_bindings(result, &[(name, HirType::Bytes, value)])?))
+    }
+
+    /// `(kind, big, write)` for `DataView.prototype.get*` / `set*`; `kind` as `thaw_dataview_get`.
+    fn dataview_accessor(property: &str) -> Option<(f64, bool, bool)> {
+        let (write, rest) = match property.strip_prefix("set") {
+            Some(rest) => (true, rest),
+            None => (false, property.strip_prefix("get")?),
+        };
+        let (kind, big) = match rest {
+            "Int8" => (-1.0, false),
+            "Uint8" => (1.0, false),
+            "Int16" => (-2.0, false),
+            "Uint16" => (2.0, false),
+            "Int32" => (-4.0, false),
+            "Uint32" => (4.0, false),
+            "Float16" => (-3.0, false),
+            "Float32" => (-5.0, false),
+            "Float64" => (-9.0, false),
+            "BigInt64" | "BigUint64" => (8.0, true),
+            _ => return None,
+        };
+        Some((kind, big, write))
+    }
+
+    /// Methods only a native `ArrayBuffer` / `DataView` has, so only claimed for a `Bytes` receiver.
+    fn is_native_view_only_method(property: &str) -> bool {
+        Self::dataview_accessor(property).is_some() || matches!(property, "transfer" | "transferToFixedLength")
+    }
+
+    /// `ab.transfer(newLength?)` / `ab.transferToFixedLength(newLength?)`.
+    fn lower_native_arraybuffer_transfer(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+        let (arguments, mut bindings) = self.lower_native_spread_values(&call.args, &format!("ArrayBuffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        let length = match arguments.as_slice() {
+            [] => HirExpr::Lit(HirLit::F64(f64::NAN)),
+            [length] => self.coerce_primitive_to_number(length.clone())?,
+            _ => return Err(format!("`ArrayBuffer.prototype.{}` takes at most one argument", property.sym)),
+        };
+        let result = HirExpr::Call(Box::new(HirExpr::Var("__thaw_arraybuffer_transfer".into())), vec![receiver, length]);
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// `dv.getInt32(offset, littleEndian?)` / `dv.setFloat64(offset, value, littleEndian?)`.
+    fn lower_native_dataview_access(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let (kind, big, write) = Self::dataview_accessor(property.sym.as_ref()).expect("dispatch checked dataview_accessor");
+        let width = match kind.abs() as u8 {
+            _ if big => 8.0,
+            3 => 2.0,
+            5 => 4.0,
+            9 => 8.0,
+            other => f64::from(other),
+        };
+        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+        let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+        let (arguments, mut bindings) = self.lower_native_spread_values(&call.args, &format!("DataView.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        let operands = if write { 2 } else { 1 };
+        if arguments.len() < operands || arguments.len() > operands + 1 {
+            return Err(format!("`DataView.prototype.{}` has the wrong number of arguments", property.sym));
+        }
+        let offset = self.coerce_primitive_to_number(arguments[0].clone())?;
+        let offset = self.bind_bytes_number("__thaw_dataview_offset", offset, &mut bindings);
+        let little = match arguments.get(operands) {
+            Some(flag) => HirExpr::Conditional(Box::new(flag.clone()), Box::new(number(1.0)), Box::new(number(0.0)), HirType::F64),
+            None => number(0.0),
+        };
+        let out_of_range = Self::bytes_range_throw(vec![HirExpr::Lit(HirLit::Str("Offset is outside the bounds of the DataView".into()))], "");
+        let end = HirExpr::BinOp(BinOp::Add, Box::new(offset.clone()), Box::new(number(width)));
+        let check = HirExpr::Conditional(
+            Box::new(HirExpr::BinOp(BinOp::Lt, Box::new(offset.clone()), Box::new(number(0.0)))),
+            Box::new(out_of_range.clone()),
+            Box::new(HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(BinOp::Gt, Box::new(end), Box::new(HirExpr::ArrayLen(Box::new(receiver.clone()))))),
+                Box::new(out_of_range),
+                Box::new(number(0.0)),
+                HirType::F64,
+            )),
+            HirType::F64,
+        );
+        let call_intrinsic = |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.to_string())), args);
+        let access = match (write, big) {
+            (false, false) => call_intrinsic("__thaw_dataview_get", vec![receiver, number(kind), offset, little]),
+            (false, true) => call_intrinsic("__thaw_bytes_read_i64", vec![receiver, offset, little]),
+            (true, true) => {
+                self.expect_type(&HirType::I64, &arguments[1], "`DataView.prototype.setBigInt64` value")?;
+                call_intrinsic("__thaw_bytes_write_i64", vec![receiver, offset, arguments[1].clone(), little])
+            }
+            (true, false) => {
+                let value = self.coerce_primitive_to_number(arguments[1].clone())?;
+                call_intrinsic("__thaw_dataview_set", vec![receiver, number(kind), offset, value, little])
+            }
+        };
+        self.wrap_call_argument_bindings(HirExpr::EvalThen(Box::new(check), Box::new(access)), &bindings)
     }
 
     /// `buf.readBigInt64LE(offset)` / `buf.writeBigUInt64BE(value,

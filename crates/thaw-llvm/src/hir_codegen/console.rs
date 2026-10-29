@@ -545,13 +545,36 @@ impl<'ctx> HirCompiler<'ctx> {
             None
         };
         let omit_before = std::mem::replace(&mut self.console_omit_absent_fields, true);
+        let mut bytes_info = None;
         let json_result = match ty {
             HirType::Json | HirType::Dictionary(_) => Ok(value.into()),
             // `undefined` is kept as the napi-undefined sentinel (not folded into `null`) so the
             // inspector can print it like Node does.
             HirType::Array(element) => self.compile_console_array_maybe_subclass(value, element),
             HirType::Bytes => {
-                let widened = self.compile_bytes_widened_handle(value)?;
+                // `ArrayBuffer` / `DataView` records print differently from a `Buffer`.
+                let record = self.compile_array_data(value)?;
+                let f64_type = self.context.f64_type();
+                let info = |name: &str, field: Option<f64>| -> Result<BasicValueEnum<'ctx>, String> {
+                    let mut call_args = vec![record.into()];
+                    if let Some(field) = field {
+                        call_args.push(f64_type.const_float(field).into());
+                    }
+                    self.builder
+                        .build_call(self.module.get_function(name).unwrap(), &call_args, "console_bytes_info")
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| format!("`{name}` returned no value"))
+                };
+                bytes_info = Some([
+                    info("thaw_bytes_console_info", Some(0.0))?,
+                    info("thaw_bytes_byte_offset", None)?,
+                    info("thaw_bytes_console_info", Some(1.0))?,
+                ]);
+                let target = info("thaw_bytes_console_target", None)?.into_pointer_value();
+                let target = self.compile_array_wrap(target)?;
+                let widened = self.compile_bytes_widened_handle(target)?;
                 self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)
             }
             HirType::Tuple(elements) => self.compile_native_tuple_to_json_with_undefined(value, elements, true),
@@ -577,6 +600,12 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         // Typed values are inspected like Node's console.log (util.inspect rules), not
         // JSON-stringified: every converted shape goes through the faithful formatter.
+        let mut format_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![json.into()];
+        if let Some(info) = bytes_info {
+            for value in info {
+                format_args.push(value.into());
+            }
+        }
         let text = self
             .builder
             .build_call(
@@ -587,7 +616,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "thaw_json_console_string"
                     })
                     .unwrap(),
-                &[json.into()],
+                &format_args,
                 "console_json_format",
             )
             .map_err(|error| error.to_string())?
