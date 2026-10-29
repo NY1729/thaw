@@ -5730,6 +5730,162 @@ pub extern "C" fn thaw_console_format(args: *mut Value) -> *const c_char {
     thaw_arena::owned_string(console_format(&args))
 }
 
+/// The `util.inspect` options a `console.dir(value, options)` call can set.
+fn console_inspect_options(options: Option<&Value>) -> crate::inspect::InspectOptions {
+    let mut result = crate::inspect::InspectOptions::default();
+    let Some(map) = options.and_then(Value::as_object) else {
+        return result;
+    };
+    let number = |key: &str| map.get(key.as_bytes()).and_then(Value::as_f64);
+    match map.get(&b"depth"[..]) {
+        Some(Value::Null) => result.depth = None,
+        Some(Value::Number(n)) => result.depth = Some(n.as_f64().unwrap_or(2.0).max(0.0) as usize),
+        _ => {}
+    }
+    if let Some(n) = number("breakLength") {
+        result.break_length = n.clamp(0.0, (1u32 << 30) as f64) as usize;
+    }
+    if let Some(n) = number("compact") {
+        result.compact = n.max(0.0) as usize;
+    }
+    if let Some(n) = number("maxArrayLength") {
+        result.max_array_length = n.max(0.0) as usize;
+    }
+    if let Some(n) = number("maxStringLength") {
+        result.max_string_length = n.max(0.0) as usize;
+    }
+    if let Some(Value::Bool(flag)) = map.get(&b"showHidden"[..]) {
+        result.show_hidden = *flag;
+    }
+    result
+}
+
+/// `console.dir(value, options)`: `util.inspect` with the given options (strings stay quoted).
+/// `options` may be null.
+#[no_mangle]
+pub extern "C" fn thaw_console_dir_text(value: *mut Value, options: *mut Value) -> *const c_char {
+    let (value, options) = (unsafe { &*value }, unsafe { options.as_ref() });
+    thaw_arena::owned_string(crate::inspect::inspect(
+        &inspect_node(value, &mut Vec::new()),
+        &console_inspect_options(options),
+    ))
+}
+
+/// Node's `console.table` cell rendering (`depth: 0`, `maxArrayLength: 3`, no line breaking).
+fn console_table_cell(value: &Value) -> String {
+    if value.as_object().is_some_and(|fields| fields.len() > 2) {
+        return "[Object]".into();
+    }
+    crate::inspect::inspect(
+        &inspect_node(value, &mut Vec::new()),
+        &crate::inspect::InspectOptions {
+            depth: Some(0),
+            max_array_length: 3,
+            break_length: 1 << 30,
+            ..Default::default()
+        },
+    )
+}
+
+/// Own enumerable keys of a table row, as Node's `Object.keys` lists them.
+fn console_table_keys(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(_) => (0..value.as_array().map_or(0, Vec::len)).map(|i| i.to_string()).collect(),
+        Value::Object(_) => value
+            .as_object()
+            .map(|fields| fields.keys().map(|key| String::from_utf8_lossy(key).into_owned()).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn console_table_get(value: &Value, key: &str) -> Option<Value> {
+    match value {
+        Value::Array(_) => value.as_array()?.get(key.parse::<usize>().ok()?).cloned(),
+        Value::Object(_) => value.as_object()?.get(key.as_bytes()).cloned(),
+        _ => None,
+    }
+}
+
+/// `console.table(data, columns)`: Node's box-drawing table; a non-object prints like `console.log`.
+/// ponytail: Map/Set inputs and double-width characters are not modelled.
+fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
+    if !matches!(data, Value::Array(_) | Value::Object(_)) {
+        return console_format(std::slice::from_ref(data));
+    }
+    let index_keys = console_table_keys(data);
+    let properties: Option<Vec<String>> = columns.and_then(Value::as_array).map(|items| {
+        items.iter().map(|item| console_format(std::slice::from_ref(item))).collect()
+    });
+    let rows = index_keys.len();
+    let mut table: Vec<(String, Vec<String>)> = Vec::new();
+    let mut primitives = vec![String::new(); rows];
+    let mut has_primitives = false;
+    for (row, index) in index_keys.iter().enumerate() {
+        let item = console_table_get(data, index).unwrap_or(Value::Null);
+        let primitive = !matches!(item, Value::Array(_) | Value::Object(_));
+        if properties.is_none() && primitive {
+            has_primitives = true;
+            primitives[row] = console_table_cell(&item);
+            continue;
+        }
+        for key in properties.clone().unwrap_or_else(|| console_table_keys(&item)) {
+            let slot = table.iter().position(|(name, _)| *name == key).unwrap_or_else(|| {
+                table.push((key.clone(), vec![String::new(); rows]));
+                table.len() - 1
+            });
+            if !primitive {
+                if let Some(cell) = console_table_get(&item, &key) {
+                    table[slot].1[row] = console_table_cell(&cell);
+                }
+            }
+        }
+    }
+    // JS objects list canonical integer keys first, in ascending order.
+    let is_index = |key: &str| key.parse::<u32>().is_ok_and(|n| n.to_string() == key && n != u32::MAX);
+    table.sort_by_key(|(key, _)| if is_index(key) { (0, key.parse::<u32>().unwrap_or(0)) } else { (1, 0) });
+    let mut head = vec!["(index)".to_string()];
+    let mut columns_out = vec![index_keys];
+    for (key, cells) in table {
+        head.push(key);
+        columns_out.push(cells);
+    }
+    if has_primitives {
+        head.push("Values".into());
+        columns_out.push(primitives);
+    }
+    let width = |text: &str| text.chars().count();
+    let widths: Vec<usize> = head
+        .iter()
+        .zip(&columns_out)
+        .map(|(title, cells)| cells.iter().map(|cell| width(cell)).chain([width(title)]).max().unwrap_or(0))
+        .collect();
+    let divider = |left: &str, middle: &str, right: &str| {
+        let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+        format!("{left}{}{right}", parts.join(middle))
+    };
+    let render = |cells: Vec<&str>| {
+        let mut line = String::from("│");
+        for (cell, w) in cells.iter().zip(&widths) {
+            line.push_str(&format!(" {cell}{} │", " ".repeat(w - width(cell))));
+        }
+        line
+    };
+    let mut lines = vec![divider("┌", "┬", "┐"), render(head.iter().map(String::as_str).collect()), divider("├", "┼", "┤")];
+    for row in 0..rows {
+        lines.push(render(columns_out.iter().map(|column| column[row].as_str()).collect()));
+    }
+    lines.push(divider("└", "┴", "┘"));
+    lines.join("\n")
+}
+
+/// `console.table(value, columns)`; `columns` may be null.
+#[no_mangle]
+pub extern "C" fn thaw_console_table_text(value: *mut Value, columns: *mut Value) -> *const c_char {
+    let (value, columns) = (unsafe { &*value }, unsafe { columns.as_ref() });
+    thaw_arena::owned_string(console_table_text(value, columns))
+}
+
 fn console_format(args: &[Value]) -> String {
     let bare = |value: &Value| match value {
         // A framed Error argument prints like a lone `console.log(error)`.

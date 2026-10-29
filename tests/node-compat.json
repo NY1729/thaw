@@ -3232,6 +3232,26 @@
       "name": "icu locale methods default locale and local time zone",
       "expect": "matched",
       "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(), d.toLocaleDateString(), d.toLocaleTimeString()); console.log((1234567.891).toLocaleString(), \"a\".localeCompare(\"B\")); }"
+    },
+    {
+      "name": "ce1 Map Set WeakMap WeakSet without type arguments",
+      "expect": "matched",
+      "source": "function main(): void { const m = new Map(); m.set(\"a\", 1); m.set(\"b\", \"x\"); console.log(m.get(\"a\"), m.size, m); const s = new Set(); s.add(1); s.add(\"a\"); console.log(s.size, s.has(1), s.has(\"zz\"), s); const k = {}; const w = new WeakMap(); w.set(k, 1); console.log(w.get(k), w.has(k), w.has({})); const ws = new WeakSet(); ws.add(k); console.log(ws.has(k), ws.has({})); const typed: Map<string, number> = new Map(); typed.set(\"x\", 2); console.log(typed.get(\"x\"), typed); const tset: Set<number> = new Set(); tset.add(3); console.log([...tset]); }"
+    },
+    {
+      "name": "ce1 console group count table dir",
+      "expect": "matched",
+      "source": "function main(): void { console.group(\"G\"); console.log(\"inside\"); console.group(); console.log(\"deeper\\nmultiline\"); console.error(\"to stderr\"); console.groupEnd(); console.groupEnd(); console.groupEnd(); console.log(\"out\"); console.group(\"A\", \"b\"); console.log(); console.log(\"a\", \"b\"); console.groupEnd(); console.count(); console.count(\"x\"); console.count(); console.countReset(); console.count(); console.countReset(\"never\"); console.table([{ a: 1, b: \"x\" }, { a: 2, c: true }]); console.table([[1, 2], [3, 4]]); console.table([1, 2]); console.table(\"str\"); console.table([{ a: 1, b: { x: 1 } }, { a: \"long string here\", b: [1, 2, 3, 4, 5] }], [\"a\"]); console.table({ r1: { c: 1 }, r2: { c: 2 } }); console.dir({ a: { b: { c: { d: 1 } } } }, { depth: 0 }); console.dir({ a: { b: { c: { d: 1 } } } }, { depth: null }); console.dir(\"s\"); console.dir([1, 2]); console.timeEnd(\"nolabel\"); console.log(\"after\"); }"
+    },
+    {
+      "name": "ce1 console methods as callback values",
+      "expect": "matched",
+      "source": "async function f(): Promise<string> { return \"r\"; } function g(): Promise<number> { return Promise.resolve(42); } function main(): void { f().then(console.log); g().then(console.log); g().then(console.error); const log = console.log; log(\"direct\", 1); }"
+    },
+    {
+      "name": "ce1 bare node specifiers match node: forms",
+      "expect": "matched",
+      "source": "import fs from \"fs\"; import util from \"util\"; import os from \"os\"; import assert from \"assert\"; import crypto from \"crypto\"; import { Readable } from \"stream\"; import { existsSync } from \"fs\"; import * as nodeUtil from \"util\"; function main(): void { console.log(fs.existsSync(\"/etc\"), existsSync(\"/definitely/not/here\")); console.log(util.inspect({ a: 1 }), nodeUtil.format(\"%s-%d\", \"x\", 4)); assert.strictEqual(1, 1); console.log(typeof os.platform(), crypto.createHash(\"md5\").update(\"a\").digest(\"hex\")); Readable.from([\"a\", \"b\"]).on(\"data\", (d: string) => console.log(d)); }"
     }
   ]
 }
