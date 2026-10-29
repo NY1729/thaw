@@ -1995,6 +1995,7 @@ impl<'a> FnLowerer<'a> {
                     && !receiver_is_dynamic
                     && !own_callable
                     && !defer_native
+                    && self.console_method_value(member).is_none()
                 {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
