@@ -5790,10 +5790,17 @@ fn console_table_cell(value: &Value) -> String {
 /// Own enumerable keys of a table row, as Node's `Object.keys` lists them.
 fn console_table_keys(value: &Value) -> Vec<String> {
     match value {
-        Value::Array(_) => (0..value.as_array().map_or(0, Vec::len)).map(|i| i.to_string()).collect(),
+        Value::Array(_) => (0..value.as_array().map_or(0, Vec::len))
+            .map(|i| i.to_string())
+            .collect(),
         Value::Object(_) => value
             .as_object()
-            .map(|fields| fields.keys().map(|key| String::from_utf8_lossy(key).into_owned()).collect())
+            .map(|fields| {
+                fields
+                    .keys()
+                    .map(|key| String::from_utf8_lossy(key).into_owned())
+                    .collect()
+            })
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -5815,7 +5822,10 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
     }
     let index_keys = console_table_keys(data);
     let properties: Option<Vec<String>> = columns.and_then(Value::as_array).map(|items| {
-        items.iter().map(|item| console_format(std::slice::from_ref(item))).collect()
+        items
+            .iter()
+            .map(|item| console_format(std::slice::from_ref(item)))
+            .collect()
     });
     let rows = index_keys.len();
     let mut table: Vec<(String, Vec<String>)> = Vec::new();
@@ -5829,11 +5839,17 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
             primitives[row] = console_table_cell(&item);
             continue;
         }
-        for key in properties.clone().unwrap_or_else(|| console_table_keys(&item)) {
-            let slot = table.iter().position(|(name, _)| *name == key).unwrap_or_else(|| {
-                table.push((key.clone(), vec![String::new(); rows]));
-                table.len() - 1
-            });
+        for key in properties
+            .clone()
+            .unwrap_or_else(|| console_table_keys(&item))
+        {
+            let slot = table
+                .iter()
+                .position(|(name, _)| *name == key)
+                .unwrap_or_else(|| {
+                    table.push((key.clone(), vec![String::new(); rows]));
+                    table.len() - 1
+                });
             if !primitive {
                 if let Some(cell) = console_table_get(&item, &key) {
                     table[slot].1[row] = console_table_cell(&cell);
@@ -5842,8 +5858,17 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
         }
     }
     // JS objects list canonical integer keys first, in ascending order.
-    let is_index = |key: &str| key.parse::<u32>().is_ok_and(|n| n.to_string() == key && n != u32::MAX);
-    table.sort_by_key(|(key, _)| if is_index(key) { (0, key.parse::<u32>().unwrap_or(0)) } else { (1, 0) });
+    let is_index = |key: &str| {
+        key.parse::<u32>()
+            .is_ok_and(|n| n.to_string() == key && n != u32::MAX)
+    };
+    table.sort_by_key(|(key, _)| {
+        if is_index(key) {
+            (0, key.parse::<u32>().unwrap_or(0))
+        } else {
+            (1, 0)
+        }
+    });
     let mut head = vec!["(index)".to_string()];
     let mut columns_out = vec![index_keys];
     for (key, cells) in table {
@@ -5858,7 +5883,14 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
     let widths: Vec<usize> = head
         .iter()
         .zip(&columns_out)
-        .map(|(title, cells)| cells.iter().map(|cell| width(cell)).chain([width(title)]).max().unwrap_or(0))
+        .map(|(title, cells)| {
+            cells
+                .iter()
+                .map(|cell| width(cell))
+                .chain([width(title)])
+                .max()
+                .unwrap_or(0)
+        })
         .collect();
     let divider = |left: &str, middle: &str, right: &str| {
         let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
@@ -5871,9 +5903,18 @@ fn console_table_text(data: &Value, columns: Option<&Value>) -> String {
         }
         line
     };
-    let mut lines = vec![divider("┌", "┬", "┐"), render(head.iter().map(String::as_str).collect()), divider("├", "┼", "┤")];
+    let mut lines = vec![
+        divider("┌", "┬", "┐"),
+        render(head.iter().map(String::as_str).collect()),
+        divider("├", "┼", "┤"),
+    ];
     for row in 0..rows {
-        lines.push(render(columns_out.iter().map(|column| column[row].as_str()).collect()));
+        lines.push(render(
+            columns_out
+                .iter()
+                .map(|column| column[row].as_str())
+                .collect(),
+        ));
     }
     lines.push(divider("└", "┴", "┘"));
     lines.join("\n")

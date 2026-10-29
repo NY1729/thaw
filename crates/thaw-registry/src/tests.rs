@@ -1521,11 +1521,32 @@ include!("tests/h2_contracts.rs");
 
 #[test]
 fn bare_node_builtin_specifiers_gain_the_node_prefix() {
-    for name in ["fs", "util", "stream", "os", "crypto", "assert", "fs/promises", "child_process"] {
-        assert_eq!(bare_node_builtin_specifier(name), Some(format!("node:{name}")));
+    for name in [
+        "fs",
+        "util",
+        "stream",
+        "os",
+        "crypto",
+        "assert",
+        "fs/promises",
+        "child_process",
+    ] {
+        assert_eq!(
+            bare_node_builtin_specifier(name),
+            Some(format!("node:{name}"))
+        );
     }
     // already prefixed, relative, packages, and the specifiers that resolve bare today
-    for name in ["node:fs", "./fs", "lodash", "path", "path/posix", "events", "test", "node:test"] {
+    for name in [
+        "node:fs",
+        "./fs",
+        "lodash",
+        "path",
+        "path/posix",
+        "events",
+        "test",
+        "node:test",
+    ] {
         assert_eq!(bare_node_builtin_specifier(name), None, "{name}");
     }
 }
