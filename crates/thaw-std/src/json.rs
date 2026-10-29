@@ -1252,7 +1252,8 @@ thread_local! {
     static FROM_ENTRIES_ERROR: Cell<bool> = const { Cell::new(false) };
     static PARSE_ERROR: Cell<bool> = const { Cell::new(false) };
     static STRINGIFY_ERROR: Cell<bool> = const { Cell::new(false) };
-    static STRINGIFY_ANCESTORS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static STRINGIFY_ANCESTORS: RefCell<Vec<(usize, *const Value)>> = const { RefCell::new(Vec::new()) };
+    static STRINGIFY_CYCLE_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
     static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     static GRAPH_PLAIN_OBJECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     // `hdl` markers decoded without HostOperations: branded so they re-encode
@@ -1268,7 +1269,7 @@ impl Drop for StringifyAncestor {
         if let Some(identity) = self.0 {
             STRINGIFY_ANCESTORS.with(|ancestors| {
                 let popped = ancestors.borrow_mut().pop();
-                debug_assert_eq!(popped, Some(identity));
+                debug_assert_eq!(popped.map(|entry| entry.0), Some(identity));
             });
         }
     }
@@ -1278,23 +1279,192 @@ fn stringify_ancestor(value: &Value) -> Option<StringifyAncestor> {
     let Some(identity) = object_identity_key(value) else {
         return Some(StringifyAncestor(None));
     };
-    let cycle = STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow().contains(&identity));
-    if cycle {
+    let cycle = STRINGIFY_ANCESTORS.with(|ancestors| {
+        let ancestors = ancestors.borrow();
+        let start = ancestors.iter().position(|entry| entry.0 == identity)?;
+        Some(describe_circle(&ancestors[start..], value))
+    });
+    if let Some(message) = cycle {
         STRINGIFY_ERROR.with(|error| error.set(true));
+        STRINGIFY_CYCLE_MESSAGE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(message);
+            }
+        });
         return None;
     }
-    STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow_mut().push(identity));
+    STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow_mut().push((identity, value)));
     Some(StringifyAncestor(Some(identity)))
+}
+
+/// How V8 words `JSON.stringify`'s circular-structure `TypeError`: the cycle's start, up to
+/// two following links, an ellipsis when the circle is longer, the last link, and the key
+/// that closes it. `links` runs from the re-entered object (empty key) down to the object
+/// that holds the back reference; each entry is (constructor name, key leading to it).
+fn circle_message(links: &[(String, String)], closing_key: &str) -> String {
+    let link = |index: usize| {
+        format!(
+            "\n    |     {} -> object with constructor '{}'",
+            links[index].1, links[index].0
+        )
+    };
+    let mut message = format!(
+        "Converting circular structure to JSON\n    --> starting at object with constructor '{}'",
+        links[0].0
+    );
+    let prefix_end = links.len().min(3);
+    for index in 1..prefix_end {
+        message.push_str(&link(index));
+    }
+    if links.len() > prefix_end + 1 {
+        message.push_str("\n    |     ...");
+    }
+    for index in prefix_end.max(links.len().saturating_sub(1))..links.len() {
+        message.push_str(&link(index));
+    }
+    message.push_str(&format!("\n    --- {closing_key} closes the circle"));
+    message
+}
+
+fn describe_circle(circle: &[(usize, *const Value)], _again: &Value) -> String {
+    let ctor = |value: &Value| match value {
+        Value::Array(_) => "Array".to_string(),
+        Value::Object(fields) => shared_object_ref(fields)
+            .get(b"__thaw_class__".as_slice())
+            .and_then(Value::as_str)
+            .map_or_else(|| "Object".to_string(), |name| plain_class_name(name).to_string()),
+        _ => "Object".to_string(),
+    };
+    // The key under which `holder` reaches the object identified by `target`.
+    let key_of = |holder: &Value, target: usize| -> String {
+        let hit = |child: &Value| object_identity_key(child) == Some(target);
+        match holder {
+            Value::Array(items) => shared_array_ref(items)
+                .iter()
+                .position(hit)
+                .map_or_else(String::new, |index| format!("index {index}")),
+            Value::Object(fields) => shared_object_ref(fields)
+                .iter()
+                .find(|(_, child)| hit(child))
+                .map_or_else(String::new, |(key, _)| {
+                    format!("property '{}'", String::from_utf8_lossy(key))
+                }),
+            _ => String::new(),
+        }
+    };
+    // SAFETY: every pointer on the ancestor stack names a value still borrowed by an
+    // enclosing serializer frame.
+    let at = |index: usize| unsafe { &*circle[index].1 };
+    let links: Vec<(String, String)> = (0..circle.len())
+        .map(|index| {
+            let key = if index == 0 {
+                String::new()
+            } else {
+                key_of(at(index - 1), circle[index].0)
+            };
+            (ctor(at(index)), key)
+        })
+        .collect();
+    circle_message(&links, &key_of(at(circle.len() - 1), circle[0].0))
+}
+
+/// The same message for a graph owned by the JS host, found by walking it through the host
+/// operations (the host's own `JSON.stringify` reports only that a cycle exists).
+fn host_circle_message(root: &Rc<HostLease>) -> Option<String> {
+    struct Walk {
+        path: Vec<(u64, String, String)>,
+        done: HashSet<u64>,
+        found: Option<String>,
+    }
+    fn visit(walk: &mut Walk, lease: &Rc<HostLease>, key: String) {
+        if walk.found.is_some() || walk.done.contains(&lease.handle) {
+            return;
+        }
+        if let Some(start) = walk.path.iter().position(|entry| entry.0 == lease.handle) {
+            let links: Vec<(String, String)> = walk.path[start..]
+                .iter()
+                .enumerate()
+                .map(|(index, (_, ctor, key))| {
+                    (ctor.clone(), if index == 0 { String::new() } else { key.clone() })
+                })
+                .collect();
+            walk.found = Some(circle_message(&links, &key));
+            return;
+        }
+        if host_query(lease, 0).as_deref() != Some("object") {
+            return;
+        }
+        let array = host_query(lease, 4).as_deref() == Some("1");
+        let ctor = if array {
+            "Array".to_string()
+        } else {
+            host_query(lease, 23)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Object".to_string())
+        };
+        walk.path.push((lease.handle, ctor, key));
+        let children: Vec<(String, Value)> = if array {
+            host_enumerate_values(lease, 3)
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| (format!("index {index}"), value))
+                .collect()
+        } else {
+            host_enumerable_entries(lease)
+                .into_iter()
+                .map(|(name, value)| {
+                    (format!("property '{}'", String::from_utf8_lossy(&name)), value)
+                })
+                .collect()
+        };
+        for (child_key, child) in children {
+            if let Value::Host(child) = &child {
+                visit(walk, child, child_key);
+            }
+        }
+        walk.path.pop();
+        walk.done.insert(lease.handle);
+    }
+    let mut walk = Walk {
+        path: Vec::new(),
+        done: HashSet::new(),
+        found: None,
+    };
+    visit(&mut walk, root, String::new());
+    walk.found
+}
+
+fn plain_class_name(name: &str) -> &str {
+    let plain = match name.strip_prefix("__thawmod") {
+        Some(rest) => rest.split_once('_').map_or(name, |(_, plain)| plain),
+        None => name,
+    };
+    plain.split("__thaw_").next().unwrap_or(plain)
 }
 
 fn begin_stringify() {
     STRINGIFY_ERROR.with(|error| error.set(false));
+    STRINGIFY_CYCLE_MESSAGE.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn stringify_cycle_message() -> String {
+    STRINGIFY_CYCLE_MESSAGE
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| "Converting circular structure to JSON".to_string())
 }
 
 fn stringify_cycle_error() -> *const c_char {
-    CString::new("\u{1}TypeError\u{1}Converting circular structure to JSON")
-        .expect("static error message")
+    CString::new(format!("\u{1}TypeError\u{1}{}", stringify_cycle_message()))
+        .unwrap_or_default()
         .into_raw()
+}
+
+/// The message of the cycle `JSON.stringify` just reported, for the `TypeError` the compiled
+/// call throws (V8's `--> starting at object ... closes the circle` text).
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_error_message() -> *const c_char {
+    thaw_arena::owned_string(stringify_cycle_message())
 }
 
 #[no_mangle]
@@ -5130,12 +5300,19 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     if let Some(node) = host_query(lease, 27).and_then(|probe| typed_probe_node(&probe)) {
         return node;
     }
+    // A container reached again while it is being formatted is a back reference
+    // (`<ref *1>` / `[Circular *1]`); the handle id is its canonical identity.
+    let id = ((lease.handle as usize) << 1) | 1;
+    if stack.contains(&id) {
+        return Node::Circular(id);
+    }
     // A host `Map`/`Set` prints like Node's (`Map(1) { 'a' => 1 }`).
     let collection = host_query(lease, 24);
     if matches!(collection.as_deref(), Some("map" | "set"))
         && HOST_INSPECT_DEPTH.with(Cell::get) < 4
     {
         HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        stack.push(id);
         let node = if collection.as_deref() == Some("map") {
             let keys = host_enumerate_values(lease, 4);
             let values = host_enumerate_values(lease, 6);
@@ -5145,7 +5322,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .map(|(key, value)| (inspect_node(key, stack), inspect_node(value, stack)))
                 .collect();
             Node::Map {
-                id: 0,
+                id,
                 ctor: None,
                 entries,
                 props: Vec::new(),
@@ -5156,12 +5333,13 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 .map(|item| inspect_node(item, stack))
                 .collect();
             Node::Set {
-                id: 0,
+                id,
                 ctor: None,
                 items,
                 props: Vec::new(),
             }
         };
+        stack.pop();
         HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
         return node;
     }
@@ -5179,6 +5357,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
         }
     }
     HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    stack.push(id);
     let node = if array {
         let items = host_enumerate_values(lease, 3)
             .iter()
@@ -5186,7 +5365,7 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             .collect();
         Node::Array {
             ctor: None,
-            id: 0,
+            id,
             items,
             extra: Vec::new(),
         }
@@ -5205,13 +5384,10 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
                 Some(name) if !name.is_empty() => Ctor::Named(name),
                 _ => Ctor::Plain,
             };
-            Node::Object {
-                id: 0,
-                ctor,
-                entries,
-            }
+            Node::Object { id, ctor, entries }
         }
     };
+    stack.pop();
     HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() - 1));
     node
 }
@@ -5347,7 +5523,35 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         }
         Value::Object(shared) => {
             let fields = shared_object_ref(shared);
-            if let Some(items @ Value::Array(_)) = fields.get(b"__thaw_array_items__".as_slice()) {
+            if let Some(state) = fields
+                .get(b"__thaw_promise_state__".as_slice())
+                .and_then(Value::as_f64)
+            {
+                // `console.log(promise)`: the codegen marshals the settled value into this wrapper.
+                let value = fields.get(b"value".as_slice());
+                let reason_tag = fields
+                    .get(b"__thaw_promise_reason_tag__".as_slice())
+                    .and_then(Value::as_f64);
+                let settled = match (state as u8, reason_tag) {
+                    (0, _) => None,
+                    (2, Some(tag)) => Some(match tag as u8 {
+                        1 => value.map_or(Node::Undefined, |value| inspect_node(value, stack)),
+                        3 => Node::Bool(matches!(
+                            fields.get(b"__thaw_promise_reason_bool__".as_slice()),
+                            Some(Value::Bool(true))
+                        )),
+                        6 => Node::Null,
+                        _ => Node::Undefined,
+                    }),
+                    _ => Some(value.map_or(Node::Undefined, |value| inspect_node(value, stack))),
+                };
+                Node::Promise {
+                    state: state as u8,
+                    value: settled.map(Box::new),
+                }
+            } else if let Some(items @ Value::Array(_)) =
+                fields.get(b"__thaw_array_items__".as_slice())
+            {
                 // console.log of an `extends Array` instance: its items plus own properties.
                 let mut node = inspect_node(items, stack);
                 if let Node::Array { ctor, extra, .. } = &mut node {
@@ -6047,6 +6251,16 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
                     None => out.extend_from_slice(serialized.as_bytes()),
                 }
             } else {
+                // The host reports only "circular reference"; word it like V8 does.
+                let circular = HOST_ERROR.with(|error| {
+                    error.borrow().as_deref().is_some_and(|text| text.contains("circular reference"))
+                });
+                if circular {
+                    let reported = HOST_ERROR.with(|error| error.borrow_mut().take());
+                    let message = host_circle_message(lease)
+                        .map(|message| format!("\u{1}TypeError\u{1}{message}"));
+                    HOST_ERROR.with(|error| *error.borrow_mut() = message.or(reported));
+                }
                 out.extend_from_slice(b"null");
             }
         }
@@ -13628,4 +13842,47 @@ mod tests {
         let wtf8 = wtf8_encode_utf16(&[0xD800, 0]);
         assert_string_after_destroy(leak(Value::Wtf8(wtf8.clone())), &wtf8);
     }
+
+    #[test]
+    fn stringify_cycle_error_names_the_circle_like_v8() {
+        fn cyclic(depth: usize) -> Value {
+            // root -> a0 -> a1 ... -> root, each hop under a distinct key
+            let root = Value::shared_object(indexmap::IndexMap::new());
+            let mut tail = root.clone();
+            for hop in 0..depth {
+                let next = Value::shared_object(indexmap::IndexMap::new());
+                if let Value::Object(fields) = &tail {
+                    unsafe { (*fields.get()).insert(format!("k{hop}").into_bytes(), next.clone()) };
+                }
+                tail = next;
+            }
+            if let Value::Object(fields) = &tail {
+                unsafe { (*fields.get()).insert(b"back".to_vec(), root.clone()) };
+            }
+            root
+        }
+        let message = |value: &Value| {
+            begin_stringify();
+            let mut out = Vec::new();
+            write_json_value(value, &mut out, None, 0);
+            assert_eq!(thaw_json_take_stringify_error(), 1);
+            let text = STRINGIFY_CYCLE_MESSAGE.with(|slot| slot.borrow_mut().take()).unwrap();
+            // Leak the cycle: `Rc` cannot free it, and the test is short-lived.
+            std::mem::forget(value.clone());
+            text
+        };
+        assert_eq!(
+            message(&cyclic(0)),
+            "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'back' closes the circle"
+        );
+        assert_eq!(
+            message(&cyclic(2)),
+            "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
+        );
+        assert_eq!(
+            message(&cyclic(5)),
+            "Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    |     property 'k0' -> object with constructor 'Object'\n    |     property 'k1' -> object with constructor 'Object'\n    |     ...\n    |     property 'k4' -> object with constructor 'Object'\n    --- property 'back' closes the circle"
+        );
+    }
+
 }
