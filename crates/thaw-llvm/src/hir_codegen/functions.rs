@@ -319,20 +319,37 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let symbol = Self::llvm_symbol_for(&func.name);
         let function = self.module.add_function(&symbol, fn_type, Some(Linkage::Internal));
-        self.mark_for_stack_frames(function);
+        self.mark_for_stack_frames(function, &func.name);
         Ok(function)
     }
 
     /// Makes `function` visible to `Error.stack`: it keeps a frame pointer (so the runtime can walk
     /// the call chain) and lives in `STACK_FRAME_SECTION` (so a return address is attributed to
     /// compiled code only). Linux only; elsewhere errors keep the single anonymous frame.
-    fn mark_for_stack_frames(&self, function: FunctionValue<'ctx>) {
+    fn mark_for_stack_frames(&mut self, function: FunctionValue<'ctx>, hir_name: &str) {
         if cfg!(target_os = "linux") {
+            // A function without a recorded definition (a lifted lambda) takes its parent's file.
+            let loc = self.fn_locs.get(hir_name).cloned().or_else(|| {
+                let parent = self.builder.get_insert_block()?.get_parent()?;
+                let inherited = self.stack_locs.get(parent.get_name().to_str().ok()?)?;
+                Some(SourceLoc { file: inherited.file.clone(), line: 0, col: 0 })
+            });
+            if let Some(loc) = loc {
+                self.stack_locs.insert(function.get_name().to_string_lossy().into_owned(), loc);
+            }
             function.add_attribute(
                 inkwell::attributes::AttributeLoc::Function,
                 self.context.create_string_attribute("frame-pointer", "all"),
             );
             function.set_section(Some(STACK_FRAME_SECTION));
+            // Inlined into the C entry point, `main` would lose its frame (that code is not in the section).
+            if function.get_name().to_bytes() == USER_MAIN_SYMBOL.as_bytes() {
+                let noinline = inkwell::attributes::Attribute::get_named_enum_kind_id("noinline");
+                function.add_attribute(
+                    inkwell::attributes::AttributeLoc::Function,
+                    self.context.create_enum_attribute(noinline, 0),
+                );
+            }
         }
     }
 
@@ -340,49 +357,54 @@ impl<'ctx> HirCompiler<'ctx> {
         function.get_section().is_some_and(|section| section.to_bytes() == STACK_FRAME_SECTION.as_bytes())
     }
 
-    /// After `new Error`-style construction: records the current call stack for `err.stack`.
-    fn emit_stack_capture(&self, framed: PointerValue<'ctx>) -> Result<(), String> {
-        let Some(current) = self.builder.get_insert_block().and_then(|block| block.get_parent()) else {
-            return Ok(());
+    /// `Class.method` / `new Class` for a lowered class member symbol (`__thaw_class_<C>_method_<m>`,
+    /// `_static_<m>`, `_initialize`); `Some("\u{1}")` marks the constructor's allocating wrapper,
+    /// which the runtime leaves out of a stack.
+    fn class_member_frame_name(symbol: &str) -> Option<String> {
+        let rest = symbol.strip_prefix("__thaw_class_")?;
+        let rest = rest.strip_suffix("__thaw_unbound").unwrap_or(rest);
+        let plain = |class: &str| {
+            class
+                .strip_prefix("__thawmod")
+                .and_then(|rest| rest.split_once('_'))
+                .filter(|(index, _)| index.bytes().all(|byte| byte.is_ascii_digit()))
+                .map_or(class, |(_, name)| name)
+                .to_string()
         };
-        if !Self::in_stack_frame_section(current) {
-            return Ok(());
+        if rest.ends_with("_constructor") {
+            return Some("\u{1}".to_string());
         }
-        let pointer = self.context.ptr_type(AddressSpace::default());
-        let frameaddress = self.module.get_function("llvm.frameaddress.p0").unwrap_or_else(|| {
-            self.module.add_function(
-                "llvm.frameaddress.p0",
-                pointer.fn_type(&[self.context.i32_type().into()], false),
-                None,
-            )
-        });
-        let frame = self
-            .builder
-            .build_call(frameaddress, &[self.context.i32_type().const_zero().into()], "frame")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("frameaddress returned no value")?;
-        let capture = self.module.get_function("thaw_error_capture_frames").unwrap();
-        self.builder
-            .build_call(
-                capture,
-                &[framed.into(), frame.into(), current.as_global_value().as_pointer_value().into()],
-                "capture_frames",
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
+        if let Some(class) = rest.strip_suffix("_initialize") {
+            return Some(format!("new {}", plain(class)));
+        }
+        let (class, member) = rest
+            .rsplit_once("_method_")
+            .or_else(|| rest.rsplit_once("_static_"))?;
+        (!member.is_empty() && !member.contains("getter_") && !member.contains("setter_") && !member.starts_with("field_"))
+            .then(|| format!("{}.{member}", plain(class)))
     }
 
     /// At process start: hands the runtime the names of the compiled functions.
     fn emit_stack_table_registration(&self) -> Result<(), String> {
+        if cfg!(target_os = "linux") {
+            // Adapters and wrappers the compiler emits between source functions must keep the
+            // frame-pointer chain unbroken, or the frames above them vanish from a stack.
+            let frame_pointer = self.context.create_string_attribute("frame-pointer", "all");
+            for function in self.module.get_functions().filter(|function| function.count_basic_blocks() > 0) {
+                if function.get_string_attribute(inkwell::attributes::AttributeLoc::Function, "frame-pointer").is_none() {
+                    function.add_attribute(inkwell::attributes::AttributeLoc::Function, frame_pointer);
+                }
+            }
+        }
         let pointer = self.context.ptr_type(AddressSpace::default());
+        let mut files: HashMap<String, PointerValue<'ctx>> = HashMap::new();
         let entries = self
             .module
             .get_functions()
             .filter(|function| Self::in_stack_frame_section(*function) && function.count_basic_blocks() > 0)
             .map(|function| {
                 let symbol = function.get_name().to_string_lossy().into_owned();
+                let symbol = symbol.strip_suffix(".resume").unwrap_or(&symbol).to_string();
                 // Bundled modules prefix their functions `__thawmod<N>_`.
                 let symbol = symbol
                     .strip_prefix("__thawmod")
@@ -393,11 +415,35 @@ impl<'ctx> HirCompiler<'ctx> {
                     .strip_prefix("__thaw_user_")
                     .or_else(|| symbol.strip_prefix("thaw_user_"))
                     .unwrap_or(symbol);
-                // Compiler-made functions (lambdas, shims) are anonymous like V8's.
-                let name = if name.starts_with("__") || name.starts_with("thaw_") { "" } else { name };
+                // Class members read `Class.member` (`new Class` for the constructor body; its
+                // allocating wrapper is hidden); other compiler-made functions are anonymous like V8's.
+                let class_member = Self::class_member_frame_name(name);
+                let name = match class_member.as_deref() {
+                    Some(member) => member,
+                    None if name.starts_with("__") || name.starts_with("thaw_") => "",
+                    None => name,
+                };
+                let loc = self.stack_locs.get(function.get_name().to_string_lossy().as_ref());
                 let name = self.builder.build_global_string_ptr(name, "stack_fn_name").map_err(|e| e.to_string())?;
+                let file = match loc {
+                    Some(loc) => *match files.entry(loc.file.clone()) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                            self.builder.build_global_string_ptr(&loc.file, "stack_fn_file").map_err(|e| e.to_string())?.as_pointer_value(),
+                        ),
+                    },
+                    None => pointer.const_null(),
+                };
+                let i32_type = self.context.i32_type();
+                let (line, col) = loc.map_or((0, 0), |loc| (loc.line, loc.col));
                 Ok(self.context.const_struct(
-                    &[function.as_global_value().as_pointer_value().into(), name.as_pointer_value().into()],
+                    &[
+                        function.as_global_value().as_pointer_value().into(),
+                        name.as_pointer_value().into(),
+                        file.into(),
+                        i32_type.const_int(line.into(), false).into(),
+                        i32_type.const_int(col.into(), false).into(),
+                    ],
                     false,
                 ))
             })
@@ -405,7 +451,11 @@ impl<'ctx> HirCompiler<'ctx> {
         if entries.is_empty() {
             return Ok(());
         }
-        let entry_type = self.context.struct_type(&[pointer.into(), pointer.into()], false);
+        let i32_type = self.context.i32_type();
+        let entry_type = self.context.struct_type(
+            &[pointer.into(), pointer.into(), pointer.into(), i32_type.into(), i32_type.into()],
+            false,
+        );
         let table = self.module.add_global(entry_type.array_type(entries.len() as u32), None, "thaw_stack_table");
         table.set_constant(true);
         table.set_linkage(Linkage::Internal);

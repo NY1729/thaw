@@ -11,6 +11,34 @@ use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyn
 pub use swc_common as common;
 pub use swc_ecma_ast as ast;
 
+thread_local! {
+    static SHARED_SOURCE_MAP: Lrc<SourceMap> = Default::default();
+}
+
+/// The thread's shared `SourceMap`: every module parsed with
+/// [`parse_typescript_with_shared_source_map_named`] appends its file here, so such a `Span`
+/// resolves to its own file (positions never collide across those modules).
+// ponytail: sources stay alive until the thread ends; fine for one-shot compiles.
+pub fn shared_source_map() -> Lrc<SourceMap> {
+    SHARED_SOURCE_MAP.with(Lrc::clone)
+}
+
+/// `(file name, 1-based line, 1-based column)` of `span`'s start, or `None` for a synthetic span
+/// (or one that was not parsed into the shared map; a span from a private parse may resolve to an
+/// unrelated file, so only lower modules whose parts all went through the shared map).
+pub fn span_location(span: swc_common::Span) -> Option<(String, u32, u32)> {
+    if span.lo.0 == 0 {
+        return None;
+    }
+    let cm = shared_source_map();
+    let loc = cm.try_lookup_char_pos(span.lo).ok()?;
+    Some((
+        loc.file.name.to_string(),
+        loc.line as u32,
+        loc.col.0 as u32 + 1,
+    ))
+}
+
 /// Parses a TypeScript source string into an SWC `Module`.
 ///
 /// Errors are rendered to stderr via SWC's diagnostic emitter and also
@@ -35,7 +63,18 @@ pub fn parse_typescript_with_source_map_named(
     source: &str,
     filename: FileName,
 ) -> Result<(Module, Lrc<SourceMap>), String> {
-    parse_typescript_source(source, filename, false)
+    parse_typescript_source(source, filename, false, false)
+}
+
+/// Like [`parse_typescript_with_source_map_named`], but the file joins the thread's
+/// [`shared_source_map`], so its spans stay resolvable by [`span_location`] next to those of every
+/// other module parsed this way. Only the module bundler uses it: other callers index sources by
+/// raw `BytePos`, which assumes each parse starts at position 1.
+pub fn parse_typescript_with_shared_source_map_named(
+    source: &str,
+    filename: FileName,
+) -> Result<(Module, Lrc<SourceMap>), String> {
+    parse_typescript_source(source, filename, false, true)
 }
 
 /// Parses ambient declarations with SWC's declaration-file grammar.
@@ -54,15 +93,20 @@ pub fn parse_declarations_with_source_map_named(
     source: &str,
     filename: FileName,
 ) -> Result<(Module, Lrc<SourceMap>), String> {
-    parse_typescript_source(source, filename, true)
+    parse_typescript_source(source, filename, true, false)
 }
 
 fn parse_typescript_source(
     source: &str,
     filename: FileName,
     declarations: bool,
+    shared: bool,
 ) -> Result<(Module, Lrc<SourceMap>), String> {
-    let cm: Lrc<SourceMap> = Default::default();
+    let cm = if shared {
+        shared_source_map()
+    } else {
+        Default::default()
+    };
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
 
     let fm = cm.new_source_file(Lrc::new(filename), source.to_string());

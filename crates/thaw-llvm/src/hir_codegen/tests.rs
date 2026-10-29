@@ -246,7 +246,12 @@ fn compile_and_run_raw_as(
     envs: &[(&str, &str)],
     commonjs: bool,
 ) -> std::process::Output {
-    let module = thaw_parser::parse_typescript(source).unwrap();
+    // The shared source map keeps the spans resolvable, so `Error.stack` frames get `file:line:col`.
+    let (module, _) = thaw_parser::parse_typescript_with_shared_source_map_named(
+        source,
+        thaw_parser::common::FileName::Custom("input.ts".into()),
+    )
+    .unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
     let context = Context::create();
@@ -766,3 +771,4 @@ include!("tests/bufu8_contracts.rs");
 include!("tests/lim3_contracts.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");
+include!("tests/stackloc_contracts.rs");

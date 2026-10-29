@@ -32,7 +32,7 @@ use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
     FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiRegisterClass,
     FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirInitStep, HirLit,
-    HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess,
+    HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess, SourceLoc,
 };
 
 #[derive(Clone)]
@@ -477,6 +477,10 @@ pub struct HirCompiler<'ctx> {
     /// `try`) resolves this completion instead of returning from the segment.
     async_return_frames: HashMap<PointerValue<'ctx>, (PointerValue<'ctx>, HirType)>,
     next_lambda: usize,
+    /// Definition sites of the source functions (`HirProgram::fn_locs`), by HIR name.
+    fn_locs: HashMap<String, SourceLoc>,
+    /// Where each stack-visible function (by LLVM symbol) is defined, for `Error.stack`.
+    stack_locs: HashMap<String, SourceLoc>,
     uses_napi: bool,
     uses_thaw_js: bool,
     uses_intl: bool,
@@ -839,6 +843,8 @@ impl<'ctx> HirCompiler<'ctx> {
             active_async_completion: None,
             async_return_frames: HashMap::new(),
             next_lambda: 0,
+            fn_locs: HashMap::new(),
+            stack_locs: HashMap::new(),
             uses_napi: false,
             uses_thaw_js: false,
             uses_intl: false,
@@ -866,6 +872,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.stack_guard = true;
+        self.fn_locs = program.fn_locs.0.clone();
         self.projects_native_objects =
             hir_contains_named_call(program, "__thaw_build_native_object_wrapper")
                 || hir_contains_non_arrow_this_value(program);

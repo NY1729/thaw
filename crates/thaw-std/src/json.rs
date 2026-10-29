@@ -6625,7 +6625,7 @@ unsafe extern "C" {
     fn thaw_error_delete_prop(error: *const c_char, key: *const c_char) -> bool;
     fn thaw_error_entries_json(error: *const c_char) -> *const c_char;
     fn thaw_error_is_instance(message: *const c_char, class_name: *const c_char) -> bool;
-    fn thaw_error_stack_frames() -> *const c_char;
+    fn thaw_error_stack_frames(frame: usize, ra: usize) -> *const c_char;
     fn thaw_error_cause(message: *const c_char) -> *const c_char;
     fn thaw_error_code(message: *const c_char) -> *const c_char;
     fn thaw_error_to_string(message: *const c_char) -> *const c_char;
@@ -6983,8 +6983,47 @@ fn is_thaw_internal_wrapper(value: &Value) -> bool {
 /// fixed set.
 /// `Error.captureStackTrace(target)` on a plain object: an own `stack` of `name: message` (V8's
 /// `Error.prototype.toString` defaults) plus the generated frame line.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[unsafe(naked)]
 #[no_mangle]
-pub extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+    // Hands the compiled caller's frame pointer and return address to the implementation.
+    core::arch::naked_asm!(
+        "mov rsi, rbp",
+        "mov rdx, [rsp]",
+        "jmp {inner}",
+        inner = sym thaw_json_capture_stack_trace_at,
+    )
+}
+
+/// See the x86-64 variant.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+    core::arch::naked_asm!(
+        "mov x1, x29",
+        "mov x2, x30",
+        "b {inner}",
+        inner = sym thaw_json_capture_stack_trace_at,
+    )
+}
+
+/// See the x86-64 variant; without a known frame layout no frames are captured.
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+    unsafe { thaw_json_capture_stack_trace_at(value, 0, 0) }
+}
+
+unsafe extern "C" fn thaw_json_capture_stack_trace_at(
+    value: *mut Value,
+    frame: usize,
+    ra: usize,
+) -> f64 {
     if value.is_null() || error_ref(unsafe { &*value }).is_some() {
         return 0.0;
     }
@@ -7001,7 +7040,7 @@ pub extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
         (_, true) => name,
         _ => format!("{name}: {message}"),
     };
-    let frames = unsafe { thaw_error_stack_frames() };
+    let frames = unsafe { thaw_error_stack_frames(frame, ra) };
     let frames = if frames.is_null() {
         String::new()
     } else {

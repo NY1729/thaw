@@ -175,6 +175,21 @@ fn class_names_referenced_as_values(
     collector.found
 }
 
+thread_local! {
+    /// Definition sites recorded while lowering, moved into `HirProgram::fn_locs` at the end.
+    static FN_LOCS: RefCell<HashMap<Symbol, SourceLoc>> = RefCell::new(HashMap::new());
+}
+
+/// Notes that the function lowered as `name` starts at `span` (ignored for synthetic spans).
+fn record_fn_loc(name: &str, span: swc_common::Span) {
+    if let Some((file, line, col)) = thaw_parser::span_location(span) {
+        let file = file.strip_suffix(" (in-memory module source)").map(str::to_string).unwrap_or(file);
+        FN_LOCS.with(|locs| {
+            locs.borrow_mut().insert(name.to_string(), SourceLoc { file, line, col });
+        });
+    }
+}
+
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     // The first attempt also keeps `undefined` through returns, initialisers, container
     // writes and object literals; if that analysis changed anything and the module no
@@ -194,8 +209,10 @@ fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     PROGRAM_DELETES_STACK.with(|flag| flag.set(module_deletes_stack(module)));
+    FN_LOCS.with(|locs| locs.borrow_mut().clear());
     let normalized = normalize_module_for_lowering(module)?;
     let mut program = lower_normalized_module(&normalized)?;
+    program.fn_locs = FnLocs(FN_LOCS.with(|locs| std::mem::take(&mut *locs.borrow_mut())));
     // `HirType::Bytes` is a lowering-time distinction only; nothing past
     // here knows it, so collapse it to its physical `Array(F64)`.
     erase_bytes(&mut program);
@@ -2788,6 +2805,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         initializers,
         functions: specialized,
         extern_functions,
+        fn_locs: Default::default(),
     })
 }
 

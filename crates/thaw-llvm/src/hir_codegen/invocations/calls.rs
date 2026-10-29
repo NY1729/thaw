@@ -1690,7 +1690,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[name.into(), message.into()], "error_frame",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("error frame returned no value")?;
-                self.emit_stack_capture(framed.into_pointer_value())?;
                 return Ok(framed);
             }
             "__thaw_error_suppress" => {
