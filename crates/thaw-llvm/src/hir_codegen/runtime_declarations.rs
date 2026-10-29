@@ -1540,6 +1540,28 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function("thaw_arraybuffer_transfer", i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false), Some(Linkage::External));
+        self.module.add_function("thaw_arraybuffer_alloc", i8_ptr.fn_type(&[f64_type.into()], false), Some(Linkage::External));
+        self.module.add_function(
+            "thaw_dataview_new",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_dataview_get",
+            f64_type.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_dataview_set",
+            self.context.void_type().fn_type(
+                &[i8_ptr.into(), f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function("thaw_bytes_console_info", f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false), Some(Linkage::External));
+        self.module.add_function("thaw_bytes_console_target", i8_ptr.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
         self.module.add_function(
             "thaw_bytes_from_buffer_like",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into(), f64_type.into()], false),
@@ -2605,7 +2627,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_json_buffer_inspect",
-            json_as_string_type,
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
