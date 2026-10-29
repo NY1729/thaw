@@ -5639,7 +5639,7 @@ pub unsafe extern "C" fn thaw_json_inspect(value: *const Value) -> *const c_char
 }
 
 /// `util.inspect` of a byte buffer given as a JSON number array (`console.log(Buffer)`).
-/// `kind` 1 prints an `ArrayBuffer`, 2 a `DataView` (`bytes` is then its whole store).
+/// `kind` 1 prints an `ArrayBuffer`, 2 a `DataView`, 3 a plain `Uint8Array` (`bytes` is then its whole store).
 #[no_mangle]
 pub extern "C" fn thaw_json_buffer_inspect(
     value: *mut Value,
@@ -5659,6 +5659,16 @@ pub extern "C" fn thaw_json_buffer_inspect(
     thaw_arena::owned_string(match kind as u8 {
         1 => crate::inspect::format_array_buffer(&bytes, 0),
         2 => crate::inspect::format_data_view(&bytes, offset as usize, length as usize),
+        3 => crate::inspect::inspect(
+            &crate::inspect::Node::Typed {
+                name: "Uint8Array".into(),
+                items: bytes
+                    .iter()
+                    .map(|&byte| crate::inspect::Node::Number(f64::from(byte)))
+                    .collect(),
+            },
+            &crate::inspect::InspectOptions::default(),
+        ),
         _ => crate::inspect::inspect(
             &crate::inspect::Node::Buffer(bytes),
             &crate::inspect::InspectOptions::default(),

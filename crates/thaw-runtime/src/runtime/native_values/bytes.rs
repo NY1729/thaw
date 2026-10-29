@@ -1298,7 +1298,15 @@ pub unsafe extern "C" fn thaw_bytes_console_info(buffer: *const u8, field: f64) 
         return view.len as f64;
     }
     let flags = view_flags(view);
-    if flags & BYTE_VIEW_DATAVIEW != 0 { 2.0 } else if flags & BYTE_VIEW_ARRAY_BUFFER != 0 { 1.0 } else { 0.0 }
+    if flags & BYTE_VIEW_DATAVIEW != 0 {
+        2.0
+    } else if flags & BYTE_VIEW_ARRAY_BUFFER != 0 {
+        1.0
+    } else if flags & BYTE_VIEW_BUFFER == 0 {
+        3.0 // a plain `Uint8Array`
+    } else {
+        0.0
+    }
 }
 
 #[no_mangle]

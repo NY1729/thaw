@@ -2225,6 +2225,26 @@ impl<'a> FnLowerer<'a> {
     /// saved before it is observed.
     pub(super) fn lower_string_index_optional(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
         let Expr::Member(member) = expr else { return Ok(None) };
+        // `d[k] ?? x` / `d[k] === undefined` on a `Record<string, number>`: a missing key is
+        // absent (`undefined`), not the element's zero value, so read it as an `Optional`.
+        if matches!(member.obj.as_ref(), Expr::Ident(_)) {
+            if let Some(HirType::Dictionary(element)) = self.peek_type_without_lowering(&member.obj) {
+                if matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool) {
+                    let key = match &member.prop {
+                        MemberProp::Ident(property) => HirExpr::Lit(HirLit::Str(property.sym.to_string())),
+                        MemberProp::Computed(computed) => {
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                        _ => return Ok(None),
+                    };
+                    let obj = self.lower_member_receiver(&member.obj)?;
+                    return self
+                        .typed_dictionary_read(obj, key, &HirType::Optional(element))
+                        .map(Some);
+                }
+            }
+        }
         let MemberProp::Computed(computed) = &member.prop else { return Ok(None) };
         if !matches!(member.obj.as_ref(), Expr::Ident(_)) {
             return Ok(None);
