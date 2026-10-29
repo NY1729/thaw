@@ -3387,6 +3387,11 @@
       "name": "infer destructuring assignment swap on module bindings and indexed targets",
       "expect": "matched",
       "source": "let a = 1, b = 2;\nlet [c, d] = [3, 4];\nfunction main(): void {\n  [a, b] = [b, a];\n  [c, d] = [d, c];\n  const xs = [3, 1, 2];\n  let i = 0, j = 2;\n  [xs[i], xs[j]] = [xs[j], xs[i]];\n  ({ a } = { a: 5 });\n  console.log(a, b, c, d, xs);\n}"
+    },
+    {
+      "name": "arguments object and surplus call arguments",
+      "expect": "matched",
+      "source": "function f(a: number, b: number) { return arguments.length; }\nfunction g(a: number) { return arguments[1] + a; }\nfunction h(): number { return Array.from(arguments).length; }\nfunction s(): number { let t = 0; for (let i = 0; i < arguments.length; i++) t += arguments[i]; return t; }\nfunction main(): void {\n  console.log((f as any)(1, 2, 3), (g as any)(1, 2), (h as any)(5, 6, 7, 8), (s as any)(1, 2, 3, 4));\n  console.log((function () { return Array.prototype.slice.call(arguments, 1); })(1, 2, 3));\n  const k = (a: number) => a * 2;\n  const log: number[] = [];\n  console.log((k as any)(4, log.push(7)), log);\n}"
     }
   ]
 }
