@@ -935,6 +935,60 @@ fn format_buffer(bytes: &[u8]) -> String {
     format!("<Buffer {text}>")
 }
 
+/// One braced `key: value` list the way `reduceToSingleString` lays it out at `indent`.
+fn braced_entries(open: &str, entries: &[String], indent: usize) -> String {
+    let start = entries.len() + indent + open.len() + 10;
+    let total = entries.iter().map(String::len).sum::<usize>() + entries.len() + start;
+    let joined = entries.join(", ");
+    if total + entries.len() <= 80 && total <= 80 && !joined.contains('\n') {
+        return format!("{open} {joined} }}");
+    }
+    let pad = " ".repeat(indent);
+    format!(
+        "{open}\n{pad}  {}\n{pad}}}",
+        entries.join(&format!(",\n{pad}  "))
+    )
+}
+
+/// `ArrayBuffer { [Uint8Contents]: <00 00>, [byteLength]: 2 }` (up to 100 bytes listed).
+pub fn format_array_buffer(bytes: &[u8], indent: usize) -> String {
+    const MAX: usize = 100;
+    let mut contents = bytes[..MAX.min(bytes.len())]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > MAX {
+        let remaining = bytes.len() - MAX;
+        let _ = write!(
+            contents,
+            " ... {remaining} more byte{}",
+            if remaining > 1 { "s" } else { "" }
+        );
+    }
+    braced_entries(
+        "ArrayBuffer {",
+        &[
+            format!("[Uint8Contents]: <{contents}>"),
+            format!("[byteLength]: {}", bytes.len()),
+        ],
+        indent,
+    )
+}
+
+/// `DataView { byteLength, byteOffset, buffer }` over the whole store `bytes`.
+pub fn format_data_view(bytes: &[u8], byte_offset: usize, byte_length: usize) -> String {
+    braced_entries(
+        "DataView {",
+        &[
+            format!("[byteLength]: {byte_length}"),
+            format!("[byteOffset]: {byte_offset}"),
+            format!("[buffer]: {}", format_array_buffer(bytes, 2)),
+        ],
+        0,
+    )
+}
+
 /// `getFunctionBase` for functions without own properties.
 fn format_function(name: &str, kind: &FnKind) -> String {
     if let FnKind::Class { extends } = kind {
@@ -1353,6 +1407,19 @@ mod unit_tests {
             "Set(2) { 1, 'x' }"
         );
         assert_eq!(show(&Node::Buffer(vec![1, 2, 255])), "<Buffer 01 02 ff>");
+        // Expected strings are Node 22's.
+        assert_eq!(
+            format_array_buffer(&[0, 0], 0),
+            "ArrayBuffer { [Uint8Contents]: <00 00>, [byteLength]: 2 }"
+        );
+        assert_eq!(
+            format_array_buffer(&[0; 8], 0),
+            "ArrayBuffer {\n  [Uint8Contents]: <00 00 00 00 00 00 00 00>,\n  [byteLength]: 8\n}"
+        );
+        assert_eq!(
+            format_data_view(&[0; 4], 1, 2),
+            "DataView {\n  [byteLength]: 2,\n  [byteOffset]: 1,\n  [buffer]: ArrayBuffer { [Uint8Contents]: <00 00 00 00>, [byteLength]: 4 }\n}"
+        );
         let typed = |name: &str, items: Vec<f64>| Node::Typed {
             name: name.into(),
             items: items.into_iter().map(Node::Number).collect(),

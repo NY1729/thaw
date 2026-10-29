@@ -31,6 +31,14 @@ pub fn span_location(span: swc_common::Span) -> Option<(String, u32, u32)> {
         return None;
     }
     let cm = shared_source_map();
+    // A span from a private parse can land mid-character here; refuse it instead of tripping SWC's assertion.
+    let file = cm.try_lookup_source_file(span.lo).ok()??;
+    if !file
+        .src
+        .is_char_boundary((span.lo - file.start_pos).0 as usize)
+    {
+        return None;
+    }
     let loc = cm.try_lookup_char_pos(span.lo).ok()?;
     Some((
         loc.file.name.to_string(),
