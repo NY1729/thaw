@@ -1993,11 +1993,6 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_error_capture_frames",
-            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
-            Some(Linkage::External),
-        );
-        self.module.add_function(
             "thaw_register_fn_table",
             self.context.void_type().fn_type(
                 &[i8_ptr.into(), self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],

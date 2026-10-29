@@ -3202,6 +3202,21 @@
       "name": "icu locale methods default locale and local time zone",
       "expect": "matched",
       "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(), d.toLocaleDateString(), d.toLocaleTimeString()); console.log((1234567.891).toLocaleString(), \"a\".localeCompare(\"B\")); }"
+    },
+    {
+      "name": "error stack frames name the calling functions with file line and column",
+      "expect": "matched",
+      "source": "class K {\n  m(): string { return new Error(\"in method\").stack!; }\n  static s(): string { return new Error(\"in static\").stack!; }\n}\nfunction inner(): string { return new Error(\"boom\").stack!; }\nfunction outer(): string { return inner(); }\nfunction frames(stack: string, count: number): string[] {\n  return stack.split(\"\\n\").slice(1, 1 + count);\n}\nfunction main(): void {\n  const lines = frames(outer(), 2);\n  console.log(lines.length, lines.every((l: string) => /^    at \\S+ \\(.*:\\d+:\\d+\\)$/.test(l)));\n  console.log(lines[0].includes(\"at inner \"), lines[1].includes(\"at outer \"));\n  console.log(frames(new K().m(), 1)[0].includes(\"at K.m \"), frames(K.s(), 1)[0].includes(\"at K.s \"));\n}\n"
+    },
+    {
+      "name": "runtime thrown TypeError stack names the throwing function",
+      "expect": "matched",
+      "source": "function fail(): string {\n  try {\n    const o: any = null;\n    o.x;\n  } catch (e: any) {\n    return e.stack;\n  }\n  return \"\";\n}\nfunction main(): void {\n  const lines = fail().split(\"\\n\");\n  console.log(lines[0], /^    at fail \\(.*:\\d+:\\d+\\)$/.test(lines[1]));\n}\n"
+    },
+    {
+      "name": "captureStackTrace on a plain object lists the calling functions",
+      "expect": "matched",
+      "source": "function mk(): any {\n  const o: any = { name: \"X\", message: \"hi\" };\n  Error.captureStackTrace(o);\n  return o.stack;\n}\nfunction wrap(): any { return mk(); }\nfunction main(): void {\n  const lines = wrap().split(\"\\n\");\n  console.log(lines[0], lines[1].includes(\"at mk \"), lines[2].includes(\"at wrap \"));\n}\n"
     }
   ]
 }
