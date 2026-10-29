@@ -622,7 +622,7 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
-            HirExpr::EvalThen(_, second) => self.infer_expr_type(second),
+            HirExpr::EvalThen(_, second) => self.infer_expr_type_inner(second),
             HirExpr::Call(callee, args) => {
                 let HirExpr::Var(name) = callee.as_ref() else {
                     let callable = match self.infer_expr_type(callee)? {
@@ -1106,6 +1106,9 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bytes_reorder"
                     | "__thaw_bytes_store_length"
                     | "__thaw_bytes_byte_offset"
+                    | "__thaw_dataview_get"
+                    | "__thaw_dataview_set"
+                    | "__thaw_bytes_kind"
                     | "__thaw_bytes_index_of" => return Ok(HirType::F64),
                     "__thaw_bytes_to_array" | "__thaw_bytes_widen_list" | "__thaw_bytes_narrow_list" => {
                         return Ok(bytes_array_intrinsic_type(name.as_str()))
@@ -1119,6 +1122,7 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_bytes_read_i64" => return Ok(HirType::I64),
                     "__thaw_bytes_equals" => return Ok(HirType::Bool),
                     "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
+                    | "__thaw_arraybuffer_alloc" | "__thaw_dataview_new" | "__thaw_arraybuffer_transfer"
                     | "__thaw_bytes_from_array" | "__thaw_bytes_concat"
                     | "__thaw_bytes_slice"
                     | "__thaw_bytes_as_u8"

@@ -2673,6 +2673,13 @@ impl<'a> FnLowerer<'a> {
                         );
                                 }
                             };
+                            // A list held in a dynamic-storage slot (captured by a closure
+                            // handed to a JS callback) reads as `Json`: decode it back.
+                            let list = &if self.infer_expr_type(list)? == HirType::Json {
+                                self.coerce_to_declared(&HirType::Array(Box::new(HirType::Bytes)), list.clone())?
+                            } else {
+                                list.clone()
+                            };
                             let list_type = self.infer_expr_type(list)?;
                             if !matches!(&list_type, HirType::Array(element)
                                 if matches!(element.as_ref(), HirType::Bytes)
@@ -2758,6 +2765,34 @@ impl<'a> FnLowerer<'a> {
                             .ok_or("`Buffer.from` expects a value")?
                             .clone();
                         let source_type = self.infer_expr_type(&source)?;
+                        // A string / number list held in a dynamic-storage slot (captured by a
+                        // closure handed to a JS callback) reads as `Json`: pick by its shape.
+                        if source_type == HirType::Json {
+                            let encoding = match arguments.get(1) {
+                                Some(argument) => argument.clone(),
+                                None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
+                            };
+                            let name = format!("__thaw_buffer_from_json_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), HirType::Json);
+                            let numbers = self.coerce_to_declared(
+                                &HirType::Array(Box::new(HirType::F64)),
+                                HirExpr::Var(name.clone()),
+                            )?;
+                            let text = self.coerce_to_declared(&HirType::Str, HirExpr::Var(name.clone()))?;
+                            let call = |intrinsic: &str, args: Vec<HirExpr>| {
+                                HirExpr::Call(Box::new(HirExpr::Var(intrinsic.to_string())), args)
+                            };
+                            let body = HirExpr::Conditional(
+                                Box::new(call("__thaw_json_is_array", vec![HirExpr::Var(name.clone())])),
+                                Box::new(call("__thaw_bytes_from_array", vec![numbers])),
+                                Box::new(call("__thaw_bytes_from_string", vec![text, encoding])),
+                                HirType::Bytes,
+                            );
+                            let mut bindings = bindings;
+                            bindings.push((name, HirType::Json, source));
+                            return self.wrap_call_argument_bindings(body, &bindings);
+                        }
                         if matches!(&source_type, HirType::Array(elem) if **elem == HirType::F64) {
                             if self.infer_expr_type_inner(&source)? == HirType::Bytes {
                                 // `Buffer.from(arrayBuffer, byteOffset?, length?)` shares the
