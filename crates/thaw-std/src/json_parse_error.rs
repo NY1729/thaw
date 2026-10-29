@@ -44,7 +44,11 @@ impl Scan<'_> {
     /// wording follows the token under the cursor.
     fn fail(&self, pos: usize, explicit: Option<&str>) -> Failure {
         let at = |what: &str| {
-            let tail = if what.ends_with("after JSON") { "" } else { " in JSON" };
+            let tail = if what.ends_with("after JSON") {
+                ""
+            } else {
+                " in JSON"
+            };
             format!("{what}{tail} at position {pos} {}", self.location(pos))
         };
         if let Some(message) = explicit {
@@ -225,7 +229,9 @@ impl Scan<'_> {
                     self.at += 1;
                     return Ok(());
                 }
-                _ => return Err(self.fail(self.at, Some("Expected ',' or '}' after property value"))),
+                _ => {
+                    return Err(self.fail(self.at, Some("Expected ',' or '}' after property value")))
+                }
             }
         }
     }
@@ -257,10 +263,15 @@ pub(crate) fn parse_error_message(source: &str) -> String {
         scan.skip_ws();
         match scan.peek() {
             None => Ok(()),
-            Some(_) => Err(scan.fail(scan.at, Some("Unexpected non-whitespace character after JSON"))),
+            Some(_) => Err(scan.fail(
+                scan.at,
+                Some("Unexpected non-whitespace character after JSON"),
+            )),
         }
     });
-    outcome.err().unwrap_or_else(|| "Unexpected token in JSON".to_string())
+    outcome
+        .err()
+        .unwrap_or_else(|| "Unexpected token in JSON".to_string())
 }
 
 /// # Safety
@@ -288,6 +299,11 @@ mod tests {
                 wrong.push(format!("{source:?}\n  node: {expected}\n  here: {got}"));
             }
         }
-        assert!(wrong.is_empty(), "{} mismatches:\n{}", wrong.len(), wrong.join("\n"));
+        assert!(
+            wrong.is_empty(),
+            "{} mismatches:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
     }
 }
