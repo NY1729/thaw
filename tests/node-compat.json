@@ -3387,6 +3387,11 @@
       "name": "infer destructuring assignment swap on module bindings and indexed targets",
       "expect": "matched",
       "source": "let a = 1, b = 2;\nlet [c, d] = [3, 4];\nfunction main(): void {\n  [a, b] = [b, a];\n  [c, d] = [d, c];\n  const xs = [3, 1, 2];\n  let i = 0, j = 2;\n  [xs[i], xs[j]] = [xs[j], xs[i]];\n  ({ a } = { a: 5 });\n  console.log(a, b, c, d, xs);\n}"
+    },
+    {
+      "name": "accessor props on object literal print as [Getter]/[Setter]/[Getter/Setter] without invoking",
+      "expect": "matched",
+      "source": "function main(): void { let calls = 0; const o = { get a() { calls++; return 1; }, set s(v: number) { calls++; }, get b() { return 2; }, set b(v: number) {} }; console.log(o); console.log(calls); console.log({ x: 1, get y() { return 2; } }, JSON.stringify(o), calls); }"
     }
   ]
 }
