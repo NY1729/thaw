@@ -19,37 +19,19 @@
 // `--include-collations search` marker data this crate doesn't vendor,
 // a real, separate capability from plain sort-order comparison.
 
-/// `__thaw_intl_collator_compare(locale, sensitivity, ignore_punctuation,
-/// numeric, case_first, a, b) -> i32` (negative/zero/positive, matching
-/// `Intl.Collator.prototype.compare`'s own contract -- real ECMA-402
-/// doesn't guarantee exactly `-1`/`0`/`1`). Falls back to plain UTF-16
-/// codepoint ordering (the same behavior `localeCompare` already has)
-/// if the locale fails to resolve.
-#[allow(clippy::too_many_arguments)]
-fn intl_collator_compare(
+/// Builds the collator for one resolved option set (None if the locale
+/// fails to resolve). Split out so a native host can cache it across the
+/// many comparisons of a sort.
+fn intl_collator_build(
     locale_tag: &str,
     sensitivity: &str,
     ignore_punctuation: bool,
     numeric: bool,
     case_first: &str,
-    a: &[u8],
-    b: &[u8],
-) -> i32 {
+) -> Option<icu_collator::Collator> {
     use std::str::FromStr;
 
-    // A lone surrogate is substituted with U+FFFD for icu4x; the
-    // codepoint fallback compares the real UTF-16 units.
-    let a_text = wtf8_to_icu_text(a);
-    let b_text = wtf8_to_icu_text(b);
-    let codepoint_fallback = || match wtf8_decode_utf16(a).cmp(&wtf8_decode_utf16(b)) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    };
-
-    let Ok(locale) = icu_locale::Locale::from_str(locale_tag) else {
-        return codepoint_fallback();
-    };
+    let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
     let curated_tag = resolve_curated_locale(&locale.id);
     let curated_locale: icu_locale::Locale =
         curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
@@ -79,9 +61,37 @@ fn intl_collator_compare(
         options.alternate_handling = Some(icu_collator::options::AlternateHandling::Shifted);
         options.max_variable = Some(icu_collator::options::MaxVariable::Punctuation);
     }
+    icu_collator::Collator::try_new_unstable(&thaw_icu_data::ThawIcuDataProvider, prefs, options).ok()
+}
 
-    let Ok(collator) =
-        icu_collator::Collator::try_new_unstable(&thaw_icu_data::ThawIcuDataProvider, prefs, options)
+/// `__thaw_intl_collator_compare(locale, sensitivity, ignore_punctuation,
+/// numeric, case_first, a, b) -> i32` (negative/zero/positive, matching
+/// `Intl.Collator.prototype.compare`'s own contract -- real ECMA-402
+/// doesn't guarantee exactly `-1`/`0`/`1`). Falls back to plain UTF-16
+/// codepoint ordering (the same behavior `localeCompare` already has)
+/// if the locale fails to resolve.
+#[allow(clippy::too_many_arguments)]
+fn intl_collator_compare(
+    locale_tag: &str,
+    sensitivity: &str,
+    ignore_punctuation: bool,
+    numeric: bool,
+    case_first: &str,
+    a: &[u8],
+    b: &[u8],
+) -> i32 {
+    // A lone surrogate is substituted with U+FFFD for icu4x; the
+    // codepoint fallback compares the real UTF-16 units.
+    let a_text = wtf8_to_icu_text(a);
+    let b_text = wtf8_to_icu_text(b);
+    let codepoint_fallback = || match wtf8_decode_utf16(a).cmp(&wtf8_decode_utf16(b)) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    };
+
+    let Some(collator) =
+        intl_collator_build(locale_tag, sensitivity, ignore_punctuation, numeric, case_first)
     else {
         return codepoint_fallback();
     };
