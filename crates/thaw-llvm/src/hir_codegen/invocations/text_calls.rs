@@ -5,6 +5,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
         let text_call = name.starts_with("__thaw_string_")
+            || name.starts_with("__thaw_intl_")
             || name.starts_with("__thaw_regex_")
             || name.starts_with("__thaw_encode_uri")
             || name.starts_with("__thaw_decode_uri")
@@ -734,6 +735,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("charCodeAt returned no value".to_string());
+            }
+            "__thaw_intl_compare" | "__thaw_intl_number" | "__thaw_intl_date" => {
+                // Implemented by the optional thaw-intl archive (linked only when this
+                // flag is set); the operands are already typed by HIR inference.
+                self.uses_intl = true;
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                let operands = args
+                    .iter()
+                    .map(|operand| self.compile_expr(operand).map(Into::into))
+                    .collect::<Result<Vec<inkwell::values::BasicMetadataValueEnum>, _>>()?;
+                let value = self
+                    .builder
+                    .build_call(self.module.get_function(&runtime).unwrap(), &operands, "intl_call")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("locale call returned no value")?;
+                if name == "__thaw_intl_compare" {
+                    return self
+                        .builder
+                        .build_signed_int_to_float(value.into_int_value(), self.context.f64_type(), "intl_compare_f64")
+                        .map(Into::into)
+                        .map_err(|error| error.to_string());
+                }
+                return Ok(value);
             }
             "__thaw_string_locale_compare" => {
                 let [receiver, other] = args else {

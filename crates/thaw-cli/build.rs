@@ -24,6 +24,7 @@ fn main() {
         "Cargo.toml",
         "crates/thaw-arena",
         "crates/thaw-icu-data",
+        "crates/thaw-intl",
         "crates/thaw-runtime",
         "crates/thaw-std",
         "crates/thaw-jit",
