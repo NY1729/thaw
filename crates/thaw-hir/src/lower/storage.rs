@@ -1,4 +1,4 @@
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use swc_common::{Span, Spanned};
 
 #[derive(Default)]
@@ -481,54 +481,108 @@ impl StorageGraph {
         self.edges.entry(right).or_default().push(left);
     }
     /// Links every call's result and arguments to the callables and native classes reachable
-    /// from its callee, to a fixpoint. The reachable set of each callee is memoised and only
-    /// grows: a round re-searches just the callees whose set contains an endpoint of an edge
-    /// the previous round added, and walks only from those endpoints. The result equals
-    /// `connect_calls_reference`, which the storage analysis checks in tests.
+    /// from its callee, to a fixpoint. Each round condenses the (capture-free) graph into its
+    /// strongly connected components and propagates, bottom-up, a bitset of the callables and
+    /// native classes each component reaches, so all callees share one linear pass instead of
+    /// each walking the merged graph. A call is linked once per newly reached callable. The
+    /// result equals `connect_calls_reference`, which the storage analysis checks in tests.
     fn connect_calls(&mut self) -> StorageCallConnections {
+        const NONE: usize = usize::MAX;
         let mut connected_calls: HashSet<usize> = HashSet::new();
-        let mut calls_by_callee: FxHashMap<(u32, u32), Vec<usize>> = FxHashMap::default();
-        for (index, call) in self.calls.iter().enumerate() {
-            calls_by_callee.entry(storage_key(call.callee)).or_default().push(index);
-        }
-        let mut callees: Vec<(u32, u32)> = calls_by_callee.keys().copied().collect();
-        callees.sort_unstable();
-        let mut reach: FxHashMap<(u32, u32), FxHashSet<(u32, u32)>> = FxHashMap::default();
-        // Endpoints of the edges the previous round added; the first round seeds every callee.
-        let mut touched: Vec<(u32, u32)> = Vec::new();
-        let mut first_round = true;
+        // Bits of the callables / native classes each call has already been linked to.
+        let mut done: Vec<Vec<u64>> = vec![Vec::new(); self.calls.len()];
         loop {
-            let mut links = Vec::new();
-            for &callee in &callees {
-                let seen = reach.entry(callee).or_default();
-                let mut pending = Vec::new();
-                let mut fresh = Vec::new();
-                if first_round {
-                    seen.insert(callee);
-                    pending.push(callee);
-                    fresh.push(callee);
-                } else {
-                    pending.extend(touched.iter().copied().filter(|node| seen.contains(node)));
-                }
-                while let Some(node) = pending.pop() {
-                    let Some(neighbors) = self.edges.get(&node) else { continue };
-                    for &next in neighbors {
-                        if self.captures.contains(&(node, next)) { continue; }
-                        if seen.insert(next) {
-                            fresh.push(next);
-                            pending.push(next);
+            let mut ids: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+            let mut keys: Vec<(u32, u32)> = Vec::new();
+            let mut intern = |key: (u32, u32)| *ids.entry(key).or_insert_with(|| { keys.push(key); keys.len() - 1 });
+            for call in &self.calls { intern(storage_key(call.callee)); }
+            let mut interesting: Vec<usize> = Vec::new();
+            for &key in self.callables.keys().chain(self.native_results.keys()) {
+                interesting.push(intern(key));
+            }
+            interesting.sort_unstable();
+            interesting.dedup();
+            for (&node, neighbors) in &self.edges {
+                intern(node);
+                for &next in neighbors { intern(next); }
+            }
+            let count = keys.len();
+            let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); count];
+            for (&node, neighbors) in &self.edges {
+                let from = ids[&node];
+                adjacency[from] = neighbors.iter()
+                    .filter(|&&next| !self.captures.contains(&(node, next)))
+                    .map(|next| ids[next])
+                    .collect();
+                adjacency[from].sort_unstable();
+                adjacency[from].dedup();
+            }
+            let words = interesting.len().div_ceil(64);
+            let mut bit_of = vec![NONE; count];
+            for (bit, &node) in interesting.iter().enumerate() { bit_of[node] = bit; }
+            // Iterative Tarjan: components are finished sinks first, so their successors' bitsets exist.
+            let mut order = vec![NONE; count];
+            let mut low = vec![0usize; count];
+            let mut on_stack = vec![false; count];
+            let mut component = vec![NONE; count];
+            let mut component_bits: Vec<Vec<u64>> = Vec::new();
+            let (mut stack, mut next_order) = (Vec::new(), 0usize);
+            for root in 0..count {
+                if order[root] != NONE { continue; }
+                order[root] = next_order; low[root] = next_order; next_order += 1;
+                stack.push(root); on_stack[root] = true;
+                let mut frames = vec![(root, 0usize)];
+                while let Some(&(node, cursor)) = frames.last() {
+                    if let Some(&next) = adjacency[node].get(cursor) {
+                        frames.last_mut().unwrap().1 += 1;
+                        if order[next] == NONE {
+                            order[next] = next_order; low[next] = next_order; next_order += 1;
+                            stack.push(next); on_stack[next] = true;
+                            frames.push((next, 0));
+                        } else if on_stack[next] {
+                            low[node] = low[node].min(order[next]);
+                        }
+                        continue;
+                    }
+                    frames.pop();
+                    if let Some(&(parent, _)) = frames.last() { low[parent] = low[parent].min(low[node]); }
+                    if low[node] != order[node] { continue; }
+                    let id = component_bits.len();
+                    let mut members = Vec::new();
+                    loop {
+                        let member = stack.pop().unwrap();
+                        on_stack[member] = false;
+                        component[member] = id;
+                        members.push(member);
+                        if member == node { break; }
+                    }
+                    let mut bits = vec![0u64; words];
+                    for &member in &members {
+                        if bit_of[member] != NONE { bits[bit_of[member] / 64] |= 1 << (bit_of[member] % 64); }
+                        for &next in &adjacency[member] {
+                            if component[next] != id {
+                                for (word, other) in bits.iter_mut().zip(&component_bits[component[next]]) { *word |= other; }
+                            }
                         }
                     }
+                    component_bits.push(bits);
                 }
-                let indices = &calls_by_callee[&callee];
-                for &node in &fresh {
-                    if let Some(class) = self.native_results.get(&node) {
-                        for &index in indices {
+            }
+            let mut links = Vec::new();
+            for index in 0..self.calls.len() {
+                let reached = &component_bits[component[ids[&storage_key(self.calls[index].callee)]]];
+                if done[index].is_empty() { done[index] = vec![0u64; words]; }
+                for word in 0..words {
+                    let mut fresh = reached[word] & !done[index][word];
+                    done[index][word] |= fresh;
+                    while fresh != 0 {
+                        let bit = word * 64 + fresh.trailing_zeros() as usize;
+                        fresh &= fresh - 1;
+                        let node = keys[interesting[bit]];
+                        if let Some(class) = self.native_results.get(&node) {
                             links.push((storage_key(self.calls[index].result), storage_key(*class)));
                         }
-                    }
-                    if let Some(callable) = self.callables.get(&node) {
-                        for &index in indices {
+                        if let Some(callable) = self.callables.get(&node) {
                             connected_calls.insert(index);
                             let call = &self.calls[index];
                             links.push((storage_key(call.result), callable.result));
@@ -553,8 +607,6 @@ impl StorageGraph {
                 }
             }
             if links.is_empty() { break; }
-            touched = links.iter().flat_map(|&(left, right)| [left, right]).collect::<FxHashSet<_>>().into_iter().collect();
-            first_round = false;
             for (left, right) in links { self.link_keys(left, right); }
         }
         self.finish_call_connections(&connected_calls)
