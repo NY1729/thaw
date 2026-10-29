@@ -56,26 +56,107 @@ fn metadata_suffix(message: &str) -> &str {
     message
 }
 
-/// Length-frame a structured error message without changing the pointer ABI.
+/// Length-frame a structured error message without changing the pointer ABI. Also records the
+/// caller's call stack for `err.stack`: this trampoline hands the caller's frame pointer and
+/// return address to the implementation, so compiled code needs no extra call.
 /// # Safety
 /// Both pointers must reference live native strings.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+    core::arch::naked_asm!(
+        "mov rdx, rbp",
+        "mov rcx, [rsp]",
+        "jmp {inner}",
+        inner = sym thaw_error_frame_at,
+    )
+}
+
+/// See the x86-64 variant.
+/// # Safety
+/// Both pointers must reference live native strings.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+    core::arch::naked_asm!(
+        "mov x2, x29",
+        "mov x3, x30",
+        "b {inner}",
+        inner = sym thaw_error_frame_at,
+    )
+}
+
+/// See the x86-64 variant; without a known frame layout no stack is captured.
+/// # Safety
+/// Both pointers must reference live native strings.
+#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+    unsafe { thaw_error_frame_at(name, message, 0, 0) }
+}
+
+unsafe extern "C" fn thaw_error_frame_at(
+    name: *const c_char,
+    message: *const c_char,
+    frame: usize,
+    ra: usize,
+) -> *const c_char {
     if name.is_null() || message.is_null() { return std::ptr::null(); }
     let name = unsafe { wtf8_bytes(name) };
     let message = unsafe { wtf8_bytes(message) };
-    thaw_arena::error_wire::encode_tagged(name, message, None)
+    let error = thaw_arena::error_wire::encode_tagged(name, message, None)
         .and_then(|bytes| arena_wtf8(&bytes))
-        .map_or(std::ptr::null(), |value| value.cast())
+        .map_or(std::ptr::null(), |value| value.cast());
+    capture_frames(error, frame, ra);
+    error
 }
 
 /// Ensures a literal framed error uses an arena-owned pointer so the optional QuickJS
 /// Error bridge can preserve identity across repeated projections. Unframed strings and
-/// already-owned frames keep their original pointer.
+/// already-owned frames keep their original pointer. The copy of a runtime-synthesised error
+/// (`TypeError: Cannot read properties...`, thrown as a literal) also records the throwing call
+/// stack, like `thaw_error_frame` does for `new Error`.
 /// # Safety
 /// `value` must reference a live native string.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_char {
+    core::arch::naked_asm!(
+        "mov rsi, rbp",
+        "mov rdx, [rsp]",
+        "jmp {inner}",
+        inner = sym thaw_error_frame_own_at,
+    )
+}
+
+/// See the x86-64 variant.
+/// # Safety
+/// `value` must reference a live native string.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_char {
+    core::arch::naked_asm!(
+        "mov x1, x29",
+        "mov x2, x30",
+        "b {inner}",
+        inner = sym thaw_error_frame_own_at,
+    )
+}
+
+/// See the x86-64 variant; without a known frame layout no stack is captured.
+/// # Safety
+/// `value` must reference a live native string.
+#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_char {
+    unsafe { thaw_error_frame_own_at(value, 0, 0) }
+}
+
+unsafe extern "C" fn thaw_error_frame_own_at(value: *const c_char, frame: usize, ra: usize) -> *const c_char {
     if value.is_null() || thaw_arena::contains_allocation(value as usize) {
         return value;
     }
@@ -84,7 +165,9 @@ pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_
         || (bytes.first() == Some(&(ERROR_TAG_MARKER as u8))
             && bytes[1..].contains(&(ERROR_TAG_MARKER as u8)));
     if framed {
-        arena_wtf8(bytes).map_or(std::ptr::null(), |owned| owned.cast())
+        let owned = arena_wtf8(bytes).map_or(std::ptr::null(), |owned| owned.cast());
+        capture_frames(owned, frame, ra);
+        owned
     } else {
         value
     }
@@ -1297,9 +1380,9 @@ pub extern "C" fn thaw_error_set_stack_trace_limit(limit: f64) -> f64 {
 }
 
 /// The frame lines of a generated `stack`: the frames captured when `error` was constructed
-/// (`thaw_error_capture_frames`), else one fixed frame of V8's anonymous shape, while
+/// (`thaw_error_frame`), else one fixed frame of V8's anonymous shape, while
 /// `Error.stackTraceLimit` allows at least one.
-// ponytail: function name + entry file only (HIR has no spans for line:col), and a frame
+// ponytail: definition line:col only (not the call site), and a frame
 // inlined by LLVM or reached through frame-pointer-less runtime code is not shown.
 fn stack_frames(error: *const c_char) -> String {
     let limit = thaw_error_stack_trace_limit();
@@ -1316,17 +1399,24 @@ fn stack_frames(error: *const c_char) -> String {
 }
 
 /// The frame lines `stack_frames` appends, for the `stack` that `Error.captureStackTrace` builds
-/// on a plain object.
+/// on a plain object: `frame` and `ra` are the compiled caller's frame pointer and return address
+/// (see `caller_pcs`); without compiled frames it is V8's single anonymous frame.
 #[no_mangle]
-pub extern "C" fn thaw_error_stack_frames() -> *const c_char {
-    let lines = if thaw_error_stack_trace_limit() >= 1.0 { "\n    at <anonymous>" } else { "" };
-    arena_c_string(lines).map_or(std::ptr::null(), |value| value.cast())
+pub extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize) -> *const c_char {
+    let limit = thaw_error_stack_trace_limit();
+    let lines = if limit < 1.0 {
+        String::new()
+    } else {
+        let lines = render_frames(&caller_pcs(frame, ra, (limit as usize).min(200)), limit as usize);
+        if lines.is_empty() { "\n    at <anonymous>".to_string() } else { lines }
+    };
+    arena_c_string(&lines).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// Compiler-emitted table of the program's functions (`thaw_register_fn_table`).
 struct FnTable {
-    /// `(entry address, display name)` sorted by address; an empty name is anonymous.
-    entries: Vec<(usize, String)>,
+    /// Sorted by entry address.
+    entries: Vec<FnInfo>,
     /// Bounds of the section holding every compiled function.
     lo: usize,
     hi: usize,
@@ -1335,10 +1425,23 @@ struct FnTable {
 
 static FN_TABLE: std::sync::OnceLock<FnTable> = std::sync::OnceLock::new();
 
+/// One compiled function: an empty name is anonymous, a `None` file/line is unknown.
+struct FnInfo {
+    address: usize,
+    name: String,
+    file: Option<String>,
+    line: u32,
+    col: u32,
+}
+
 #[repr(C)]
 pub struct FnEntry {
     function: *const u8,
     name: *const c_char,
+    /// Null when the function's definition site is unknown.
+    file: *const c_char,
+    line: u32,
+    col: u32,
 }
 
 /// Registers the compiled functions' names; called once at process start by generated code.
@@ -1354,13 +1457,19 @@ pub unsafe extern "C" fn thaw_register_fn_table(
     file: *const c_char,
 ) {
     let text = |pointer: *const c_char| unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
-    let mut entries: Vec<(usize, String)> = (0..count)
+    let mut entries: Vec<FnInfo> = (0..count)
         .map(|index| {
             let entry = unsafe { &*entries.add(index) };
-            (entry.function as usize, text(entry.name))
+            FnInfo {
+                address: entry.function as usize,
+                name: text(entry.name),
+                file: (!entry.file.is_null()).then(|| text(entry.file)),
+                line: entry.line,
+                col: entry.col,
+            }
         })
         .collect();
-    entries.sort_by_key(|entry| entry.0);
+    entries.sort_by_key(|entry| entry.address);
     let _ = FN_TABLE.set(FnTable { entries, lo: lo as usize, hi: hi as usize, file: text(file) });
 }
 
@@ -1397,31 +1506,41 @@ fn query_stack_bounds() -> (usize, usize) {
     (0, 0)
 }
 
-/// Records the call stack of the function that just built `error`, for `err.stack`: `current` is
-/// that function's entry and `frame` its frame pointer; callers are found by following the saved
-/// frame-pointer chain of compiled code (every compiled function keeps one). Best effort: the
-/// walk stops at the first record that is not on this thread's stack or does not move up.
-///
-/// # Safety
-/// `error` must be null or NUL-terminated; `frame` must be null or the caller's frame pointer.
-#[no_mangle]
-pub unsafe extern "C" fn thaw_error_capture_frames(error: *const c_char, frame: *const usize, current: *const u8) {
-    let limit = thaw_error_stack_trace_limit();
-    if error.is_null() || current.is_null() || limit < 1.0 || FN_TABLE.get().is_none() {
-        return;
-    }
-    let limit = (limit as usize).min(200);
-    let mut pcs = vec![current as usize];
+/// Frame-pointer chain of the compiled code that called a runtime entry, innermost first:
+/// `ra` is the entry's return address and `frame` the caller's frame pointer (both taken by the
+/// naked trampoline in front of the entry, so no IR is needed at the call site). Callers are
+/// found by following the saved frame-pointer chain of compiled code (every compiled function
+/// keeps one). Best effort: the walk stops at the first record that is not on this thread's stack
+/// or does not move up, and non-compiled addresses are filtered out when rendering.
+fn caller_pcs(frame: usize, ra: usize, limit: usize) -> Vec<usize> {
+    let Some(table) = FN_TABLE.get() else {
+        return Vec::new();
+    };
+    let compiled = |pc: usize| pc >= table.lo && pc < table.hi;
+    let mut pcs = vec![ra.wrapping_sub(1)];
+    let mut seen = usize::from(compiled(pcs[0]));
     let (low, high) = stack_bounds();
-    let mut frame = frame as usize;
-    while pcs.len() < limit && frame.is_multiple_of(8) && frame >= low && frame + 16 <= high {
+    let mut frame = frame;
+    while seen < limit && pcs.len() < 256 && frame.is_multiple_of(8) && frame >= low && frame + 16 <= high {
         let (next, ra) = unsafe { (*(frame as *const usize), *((frame + 8) as *const usize)) };
-        pcs.push(ra.wrapping_sub(1));
+        let pc = ra.wrapping_sub(1);
+        seen += usize::from(compiled(pc));
+        pcs.push(pc);
         if next <= frame {
             break;
         }
         frame = next;
     }
+    pcs
+}
+
+/// Records the call stack at `error`'s construction for `err.stack`.
+fn capture_frames(error: *const c_char, frame: usize, ra: usize) {
+    let limit = thaw_error_stack_trace_limit();
+    if error.is_null() || limit < 1.0 || FN_TABLE.get().is_none() {
+        return;
+    }
+    let pcs = caller_pcs(frame, ra, (limit as usize).min(200));
     thaw_arena::register_metadata_reset_hook(prune_error_extras);
     let key = extras_key(error);
     ERROR_EXTRAS.with(|table| extras_entry(&mut table.borrow_mut(), key).frames = pcs);
@@ -1429,6 +1548,7 @@ pub unsafe extern "C" fn thaw_error_capture_frames(error: *const c_char, frame: 
 
 /// `\n    at name (file)` lines for the program functions among `pcs`, at most `limit`.
 fn render_frames(pcs: &[usize], limit: usize) -> String {
+    use std::fmt::Write as _;
     let Some(table) = FN_TABLE.get() else {
         return String::new();
     };
@@ -1441,16 +1561,26 @@ fn render_frames(pcs: &[usize], limit: usize) -> String {
         if pc < table.lo || pc >= table.hi {
             continue;
         }
-        let index = table.entries.partition_point(|entry| entry.0 <= pc);
-        let Some((_, name)) = index.checked_sub(1).map(|index| &table.entries[index]) else {
+        let index = table.entries.partition_point(|entry| entry.address <= pc);
+        let Some(info) = index.checked_sub(1).map(|index| &table.entries[index]) else {
             continue;
         };
-        shown += 1;
-        if name.is_empty() {
-            out.push_str(&format!("\n    at {}", table.file));
-        } else {
-            out.push_str(&format!("\n    at {name} ({})", table.file));
+        if info.name == "\u{1}" {
+            continue;
         }
+        shown += 1;
+        let file = info.file.as_deref().unwrap_or(&table.file);
+        let _ = if info.line == 0 {
+            if info.name.is_empty() {
+                write!(out, "\n    at {file}")
+            } else {
+                write!(out, "\n    at {} ({file})", info.name)
+            }
+        } else if info.name.is_empty() {
+            write!(out, "\n    at {file}:{}:{}", info.line, info.col)
+        } else {
+            write!(out, "\n    at {} ({file}:{}:{})", info.name, info.line, info.col)
+        };
     }
     out
 }

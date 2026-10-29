@@ -55,8 +55,8 @@ pub(crate) fn thaw_js_routed() -> bool {
 
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
-    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirInitStep, HirLit,
-    HirOptionalMask, HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess, Symbol,
+    FfiOwnership, FfiSignature, FfiStringAbi, FnLocs, HirExpr, HirFunction, HirInitStep, HirLit,
+    HirOptionalMask, HirParam, HirProgram, HirStmt, HirType, NonArrowThisAccess, SourceLoc, Symbol,
 };
 
 type LoweredBinding = (Symbol, HirType, HirExpr);

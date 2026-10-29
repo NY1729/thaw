@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HirProgram {
@@ -12,6 +13,27 @@ pub struct HirProgram {
     /// step must resolve from elsewhere (a real native library today; a
     /// thaw-registry-fetched one eventually).
     pub extern_functions: Vec<FfiSignature>,
+    /// Where each source function (by `HirFunction::name`) is defined, for `Error.stack` frames.
+    /// Debug metadata only: it never takes part in program equality.
+    pub fn_locs: FnLocs,
+}
+
+/// A source position: file name, 1-based line and column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceLoc {
+    pub file: String,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// Function definition sites; equal to any other table so it cannot perturb program comparisons.
+#[derive(Debug, Clone, Default)]
+pub struct FnLocs(pub HashMap<Symbol, SourceLoc>);
+
+impl PartialEq for FnLocs {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 /// Applies an explicitly configured error ABI to an ambient symbol and every
