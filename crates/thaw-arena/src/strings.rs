@@ -582,13 +582,19 @@ mod tests {
             current = next;
         }
         assert!(moves < 30, "{moves} copies for 500 appends");
-        assert_eq!(unsafe { NativeStr::from_ptr(current) }.to_bytes().len(), 500);
+        assert_eq!(
+            unsafe { NativeStr::from_ptr(current) }.to_bytes().len(),
+            500
+        );
         assert_eq!(unsafe { NativeStr::from_ptr(alias) }.to_bytes().len(), 101);
         // Embedded NULs are never grown in place and keep their length.
         let mut state = [0usize; 3];
         let nul = arena_string(b"a\0b").cast_const();
         let joined = unsafe { thaw_string_append_owned(nul, nul, state.as_mut_ptr()) };
-        assert_eq!(unsafe { NativeStr::from_ptr(joined) }.to_bytes(), b"a\0ba\0b");
+        assert_eq!(
+            unsafe { NativeStr::from_ptr(joined) }.to_bytes(),
+            b"a\0ba\0b"
+        );
         assert_eq!(state[0], 0);
     }
 

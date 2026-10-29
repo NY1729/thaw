@@ -549,8 +549,16 @@ impl<'ctx> HirCompiler<'ctx> {
         let [left, right] = args.as_slice() else {
             return None;
         };
+        // The leftmost operand may carry the `+` operand string coercion
+        // (`__thaw_error_to_string`), the identity for an untagged string.
         let mut operands = match left {
             HirExpr::Var(v) if v == name => Vec::new(),
+            HirExpr::Call(wrapper, wrapped)
+                if matches!(wrapper.as_ref(), HirExpr::Var(f) if f == "__thaw_error_to_string")
+                    && matches!(wrapped.as_slice(), [HirExpr::Var(v)] if v == name) =>
+            {
+                Vec::new()
+            }
             _ => Self::string_append_operands(name, left)?,
         };
         operands.push(right);
@@ -634,6 +642,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_load(ty, cell, "append_left")
             .map_err(|e| e.to_string())?;
+        // An error-tagged string renders to a fresh one; never owned.
+        accumulated = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_error_to_string").unwrap(),
+                &[accumulated.into()],
+                "append_left_text",
+            )
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("error text returned no value")?;
         let mut rights = Vec::with_capacity(operands.len());
         for operand in operands {
             rights.push(self.compile_expr(operand)?);
