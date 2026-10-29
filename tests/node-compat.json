@@ -3252,6 +3252,51 @@
       "name": "ce1 bare node specifiers match node: forms",
       "expect": "matched",
       "source": "import fs from \"fs\"; import util from \"util\"; import os from \"os\"; import assert from \"assert\"; import crypto from \"crypto\"; import { Readable } from \"stream\"; import { existsSync } from \"fs\"; import * as nodeUtil from \"util\"; function main(): void { console.log(fs.existsSync(\"/etc\"), existsSync(\"/definitely/not/here\")); console.log(util.inspect({ a: 1 }), nodeUtil.format(\"%s-%d\", \"x\", 4)); assert.strictEqual(1, 1); console.log(typeof os.platform(), crypto.createHash(\"md5\").update(\"a\").digest(\"hex\")); Readable.from([\"a\", \"b\"]).on(\"data\", (d: string) => console.log(d)); }"
+    },
+    {
+      "name": "infer fs.readFile callback params are contextually typed",
+      "expect": "matched",
+      "source": "import fs from \"node:fs\"; function main(): void { fs.readFile(\"/nonexistent-thaw-file\", (e, d) => console.log(\"cb\", e!.code, d)); fs.writeFileSync(\"/tmp/thaw-infer-rf.txt\", \"hello\"); fs.readFile(\"/tmp/thaw-infer-rf.txt\", (err, data) => console.log(err, data.length > 0)); fs.readFile(\"/tmp/thaw-infer-rf.txt\", \"utf8\", (err, text) => console.log(err, text)); }"
+    },
+    {
+      "name": "infer string replace callback params",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".replace(/b/, (m) => m.toUpperCase()), \"a-b\".replace(/-(\\w)/g, (_m, c) => c.toUpperCase()), \"x1y2\".replaceAll(/\\d/g, function (d) { return \"<\" + d + \">\"; })); }"
+    },
+    {
+      "name": "infer typed global function variables and recursion",
+      "expect": "matched",
+      "source": "const add: (a: number, b: number) => number = (x, y) => x + y;\nconst fib = (n: number): number => (n < 2 ? n : fib(n - 1) + fib(n - 2));\nconst fact = function g(n: number): number { return n <= 1 ? 1 : n * g(n - 1); };\nconst handlers: { on: (cb: (v: string) => void) => void } = { on(cb) { cb(\"hi\"); } };\nfunction main(): void { console.log(add(1, 2), fib(15), fact(5)); handlers.on((v) => console.log(v)); }"
+    },
+    {
+      "name": "infer zlib callback params",
+      "expect": "matched",
+      "source": "import zlib from \"node:zlib\";\nfunction main(): void {\n  zlib.gzip(\"cb\", (e, b) => zlib.gunzip(b, (e2, r) => console.log(\"cb\", e, e2, r.toString())));\n}"
+    },
+    {
+      "name": "infer stream pipeline and Transform/Writable callback params",
+      "expect": "matched",
+      "source": "import { pipeline, Readable, Writable, Transform } from \"node:stream\";\nfunction main(): void {\n  const up = new Transform({ transform(c, _e, cb) { cb(null, c.toString().toUpperCase()); } });\n  const out: string[] = [];\n  pipeline(Readable.from([\"a\", \"b\", \"c\"]), up, new Writable({ write(c, _e, cb) { out.push(c.toString()); cb(); } }), (e) => console.log(\"pipeline\", e, out));\n}"
+    },
+    {
+      "name": "infer net server and socket callback params",
+      "expect": "matched",
+      "source": "import net from \"node:net\";\nfunction main(): void {\n  const s = net.createServer((c) => { c.on(\"data\", (d) => c.end(\"echo:\" + d)); });\n  s.listen(0, \"127.0.0.1\", () => { const c = net.connect((s.address() as any).port, \"127.0.0.1\", () => c.write(\"hey\")); let r = \"\"; c.on(\"data\", (d) => (r += d)); c.on(\"close\", () => { console.log(r); s.close(); }); });\n}"
+    },
+    {
+      "name": "infer web stream start controller and proxy handler params",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const p = new Proxy({ a: 1 } as Record<string, any>, { get: (t, k: string) => (k in t ? t[k] : \"dflt\"), has: () => true });\n  console.log(p.a, p.q, \"zz\" in p);\n  const px = new Proxy({ a: 1 } as any, { ownKeys: () => [\"a\", \"z\"], getOwnPropertyDescriptor: (t, k) => ({ value: t[k] ?? \"zz\", enumerable: true, configurable: true }) });\n  console.log(Object.keys(px), { ...px });\n  const rs = new ReadableStream({ start(c) { c.enqueue(\"w1\"); c.enqueue(\"w2\"); c.close(); } });\n  const rd = rs.getReader();\n  console.log(await rd.read(), await rd.read(), await rd.read());\n}"
+    },
+    {
+      "name": "infer async arrows awaiting plain promise-returning functions inside map",
+      "expect": "matched",
+      "source": "const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));\nfunction pause(ms: number): Promise<void> { return new Promise<void>((r) => setTimeout(r, ms)); }\nasync function main(): Promise<void> {\n  const rs = await Promise.all([1, 2, 3].map(async (x) => { await sleep(5 * (4 - x)); return x; }));\n  console.log(rs);\n  const g = async (x: number) => { await pause(1); return x * 2; };\n  console.log(await g(21));\n  let n = 0;\n  await Promise.all([1, 2].map(async (x) => { await pause(1); n += x; }));\n  console.log(n);\n}"
+    },
+    {
+      "name": "infer destructuring assignment swap on module bindings and indexed targets",
+      "expect": "matched",
+      "source": "let a = 1, b = 2;\nlet [c, d] = [3, 4];\nfunction main(): void {\n  [a, b] = [b, a];\n  [c, d] = [d, c];\n  const xs = [3, 1, 2];\n  let i = 0, j = 2;\n  [xs[i], xs[j]] = [xs[j], xs[i]];\n  ({ a } = { a: 5 });\n  console.log(a, b, c, d, xs);\n}"
     }
   ]
 }

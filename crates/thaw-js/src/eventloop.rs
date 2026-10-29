@@ -167,7 +167,7 @@ impl Interp {
         }
         while let Some(i) = s.find('\n') {
             let line: String = s.drain(..=i).collect();
-            let line = &line[..line.len() - 1];
+            let line = &*crate::builtins::lossy_out(&line[..line.len() - 1]);
             if self.rt.stream {
                 println!("{line}");
             } else {
@@ -647,6 +647,30 @@ impl Interp {
         Ok(Value::Object(obj))
     }
 
+    /// The id of a Timeout/Immediate object (what crosses the host boundary in its place).
+    pub(crate) fn timer_handle_id(&mut self, v: &Value) -> Option<u64> {
+        let Value::Object(o) = v else { return None };
+        find_own(o, "@@tid")?;
+        self.timer_id(v)
+    }
+
+    /// The live Timeout/Immediate object for `id`, or the bare id once it is gone.
+    pub(crate) fn timer_object(&self, id: u64) -> Value {
+        self.rt
+            .timers
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.obj.clone())
+            .or_else(|| {
+                self.rt
+                    .immediates
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.obj.clone())
+            })
+            .map_or(Value::Number(id as f64), Value::Object)
+    }
+
     fn timer_id(&mut self, v: &Value) -> Option<u64> {
         match v {
             Value::Number(n) => Some(*n as u64),
@@ -741,6 +765,11 @@ impl Interp {
         }
         self.rt.cleared.clear();
         Ok(())
+    }
+
+    /// Referenced timers/immediates or queued jobs remain.
+    pub fn work_pending(&self) -> bool {
+        self.loop_alive() || !self.rt.ticks.is_empty() || !self.rt.micro.is_empty()
     }
 
     fn loop_alive(&self) -> bool {
@@ -1210,7 +1239,7 @@ impl Interp {
 /// How Node's `ERR_INVALID_ARG_TYPE` message describes a bad argument.
 fn received(v: &Value, shown: &str) -> String {
     match v {
-        Value::Undefined => "undefined".into(),
+        Value::Undefined | Value::Hole => "undefined".into(),
         Value::Null => "null".into(),
         Value::Bool(b) => format!("type boolean ({b})"),
         Value::Number(_) => format!("type number ({shown})"),

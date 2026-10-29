@@ -3394,7 +3394,15 @@ impl<'a> FnLowerer<'a> {
                 }
             } else {
                 let expected = (!generic_placeholder).then_some(expected).flatten();
+                // No declared slot to type the callback from (an untyped callee): its
+                // parameters are contextually `any`.
+                let implicit_any = if expected.is_none() {
+                    self.lower_implicit_any_callback(&argument.expr)
+                } else {
+                    None
+                };
                 match argument.expr.as_ref() {
+                    _ if implicit_any.is_some() => implicit_any.expect("checked")?,
                     Expr::Arrow(arrow)
                         if signature
                             .as_ref()
