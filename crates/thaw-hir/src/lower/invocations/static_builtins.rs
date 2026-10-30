@@ -5044,8 +5044,9 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(entries, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"fromEntries" {
+                        let contextual_args = contextual_from_entries_arguments(&call.args);
                         let (arguments, bindings) =
-                            self.lower_native_spread_values(&call.args, "Object.fromEntries")?;
+                            self.lower_native_spread_values(contextual_args.as_deref().unwrap_or(&call.args), "Object.fromEntries")?;
                         let [entries] = arguments.as_slice() else {
                             return Err("`Object.fromEntries` expects exactly one argument".into());
                         };
@@ -6374,4 +6375,63 @@ fn supported_values_of(key: &str) -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+
+/// `Object.fromEntries(xs.map((x) => [k, v]))`: the callback's pair literal is an entry, not a
+/// heterogeneous array, so give it the `[string, any]` entry type (`k` keys are property names).
+fn contextual_from_entries_arguments(args: &[swc_ecma_ast::ExprOrSpread]) -> Option<Vec<swc_ecma_ast::ExprOrSpread>> {
+    use swc_common::DUMMY_SP;
+    use swc_ecma_ast::*;
+    let [argument] = args else { return None };
+    if argument.spread.is_some() {
+        return None;
+    }
+    let Expr::Call(call) = argument.expr.as_ref() else { return None };
+    let Callee::Expr(callee) = &call.callee else { return None };
+    let Expr::Member(member) = callee.as_ref() else { return None };
+    if !matches!(&member.prop, MemberProp::Ident(name) if name.sym == *"map") {
+        return None;
+    }
+    let [callback] = call.args.as_slice() else { return None };
+    let Expr::Arrow(arrow) = callback.expr.as_ref() else { return None };
+    let ArrowFunctionBody::Expr(body) = arrow.body.as_ref() else { return None };
+    let mut inner = body.as_ref();
+    while let Expr::Paren(paren) = inner {
+        inner = paren.expr.as_ref();
+    }
+    let Expr::Array(pair) = inner else { return None };
+    let [Some(key), Some(value)] = pair.elems.as_slice() else { return None };
+    if key.spread.is_some() || value.spread.is_some() {
+        return None;
+    }
+    let keyword = |kind| Box::new(TsType::TsKeywordType(TsKeywordType { span: DUMMY_SP, kind }));
+    let tuple_element = |kind| TsTupleElement { span: DUMMY_SP, label: None, ty: keyword(kind) };
+    let entry_type = TsType::TsTupleType(TsTupleType {
+        span: DUMMY_SP,
+        elem_types: vec![
+            tuple_element(TsKeywordTypeKind::TsStringKeyword),
+            tuple_element(TsKeywordTypeKind::TsAnyKeyword),
+        ],
+    });
+    let string_key = Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        ctxt: Default::default(),
+        callee: Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt("String".into(), DUMMY_SP)))),
+        args: vec![ExprOrSpread { spread: None, expr: key.expr.clone() }],
+        type_args: None,
+    });
+    let entry = Expr::Array(ArrayLit {
+        span: DUMMY_SP,
+        elems: vec![
+            Some(ExprOrSpread { spread: None, expr: Box::new(string_key) }),
+            Some(value.clone()),
+        ],
+    });
+    let mut rewritten_arrow = arrow.clone();
+    *rewritten_arrow.body = ArrowFunctionBody::Expr(Box::new(entry));
+    rewritten_arrow.return_type = Some(Box::new(TsTypeAnn { span: DUMMY_SP, type_ann: Box::new(entry_type) }));
+    let mut rewritten_call = call.clone();
+    rewritten_call.args = vec![ExprOrSpread { spread: None, expr: Box::new(Expr::Arrow(rewritten_arrow)) }];
+    Some(vec![ExprOrSpread { spread: None, expr: Box::new(Expr::Call(rewritten_call)) }])
 }

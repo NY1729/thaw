@@ -2874,3 +2874,111 @@ pub fn infer_collection_type_args(module: &Module) -> Module {
     module.visit_mut_with(&mut Fill { names: collect.names, fields: collect.fields, returns: Vec::new() });
     module
 }
+
+/// `Record<E, T>` / `{ [K in E]: T }` with an enum `E` as the key set: spell the keys as the enum's
+/// literal values, which is what the finite-key utility types resolve.
+pub fn enum_keys_as_literals(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    let Ok((values, _, _)) = collect_enums(module) else { return module.clone() };
+    if values.is_empty() {
+        return module.clone();
+    }
+    let literal_union = |name: &str, span: swc_common::Span| -> Option<TsType> {
+        let mut members: Vec<(String, HirLit)> = values
+            .iter()
+            .filter(|((enum_name, _), _)| enum_name == name)
+            .map(|((_, member), value)| (member.clone(), value.clone()))
+            .collect();
+        if members.is_empty() {
+            return None;
+        }
+        members.sort_by(|a, b| match (&a.1, &b.1) {
+            (HirLit::F64(x), HirLit::F64(y)) => x.total_cmp(y),
+            _ => a.0.cmp(&b.0),
+        });
+        let mut types = Vec::new();
+        for (_, value) in members {
+            let lit = match value {
+                HirLit::F64(number) => TsLit::Number(Number { span, value: number, raw: None }),
+                HirLit::Str(text) => TsLit::Str(Str { span, value: text.as_str().into(), raw: None }),
+                _ => return None,
+            };
+            let ty = Box::new(TsType::TsLitType(TsLitType { span, lit }));
+            if !types.iter().any(|existing| swc_common::EqIgnoreSpan::eq_ignore_span(existing, &ty)) {
+                types.push(ty);
+            }
+        }
+        Some(TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(TsUnionType { span, types })))
+    };
+    struct Rewrite<'a> {
+        literal_union: &'a dyn Fn(&str, swc_common::Span) -> Option<TsType>,
+        values: &'a EnumValues,
+    }
+    impl Rewrite<'_> {
+        fn replace(&self, ty: &mut TsType) {
+            if let TsType::TsTypeRef(reference) = ty {
+                if let (TsEntityName::Ident(name), None) = (&reference.type_name, &reference.type_params) {
+                    if let Some(union) = (self.literal_union)(name.sym.as_ref(), reference.span) {
+                        *ty = union;
+                    }
+                }
+            }
+        }
+    }
+    impl VisitMut for Rewrite<'_> {
+        fn visit_mut_ts_type_ref(&mut self, reference: &mut TsTypeRef) {
+            reference.visit_mut_children_with(self);
+            let is_record = matches!(&reference.type_name, TsEntityName::Ident(name) if name.sym == *"Record");
+            if is_record {
+                if let Some(params) = reference.type_params.as_mut() {
+                    if let Some(key) = params.params.first_mut() {
+                        self.replace(key);
+                    }
+                }
+            }
+        }
+        /// `{ [E.A]: v }`: a constant enum key is an ordinary named property.
+        fn visit_mut_prop_name(&mut self, name: &mut PropName) {
+            name.visit_mut_children_with(self);
+            if let PropName::Computed(computed) = name {
+                // An enum member read already folded to its literal value.
+                match computed.expr.as_ref() {
+                    Expr::Lit(Lit::Num(number)) => {
+                        *name = PropName::Num(number.clone());
+                        return;
+                    }
+                    Expr::Lit(Lit::Str(text)) => {
+                        *name = PropName::Str(text.clone());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if let PropName::Computed(computed) = name {
+                if let Expr::Member(member) = computed.expr.as_ref() {
+                    if let (Expr::Ident(owner), MemberProp::Ident(property)) = (member.obj.as_ref(), &member.prop) {
+                        let key = (owner.sym.to_string(), property.sym.to_string());
+                        match self.values.get(&key) {
+                            Some(HirLit::F64(number)) => {
+                                *name = PropName::Num(Number { span: member.span, value: *number, raw: None });
+                            }
+                            Some(HirLit::Str(text)) => {
+                                *name = PropName::Str(Str { span: member.span, value: text.as_str().into(), raw: None });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        fn visit_mut_ts_mapped_type(&mut self, mapped: &mut TsMappedType) {
+            mapped.visit_mut_children_with(self);
+            if let Some(constraint) = mapped.type_param.constraint.as_mut() {
+                self.replace(constraint);
+            }
+        }
+    }
+    let mut result = module.clone();
+    result.visit_mut_with(&mut Rewrite { literal_union: &literal_union, values: &values });
+    result
+}

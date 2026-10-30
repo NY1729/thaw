@@ -304,6 +304,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let merged = normalize_interface_merges(module)?;
     let merged = flatten_namespaces(&merged);
     let merged = enums_as_values(&merged);
+    let merged = enum_keys_as_literals(&merged);
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = lift_local_classes(&normalized);
     let normalized = lift_local_type_declarations(&normalized);

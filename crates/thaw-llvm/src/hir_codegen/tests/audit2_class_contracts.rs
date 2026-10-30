@@ -181,3 +181,41 @@ function main(): void { new Foo(); console.log(E.f(), E.A, Foo.count, Foo.tag); 
 "##;
     assert_eq!(compile_and_run(source, "audit2_merged_namespace"), "E.f 1 1 merged\n");
 }
+
+#[test]
+fn audit2_empty_array_takes_the_declared_element_type() {
+    let source = r##"function main(): void {
+  let row: string[] = [];
+  const rows: string[][] = [];
+  row.push("a"); rows.push(row); row = []; row.push("b"); rows.push(row);
+  console.log(rows);
+  const g = new Map<string, [string, number][]>([["A", [["B", 1]]]]);
+  for (const [v, w] of g.get("A") ?? []) console.log(v, w);
+  for (const [v, w] of g.get("Z") ?? []) console.log(v, w);
+  console.log("done");
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_empty_array_type"),
+        "[ [ 'a' ], [ 'b' ] ]\nB 1\ndone\n"
+    );
+}
+
+#[test]
+fn audit2_from_entries_of_mapped_pairs_and_record_over_enum() {
+    let source = r##"enum State { Idle, Running, Done }
+const next: Record<State, State[]> = { [State.Idle]: [State.Running], [State.Running]: [State.Done], [State.Done]: [] };
+const labels: { [K in State]: string } = { [State.Idle]: "i", [State.Running]: "r", [State.Done]: "d" };
+interface U { id: number; name: string }
+function main(): void {
+  const users: U[] = [{ id: 1, name: "a" }, { id: 2, name: "b" }];
+  console.log(Object.fromEntries(users.map((u) => [u.id, u.name])), Object.fromEntries(users.map((u) => [u.name, u.id])));
+  const s: State = State.Running;
+  console.log(next[State.Idle], s, labels[State.Done], labels[s]);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_entries_record_enum"),
+        "{ '1': 'a', '2': 'b' } { a: 1, b: 2 }\n[ 1 ] 1 d r\n"
+    );
+}

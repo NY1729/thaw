@@ -3324,6 +3324,26 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     HirType::Object(fields) => {
+                        // A constant numeric key (a literal or an enum member) names a property.
+                        let constant_number = match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Num(number)) => Some(number.value),
+                            Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                                (Expr::Ident(owner), MemberProp::Ident(property)) => {
+                                    match self.enum_values.get(&(self.resolve_binding(owner.sym.as_ref()), property.sym.to_string())) {
+                                        Some(HirLit::F64(number)) => Some(*number),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(number) = constant_number {
+                            let key = if number.fract() == 0.0 { format!("{}", number as i64) } else { number.to_string() };
+                            if fields.iter().any(|(name, _)| name == &key) {
+                                return self.lower_fixed_object_property_read(obj, &fields, &key);
+                            }
+                        }
                         if let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() {
                             let key = key.value.to_string_lossy().into_owned();
                             if fields.iter().any(|(name, _)| name == &key) {
@@ -3390,6 +3410,7 @@ impl<'a> FnLowerer<'a> {
                             if !members.contains(&HirType::Undefined) {
                                 members.push(HirType::Undefined);
                             }
+                            let key = if self.infer_expr_type(&key)? == HirType::F64 { self.coerce_primitive_to_string(key)? } else { key };
                             self.expect_type(&HirType::Str, &key, "computed object key")?;
                             return Ok(HirExpr::DynamicPropAccess(
                                 Box::new(obj),
@@ -3405,7 +3426,8 @@ impl<'a> FnLowerer<'a> {
                             }
                             other => HirType::Optional(Box::new(other.clone())),
                         };
-                        self.expect_type(&HirType::Str, &key, "computed object key")?;
+                        let key = if self.infer_expr_type(&key)? == HirType::F64 { self.coerce_primitive_to_string(key)? } else { key };
+                            self.expect_type(&HirType::Str, &key, "computed object key")?;
                         Ok(HirExpr::DynamicPropAccess(
                             Box::new(obj),
                             Box::new(key),
