@@ -64,6 +64,7 @@ impl<'a> FnLowerer<'a> {
             source_ret_type: None,
             immutable_bindings: HashSet::new(),
             function_var_names: HashMap::new(),
+            tdz_pending: HashMap::new(),
             strict_nullable_bindings: HashSet::new(),
             static_string_bindings: HashMap::new(),
             narrowings: HashMap::new(),
