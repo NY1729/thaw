@@ -206,8 +206,9 @@
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
   // Digests `createHash`/`createHmac`/`pbkdf2` accept; sign/verify/OAEP keep the narrower set below.
   const normalizeDigestAlgorithm = algorithm => {
-    const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
-    if (!['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'sha3224', 'sha3256', 'sha3384', 'sha3512'].includes(name)) throw new Error(`Digest method not supported`);
+    let name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
+    if (name === 'rmd160' || name === 'ripemd') name = 'ripemd160';
+    if (!['md5', 'ripemd160', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'sha3224', 'sha3256', 'sha3384', 'sha3512'].includes(name)) throw new Error(`Digest method not supported`);
     return name;
   };
   const normalizeHashAlgorithm = algorithm => {
@@ -428,47 +429,93 @@
       callback(null, value);
     });
   };
+  const cryptoError = (Type, code, message) => { const error = new Type(message); error.code = code; return error; };
+  const cipherNative = (name, ...args) => {
+    const result = globalThis[name](...args);
+    if (result.charCodeAt(0) === 33) {
+      const reason = result.slice(1);
+      if (reason === 'bad decrypt') throw Object.assign(new Error('error:1C800064:Provider routines::bad decrypt'), { library: 'Provider routines', reason: 'bad decrypt', code: 'ERR_OSSL_BAD_DECRYPT' });
+      if (reason === 'wrong final block length') throw Object.assign(new Error('error:1C80006B:Provider routines::wrong final block length'), { library: 'Provider routines', reason: 'wrong final block length', code: 'ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH' });
+      if (reason === 'data not multiple of block length') throw Object.assign(new Error('error:1C80006B:Provider routines::wrong final block length'), { library: 'Provider routines', reason: 'wrong final block length', code: 'ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH' });
+      throw new Error(reason);
+    }
+    return Buffer.from(result, 'hex');
+  };
   class Cipheriv {
-    constructor(algorithm, key, iv, decrypt) {
-      this.algorithm = String(algorithm).toLowerCase();
-      this.key = Buffer.from(key);
-      this.iv = Buffer.from(iv);
+    constructor(algorithm, key, iv, decrypt, options) {
+      const name = String(algorithm).toLowerCase().replace(/^(?:id-)?aes(\d+)$/, 'aes-$1-cbc').replace(/^id-/, '');
+      const match = /^aes-(128|192|256)-(cbc|ecb|ctr|gcm)$/.exec(name);
+      if (!match) throw cryptoError(Error, 'ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
+      this.algorithm = name;
+      this.mode = match[2];
+      this.key = Buffer.from(key instanceof KeyObject ? key.export() : key);
+      if (this.key.length * 8 !== Number(match[1])) throw cryptoError(RangeError, 'ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
+      this.iv = iv === null || iv === undefined ? Buffer.alloc(0) : Buffer.from(iv);
+      const ivOk = this.mode === 'ecb' ? this.iv.length === 0 : this.mode === 'gcm' ? this.iv.length > 0 : this.iv.length === 16;
+      if (!ivOk) throw cryptoError(TypeError, 'ERR_CRYPTO_INVALID_IV', 'Invalid initialization vector');
+      this.initialIv = this.iv;
       this.decrypt = decrypt;
       this.pending = Buffer.alloc(0);
       this.finished = false;
+      this.autoPadding = true;
+      this.processed = 0;
+      this.aad = Buffer.alloc(0);
+      this.ciphertext = [];
+      this.tagLength = options && options.authTagLength !== undefined ? Number(options.authTagLength) : 16;
+      this.tag = null;
+    }
+    _out(value, outputEncoding) { return outputEncoding === undefined || outputEncoding === 'buffer' ? value : value.toString(outputEncoding); }
+    setAutoPadding(value = true) { this.autoPadding = Boolean(value); return this; }
+    setAAD(buffer, options) {
+      if (this.mode !== 'gcm') throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAAD');
+      this.aad = Buffer.concat([this.aad, Buffer.from(buffer)]);
+      return this;
+    }
+    getAuthTag() {
+      if (this.decrypt || this.mode !== 'gcm' || this.tag === null) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation getAuthTag');
+      return Buffer.from(this.tag);
+    }
+    setAuthTag(tag) {
+      if (!this.decrypt || this.mode !== 'gcm' || this.finished) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAuthTag');
+      this.tag = Buffer.from(tag);
+      return this;
     }
     update(value, inputEncoding, outputEncoding) {
-      if (this.finished) throw new Error('Trying to add data in unsupported state');
-      this.pending = Buffer.concat([this.pending, Buffer.from(value, inputEncoding)]);
-      const length = this.decrypt
-        ? Math.max(0, Math.floor((this.pending.length - 1) / 16) * 16)
-        : Math.floor(this.pending.length / 16) * 16;
-      if (!length) return outputEncoding === undefined ? Buffer.alloc(0) : '';
-      const input = this.pending.subarray(0, length);
+      if (this.finished) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation update');
+      const input = Buffer.from(value, inputEncoding);
+      if (this.mode === 'ctr' || this.mode === 'gcm') {
+        const output = cipherNative('__thaw_crypto_ctr_hex', this.mode === 'gcm', this.key.toString('hex'), this.iv.toString('hex'), this.processed, input.toString('hex'));
+        this.processed += input.length;
+        if (this.mode === 'gcm') this.ciphertext.push(this.decrypt ? input : output);
+        return this._out(output, outputEncoding);
+      }
+      this.pending = Buffer.concat([this.pending, input]);
+      const keepLast = this.decrypt && this.autoPadding;
+      const length = Math.max(0, Math.floor((this.pending.length - (keepLast ? 1 : 0)) / 16) * 16);
+      if (!length) return this._out(Buffer.alloc(0), outputEncoding);
+      const chunk = this.pending.subarray(0, length);
       this.pending = Buffer.from(this.pending.subarray(length));
-      const output = Buffer.from(__thaw_crypto_cipher_hex(
-        this.algorithm, this.key.toString('hex'), this.iv.toString('hex'),
-        input.toString('hex'), this.decrypt, false
-      ), 'hex');
-      this.iv = Buffer.from((this.decrypt ? input : output).subarray(length - 16, length));
-      return outputEncoding === undefined ? output : output.toString(outputEncoding);
+      const output = cipherNative('__thaw_crypto_cipher_hex', this.algorithm, this.key.toString('hex'), this.iv.toString('hex'), chunk.toString('hex'), this.decrypt, false, false);
+      this.iv = Buffer.from((this.decrypt ? chunk : output).subarray(length - 16, length));
+      return this._out(output, outputEncoding);
     }
     final(outputEncoding) {
-      if (this.finished) throw new Error('Invalid state');
+      if (this.finished) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation final');
       this.finished = true;
-      const value = Buffer.from(__thaw_crypto_cipher_hex(
-        this.algorithm,
-        this.key.toString('hex'),
-        this.iv.toString('hex'),
-        this.pending.toString('hex'),
-        this.decrypt,
-        true
-      ), 'hex');
-      return outputEncoding === undefined ? value : value.toString(outputEncoding);
+      if (this.mode === 'ctr') return this._out(Buffer.alloc(0), outputEncoding);
+      if (this.mode === 'gcm') {
+        const computed = cipherNative('__thaw_crypto_gcm_tag_hex', this.key.toString('hex'), this.iv.toString('hex'), this.aad.toString('hex'), Buffer.concat(this.ciphertext).toString('hex'));
+        if (this.decrypt) {
+          if (this.tag === null || this.tag.length === 0 || !computed.subarray(0, this.tag.length).equals(this.tag)) throw new Error('Unsupported state or unable to authenticate data');
+        } else this.tag = computed.subarray(0, this.tagLength);
+        return this._out(Buffer.alloc(0), outputEncoding);
+      }
+      const value = cipherNative('__thaw_crypto_cipher_hex', this.algorithm, this.key.toString('hex'), this.iv.toString('hex'), this.pending.toString('hex'), this.decrypt, true, this.autoPadding);
+      return this._out(value, outputEncoding);
     }
   }
-  const createCipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, false);
-  const createDecipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, true);
+  const createCipheriv = (algorithm, key, iv, options) => new Cipheriv(algorithm, key, iv, false, options);
+  const createDecipheriv = (algorithm, key, iv, options) => new Cipheriv(algorithm, key, iv, true, options);
   const createSecretKey = key => new KeyObject('secret', Buffer.from(key));
   // Real Node's `createPrivateKey`/`createPublicKey`, now backed by
   // real RSA/EC/Ed25519 PEM *and DER* parsing, including passphrase-
@@ -744,5 +791,6 @@
   webCrypto.subtle = webCrypto.subtle || subtle;
   globalThis.crypto = webCrypto;
   cryptoModule.webcrypto = webCrypto;
+  cryptoModule.getRandomValues = webCrypto.getRandomValues;
   cryptoModule.subtle = webCrypto.subtle;
   globalThis.__thaw_crypto_module = cryptoModule;
