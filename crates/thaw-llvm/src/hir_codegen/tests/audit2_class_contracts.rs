@@ -98,3 +98,28 @@ function main(): void {
         "r 30 [ 12, 15, 3 ]\nr 4\n"
     );
 }
+
+#[test]
+fn audit2_generic_class_with_generic_method_named_map() {
+    let source = r##"class Stack<T> {
+  private items: T[] = [];
+  push(x: T): this { this.items.push(x); return this; }
+  map<U>(f: (x: T) => U): Stack<U> { const s = new Stack<U>(); this.items.forEach((i) => s.push(f(i))); return s; }
+  toArray(): T[] { return [...this.items]; }
+}
+class Box<T> {
+  constructor(public v: T) {}
+  map<U>(f: (x: T) => U): Box<U> { return new Box<U>(f(this.v)); }
+}
+function main(): void {
+  const st = new Stack<number>().push(1).push(2);
+  console.log(st.map((x) => x * 2).toArray(), st.map((x) => "n" + x).toArray());
+  const b = new Box<number>(2);
+  console.log(b.map((x) => x * 2).v, b.map((x) => "s" + x).v);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_generic_map_method"),
+        "[ 2, 4 ] [ 'n1', 'n2' ]\n4 s2\n"
+    );
+}
