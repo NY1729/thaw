@@ -961,11 +961,16 @@ fn build_with_native_mode_routed(
     compiler.compile_program(&program)?;
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
-    if thaw_js_routing && compiler.uses_thaw_js() && uses_quickjs {
-        if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
+    if thaw_js_routing && compiler.uses_thaw_js() {
+        // `THAW_JS_RUNTIME_DUMP_FN` also dumps a function of a build that stays routed.
+        if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
+            && (uses_quickjs || std::env::var_os("THAW_JS_RUNTIME_DUMP_FN").is_some())
+        {
             report_thaw_js_mixed(&compiler.print_to_string());
         }
-        return Err(THAW_JS_MIXED.to_string());
+        if uses_quickjs {
+            return Err(THAW_JS_MIXED.to_string());
+        }
     }
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
     runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));

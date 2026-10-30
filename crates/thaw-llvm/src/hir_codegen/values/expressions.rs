@@ -716,8 +716,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 // A live Host lease (primitives as scalars), not the
                 // `__thaw_js_handle_id__` placeholder object: every Json
                 // consumer (console.log, spread, property reads) reads it live.
-                self.uses_quickjs = true;
-                self.uses_quickjs_handles = true;
+                self.js_mark_handles_used();
                 self.tracks_owned_json_roots = true;
                 let handle = self.compile_expr(inner)?.into_int_value();
                 let json = self.builder.build_call(

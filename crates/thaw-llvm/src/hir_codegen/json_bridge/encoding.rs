@@ -1637,8 +1637,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         if !self.compiling_quickjs_dynamic_arguments {
             // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
-            self.uses_quickjs = true;
-            self.uses_quickjs_handles = true;
+            self.js_mark_handles_used();
             self.tracks_owned_json_roots = true;
             let json = self
                 .builder
@@ -1667,6 +1666,9 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if self.js_engine() == JsEngine::ThawJs {
+            return self.compile_thaw_js_handle_marker(handle.into_int_value());
+        }
         let handle = self
             .builder
             .build_unsigned_int_to_float(

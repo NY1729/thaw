@@ -524,6 +524,7 @@ pub struct HirCompiler<'ctx> {
     /// the main script queued (an ES module's body runs inside a microtask, so they run after).
     commonjs_entry: bool,
     uses_quickjs_handles: bool,
+    uses_thaw_js_handles: bool,
     /// Compile full-layout native projection adapters only in modules whose
     /// completed HIR actually crosses a fixed object into QuickJS.
     projects_native_objects: bool,
@@ -891,6 +892,7 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_quickjs: false,
             commonjs_entry: false,
             uses_quickjs_handles: false,
+            uses_thaw_js_handles: false,
             projects_native_objects: false,
             tracks_physical_object_layouts: false,
             tracks_object_integrity: false,
@@ -1010,6 +1012,80 @@ impl<'ctx> HirCompiler<'ctx> {
             for (quickjs, thaw_js) in [
                 ("thaw_js_retain_handle", "thaw_tjs_retain_handle"),
                 ("thaw_js_release_handle", "thaw_tjs_release_handle"),
+                (
+                    "thaw_js_get_property_result",
+                    "thaw_tjs_get_property_result",
+                ),
+                (
+                    "thaw_js_get_property_json_key_result",
+                    "thaw_tjs_get_property_json_key_result",
+                ),
+                (
+                    "thaw_js_get_property_exact_result",
+                    "thaw_tjs_get_property_exact_result",
+                ),
+                (
+                    "thaw_js_capture_handle_graph_result",
+                    "thaw_tjs_capture_handle_graph_result",
+                ),
+                (
+                    "thaw_js_call_selected_method_graph_result",
+                    "thaw_tjs_call_selected_method_graph_result",
+                ),
+                (
+                    "thaw_js_call_selected_method_handle_graph_args_result",
+                    "thaw_tjs_call_selected_method_handle_graph_args_result",
+                ),
+                (
+                    "thaw_js_resolve_handle_graph_result",
+                    "thaw_tjs_resolve_handle_graph_result",
+                ),
+                ("thaw_js_handle_to_string", "thaw_tjs_handle_to_string"),
+                (
+                    "thaw_js_handle_to_console_string",
+                    "thaw_tjs_handle_to_console_string",
+                ),
+                (
+                    "thaw_js_handle_is_plain_data",
+                    "thaw_tjs_handle_is_plain_data",
+                ),
+                (
+                    "thaw_js_handle_typed_array_probe",
+                    "thaw_tjs_handle_typed_array_probe",
+                ),
+                (
+                    "thaw_js_exception_native_token",
+                    "thaw_tjs_exception_native_token",
+                ),
+                ("thaw_js_host_query_result", "thaw_tjs_host_query_result"),
+                (
+                    "thaw_js_host_date_set_result",
+                    "thaw_tjs_host_date_set_result",
+                ),
+                (
+                    "thaw_js_host_enumerate_result",
+                    "thaw_tjs_host_enumerate_result",
+                ),
+                (
+                    "thaw_js_set_property_graph_result",
+                    "thaw_tjs_set_property_graph_result",
+                ),
+                (
+                    "thaw_js_property_predicate_json_key_result",
+                    "thaw_tjs_property_predicate_json_key_result",
+                ),
+                (
+                    "thaw_js_error_from_tagged_handle",
+                    "thaw_tjs_error_from_tagged_handle",
+                ),
+                (
+                    "thaw_js_lookup_native_object",
+                    "thaw_tjs_lookup_native_object",
+                ),
+                (
+                    "thaw_js_intern_native_object",
+                    "thaw_tjs_intern_native_object",
+                ),
                 ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
                 (
                     "thaw_js_terminal_work_pending",
@@ -1018,6 +1094,8 @@ impl<'ctx> HirCompiler<'ctx> {
             ] {
                 if let Some(function) = self.module.get_function(quickjs) {
                     function.as_global_value().set_name(thaw_js);
+                    // A weak reference would not pull its definition out of the static thaw-js archive.
+                    function.set_linkage(Linkage::External);
                 }
             }
         }
@@ -2441,6 +2519,8 @@ include!("hir_codegen/collections.rs");
 include!("hir_codegen/builtins.rs");
 
 include!("hir_codegen/json_values.rs");
+
+include!("hir_codegen/js_engine.rs");
 
 include!("hir_codegen/dynamic_host.rs");
 

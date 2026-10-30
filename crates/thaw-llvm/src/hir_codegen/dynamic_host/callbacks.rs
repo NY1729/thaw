@@ -3414,11 +3414,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[json.into()], "typed_dynamic_js_value_json",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
                 let text = self.compile_check_json_stringify_error(text)?;
-                let result = self.builder.build_call(
-                    self.module.get_function("thaw_js_retain_graph_result").unwrap(),
-                    &[text.into()], "typed_dynamic_js_value_retain",
-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap()
-                    .into_struct_value();
+                self.js_mark_handles_used();
+                let result = self.js_retain_graph(text, "typed_dynamic_js_value_retain")?;
                 let handle = self.builder.build_extract_value(result, 0, "typed_dynamic_js_value_handle")
                     .map_err(|error| error.to_string())?;
                 let error = self.builder.build_extract_value(result, 1, "typed_dynamic_js_value_error")
