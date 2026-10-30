@@ -46,6 +46,7 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use thaw_std as _;
 
 include!("runtime/native_values/numbers.rs");
+include!("runtime/native_values/bigint.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
 include!("runtime/native_values/array_provenance.rs");

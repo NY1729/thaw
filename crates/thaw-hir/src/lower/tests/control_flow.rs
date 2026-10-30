@@ -1748,7 +1748,7 @@ fn thaw_rethrow_cleanup_expected_member_typeof(
     let value = thaw_rethrow_cleanup_member_value(parameter, index, members);
     match (&members[index], index) {
         (HirType::F64, 0) => HirExpr::Lit(HirLit::Str("number".into())),
-        (HirType::I64, 1) => HirExpr::Lit(HirLit::Str("bigint".into())),
+        (HirType::BigInt, 1) => HirExpr::Lit(HirLit::Str("bigint".into())),
         (HirType::Bool, 2) => HirExpr::Lit(HirLit::Str("boolean".into())),
         (HirType::Str, 3) => HirExpr::Lit(HirLit::Str("string".into())),
         (HirType::Undefined, 4) => HirExpr::Lit(HirLit::Str("undefined".into())),
