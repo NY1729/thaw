@@ -751,7 +751,7 @@ impl<'a> FnLowerer<'a> {
             ("Array", "of" | "from" | "isArray" | "fromAsync")
                 | (
                     "Buffer",
-                    "from" | "alloc" | "concat" | "byteLength" | "isBuffer"
+                    "from" | "alloc" | "allocUnsafe" | "allocUnsafeSlow" | "concat" | "byteLength" | "isBuffer"
                 )
                 | ("Uint8Array", "fromHex" | "fromBase64" | "from")
                 | ("BigInt", "asIntN" | "asUintN")
@@ -2716,7 +2716,7 @@ impl<'a> FnLowerer<'a> {
                                 &bindings,
                             );
                         }
-                        if property.sym == *"alloc" {
+                        if property.sym == *"alloc" || property.sym == *"allocUnsafe" || property.sym == *"allocUnsafeSlow" {
                             let (arguments, bindings) =
                                 self.lower_native_spread_values(&call.args, "Buffer.alloc")?;
                             // `Buffer.alloc(size, fill?, encoding?)`: a string fill is
