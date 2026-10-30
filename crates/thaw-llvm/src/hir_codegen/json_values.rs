@@ -14,8 +14,7 @@ impl<'ctx> HirCompiler<'ctx> {
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         // This API captures the exact JS value into an owned graph;
         // resolve_handle_graph_result would assimilate a thrown

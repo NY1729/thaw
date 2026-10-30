@@ -161,3 +161,24 @@ fn thaw_js_class_properties_are_not_class_operations() {
     let error = compiler.compile_program(&program).unwrap_err();
     assert!(error.contains("cannot cross the thaw-js boundary"), "{error}");
 }
+
+#[test]
+fn routed_graph_retain_uses_the_tjs_symbol_and_not_quickjs() {
+    let source = "function main(): void { const object: JsValue = retainDynamicJson({}); }";
+    let compile = |routed: bool| {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "thaw_js_graph");
+        compiler.set_thaw_js_routed(routed);
+        compiler.compile_program(&program).unwrap();
+        (compiler.uses_thaw_js(), compiler.uses_quickjs(), compiler.print_to_string())
+    };
+    let (uses_thaw_js, _, ir) = compile(true);
+    assert!(uses_thaw_js, "{ir}");
+    assert!(ir.contains("call { i64, ptr } @thaw_tjs_retain_graph_result("), "{ir}");
+    assert!(!ir.contains("call { i64, ptr } @thaw_js_retain_graph_result("), "{ir}");
+    let (_, uses_quickjs, ir) = compile(false);
+    assert!(uses_quickjs, "{ir}");
+    assert!(ir.contains("call { i64, ptr } @thaw_js_retain_graph_result("), "{ir}");
+}
