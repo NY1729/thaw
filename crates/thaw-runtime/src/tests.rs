@@ -1002,7 +1002,7 @@ fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
                 std::ptr::dangling::<u8>(),
                 2,
                 0.0,
-                42,
+                thaw_bigint_from_i64(42),
                 false,
                 std::ptr::null(),
             )
@@ -1029,7 +1029,7 @@ fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
                 std::ptr::dangling::<u8>(),
                 2,
                 0.0,
-                42,
+                thaw_bigint_from_i64(42),
                 false,
                 std::ptr::null(),
             )
@@ -1085,7 +1085,7 @@ fn compiler_text_reporter_snapshots_opaque_and_typed_rejections() {
                 std::ptr::dangling::<u8>(),
                 2,
                 0.0,
-                42,
+                thaw_bigint_from_i64(42),
                 false,
                 std::ptr::null(),
             )
@@ -3731,7 +3731,7 @@ fn future_native_timer_remains_pending_after_an_idle_drain() {
 fn terminal_exception_report_uses_provenance_or_typed_scalar_without_reading_opaque_pointer() {
     let opaque = std::ptr::dangling::<std::os::raw::c_char>();
     let scalar =
-        unsafe { thaw_runtime_exception_report_text(opaque, std::ptr::null(), 2, 0.0, 42, false) };
+        unsafe { thaw_runtime_exception_report_text(opaque, std::ptr::null(), 2, 0.0, thaw_bigint_from_i64(42), false) };
     assert_eq!(
         unsafe { thaw_arena::NativeStr::from_ptr(scalar) }.to_bytes(),
         b"42"
