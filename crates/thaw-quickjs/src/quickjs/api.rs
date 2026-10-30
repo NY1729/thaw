@@ -3468,7 +3468,31 @@ fn run_pending_jobs(ctx: &Ctx<'_>) {
     }
 }
 
+/// Same wire text a caught exception gets (`describe_tagged_exception`), so a `: Error`-typed
+/// (native tagged string) callback parameter receives a real Error, not `String(error)`.
+fn error_to_tagged<'js>(ctx: Ctx<'js>, value: Value<'js>) -> String {
+    let (name, message) = value.as_object().map_or_else(
+        || ("Error".to_string(), String::new()),
+        |obj| {
+            (
+                obj.get::<_, String>("name").unwrap_or_else(|_| "Error".into()),
+                obj.get::<_, String>("message").unwrap_or_default(),
+            )
+        },
+    );
+    let mut body = framed_error(&name, &message, None);
+    if let Some(properties) = error_property_json(&ctx, &value) {
+        body.push(ERROR_PROPERTIES_MARKER);
+        body.push_str(&properties);
+    }
+    body
+}
+
 fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    ctx.globals().set(
+        "__thaw_error_to_tagged",
+        Function::new(ctx.clone(), error_to_tagged)?,
+    )?;
     ctx.globals().set(
         "__thaw_run_pending_jobs",
         Function::new(ctx.clone(), |ctx: Ctx<'_>| run_pending_jobs(&ctx))?,
@@ -4069,13 +4093,16 @@ fn register_native_callback(
         let label_js = serde_json::to_string(&source_label).unwrap_or_else(|_| "\"\"".into());
         let name_js = serde_json::to_string(&source_label.chars().skip(1).collect::<String>())
             .unwrap_or_else(|_| "\"\"".into());
+        let mask_low = jsvalue_param_mask & 0xffff_ffff;
+        let error_mask = jsvalue_param_mask >> 32;
         let wrapper_source = format!(
             "(function() {{ \
              var raw = globalThis['{raw_name}']; \
              delete globalThis['{raw_name}']; \
              var poll = globalThis['{poll_name}']; \
              if ({method_mode}) delete globalThis['{poll_name}']; \
-             var mask = {jsvalue_param_mask}; \
+             var mask = {mask_low}; \
+             var errorMask = {error_mask}; \
              var callback = function() {{ \
              var args = {has_rest} \
              ? Array.prototype.slice.call(arguments, 0, {visible_param_count} - 1).concat([Array.prototype.slice.call(arguments, {visible_param_count} - 1)]) \
@@ -4092,6 +4119,7 @@ fn register_native_callback(
              }} \
              try {{ \
              for (var i = 0; i < args.length; i++) {{ \
+             if ((errorMask & (1 << i)) !== 0 && args[i] instanceof Error) args[i] = globalThis.__thaw_error_to_tagged(args[i]); \
              if (!{graph_mode} && (mask & (1 << i)) !== 0) {{ \
              var id = globalThis.__thaw_retain_dynamic_value(args[i]); \
              globalThis.__thaw_retain_dynamic_value(args[i]); \

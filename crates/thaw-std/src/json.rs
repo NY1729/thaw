@@ -7360,6 +7360,33 @@ pub extern "C" fn thaw_json_error_stack(value: *mut Value) -> *mut Value {
     ))
 }
 
+/// `thaw_json_as_string` for a value landing in a `string`/`Error`-typed native slot (a callback
+/// parameter, annotated `: Error` -- which lowers to `Str`): a live JS Error becomes the native
+/// framed Error text (name, message, own properties), not `String(error)`.
+#[no_mangle]
+pub extern "C" fn thaw_json_as_string_value(value: *mut Value) -> *const c_char {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        if host_query(lease, 22).as_deref() == Some("1") {
+            let name = caught_json_text(value, "name").unwrap_or_else(|| "Error".into());
+            let message = caught_json_text(value, "message").unwrap_or_default();
+            if let Some(mut framed) =
+                thaw_arena::error_wire::encode_tagged(name.as_bytes(), message.as_bytes(), None)
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            {
+                // Own properties (`code`, ...) ride after the frame, as for a caught exception.
+                if let Some(properties) =
+                    host_query(lease, 28).filter(|text| text != "{}" && !text.is_empty())
+                {
+                    framed.push('\u{5}');
+                    framed.push_str(&properties);
+                }
+                return thaw_arena::owned_string(framed);
+            }
+        }
+    }
+    thaw_json_as_string(value)
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
