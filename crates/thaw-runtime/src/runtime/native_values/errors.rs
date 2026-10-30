@@ -1398,6 +1398,17 @@ fn stack_frames(error: *const c_char) -> String {
     }
 }
 
+/// The frame lines a generated `stack` of the framed Error `error` carries (empty for anything
+/// else): what `console.log(error)` appends to the `Name: message` header like Node.
+///
+/// # Safety
+/// `error` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frames(error: *const c_char) -> *const c_char {
+    let lines = if is_framed_error_text(error) { stack_frames(error) } else { String::new() };
+    arena_c_string(&lines).map_or(std::ptr::null(), |value| value.cast())
+}
+
 /// The frame lines `stack_frames` appends, for the `stack` that `Error.captureStackTrace` builds
 /// on a plain object: `frame` and `ra` are the compiled caller's frame pointer and return address
 /// (see `caller_pcs`); without compiled frames it is V8's single anonymous frame.
