@@ -119,6 +119,7 @@ impl<'a> FnLowerer<'a> {
             native_method_values: HashMap::new(),
             native_class_aliases: HashMap::new(),
             class_method_view_made: false,
+            accessor_projection_depth: 0,
             member_receiver_bindings: HashSet::new(),
             assigned_later: HashSet::new(),
             awaited_bindings: HashSet::new(),
@@ -169,10 +170,9 @@ impl<'a> FnLowerer<'a> {
 
     fn is_primitive_array_index(&self, expr: &Expr, element: &HirType) -> bool {
         let Expr::Member(member) = expr else { return false };
-        matches!(element, HirType::F64 | HirType::Str)
-            && matches!(member.prop, MemberProp::Computed(_))
-            && self.infer_member_receiver_type(&member.obj)
-                == Some(HirType::Array(Box::new(element.clone())))
+        // Any computed read (`xs[i]`, `dictionary[key][i]`) of a primitive slot: an absent value
+        // widens the way a sparse element does.
+        matches!(element, HirType::F64 | HirType::Str) && matches!(member.prop, MemberProp::Computed(_))
     }
 
     /// Records a declared parameter whose type includes `undefined`/`null` (see
@@ -232,7 +232,13 @@ impl<'a> FnLowerer<'a> {
             }),
             Expr::Ident(ident) => {
                 let resolved = self.resolve_binding(ident.sym.as_ref());
-                self.sparse_arrays.contains(&resolved)
+                // Elements with methods (class instances, interfaces) cannot be called through an
+                // `Optional`: a hole there is outside what the declared element type allows.
+                let method_elements = matches!(self.scope.get(&resolved),
+                    Some(HirType::Array(element)) if matches!(element.as_ref(), HirType::Object(fields)
+                        if class_name_from_type(element).is_some()
+                            || fields.iter().any(|(_, field)| matches!(field, HirType::Function(..) | HirType::CallableFunction(..)))));
+                !method_elements && self.sparse_arrays.contains(&resolved)
             }
             Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
                 Some(Expr::Member(member))

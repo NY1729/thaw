@@ -518,7 +518,25 @@ fn lower_class_methods(
         };
         let signature = &signatures[&symbol];
         let declared_ret = deferred_generator_ret(&signature.ret, method.function.is_generator);
-        if method.is_abstract || (declaration.class.is_abstract && !method.is_static) {
+        if method.is_abstract {
+            // Never called with its own class's identity: a base-typed receiver dispatches to an
+            // override, but the dispatch chain still names this symbol as its default branch.
+            if !method.is_static && matches!(method.kind, MethodKind::Method) {
+                let mut params = vec![HirParam { name: "__thaw_this".into(), ty: instance_type.clone() }];
+                params.extend(signature.params[1..].iter().enumerate().map(|(index, ty)| HirParam {
+                    name: format!("__thaw_abstract_arg_{index}"),
+                    ty: ty.clone(),
+                }));
+                functions.push(HirFunction {
+                    name: symbol,
+                    params,
+                    ret: signature.ret.clone(),
+                    is_async: signature.is_async,
+                    body: vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "\u{1}TypeError\u{1}abstract method called".into(),
+                    )))],
+                });
+            }
             continue;
         }
         let mut params = if method.is_static {

@@ -2071,6 +2071,18 @@ impl<'a> FnLowerer<'a> {
                 };
                 if let Some((object_expr, object_ty, object_label)) = lowered_object {
                     let requested_property = property.as_str();
+                    // An element read that only looks optional (the native types are more
+                    // conservative than TypeScript's) before calling a method-bearing object.
+                    let (object_expr, object_ty) = match &object_ty {
+                        HirType::Optional(payload) if matches!(payload.as_ref(), HirType::Object(fields)
+                            if fields.iter().any(|(name, ty)| name == requested_property
+                                && matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)))) =>
+                        {
+                            let strict = self.receiver_requires_narrowing(&member.obj);
+                            self.unwrap_required_optional_member(object_expr, object_ty, requested_property, strict)?
+                        }
+                        _ => (object_expr, object_ty),
+                    };
                     if matches!(object_expr, HirExpr::NonArrowThis { .. })
                         || matches!(object_ty, HirType::NonArrowReceiver(_))
                     {
@@ -3473,6 +3485,24 @@ impl<'a> FnLowerer<'a> {
                 }
             };
             value = self.lower_storage_call_spread(argument, value)?;
+            // `f(xs[0])` for a generic `f` with a method-bearing element: the read only looks
+            // optional, so `T` must be the element itself.
+            if argument.spread.is_none()
+                && signature.as_ref().is_some_and(|signature| !signature.generic_type_params.is_empty())
+                && matches!(argument.expr.as_ref(), Expr::Member(member) if matches!(member.prop, MemberProp::Computed(_)))
+            {
+                if let Ok(HirType::Optional(payload)) = self.infer_expr_type(&value) {
+                    if matches!(payload.as_ref(), HirType::Object(fields)
+                        if class_name_from_type(&payload).is_some()
+                            || fields.iter().any(|(_, ty)| matches!(ty, HirType::Function(..) | HirType::CallableFunction(..))))
+                    {
+                        let (unwrapped, _) = self.unwrap_required_optional_member(
+                            value, HirType::Optional(payload), "argument", false,
+                        )?;
+                        value = unwrapped;
+                    }
+                }
+            }
             if let Some((physical_params, fixed_prefix, rest_element)) = known_actual_rest.take() {
                 if physical_params.len() != fixed_prefix + 1
                     || physical_params.get(fixed_prefix)

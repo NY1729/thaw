@@ -189,7 +189,9 @@ impl<'ctx> HirCompiler<'ctx> {
                             | HirType::Object(_)
                             | HirType::Null
                             | HirType::Undefined
-                            | HirType::I64 | HirType::BigInt
+                            | HirType::I64
+                            | HirType::BigInt
+                            | HirType::Symbol
                             | HirType::Optional(_)
                             | HirType::Nullable(_)
                             | HirType::Nullish(_)
@@ -242,11 +244,21 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         let mut pushed = Ok(());
-        for (ty, value) in values {
+        for (ty, mut value) in values {
+            let mut ty = ty.unwrap();
+            // A Symbol formats as its `Symbol(desc)` text, exactly what `%s` and the
+            // trailing-argument inspection print for it.
+            if ty == HirType::Symbol {
+                value = call(self, "thaw_symbol_to_string", &[value.into()])?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("symbol conversion returned no value")?;
+                ty = HirType::Str;
+            }
             pushed = self.compile_json_array_push_native_with_undefined(
                 array,
                 value,
-                &ty.unwrap(),
+                &ty,
                 true,
             );
             if pushed.is_err() {

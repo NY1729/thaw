@@ -304,8 +304,10 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let merged = normalize_interface_merges(module)?;
     let merged = flatten_namespaces(&merged);
     let merged = enums_as_values(&merged);
+    let merged = enum_keys_as_literals(&merged);
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = lift_local_classes(&normalized);
+    let normalized = lift_local_type_declarations(&normalized);
     let normalized = normalize_top_level_class_expressions(&normalized)?;
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
@@ -1591,7 +1593,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         )?
                     } else if method.function.return_type.is_none()
                         && !method.is_abstract
-                        && (!class_decl.class.is_abstract || method.is_static)
                     {
                         // Mirrors the identical free-function case just
                         // above (`func.return_type.is_none() && !is_extern
@@ -1904,7 +1905,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         let receiver_count = usize::from(!method.is_static);
                         if base_signature.params[receiver_count..]
                             != derived_signature.params[receiver_count..]
-                            || base_signature.ret != derived_signature.ret
+                            // An unannotated override's return type is inferred later.
+                            || (base_signature.ret != derived_signature.ret
+                                && !hir_type_contains_dynamic(&derived_signature.ret))
                             || base_signature.is_async != derived_signature.is_async
                             || base_signature.native_rest != derived_signature.native_rest
                         {
@@ -2047,7 +2050,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     .value
                     .as_deref()
                     .and_then(|value| {
-                        infer_class_field_expr_type(value, &|class, member| {
+                        infer_class_field_type(value, &interfaces, &generic_interfaces, &|class, member| {
                             let owner = class?;
                             global_types.get(&class_static_field_symbol(owner, member)).cloned()
                         })
@@ -2723,7 +2726,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
 
     let mut specialized = Vec::new();
     for fn_decl in fn_decls {
-        let function = lower_fn_decl(
+        let lowered = lower_fn_decl(
             fn_decl,
             &signatures,
             &interfaces,
@@ -2733,10 +2736,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &global_types,
             &immutable_globals,
             None,
-        )?;
-        if !signatures[&function.name].generic_type_params.is_empty() {
+        );
+        // A generic body is only a template here (its `T` is `Dynamic`, so e.g. a method call on
+        // a `T extends Shape` value cannot resolve); each instantiation is lowered and checked
+        // with its concrete types.
+        if !signatures[fn_decl.ident.sym.as_ref()].generic_type_params.is_empty() {
             continue;
         }
+        let function = lowered?;
         specialized.push(function);
     }
     for declaration in &class_decls {
@@ -2830,6 +2837,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         functions: specialized,
         extern_functions,
         fn_locs: Default::default(),
+        class_layouts: {
+            let mut layouts = interfaces
+                .iter()
+                .filter(|(name, ty)| class_name_from_type(ty) == Some(name.as_str()))
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect::<Vec<_>>();
+            layouts.sort_by(|a, b| a.0.cmp(&b.0));
+            layouts.into_iter().map(|(_, ty)| ty).collect()
+        },
     })
 }
 

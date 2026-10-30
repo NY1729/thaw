@@ -807,3 +807,4 @@ include!("tests/audit2_error_async_contracts.rs");
 include!("tests/audit2_recursive_contracts.rs");
 include!("tests/bigint_arbitrary_contracts.rs");
 include!("tests/error_inspect_contracts.rs");
+include!("tests/audit2_inspect_format_contracts.rs");

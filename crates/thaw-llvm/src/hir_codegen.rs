@@ -500,6 +500,8 @@ pub struct HirCompiler<'ctx> {
     next_lambda: usize,
     /// Definition sites of the source functions (`HirProgram::fn_locs`), by HIR name.
     fn_locs: HashMap<String, SourceLoc>,
+    /// Native class instance layouts (`HirProgram::class_layouts`).
+    class_layouts: Vec<HirType>,
     /// Where each stack-visible function (by LLVM symbol) is defined, for `Error.stack`.
     stack_locs: HashMap<String, SourceLoc>,
     uses_napi: bool,
@@ -873,6 +875,7 @@ impl<'ctx> HirCompiler<'ctx> {
             async_return_frames: HashMap::new(),
             next_lambda: 0,
             fn_locs: HashMap::new(),
+            class_layouts: Vec::new(),
             stack_locs: HashMap::new(),
             uses_napi: false,
             uses_thaw_js: false,
@@ -905,6 +908,7 @@ impl<'ctx> HirCompiler<'ctx> {
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.stack_guard = true;
         self.fn_locs = program.fn_locs.0.clone();
+        self.class_layouts = program.class_layouts.clone();
         self.projects_native_objects =
             hir_contains_named_call(program, "__thaw_build_native_object_wrapper")
                 || hir_contains_non_arrow_this_value(program);
