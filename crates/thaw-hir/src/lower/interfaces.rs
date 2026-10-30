@@ -526,7 +526,7 @@ fn resolve_interface(
     in_progress.pop();
 
     let hir_ty = if let Some(element) = dictionary {
-        HirType::Dictionary(Box::new(element))
+        dictionary_hir_type(element)
     } else {
         HirType::Object(fields)
     };
