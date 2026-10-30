@@ -50,3 +50,29 @@ function main(): void { console.log(f(new A()), f(new B()), g(new A()), g(new B(
 "##;
     assert_eq!(compile_and_run(source, "audit2_instanceof_narrow"), "1 2 A1 B3 C32\n");
 }
+
+#[test]
+fn audit2_class_field_initialisers_infer_collection_and_enum_types() {
+    let source = r##"enum State { Idle, Running }
+class M {
+  private m = new Map<string, number>();
+  seen = new Set<string>();
+  state = State.Idle;
+  set(k: string, v: number) { this.m.set(k, v); this.seen.add(k); }
+  size() { return this.m.size + this.seen.size; }
+  go() { this.state = State.Running; }
+}
+function main(): void { const m = new M(); m.set("a", 1); m.go(); console.log(m.size(), m.state); }
+"##;
+    assert_eq!(compile_and_run(source, "audit2_field_init_infer"), "2 1\n");
+}
+
+#[test]
+fn audit2_abstract_override_without_return_annotation() {
+    let source = r##"abstract class Base { abstract area(): number; d() { return this.area(); } }
+class Rect extends Base { constructor(private w: number) { super(); } area() { return this.w * 2; } }
+class Sq extends Base { area(): number { return 4; } }
+function main(): void { console.log(new Rect(2).d(), new Sq().d()); }
+"##;
+    assert_eq!(compile_and_run(source, "audit2_abstract_override_infer"), "4 4\n");
+}

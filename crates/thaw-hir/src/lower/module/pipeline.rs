@@ -1899,7 +1899,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         let receiver_count = usize::from(!method.is_static);
                         if base_signature.params[receiver_count..]
                             != derived_signature.params[receiver_count..]
-                            || base_signature.ret != derived_signature.ret
+                            // An unannotated override's return type is inferred later.
+                            || (base_signature.ret != derived_signature.ret
+                                && !hir_type_contains_dynamic(&derived_signature.ret))
                             || base_signature.is_async != derived_signature.is_async
                             || base_signature.native_rest != derived_signature.native_rest
                         {
@@ -2041,7 +2043,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 None => property
                     .value
                     .as_deref()
-                    .and_then(infer_class_field_literal_type)
+                    .and_then(|value| infer_class_field_type(value, &interfaces, &generic_interfaces))
                     .ok_or_else(|| {
                         format!(
                             "class `{class_name}` static field `{field}` needs a type annotation"
