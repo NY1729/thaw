@@ -153,6 +153,7 @@ thaw_error_frame_own
 thaw_error_get_prop_json
 thaw_error_has_prop
 thaw_error_inspect
+thaw_error_console_inspect
 thaw_error_is_error
 thaw_error_is_instance
 thaw_error_json_stringify
@@ -168,6 +169,7 @@ thaw_error_set_prop
 thaw_error_set_stack_trace_limit
 thaw_error_stack
 thaw_error_stack_frames
+thaw_error_frames
 thaw_error_stack_trace_limit
 thaw_error_stack_with_frames
 thaw_error_suppress

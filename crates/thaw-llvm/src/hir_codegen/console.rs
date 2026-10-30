@@ -443,7 +443,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     let message = self
                         .builder
                         .build_call(
-                            self.module.get_function("thaw_error_inspect").unwrap(),
+                            self.module.get_function("thaw_error_console_inspect").unwrap(),
                             &[ptr.into()],
                             "console_error_message",
                         )
@@ -1117,7 +1117,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let message = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_error_inspect").unwrap(),
+                        self.module.get_function("thaw_error_console_inspect").unwrap(),
                         &[value.into_pointer_value().into()],
                         "console_union_error_message",
                     )
