@@ -4032,6 +4032,12 @@ impl<'a> FnLowerer<'a> {
                                 let element_type = element.as_ref().clone();
                                 (source, HirType::Array(element), element_type)
                             }
+                            // A dynamic `any` value (e.g. `arguments`) used as an array source.
+                            HirType::Json => {
+                                let array_type = HirType::Array(Box::new(HirType::Json));
+                                let source = self.coerce_to_declared(&array_type, source)?;
+                                (source, array_type, HirType::Json)
+                            }
                             HirType::Str => (
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_string_to_array".into())),
