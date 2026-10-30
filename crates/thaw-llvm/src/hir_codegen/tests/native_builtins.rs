@@ -8544,11 +8544,9 @@ fn compiles_turkish_and_azeri_string_casing() {
 /// `AggregateError` preserves statically typed errors and an arbitrary cause
 /// while retaining the existing tagged exception behavior when thrown.
 ///
-/// A caught `AggregateError` is printed as Node prints an error that has no stack
-/// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
-/// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
-/// the stack trace, which a native binary has no equivalent of, so it is omitted.
-/// A statically typed error value prints as its "Name: message" first line.
+/// An `AggregateError` itself captures no frames, so it prints as Node prints an error with
+/// no stack (`e.stack = "AggregateError: all failed"` under Node 22): `[AggregateError: all
+/// failed] { [errors]: [...] }`. Its member `Error`s carry frames and print like Node's.
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -8576,7 +8574,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "AggregateError\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
+        "AggregateError\n1,2,3\n17\ntrue\n[AggregateError: all failed] {\n  [errors]: [\n    Error: a\n        at main (input.ts:5:9)\n  ]\n}\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
     );
 }
 
