@@ -141,6 +141,7 @@ impl<'a> FnLowerer<'a> {
             expected_source_return_hint: None,
             expected_arrow_return_hint: None,
             expected_collection_hint: None,
+            native_u8_args: HashSet::new(),
             any_object_literal: false,
             native_iteration_callback: false,
             stored_arrow_initializer: false,

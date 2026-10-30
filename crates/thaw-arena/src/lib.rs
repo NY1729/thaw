@@ -58,11 +58,34 @@ pub enum SnapshotError {
     IdentityUnavailable,
 }
 
+/// A traced allocation. `serial` 0 means identity unavailable (the serial counter overflowed).
+#[derive(Clone, Copy)]
+struct AllocRecord {
+    size: usize,
+    generation: usize,
+    serial: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PendingAllocation {
+    base: usize,
+    size: usize,
+    serial: u64,
+}
+
+/// More pending allocations than this are folded into `ALLOCATIONS` before a lookup; fewer are
+/// scanned in place.
+const PENDING_SCAN_LIMIT: usize = 32;
+
 thread_local! {
     static ARENA: RefCell<Bump> = RefCell::new(Bump::new());
     static RETAINED: RefCell<Vec<Bump>> = const { RefCell::new(Vec::new()) };
-    static ALLOCATIONS: RefCell<BTreeMap<usize, (usize, usize)>> = const { RefCell::new(BTreeMap::new()) };
-    static ALLOCATION_IDS: RefCell<BTreeMap<usize, u64>> = const { RefCell::new(BTreeMap::new()) };
+    /// Allocations that survived a reset (or were looked up since), keyed by base address.
+    static ALLOCATIONS: RefCell<BTreeMap<usize, AllocRecord>> = const { RefCell::new(BTreeMap::new()) };
+    /// Traced allocations since the last settle: appended in O(1), so allocation does not pay for
+    /// an ordered-map insert. Folded into `ALLOCATIONS` only when a lookup needs many of them;
+    /// a reset sorts them once and keeps just the live ones.
+    static PENDING_ALLOCATIONS: RefCell<Vec<PendingAllocation>> = const { RefCell::new(Vec::new()) };
     static NEXT_ALLOCATION_ID: Cell<u64> = const { Cell::new(0) };
     static GRAPH_EPOCH: Cell<Option<u64>> = const { Cell::new(Some(0)) };
     static ROOTS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
@@ -286,6 +309,94 @@ pub fn was_reclaimed(pointer: usize) -> bool {
     })
 }
 
+/// Moves every pending allocation into `ALLOCATIONS`.
+fn flush_pending(
+    allocations: &mut BTreeMap<usize, AllocRecord>,
+    pending: &mut Vec<PendingAllocation>,
+) {
+    let generation = RETAINED.with(|retained| retained.borrow().len());
+    for record in pending.drain(..) {
+        allocations.insert(
+            record.base,
+            AllocRecord {
+                size: record.size,
+                generation,
+                serial: record.serial,
+            },
+        );
+    }
+}
+
+/// The traced allocation with the greatest base `<= pointer` (a pending one wins a tie, being
+/// newer), whether or not it contains `pointer`. `pending` must be sorted by base.
+fn nearest_allocation(
+    allocations: &BTreeMap<usize, AllocRecord>,
+    pending: &[PendingAllocation],
+    generation: usize,
+    pointer: usize,
+) -> Option<(usize, AllocRecord)> {
+    let from_pending = pending
+        .partition_point(|record| record.base <= pointer)
+        .checked_sub(1)
+        .map(|index| pending[index]);
+    let from_table = allocations
+        .range(..=pointer)
+        .next_back()
+        .map(|(&base, &record)| (base, record));
+    match (from_pending, from_table) {
+        (Some(new), Some((base, _))) if new.base >= base => {
+            Some((new.base, new.into_record(generation)))
+        }
+        (Some(new), None) => Some((new.base, new.into_record(generation))),
+        (_, table) => table,
+    }
+}
+
+impl PendingAllocation {
+    fn into_record(self, generation: usize) -> AllocRecord {
+        AllocRecord {
+            size: self.size,
+            generation,
+            serial: self.serial,
+        }
+    }
+}
+
+/// The tracked allocation containing `pointer`: its base address and record.
+fn locate_allocation(pointer: usize) -> Option<(usize, AllocRecord)> {
+    PENDING_ALLOCATIONS.with(|pending| {
+        let mut pending = pending.try_borrow_mut().ok()?;
+        ALLOCATIONS.with(|allocations| {
+            let mut allocations = allocations.try_borrow_mut().ok()?;
+            if pending.len() > PENDING_SCAN_LIMIT {
+                flush_pending(&mut allocations, &mut pending);
+            }
+            let generation = RETAINED.with(|retained| retained.borrow().len());
+            // A short, unsorted pending list: the newest allocation with the greatest base wins.
+            let from_pending = pending.iter().filter(|record| record.base <= pointer).fold(
+                None::<PendingAllocation>,
+                |best, record| match best {
+                    Some(best) if best.base > record.base => Some(best),
+                    _ => Some(*record),
+                },
+            );
+            let from_table = allocations
+                .range(..=pointer)
+                .next_back()
+                .map(|(&base, &record)| (base, record));
+            let (base, record) = match (from_pending, from_table) {
+                (Some(new), Some((base, _))) if new.base >= base => {
+                    (new.base, new.into_record(generation))
+                }
+                (Some(new), None) => (new.base, new.into_record(generation)),
+                (_, Some(table)) => table,
+                (None, None) => return None,
+            };
+            (pointer - base < record.size).then_some((base, record))
+        })
+    })
+}
+
 /// A foreign FFI pointer cannot be kept alive by an ArenaRoot. Check that a
 /// prospective live-object owner still belongs to a tracked allocation
 /// before attaching a retained JS wrapper or callback to it.
@@ -293,13 +404,7 @@ pub fn contains_allocation(pointer: usize) -> bool {
     if pointer == 0 || !is_tracing() {
         return false;
     }
-    ALLOCATIONS.with(|allocations| {
-        let allocations = allocations.borrow();
-        allocations
-            .range(..=pointer)
-            .next_back()
-            .is_some_and(|(&start, &(size, _))| pointer - start < size)
-    })
+    locate_allocation(pointer).is_some()
 }
 
 /// Returns the stable identity of a tracked allocation containing `pointer`.
@@ -307,14 +412,10 @@ pub fn allocation_identity(pointer: usize) -> Option<AllocationId> {
     if pointer == 0 || !is_tracing() {
         return None;
     }
-    ALLOCATIONS.with(|allocations| {
-        let allocations = allocations.try_borrow().ok()?;
-        let (&base, &(size, _)) = allocations.range(..=pointer).next_back()?;
-        if pointer - base >= size {
-            return None;
-        }
-        let serial = ALLOCATION_IDS.with(|ids| ids.try_borrow().ok()?.get(&base).copied())?;
-        Some(AllocationId { base, serial })
+    let (base, record) = locate_allocation(pointer)?;
+    (record.serial != 0).then_some(AllocationId {
+        base,
+        serial: record.serial,
     })
 }
 
@@ -336,36 +437,42 @@ pub fn allocation_span_identity(
     {
         return None;
     }
-    ALLOCATIONS.with(|allocations| {
-        let allocations = allocations.try_borrow().ok()?;
-        let (&base, &(size, _)) = allocations.range(..=pointer).next_back()?;
-        let offset = pointer.checked_sub(base)?;
-        let end = offset.checked_add(byte_len)?;
-        if end > size {
-            return None;
-        }
-        let serial = ALLOCATION_IDS.with(|ids| ids.try_borrow().ok()?.get(&base).copied())?;
-        Some((AllocationId { base, serial }, offset))
-    })
+    let (base, record) = locate_allocation(pointer)?;
+    let end = pointer.checked_sub(base)?.checked_add(byte_len)?;
+    if end > record.size || record.serial == 0 {
+        return None;
+    }
+    Some((
+        AllocationId {
+            base,
+            serial: record.serial,
+        },
+        pointer - base,
+    ))
 }
 
 /// Copies native tracing metadata and initialized pointer words without changing
 /// roots, references, allocation metadata, or bump generations.
 pub fn snapshot_native_graph() -> Result<NativeGraphSnapshot, SnapshotError> {
     let allocations = ALLOCATIONS.with(|allocations| {
-        let allocations = allocations
-            .try_borrow()
+        let mut allocations = allocations
+            .try_borrow_mut()
             .map_err(|_| SnapshotError::BorrowConflict)?;
-        ALLOCATION_IDS.with(|ids| {
-            let ids = ids
-                .try_borrow()
+        PENDING_ALLOCATIONS.with(|pending| {
+            let mut pending = pending
+                .try_borrow_mut()
                 .map_err(|_| SnapshotError::BorrowConflict)?;
+            flush_pending(&mut allocations, &mut pending);
+            Ok::<(), SnapshotError>(())
+        })?;
+        {
             let mut copied = BTreeMap::new();
-            for (&base, &(size, generation)) in allocations.iter() {
-                let serial = ids
-                    .get(&base)
-                    .copied()
-                    .ok_or(SnapshotError::IdentityUnavailable)?;
+            for (&base, record) in allocations.iter() {
+                let (size, generation) = (record.size, record.generation);
+                if record.serial == 0 {
+                    return Err(SnapshotError::IdentityUnavailable);
+                }
+                let serial = record.serial;
                 let mut pointer_words = Vec::new();
                 for offset in (0..size.saturating_sub(std::mem::size_of::<usize>() - 1))
                     .step_by(std::mem::size_of::<usize>())
@@ -384,7 +491,7 @@ pub fn snapshot_native_graph() -> Result<NativeGraphSnapshot, SnapshotError> {
                 );
             }
             Ok(copied)
-        })
+        }
     })?;
     let mut references = REFERENCES.with(|references| {
         references
@@ -539,23 +646,22 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
     BYTES_SINCE_RESET.with(|bytes| bytes.set(bytes.get().saturating_add(size)));
     if is_tracing() {
         unsafe { pointer.write_bytes(0, size) };
-        let generation = RETAINED.with(|retained| retained.borrow().len());
-        ALLOCATIONS.with(|allocations| {
-            let base = pointer as usize;
-            allocations
-                .borrow_mut()
-                .insert(base, (size.max(1), generation));
-            ALLOCATION_IDS.with(|ids| {
-                let serial = NEXT_ALLOCATION_ID.with(|next| next.get().checked_add(1));
-                if let Some(serial) = serial {
-                    NEXT_ALLOCATION_ID.with(|next| next.set(serial));
-                    ids.borrow_mut().insert(base, serial);
-                } else {
-                    ids.borrow_mut().remove(&base);
-                }
-            });
-            GRAPH_EPOCH.with(|epoch| epoch.set(epoch.get().and_then(|value| value.checked_add(1))));
+        // 0 marks "identity unavailable" once the serial counter is exhausted.
+        let serial = NEXT_ALLOCATION_ID.with(|next| match next.get().checked_add(1) {
+            Some(serial) => {
+                next.set(serial);
+                serial
+            }
+            None => 0,
         });
+        PENDING_ALLOCATIONS.with(|pending| {
+            pending.borrow_mut().push(PendingAllocation {
+                base: pointer as usize,
+                size: size.max(1),
+                serial,
+            });
+        });
+        GRAPH_EPOCH.with(|epoch| epoch.set(epoch.get().and_then(|value| value.checked_add(1))));
     }
     pointer
 }
@@ -572,8 +678,13 @@ pub extern "C" fn thaw_arena_reset_if_grown() {
         return;
     }
     thaw_arena_reset();
-    let surviving: usize =
-        ALLOCATIONS.with(|allocations| allocations.borrow().values().map(|&(size, _)| size).sum());
+    let surviving: usize = ALLOCATIONS.with(|allocations| {
+        allocations
+            .borrow()
+            .values()
+            .map(|record| record.size)
+            .sum()
+    });
     NEXT_AUTO_RESET.with(|next| next.set(AUTO_RESET_FLOOR.max(surviving.saturating_mul(2))));
 }
 
@@ -600,6 +711,21 @@ pub extern "C" fn thaw_arena_reset() {
     }
     ALLOCATIONS.with(|allocations| {
         let mut allocations = allocations.borrow_mut();
+        // Allocations since the last settle are sorted once and consulted in place; only the
+        // live ones are ever inserted into the ordered map.
+        let mut fresh = PENDING_ALLOCATIONS.with(|fresh| std::mem::take(&mut *fresh.borrow_mut()));
+        fresh.sort_by_key(|record| record.base);
+        // A repeated base (a zero-size allocation) keeps the newest record, as a map insert did.
+        fresh.dedup_by(|later, earlier| {
+            let same = later.base == earlier.base;
+            if same {
+                *earlier = *later;
+            }
+            same
+        });
+        let current_generation = RETAINED.with(|retained| retained.borrow().len());
+        let nearest =
+            |pointer: usize| nearest_allocation(&allocations, &fresh, current_generation, pointer);
         let mut pending = roots
             .iter()
             .map(|&slot| unsafe { (slot as *const usize).read_unaligned() })
@@ -612,32 +738,31 @@ pub extern "C" fn thaw_arena_reset() {
         let mut live = HashSet::new();
         let mut owners = HashSet::new();
         while let Some(pointer) = pending.pop() {
+            let found = nearest(pointer);
             if owners.insert(pointer) {
                 REFERENCES.with(|references| {
                     if let Some(children) = references.borrow().get(&pointer) {
                         pending.extend(children);
                     }
                 });
-                if let Some((&base, &(size, _))) = allocations.range(..=pointer).next_back() {
-                    if pointer - base < size {
-                        ALLOCATION_IDS.with(|ids| {
-                            if let Some(serial) = ids.borrow().get(&base).copied() {
-                                let identity = AllocationId { base, serial };
-                                ALLOCATION_REFERENCES.with(|references| {
-                                    if let Some(children) =
-                                        references.borrow().get(&(identity, pointer))
-                                    {
-                                        pending.extend(children);
-                                    }
-                                });
+                if let Some((base, record)) = found {
+                    if pointer - base < record.size && record.serial != 0 {
+                        let identity = AllocationId {
+                            base,
+                            serial: record.serial,
+                        };
+                        ALLOCATION_REFERENCES.with(|references| {
+                            if let Some(children) = references.borrow().get(&(identity, pointer)) {
+                                pending.extend(children);
                             }
                         });
                     }
                 }
             }
-            let Some((&start, &(size, _))) = allocations.range(..=pointer).next_back() else {
+            let Some((start, record)) = found else {
                 continue;
             };
+            let size = record.size;
             if pointer - start >= size || !live.insert(start) {
                 continue;
             }
@@ -649,7 +774,7 @@ pub extern "C" fn thaw_arena_reset() {
         }
         let generations = live
             .iter()
-            .map(|start| allocations[start].1)
+            .filter_map(|&start| nearest(start).map(|(_, record)| record.generation))
             .collect::<HashSet<_>>();
         REFERENCES.with(|references| {
             references
@@ -657,34 +782,57 @@ pub extern "C" fn thaw_arena_reset() {
                 .retain(|owner, _| live.contains(owner) || owners.contains(owner))
         });
         ALLOCATION_REFERENCES.with(|references| {
-            ALLOCATION_IDS.with(|ids| {
-                let ids = ids.borrow();
-                references.borrow_mut().retain(|(identity, owner), _| {
-                    live.contains(&identity.base)
-                        && ids.get(&identity.base) == Some(&identity.serial)
-                        && *owner >= identity.base
-                        && allocations
-                            .get(&identity.base)
-                            .is_some_and(|(size, _)| *owner - identity.base < *size)
-                });
+            references.borrow_mut().retain(|(identity, owner), _| {
+                live.contains(&identity.base)
+                    && nearest(identity.base).is_some_and(|(base, record)| {
+                        base == identity.base
+                            && record.serial == identity.serial
+                            && *owner >= identity.base
+                            && *owner - identity.base < record.size
+                    })
             });
         });
+        // Every record, old and fresh, in base order (a fresh record replaces a table record
+        // with the same base): live ones form the new table, dead ones the reclaimed ranges.
+        let mut survivors = Vec::new();
         RECLAIMED.with(|ranges| {
             let mut ranges = ranges.borrow_mut();
             ranges.clear();
-            allocations.retain(|&start, (size, _)| {
-                if live.contains(&start) {
-                    true
+            let mut table = allocations
+                .iter()
+                .map(|(&base, &record)| (base, record))
+                .peekable();
+            let mut fresh_records = fresh
+                .iter()
+                .map(|record| (record.base, record.into_record(current_generation)))
+                .peekable();
+            loop {
+                let take_table = match (table.peek(), fresh_records.peek()) {
+                    (Some(old), Some(new)) => {
+                        if old.0 == new.0 {
+                            table.next();
+                            continue;
+                        }
+                        old.0 < new.0
+                    }
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => break,
+                };
+                let (base, record) = if take_table {
+                    table.next()
                 } else {
-                    ranges.push((start, start + *size));
-                    false
+                    fresh_records.next()
                 }
-            });
-            ALLOCATION_IDS.with(|ids| {
-                ids.borrow_mut()
-                    .retain(|base, _| allocations.contains_key(base))
-            });
+                .expect("peeked record");
+                if live.contains(&base) {
+                    survivors.push((base, record));
+                } else {
+                    ranges.push((base, base + record.size));
+                }
+            }
         });
+        *allocations = survivors.into_iter().collect();
         RETAINED.with(|retained| {
             let mut retained = retained.borrow_mut();
             let current = retained.len();
@@ -707,8 +855,8 @@ pub extern "C" fn thaw_arena_reset() {
                 old_index += 1;
                 keep
             });
-            for (_, generation) in allocations.values_mut() {
-                *generation = mapping[generation];
+            for record in allocations.values_mut() {
+                record.generation = mapping[&record.generation];
             }
         });
     });
@@ -1036,6 +1184,38 @@ mod tests {
             assert!(was_reclaimed(garbage));
             assert!(!was_reclaimed(kept.0));
             drop(kept);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn lookups_and_reset_see_allocations_still_pending_and_already_settled() {
+        std::thread::spawn(|| {
+            thaw_arena_enable_tracing();
+            // More than PENDING_SCAN_LIMIT allocations settle into the ordered map on a lookup;
+            // later ones stay pending and are found by scanning.
+            let settled: Vec<usize> = (0..100).map(|_| thaw_arena_alloc(24, 8) as usize).collect();
+            let first = allocation_identity(settled[0] + 8).unwrap();
+            assert_eq!(first.base, settled[0]);
+            let late = thaw_arena_alloc(24, 8) as usize;
+            let late_id = allocation_identity(late + 16).unwrap();
+            assert_eq!(
+                (late_id.base, late_id.serial),
+                (late, first.serial + settled.len() as u64)
+            );
+            assert!(contains_allocation(settled[99] + 23));
+            assert!(!contains_allocation(settled[99] + 24 + 4096));
+            // Two allocations (one settled, one pending) are kept by roots; everything else goes.
+            let keep_settled = ArenaRoot::new(settled[50]);
+            let keep_pending = ArenaRoot::new(thaw_arena_alloc(24, 8) as usize);
+            let garbage = thaw_arena_alloc(24, 8) as usize;
+            thaw_arena_reset();
+            assert!(was_reclaimed(settled[0]) && was_reclaimed(late) && was_reclaimed(garbage));
+            assert!(!was_reclaimed(settled[50]) && !was_reclaimed(keep_pending.0));
+            assert!(contains_allocation(settled[50]) && contains_allocation(keep_pending.0));
+            assert!(!contains_allocation(garbage));
+            drop((keep_settled, keep_pending));
         })
         .join()
         .unwrap();
