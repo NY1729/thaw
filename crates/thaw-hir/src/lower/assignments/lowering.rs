@@ -288,69 +288,19 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `buf[i] = v` on a Buffer/Uint8Array: an out-of-range, negative or
-    /// non-integer index is ignored (never grows the array), as in Node.
+    /// non-integer index is ignored (never grows the array), as in Node. The
+    /// checked store is one intrinsic (`__thaw_bytes_set_safe`), so the write
+    /// costs no closure or temporary.
     fn lower_bytes_index_write(
         &mut self,
         array: HirExpr,
         index: HirExpr,
         value: HirExpr,
     ) -> Result<HirExpr, String> {
-        let id = self.next_binding;
-        self.next_binding += 1;
-        let (array_name, index_name, value_name) = (
-            format!("__thaw_bytes_write_array_{id}"),
-            format!("__thaw_bytes_write_index_{id}"),
-            format!("__thaw_bytes_write_value_{id}"),
-        );
-        let array_type = HirType::Array(Box::new(HirType::F64));
-        let value_type = self.infer_expr_type(&value)?;
-        self.scope.insert(array_name.clone(), array_type.clone());
-        self.scope.insert(index_name.clone(), HirType::F64);
-        self.scope.insert(value_name.clone(), value_type.clone());
-        let (array_var, index_var, value_var) = (
-            HirExpr::Var(array_name.clone()),
-            HirExpr::Var(index_name.clone()),
-            HirExpr::Var(value_name.clone()),
-        );
-        let zero = HirExpr::Lit(HirLit::F64(0.0));
-        let write = HirStmt::Expr(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_bytes_set".into())),
-            vec![array_var.clone(), index_var.clone(), value_var.clone()],
-        ));
-        let is_int = HirExpr::BinOp(
-            BinOp::EqEqEq,
-            Box::new(index_var.clone()),
-            Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
-                vec![index_var.clone()],
-            )),
-        );
-        let in_len = HirExpr::BinOp(
-            BinOp::Lt,
-            Box::new(index_var.clone()),
-            Box::new(HirExpr::ArrayLen(Box::new(array_var))),
-        );
-        let non_negative = HirExpr::BinOp(BinOp::GtEq, Box::new(index_var), Box::new(zero));
-        let result = HirExpr::Block(vec![
-            HirStmt::If(
-                is_int,
-                vec![HirStmt::If(
-                    non_negative,
-                    vec![HirStmt::If(in_len, vec![write], Vec::new())],
-                    Vec::new(),
-                )],
-                Vec::new(),
-            ),
-            HirStmt::Return(Some(value_var)),
-        ]);
-        self.wrap_call_argument_bindings(
-            result,
-            &[
-                (array_name, array_type, array),
-                (index_name, HirType::F64, index),
-                (value_name, value_type, value),
-            ],
-        )
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_set_safe".into())),
+            vec![array, index, value],
+        ))
     }
 
     fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
