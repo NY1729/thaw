@@ -3117,3 +3117,28 @@ fn widens_inherited_bare_fields_through_an_instantiated_subclass() {
     assert!(layout.contains(&("x".to_string(), widened.clone())));
     assert!(layout.contains(&("y".to_string(), widened)));
 }
+
+#[test]
+fn date_and_regexp_subclasses_wrap_the_native_object() {
+    let program = lower(
+        r#"class MyDate extends Date { fmt(): string { return this.toISOString(); } }
+        class MyRe extends RegExp { hit(s: string): boolean { return this.test(s); } }
+        function main(): void { new MyDate(0); new MyRe("a"); }"#,
+    );
+    let date = native_subclass_layout(&program, "MyDate");
+    assert_eq!(date[0].0, "__thaw_class_identity_\u{1e}MyDate\u{1f}Date");
+    assert_eq!(date[1].0, "__thaw_base");
+    let regexp = native_subclass_layout(&program, "MyRe");
+    assert_eq!(regexp[0].0, "__thaw_class_identity_\u{1e}MyRe\u{1f}RegExp");
+    assert_eq!(regexp[1].0, "__thaw_base");
+}
+
+#[test]
+fn external_javascript_class_bases_get_a_named_diagnostic() {
+    let module = thaw_parser::parse_typescript(
+        "class C extends __thaw_class_ctor_246e6577245472616e73666f726d {} function main(): void { new C(); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("external JavaScript class `Transform`"), "{error}");
+}

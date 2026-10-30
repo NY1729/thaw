@@ -2627,7 +2627,7 @@ impl<'a> FnLowerer<'a> {
                     let native_builtin_match =
                         native_builtin_instanceof_static_match(class.sym.as_ref(), &value_type);
                     let native_collection_subclass = native_base_type(&value_type).is_some()
-                        && matches!(class.sym.as_ref(), "Map" | "Set" | "Array");
+                        && matches!(class.sym.as_ref(), "Map" | "Set" | "Array" | "Date" | "RegExp");
                     if !extends_error_family
                         && native_builtin_match.is_none()
                         && !native_collection_subclass
@@ -6748,7 +6748,7 @@ fn native_object_instanceof(ty: &HirType) -> Option<bool> {
 
 fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<bool> {
     // A `Map`/`Set` subclass instance is an object: its identity chain decides.
-    if native_base_type(ty).is_some() && matches!(class, "Map" | "Set" | "Array") {
+    if native_base_type(ty).is_some() && matches!(class, "Map" | "Set" | "Array" | "Date" | "RegExp") {
         return None;
     }
     Some(match class {
