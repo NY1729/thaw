@@ -3402,6 +3402,11 @@
       "name": "audit2 class instance used through interface-typed param variable and array calls methods",
       "expect": "matched",
       "source": "interface Shape { area(): number; name: string }\nclass Circle implements Shape { name = \"c\"; constructor(private r: number) {} area(): number { return 2 * this.r; } }\nclass Rect implements Shape { name = \"r\"; constructor(private w: number, private h: number) {} area(): number { return this.w * this.h; } }\ninterface Counter { n: number; inc(by: number): number }\nclass C implements Counter { n = 0; inc(by: number): number { this.n += by; return this.n; } }\nfunction show(s: Shape) { return s.name + \":\" + s.area(); }\nfunction bump(c: Counter) { c.inc(2); c.n += 1; return c.n; }\nfunction main(): void {\n  console.log(show(new Circle(1)), show(new Rect(2, 3)));\n  const shapes: Shape[] = [new Circle(2), new Rect(1, 1)];\n  console.log(shapes.map((s) => s.area()), shapes[0].area());\n  const c = new C();\n  console.log(bump(c), c.n);\n  const k: Counter = c;\n  console.log(k.inc(5), c.n);\n  const d = new Circle(3);\n  const s: Shape = d;\n  console.log(s.name, s.area());\n}"
+    },
+    {
+      "name": "audit2 instanceof narrows a base-class value to its subclass",
+      "expect": "matched",
+      "source": "class A { x = 1; }\nclass B extends A { y = 2; }\nclass C extends B { z = 3; }\nfunction f(a: A): number { return a instanceof B ? a.y : a.x; }\nfunction g(a: A): string {\n  if (a instanceof C) { return \"C\" + a.z + a.y; }\n  else if (a instanceof B) { a.y += 1; return \"B\" + a.y; }\n  return \"A\" + a.x;\n}\nfunction main(): void { console.log(f(new A()), f(new B()), g(new A()), g(new B()), g(new C())); }"
     }
   ]
 }

@@ -34,3 +34,19 @@ function main(): void {
         "c:2 r:6\n[ 4, 1 ] 4\n3 3\n8 8\nc 6\n"
     );
 }
+
+#[test]
+fn audit2_instanceof_narrows_base_to_subclass() {
+    let source = r##"class A { x = 1; }
+class B extends A { y = 2; }
+class C extends B { z = 3; }
+function f(a: A): number { return a instanceof B ? a.y : a.x; }
+function g(a: A): string {
+  if (a instanceof C) { return "C" + a.z + a.y; }
+  else if (a instanceof B) { a.y += 1; return "B" + a.y; }
+  return "A" + a.x;
+}
+function main(): void { console.log(f(new A()), f(new B()), g(new A()), g(new B()), g(new C())); }
+"##;
+    assert_eq!(compile_and_run(source, "audit2_instanceof_narrow"), "1 2 A1 B3 C32\n");
+}

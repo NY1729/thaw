@@ -4158,11 +4158,24 @@ impl<'a> FnLowerer<'a> {
                 let alternate_optional =
                     alternate_optional.filter(|(name, _, _)| still_valid(name));
                 let saved_narrowings = self.save_narrowings();
-                let mut consequent = self.lower_expr_with_union_narrowing(
+                let downcast = self.class_downcast_narrowing(&conditional.test)
+                    .map(|narrowing| (narrowing.0.clone(), narrowing.1.clone(), self.begin_class_downcast(&narrowing).0));
+                let consequent = self.lower_expr_with_union_narrowing(
                     &conditional.cons,
                     consequent_union.as_deref(),
                     consequent_optional.as_ref(),
-                )?;
+                );
+                let mut consequent = match downcast {
+                    Some((source, current, hir_name)) => {
+                        self.end_class_downcast(&source);
+                        let consequent = consequent?;
+                        let derived = self.scope.get(&hir_name).cloned().ok_or("downcast binding lost")?;
+                        self.wrap_call_argument_bindings(consequent, &[(
+                            hir_name, derived, HirExpr::Var(current),
+                        )])?
+                    }
+                    None => consequent?,
+                };
                 self.restore_narrowings_for_sibling(&saved_narrowings);
                 let mut alternate = self.lower_expr_with_union_narrowing(
                     &conditional.alt,
