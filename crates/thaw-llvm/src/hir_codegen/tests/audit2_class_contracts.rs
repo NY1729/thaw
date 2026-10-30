@@ -76,3 +76,25 @@ function main(): void { console.log(new Rect(2).d(), new Sq().d()); }
 "##;
     assert_eq!(compile_and_run(source, "audit2_abstract_override_infer"), "4 4\n");
 }
+
+#[test]
+fn audit2_interface_methods_in_array_params_callbacks_and_constrained_generics() {
+    let source = r##"interface Shape { area(): number; name: string }
+class Circle implements Shape { name = "c"; constructor(private r: number) {} area(): number { return 3 * this.r * this.r; } }
+class Rect implements Shape { name = "r"; constructor(private w: number, private h: number) {} area(): number { return this.w * this.h; } }
+function largest(xs: Shape[]): Shape { return xs.reduce((a, b) => (a.area() >= b.area() ? a : b)); }
+function total(xs: Shape[]): number { let t = 0; for (const x of xs) t += x.area(); return t; }
+function areas(xs: Shape[]): number[] { return xs.map((s) => s.area()); }
+function biggest<T extends Shape>(xs: T[]): T { let m = xs[0]; for (const x of xs) if (x.area() > m.area()) m = x; return m; }
+function one<T extends Shape>(x: T): number { return x.area(); }
+function main(): void {
+  const shapes: Shape[] = [new Circle(2), new Rect(3, 5), new Circle(1)];
+  console.log(largest(shapes).name, total(shapes), areas(shapes));
+  console.log(biggest(shapes).name, one(new Rect(2, 2)));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_interface_array_generics"),
+        "r 30 [ 12, 15, 3 ]\nr 4\n"
+    );
+}

@@ -1325,6 +1325,14 @@ fn type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> bool {
             .iter()
             .any(|element| type_satisfies_constraint(actual, element)),
         HirType::Object(required) => required.iter().all(|(name, ty)| {
+            // A class instance provides its interface methods through the class symbol table,
+            // not as layout fields; the source was already type-checked, so accept them here.
+            if matches!(ty, HirType::Function(..) | HirType::CallableFunction(..))
+                && matches!(actual, HirType::Object(fields)
+                    if fields.iter().all(|(field, _)| field != name) && class_name_from_type(actual).is_some())
+            {
+                return true;
+            }
             let actual_field = match actual {
                 HirType::Object(fields) => fields
                     .iter()

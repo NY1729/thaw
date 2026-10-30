@@ -666,6 +666,20 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        // An element read that only looks optional, handed to a slot declared as the method-bearing
+        // object itself: unwrap it (keeping the runtime `undefined` guard).
+        if matches!(declared, HirType::Object(fields) if class_name_from_type(declared).is_some()
+            || fields.iter().any(|(_, ty)| matches!(ty, HirType::Function(..) | HirType::CallableFunction(..))))
+        {
+            if let Ok(HirType::Optional(payload)) = self.infer_expr_type(&value) {
+                if payload.as_ref() == declared {
+                    let (unwrapped, _) = self.unwrap_required_optional_member(
+                        value, HirType::Optional(payload), "value", false,
+                    )?;
+                    return Ok(unwrapped);
+                }
+            }
+        }
         // A `Map`/`Set`/`Array` subclass instance passed where its native collection
         // is declared (alone or as a union member): hand over the wrapped collection
         // (shared, so mutation through the callee stays visible on the instance).
