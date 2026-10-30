@@ -314,9 +314,17 @@ impl<'a> FnLowerer<'a> {
                 &self.generic_call_returns,
             )
             .ok()
-            .or_else(|| {
-                (self.infer_member_receiver_type(&member.obj) == Some(HirType::JsValue))
-                    .then_some(HirType::JsValue)
+            .or_else(|| match self.infer_member_receiver_type(&member.obj) {
+                Some(HirType::JsValue) => Some(HirType::JsValue),
+                // `this.field.method()`: `this` is not in the generic
+                // inference scopes, so read the field off its object type.
+                Some(HirType::Object(fields)) => match &member.prop {
+                    MemberProp::Ident(property) => fields
+                        .iter()
+                        .find_map(|(name, ty)| (name == property.sym.as_ref()).then(|| ty.clone())),
+                    _ => None,
+                },
+                _ => None,
             }),
             Expr::Paren(_) | Expr::TsAs(_) | Expr::TsTypeAssertion(_) => {
                 infer_generic_constructor_expr_type(
