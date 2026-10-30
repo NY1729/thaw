@@ -806,6 +806,7 @@ impl<'a> FnLowerer<'a> {
                 self.interfaces,
                 self.generic_interfaces,
                 &HashMap::new(),
+                Some(block.stmts.as_slice()),
             )?,
         };
         let saved_scope = self.scope.clone();

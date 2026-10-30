@@ -1938,6 +1938,7 @@ fn lower_generic_instance(
             interfaces,
             generic_interfaces,
             &substitution,
+            fn_decl.function.body.as_ref().map(|body| body.stmts.as_slice()),
         )?
     } else {
         lower_fn_return_type(

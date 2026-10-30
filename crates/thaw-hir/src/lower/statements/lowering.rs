@@ -911,6 +911,17 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
             }
+            // An array of a union member (`yield* [1, 2]` in a generator that
+            // also yields strings) widens element-wise to the generator's type.
+            if matches!(&value_type, HirType::Array(actual)
+                if matches!(element, HirType::Union(members) if members.contains(actual)))
+            {
+                value = HirExpr::JsonAsNative(
+                    Box::new(self.coerce_to_declared(&HirType::Json, value)?),
+                    expected_array_type.clone(),
+                );
+                value_type = expected_array_type.clone();
+            }
             if value_type == expected_array_type {
                 return Ok((
                     vec![HirStmt::Expr(HirExpr::Assign(
@@ -988,7 +999,10 @@ impl<'a> FnLowerer<'a> {
             };
             let array_type = HirType::Array(Box::new(delegate_element.as_ref().clone()));
             let async_delegate = matches!(result.as_ref(), HirType::Promise(inner) if inner.as_ref() == &array_type);
+            let widened_delegate = !async_delegate
+                && matches!(element, HirType::Union(members) if members.contains(delegate_element.as_ref()));
             if element != &HirType::Dynamic
+                && !widened_delegate
                 && result.as_ref() != &expected_array_type
                 && !matches!(result.as_ref(), HirType::Promise(inner) if inner.as_ref() == &expected_array_type)
             {
@@ -1006,7 +1020,11 @@ impl<'a> FnLowerer<'a> {
             {
                 return Err("a synchronous generator cannot delegate to an async generator".into());
             }
-            let input = self.coerce_to_declared(input_type, HirExpr::Var(input.into()))?;
+            let input = if input_type == &HirType::Undefined {
+                HirExpr::Lit(HirLit::Undefined)
+            } else {
+                self.coerce_to_declared(input_type, HirExpr::Var(input.into()))?
+            };
             // The delegate's error channel is typed by the producer; a string
             // channel (user iterator protocol) receives the converted text.
             // The thrown-value binding is typed `Json` for the duration of this
@@ -1181,9 +1199,23 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::ArrayConcat(
                                 vec![
                                     HirExpr::Var(values.into()),
-                                    HirExpr::Var(chunk.clone()),
+                                    if widened_delegate {
+                                        HirExpr::JsonAsNative(
+                                            Box::new(self.coerce_to_declared(
+                                                &HirType::Json,
+                                                HirExpr::Var(chunk.clone()),
+                                            )?),
+                                            expected_array_type.clone(),
+                                        )
+                                    } else {
+                                        HirExpr::Var(chunk.clone())
+                                    },
                                 ],
-                                delegate_element.as_ref().clone(),
+                                if widened_delegate {
+                                    element.clone()
+                                } else {
+                                    delegate_element.as_ref().clone()
+                                },
                             )),
                         )),
                         HirStmt::Expr(HirExpr::Call(

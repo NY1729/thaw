@@ -1197,6 +1197,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         annotation_interfaces,
                         &generic_interfaces,
                         &type_substitution,
+                        func.body.as_ref().map(|body| body.stmts.as_slice()),
                     )?
                 } else if assertion_function {
                     HirType::Void
@@ -1588,6 +1589,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             &interfaces,
                             &generic_interfaces,
                             &HashMap::new(),
+                            method.function.body.as_ref().map(|body| body.stmts.as_slice()),
                         )?
                     } else if method.function.return_type.is_none()
                         && !method.is_abstract
@@ -2358,6 +2360,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 changed = true;
             }
         }
+        // A trial pass: top-level statements can consume a callee whose
+        // `Dynamic`-deferred signature (e.g. an unannotated generator's
+        // element type) converges later in this loop; the final pass
+        // re-lowers for real and surfaces any genuine error.
         let _ = lower_top_level_initializers(
             module,
             &global_types,
@@ -2369,7 +2375,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &enum_reverse_values,
             Some(&call_constraints),
             &value_referenced_classes,
-        )?;
+        );
         for fn_decl in &fn_decls {
             let name = fn_decl.ident.sym.to_string();
             // This whole loop is a *trial* pass whose only purpose is
