@@ -23,8 +23,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.uses_quickjs = true;
                 self.uses_quickjs_handles = true;
             }
-            JsEngine::ThawJs => self.uses_thaw_js = true,
+            JsEngine::ThawJs => {
+                self.uses_thaw_js = true;
+                self.uses_thaw_js_handles = true;
+            }
         }
+    }
+
+    /// Whether the program holds live JS handles under either engine.
+    fn js_handles_used(&self) -> bool {
+        self.uses_quickjs_handles || self.uses_thaw_js_handles
     }
 
     /// Retain the value graph wire `wire` as a handle: `{ handle: i64, error: ptr }`.
@@ -39,7 +47,11 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         Ok(self
             .builder
-            .build_call(self.module.get_function(symbol).unwrap(), &[wire.into()], name)
+            .build_call(
+                self.module.get_function(symbol).unwrap(),
+                &[wire.into()],
+                name,
+            )
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()

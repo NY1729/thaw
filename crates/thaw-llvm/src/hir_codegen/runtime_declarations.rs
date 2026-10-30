@@ -3858,6 +3858,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_adopt_handle_marker",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_tjs_frame_error",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

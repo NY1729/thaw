@@ -1629,8 +1629,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         if !self.compiling_quickjs_dynamic_arguments {
             // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
-            self.uses_quickjs = true;
-            self.uses_quickjs_handles = true;
+            self.js_mark_handles_used();
             self.tracks_owned_json_roots = true;
             let json = self
                 .builder

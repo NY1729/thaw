@@ -140,10 +140,16 @@ impl<'ctx> HirCompiler<'ctx> {
             // The condition may be this function's first QuickJS operation.
             // Establish the handle dependency before it is compiled, since an
             // arena-promoted cell skips reactive promotion at closure creation.
-            self.uses_quickjs = true;
-            self.uses_quickjs_handles = true;
+            // (field-level: `builder` is borrowed here)
+            if self.thaw_js_routed {
+                self.uses_thaw_js = true;
+                self.uses_thaw_js_handles = true;
+            } else {
+                self.uses_quickjs = true;
+                self.uses_quickjs_handles = true;
+            }
         }
-        let pending_claim = if self.uses_quickjs_handles && *hir_ty == HirType::JsValue {
+        let pending_claim = if self.js_handles_used() && *hir_ty == HirType::JsValue {
             if defer_js_retain {
                 // Match the cell's allocation placement and initial-copy site.
                 // In an outer loop this is a fresh cell and claim per iteration.
