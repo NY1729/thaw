@@ -1659,6 +1659,9 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if self.js_engine() == JsEngine::ThawJs {
+            return self.compile_thaw_js_handle_marker(handle.into_int_value());
+        }
         let handle = self
             .builder
             .build_unsigned_int_to_float(
