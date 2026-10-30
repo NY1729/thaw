@@ -390,8 +390,20 @@ impl<'a> FnLowerer<'a> {
                 self.json_receiver_candidate(&member.obj)
                     || self.peek_type_without_lowering(&member.obj).is_some_and(|ty| {
                         ty == crate::caught_exception_carrier_type()
+                            || ty == HirType::Dictionary(Box::new(HirType::Json))
                     })
             }
+            // `(d[k] ??= [])` / `(d[k] ||= [])` evaluates to the dictionary slot's Json value.
+            Expr::Assign(assign) if matches!(
+                assign.op,
+                swc_ecma_ast::AssignOp::NullishAssign | swc_ecma_ast::AssignOp::OrAssign
+            ) => match &assign.left {
+                swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Member(member)) => {
+                    self.peek_type_without_lowering(&member.obj)
+                        .is_some_and(|ty| ty == HirType::Dictionary(Box::new(HirType::Json)))
+                }
+                _ => false,
+            },
             Expr::TsAs(assertion) => self.json_receiver_candidate(&assertion.expr),
             Expr::Call(call) => call_returns_json(call, false),
             Expr::Await(awaited) => match awaited.arg.as_ref() {

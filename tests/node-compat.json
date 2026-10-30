@@ -3407,6 +3407,16 @@
       "name": "audit2 Math.max spread with extra arguments and sets",
       "expect": "matched",
       "source": "function main(): void { const a = [1, 2]; const s = new Set([1, 5]); console.log(Math.max(...a, 3), Math.min(9, ...a), Math.max(...s), Math.max(...[1, 5], 10)); }"
+    },
+    {
+      "name": "audit2 dictionary array values are shared and mutable",
+      "expect": "matched",
+      "source": "function main(): void {\n  const o: { [k: string]: number[] } = { x: [1] };\n  o.x.push(2);\n  console.log(o);\n  const g: Record<string, string[]> = {};\n  g[\"a\"] = [\"x\"]; g[\"a\"].push(\"y\"); console.log(g);\n  const groups: Record<string, string[]> = {};\n  for (const w of [\"apple\", \"avocado\", \"banana\"]) { const k = w[0]; const l = groups[k] || (groups[k] = []); l.push(w); }\n  console.log(groups);\n  const m: Record<string, number[]> = {};\n  (m[\"k\"] ??= []).push(1); (m[\"k\"] ??= []).push(2);\n  console.log(m, m.k.length, m[\"k\"][1] + 1);\n}"
+    },
+    {
+      "name": "audit2 any[] cursor keeps nested links",
+      "expect": "matched",
+      "source": "function main(): void {\n  const root: any[] = []; let cur = root;\n  for (let i = 0; i < 3; i++) { const n: any[] = []; cur.push(n); cur = n; }\n  console.log(JSON.stringify(root));\n  const r: any[] = []; const n: any[] = []; r.push(n); n.push(1); console.log(JSON.stringify(r));\n}"
     }
   ]
 }

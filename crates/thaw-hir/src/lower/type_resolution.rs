@@ -197,6 +197,13 @@ fn lower_non_arrow_receiver_type(
     }
 }
 
+/// A runtime-keyed dictionary type. Array values are held as `Json`: a native array read out of
+/// a dictionary is a copy, so `d.k.push(x)` or `const g = d[k]; g.push(x)` would be lost, while
+/// a `Json` array read shares the stored allocation.
+fn dictionary_hir_type(value: HirType) -> HirType {
+    HirType::Dictionary(Box::new(if matches!(value, HirType::Array(_)) { HirType::Json } else { value }))
+}
+
 fn lower_ts_type(
     ty: &TsType,
     interfaces: &HashMap<Symbol, HirType>,
@@ -670,7 +677,7 @@ fn lower_ts_type(
                 };
                 let value = lower_ts_type(value, interfaces, generic_interfaces)?;
                 if is_string_keyword(keys) {
-                    return Ok(HirType::Dictionary(Box::new(value)));
+                    return Ok(dictionary_hir_type(value));
                 }
                 return Ok(HirType::Object(
                     utility_keys(keys, interfaces, generic_interfaces)?
@@ -925,7 +932,7 @@ fn lower_ts_type(
                         _ => return Err("dictionary types only support properties".into()),
                     }
                 }
-                return Ok(HirType::Dictionary(Box::new(value)));
+                return Ok(dictionary_hir_type(value));
             }
             let fields = type_lit
                 .members
@@ -1204,7 +1211,7 @@ fn resolve_generic_interface(
     in_progress.pop();
 
     if let Some(element) = dictionary {
-        Ok(HirType::Dictionary(Box::new(element)))
+        Ok(dictionary_hir_type(element))
     } else {
         Ok(HirType::Object(fields))
     }
@@ -1525,7 +1532,7 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 )?;
                 if is_string_keyword(keys) {
-                    return Ok(HirType::Dictionary(Box::new(value)));
+                    return Ok(dictionary_hir_type(value));
                 }
                 return Ok(HirType::Object(
                     substituted_utility_keys(
@@ -1980,7 +1987,7 @@ fn resolve_ts_type_with_substitution(
                         _ => return Err("dictionary types only support properties".into()),
                     }
                 }
-                return Ok(HirType::Dictionary(Box::new(value)));
+                return Ok(dictionary_hir_type(value));
             }
             let fields = type_lit
                 .members

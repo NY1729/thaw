@@ -664,9 +664,9 @@ fn instantiate_generic_pattern(
             };
             indexed_access_hir_type(instantiate_generic_pattern(inner, substitution)?, &keys)
         }
-        GenericTypePattern::Dictionary(inner) => Ok(HirType::Dictionary(Box::new(
+        GenericTypePattern::Dictionary(inner) => Ok(dictionary_hir_type(
             instantiate_generic_pattern(inner, substitution)?,
-        ))),
+        )),
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
                 .iter()
