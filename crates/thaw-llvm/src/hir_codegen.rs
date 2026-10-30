@@ -505,6 +505,8 @@ pub struct HirCompiler<'ctx> {
     /// Where each stack-visible function (by LLVM symbol) is defined, for `Error.stack`.
     stack_locs: HashMap<String, SourceLoc>,
     /// NUL-terminated string constants already emitted, so each distinct text exists once.
+    /// Whole-program builds route synthetic errors through one shared setter function.
+    share_error_setter: bool,
     interned_strings: std::cell::RefCell<HashMap<String, inkwell::values::GlobalValue<'ctx>>>,
     uses_napi: bool,
     /// Backend optimisation level for `write_object_file` (`Default` unless `set_codegen_opt`).
@@ -879,6 +881,7 @@ impl<'ctx> HirCompiler<'ctx> {
             fn_locs: HashMap::new(),
             class_layouts: Vec::new(),
             stack_locs: HashMap::new(),
+            share_error_setter: false,
             interned_strings: std::cell::RefCell::new(HashMap::new()),
             uses_napi: false,
             uses_thaw_js: false,
@@ -909,6 +912,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
+        self.share_error_setter = true;
         self.stack_guard = true;
         self.fn_locs = program.fn_locs.0.clone();
         self.class_layouts = program.class_layouts.clone();
