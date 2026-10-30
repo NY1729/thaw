@@ -47,3 +47,56 @@ fn let_read_before_declaration_lowers_to_a_reference_error() {
             .contains("Cannot access 'x' before initialization")
     );
 }
+
+#[test]
+fn new_before_class_declaration_is_rewritten_to_a_reference_error() {
+    let module = thaw_parser::parse_typescript(
+        "try { console.log(new D().v); } catch (e) { console.log(1); }\nclass D { v = 1; }",
+    )
+    .unwrap();
+    let normalized = normalize_module_for_lowering(&module).unwrap();
+    assert!(format!("{normalized:?}").contains("@@thaw_tdz_throw"), "{normalized:?}");
+}
+
+#[test]
+fn inner_scopes_that_redeclare_a_later_name_are_not_tdz_reads() {
+    let program = lower(
+        r#"
+        function main(): void {
+            let s = "";
+            for (let i = 0; i < 3; i++) { s += i; }
+            const fns: (() => number)[] = [];
+            for (let k = 0; k < 2; k++) { fns.push(() => k); }
+            let i = 0;
+            let k = 1;
+            console.log(s, i, k, fns.length);
+        }
+        "#,
+    );
+    let body = format!("{:?}", program.functions[0].body);
+    assert!(!body.contains("before initialization"), "{body}");
+    assert!(!body.contains("__thaw_tdz_"), "{body}");
+}
+
+#[test]
+fn a_let_in_a_closure_does_not_make_a_later_var_hoisted() {
+    assert!(pre_read_names("const f = (a: number) => a; function g(a: number) { return a; } var a = 1;").is_empty());
+    assert!(pre_read_names("for (let i = 0; i < 2; i++) {} var i = 3;").is_empty());
+}
+
+#[test]
+fn a_closure_parameter_named_like_a_later_const_is_not_a_tdz_read() {
+    let program = lower(
+        r#"
+        async function main(): Promise<void> {
+            const received = new Promise<Json>((resolve) => {
+                setTimeout((value: Json) => { resolve(value); }, 1);
+            });
+            const value = await received;
+            console.log(value);
+        }
+        "#,
+    );
+    let body = format!("{:?}", program.functions[0].body);
+    assert!(!body.contains("before initialization"), "{body}");
+}

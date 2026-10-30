@@ -3782,6 +3782,31 @@
       "name": "let/const straight-line TDZ ReferenceError",
       "expect": "matched",
       "source": "function main(): void {\n  try { console.log(x); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  let x = 5;\n  console.log(x);\n  try { console.log(c + 1); } catch (e) { console.log((e as Error).message); }\n  const c = 2;\n  console.log(c);\n}"
+    },
+    {
+      "name": "closure TDZ: function and arrow read before let",
+      "expect": "matched",
+      "source": "function main(): void {\n  const g = () => k;\n  let k = 3;\n  console.log(g());\n  function early(): number { return z + 1; }\n  try { early(); } catch (e) { console.log((e as Error).message); }\n  let z = 1;\n  console.log(early());\n}"
+    },
+    {
+      "name": "typeof before let throws ReferenceError",
+      "expect": "matched",
+      "source": "function main(): void {\n  try { console.log(typeof w); } catch (e) { console.log((e as Error).name); }\n  let w = 1;\n  console.log(typeof w);\n}"
+    },
+    {
+      "name": "var in for head read after loop",
+      "expect": "matched",
+      "source": "function main(): void {\n  for (var i = 0; i < 3; i++) {}\n  console.log(i);\n}"
+    },
+    {
+      "name": "module level var hoisting, let TDZ and closure TDZ",
+      "expect": "matched",
+      "source": "function main(): void {}\nconsole.log(typeof h);\nvar h = 3;\nconsole.log(h);\ntry { console.log(x); } catch (e) { console.log((e as Error).name, (e as Error).message); }\nlet x = 5;\nconsole.log(x);\nfunction f(): number {\n  try { return y + 1; } catch (e) { console.log((e as Error).message); return -1; }\n}\nconsole.log(f());\nlet y = 2;\nconsole.log(f());\nfunction useLater(): number { return z; }\nlet z = 7;\nconsole.log(useLater());\nconst w = () => q;\nlet q = 1;\nconsole.log(w());"
+    },
+    {
+      "name": "module level new before class declaration throws ReferenceError",
+      "expect": "matched",
+      "source": "function main(): void {}\ntry { const a = new D(); console.log(a.v); } catch (e) { console.log((e as Error).name, (e as Error).message); }\nclass D { v = 1; }\nconsole.log(new D().v);"
     }
   ]
 }

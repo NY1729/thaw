@@ -548,6 +548,22 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
+        let class_checked;
+        let stmts = match class_tdz_throws(stmts, false) {
+            Some(rewritten) => {
+                class_checked = rewritten;
+                &class_checked[..]
+            }
+            None => stmts,
+        };
+        let flagged;
+        let stmts = match closure_tdz_flags(stmts, false) {
+            Some(rewritten) => {
+                flagged = rewritten;
+                &flagged[..]
+            }
+            None => stmts,
+        };
         let hoisted_vars = pre_read_var_names(stmts)
             .into_iter()
             .filter(|name| self.bindings.get(name).is_none_or(Vec::is_empty))
@@ -559,10 +575,7 @@ impl<'a> FnLowerer<'a> {
             var_hoisted = hoist_var_names(stmts, &hoisted_vars);
             &var_hoisted[..]
         };
-        let saved_tdz = self.tdz_pending.clone();
-        let lowered = self.lower_stmts_in_order(stmts);
-        self.tdz_pending = saved_tdz;
-        lowered
+        self.lower_stmts_in_order(stmts)
     }
 
     fn lower_stmts_in_order(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
@@ -572,29 +585,6 @@ impl<'a> FnLowerer<'a> {
         let hoisted = Self::hoist_function_declarations(&forward);
         let stmts: &[Stmt] = &hoisted;
         // Straight-line TDZ: a `let`/`const` read before its declaration statement.
-        let mut tdz_declared: Vec<Vec<String>> = Vec::with_capacity(stmts.len());
-        for stmt in stmts {
-            let mut names = Vec::new();
-            if let Stmt::Decl(Decl::Var(declaration)) = stmt {
-                if declaration.kind != VarDeclKind::Var {
-                    for declarator in &declaration.decls {
-                        let Pat::Ident(binding) = &declarator.name else { continue };
-                        let name = binding.id.sym.to_string();
-                        // Only a placeholder for the throwing read's static type.
-                        let placeholder = match declarator.init.as_deref() {
-                            Some(Expr::Lit(Lit::Num(_))) => HirLit::F64(0.0),
-                            Some(Expr::Lit(Lit::Str(_))) => HirLit::Str(String::new()),
-                            Some(Expr::Lit(Lit::Bool(_))) => HirLit::Bool(false),
-                            _ => HirLit::Undefined,
-                        };
-                        let current = self.resolve_binding(&name);
-                        self.tdz_pending.insert(name.clone(), (current, placeholder));
-                        names.push(name);
-                    }
-                }
-            }
-            tdz_declared.push(names);
-        }
         #[derive(Default)]
         struct BindingConsumers {
             members: HashSet<Symbol>,
@@ -628,11 +618,6 @@ impl<'a> FnLowerer<'a> {
         // `out` index from which each resource is live.
         let mut using_starts: Vec<usize> = Vec::new();
         for (index, stmt) in stmts.iter().enumerate() {
-            if index > 0 {
-                for name in &tdz_declared[index - 1] {
-                    self.tdz_pending.remove(name);
-                }
-            }
             if let Stmt::Decl(Decl::Var(var_decl)) = stmt {
                 self.mark_native_uint8array_declarations(var_decl, &stmts[index + 1..]);
                 let uninit: Vec<Symbol> = var_decl
