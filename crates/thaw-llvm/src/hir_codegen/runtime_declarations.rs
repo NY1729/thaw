@@ -1116,6 +1116,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.add_function(name, ty, Some(Linkage::External));
         }
         self.module.add_function(
+            "thaw_bigint_pow_overflows",
+            self.context.bool_type().fn_type(&[i64_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_bigint_pow",
             i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
             Some(Linkage::External),

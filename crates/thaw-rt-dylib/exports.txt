@@ -59,6 +59,7 @@ thaw_bigint_decimal_shr
 thaw_bigint_decimal_sub
 thaw_bigint_decimal_xor
 thaw_bigint_pow
+thaw_bigint_pow_overflows
 thaw_bool_array_fill
 thaw_bool_array_includes
 thaw_bool_array_index_of
