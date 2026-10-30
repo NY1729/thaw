@@ -795,6 +795,7 @@ include!("tests/errframes_contracts.rs");
 include!("tests/stackloc_contracts.rs");
 include!("tests/anon_fn_contracts.rs");
 include!("tests/audit_silent1_contracts.rs");
+include!("tests/audit2_class_contracts.rs");
 include!("tests/ce1_contracts.rs");
 include!("tests/audit_inspect_contracts.rs");
 include!("tests/audit_perf_contracts.rs");
