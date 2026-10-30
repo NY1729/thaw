@@ -3437,6 +3437,26 @@
       "name": "audit2 class instance used through interface-typed param variable and array calls methods",
       "expect": "matched",
       "source": "interface Shape { area(): number; name: string }\nclass Circle implements Shape { name = \"c\"; constructor(private r: number) {} area(): number { return 2 * this.r; } }\nclass Rect implements Shape { name = \"r\"; constructor(private w: number, private h: number) {} area(): number { return this.w * this.h; } }\ninterface Counter { n: number; inc(by: number): number }\nclass C implements Counter { n = 0; inc(by: number): number { this.n += by; return this.n; } }\nfunction show(s: Shape) { return s.name + \":\" + s.area(); }\nfunction bump(c: Counter) { c.inc(2); c.n += 1; return c.n; }\nfunction main(): void {\n  console.log(show(new Circle(1)), show(new Rect(2, 3)));\n  const shapes: Shape[] = [new Circle(2), new Rect(1, 1)];\n  console.log(shapes.map((s) => s.area()), shapes[0].area());\n  const c = new C();\n  console.log(bump(c), c.n);\n  const k: Counter = c;\n  console.log(k.inc(5), c.n);\n  const d = new Circle(3);\n  const s: Shape = d;\n  console.log(s.name, s.area());\n}"
+    },
+    {
+      "name": "class extends EventEmitter from node:events emits to listeners, once, instanceof",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nclass Svc extends EventEmitter { n: number = 0; run(): void { this.n++; this.emit('ran', this.n); } }\nfunction main(): void {\n  const s = new Svc();\n  s.on('ran', (n: number) => console.log('ran', n));\n  s.once('ran', (n: number) => console.log('once', n));\n  s.run(); s.run();\n  console.log(s instanceof EventEmitter, s instanceof Svc, s.listenerCount('ran'), s.eventNames());\n  try { s.emit('error', new Error('boom')); } catch (e: any) { console.log(e.message); }\n}"
+    },
+    {
+      "name": "class extends Date and RegExp keeps builtin methods and instanceof",
+      "expect": "matched",
+      "source": "class MyDate extends Date { fmt(): string { return this.toISOString().slice(0, 10); } }\nclass MyRe extends RegExp { hit(s: string): boolean { return this.test(s); } }\nfunction main(): void {\n  const d = new MyDate(86400000);\n  console.log(d.fmt(), d instanceof Date, d instanceof MyDate, d.getTime());\n  const r = new MyRe('a+');\n  console.log(r.hit('caat'), r.hit('zzz'), r instanceof RegExp, r.source);\n}"
+    },
+    {
+      "name": "typed callback stored in a rest-any callback slot receives decoded arguments",
+      "expect": "matched",
+      "source": "function call(f: (...args: any[]) => void, ...args: any[]): void { f(...args); }\nfunction main(): void {\n  call((n: number) => console.log('a', n), 1);\n  call((a: number, b: string) => console.log('f', a, b), 1);\n  call((...r: any[]) => console.log('g', r), 1, 2);\n}"
+    },
+    {
+      "name": "class with a method returning its own type can be used as an instanceof operand",
+      "expect": "matched",
+      "source": "class E { n: number = 0; add(): E { this.n++; return this; } }\nclass S extends E {}\nfunction main(): void { const s = new S(); s.add(); console.log(s.n, s instanceof E, s instanceof S); }"
     }
   ]
 }

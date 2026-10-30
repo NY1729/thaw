@@ -71,6 +71,9 @@ struct FnLowerer<'a> {
     /// Set by the `any` declaration/assignment sites: the next native array converted to
     /// `Json` is a live view that aliases the array instead of a copy.
     alias_native_arrays: bool,
+    /// Class layouts whose method results are being projected live right now; a method
+    /// handing back its own (or an enclosing) class is not projected again.
+    projecting_class_methods: Vec<HirType>,
     /// One-shot: parameter type for the next arrow passed to a live dynamic method call, instead of `JsValue`.
     dynamic_callback_parameter: Option<HirType>,
     /// Set while lowering the general `===` under a caught-Error identity check (no recursion).
