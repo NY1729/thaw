@@ -221,3 +221,78 @@ function main(): void {
         "1\n5\n"
     );
 }
+
+#[test]
+fn audit2_contract_recursive_instances_print_stringify_and_instanceof() {
+    let source = r##"class N { next: N | null = null; v: number; constructor(v: number) { this.v = v; } }
+class T { kids: T[] = []; label: string; constructor(l: string) { this.label = l; } }
+function main(): void {
+  const a = new N(1); a.next = new N(2); a.next.next = new N(3);
+  console.log(a);
+  console.log(JSON.stringify(a));
+  console.log(a instanceof N, a.next instanceof N);
+  const t = new T("r"); t.kids.push(new T("a")); t.kids[0].kids.push(new T("b")); t.kids.push(new T("c"));
+  console.log(t);
+  console.log(JSON.stringify(t));
+  const c = new N(9); c.next = c;
+  try { console.log(JSON.stringify(c)); } catch (e) { console.log((e as Error).name); }
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_recursive_print_stringify_instanceof"),
+        "N { next: N { next: N { next: null, v: 3 }, v: 2 }, v: 1 }\n{\"next\":{\"next\":{\"next\":null,\"v\":3},\"v\":2},\"v\":1}\ntrue true\nT {\n  kids: [ T { kids: [Array], label: 'a' }, T { kids: [], label: 'c' } ],\n  label: 'r'\n}\n{\"kids\":[{\"kids\":[{\"kids\":[],\"label\":\"b\"}],\"label\":\"a\"},{\"kids\":[],\"label\":\"c\"}],\"label\":\"r\"}\nTypeError\n"
+    );
+}
+
+#[test]
+fn audit2_contract_generic_recursive_classes() {
+    let source = r##"class Node<T> { next: Node<T> | null = null; value: T; constructor(v: T) { this.value = v; } }
+class Stack<T> {
+  head: Node<T> | null = null; size = 0;
+  push(v: T): void { const n = new Node<T>(v); n.next = this.head; this.head = n; this.size++; }
+  pop(): T | undefined { const h = this.head; if (h === null) return undefined; this.head = h.next; this.size--; return h.value; }
+}
+function main1(): void {
+  const s = new Stack<number>(); s.push(1); s.push(2); s.push(3);
+  console.log(s.pop(), s.pop(), s.size);
+  const t = new Stack<string>(); t.push("a"); console.log(t.pop(), t.pop());
+}
+
+class TNode<K, V> {
+  left: TNode<K, V> | null = null; right: TNode<K, V> | null = null;
+  key: K; val: V;
+  constructor(k: K, v: V) { this.key = k; this.val = v; }
+}
+class Tree<V> {
+  root: TNode<number, V> | null = null;
+  put(k: number, v: V): void {
+    const n = new TNode<number, V>(k, v);
+    let cur = this.root;
+    if (cur === null) { this.root = n; return; }
+    while (true) {
+      if (k < cur.key) { const l: TNode<number, V> | null = cur.left; if (l === null) { cur.left = n; return; } cur = l; }
+      else { const r: TNode<number, V> | null = cur.right; if (r === null) { cur.right = n; return; } cur = r; }
+    }
+  }
+  walk(n: TNode<number, V> | null, out: V[]): void {
+    if (n === null) return;
+    this.walk(n.left, out); out.push(n.val); this.walk(n.right, out);
+  }
+  all(): V[] { const out: V[] = []; this.walk(this.root, out); return out; }
+}
+class Link<T> { next: Link<T> | null = null; v: T; constructor(v: T) { this.v = v; } }
+function main(): void {
+  main1();
+  const t = new Tree<string>();
+  t.put(5, "five"); t.put(2, "two"); t.put(8, "eight"); t.put(1, "one");
+  console.log(t.all());
+  const n = new Tree<number>(); n.put(2, 20); n.put(1, 10); console.log(n.all());
+  const l = new Link<number>(1); l.next = new Link<number>(2);
+  console.log(l.v, l.next !== null);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_generic_recursive_classes"),
+        "3 2 1\na undefined\n[ 'one', 'two', 'five', 'eight' ]\n[ 10, 20 ]\n1 true\n"
+    );
+}
