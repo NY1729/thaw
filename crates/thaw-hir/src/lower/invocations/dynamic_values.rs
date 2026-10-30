@@ -275,7 +275,7 @@ impl<'a> FnLowerer<'a> {
                     .or_else(|| self.nullable_narrowings.get(&name))
                     .or_else(|| self.nullish_narrowings.get(&name))
                 {
-                    if native_base_type(payload).is_some() {
+                    if native_base_type(payload).is_some() || class_name_from_type(payload).is_some() {
                         return Some(payload.clone());
                     }
                 }

@@ -79,3 +79,145 @@ fn audit2_contract_any_array_cursor_keeps_nested_links() {
         "[[[[]]]]\n[[1]]\n"
     );
 }
+
+#[test]
+fn audit2_contract_self_referential_class_linked_list() {
+    let source = r##"class N {
+  next: N | null = null;
+  v: number;
+  constructor(v: number) { this.v = v; }
+}
+class List {
+  head: N | null = null;
+  size = 0;
+  push(v: number): void {
+    const n = new N(v);
+    const h = this.head;
+    if (h === null) { this.head = n; } else {
+      let cur: N | null = h;
+      while (cur !== null) { if (cur.next === null) { cur.next = n; break; } cur = cur.next; }
+    }
+    this.size++;
+  }
+  sum(): number { let s = 0; let c = this.head; while (c !== null) { s += c.v; c = c.next; } return s; }
+  reverse(): void {
+    let prev: N | null = null; let cur = this.head;
+    while (cur !== null) { const nx: N | null = cur.next; cur.next = prev; prev = cur; cur = nx; }
+    this.head = prev;
+  }
+  toArray(): number[] { const out: number[] = []; for (let c = this.head; c; c = c.next) out.push(c.v); return out; }
+}
+function main(): void {
+  const l = new List();
+  for (let i = 1; i <= 4; i++) l.push(i);
+  console.log(l.sum(), l.size, l.toArray());
+  l.reverse();
+  console.log(l.toArray(), l.head!.next!.v, l.head!.next!.next!.next!.next === null);
+  const a = new N(1);
+  console.log(a.next === null, a.v);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_self_referential_class_linked_list"),
+        "10 4 [ 1, 2, 3, 4 ]\n[ 4, 3, 2, 1 ] 3 true\ntrue 1\n"
+    );
+}
+
+#[test]
+fn audit2_contract_self_referential_class_tree_and_optional_link() {
+    let source = r##"class T {
+  left: T | null = null; right: T | null = null; v: number;
+  constructor(v: number) { this.v = v; }
+  insert(v: number): void {
+    if (v < this.v) { const l = this.left; if (l === null) this.left = new T(v); else l.insert(v); }
+    else { const r = this.right; if (r === null) this.right = new T(v); else r.insert(v); }
+  }
+  inorder(out: number[]): void {
+    const l = this.left; if (l !== null) l.inorder(out);
+    out.push(this.v);
+    const r = this.right; if (r !== null) r.inorder(out);
+  }
+}
+class N2 { next?: N2; v = 1; }
+function main(): void {
+  const root = new T(5);
+  for (const x of [3, 8, 1, 4, 9, 7]) root.insert(x);
+  const out: number[] = []; root.inorder(out);
+  console.log(out.join(","));
+  const h = new N2(); h.next = new N2();
+  console.log(h.next.v, h.next.next === undefined);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_self_referential_class_tree"),
+        "1,3,4,5,7,8,9\n1 true\n"
+    );
+}
+
+#[test]
+fn audit2_contract_mutually_recursive_and_forward_referenced_classes() {
+    let source = r##"class Dept { name: string; staff: Emp[] = []; boss: Emp | null = null; constructor(n: string) { this.name = n; } }
+class Emp { name: string; dept: Dept | null = null; constructor(n: string) { this.name = n; } }
+class Tree { kids: Tree[] = []; label: string; constructor(l: string) { this.label = l; }
+  add(k: Tree): Tree { this.kids.push(k); return this; }
+  count(): number { let n = 1; for (const k of this.kids) n += k.count(); return n; }
+}
+class Base { link: Base | null = null; id = 1; who(): string { return "base" + this.id; } }
+class Derived extends Base { extra = 2; who(): string { return "derived" + this.id; } }
+function main(): void {
+  const d = new Dept("eng"); const e = new Emp("ann"); e.dept = d; d.staff.push(e); d.boss = e;
+  const b = d.boss;
+  console.log(d.staff.length, d.staff[0].name, b !== null ? b.name : "none", e.dept === d);
+  const t = new Tree("r").add(new Tree("a").add(new Tree("b"))).add(new Tree("c"));
+  console.log(t.count(), t.kids[0].kids[0].label);
+  const x = new Base(); const y = new Derived(); x.link = y;
+  const l = x.link; console.log(l !== null ? l.who() : "-", x.who());
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_mutually_recursive_classes"),
+        "1 ann ann true\n4 b\nderived1 base1\n"
+    );
+}
+
+#[test]
+fn audit2_contract_self_referential_interface_and_type_alias() {
+    let source = r##"interface TreeNode { v: number; kids: TreeNode[]; parent?: TreeNode }
+type Tree = { label: string; kids: Tree[] };
+type Opt = { next: Opt | null; n: number };
+function sum(t: TreeNode): number { let s = t.v; for (const k of t.kids) s += sum(k); return s; }
+function depth(t: Tree): number { let d = 0; for (const k of t.kids) d = Math.max(d, depth(k)); return d + 1; }
+function len(o: Opt | null): number { return o === null ? 0 : 1 + len(o.next); }
+function main(): void {
+  const t: TreeNode = { v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] };
+  console.log(sum(t));
+  const u: Tree = { label: "a", kids: [{ label: "b", kids: [{ label: "c", kids: [] }] }] };
+  console.log(depth(u), u.kids[0].kids[0].label);
+  const o: Opt = { n: 1, next: { n: 2, next: null } };
+  console.log(len(o));
+  const extra: TreeNode = { v: 10, kids: [] }; t.kids.push(extra); console.log(sum(t));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_self_referential_interface_alias"),
+        "10\n3 c\n2\n20\n"
+    );
+}
+
+#[test]
+fn audit2_contract_method_call_on_narrowed_property_local() {
+    let source = r##"class B { v = 1; m(): number { return this.v; } }
+class A { b: B | null = null; }
+function main(): void {
+  const a = new A(); a.b = new B();
+  const x = a.b;
+  if (x !== null) console.log(x.m());
+  let c: B | null = new B();
+  while (c !== null) { c.v = 5; console.log(c.v); c = null; }
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_method_call_on_narrowed_property_local"),
+        "1\n5\n"
+    );
+}

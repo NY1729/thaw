@@ -266,6 +266,15 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                // `c.v = x` / `c.next = n` on a maybe-absent object binding whose narrowing the
+                // flow analysis dropped (e.g. `c` is reassigned later in the loop): unwrap it with a
+                // runtime `TypeError` guard, like the read path.
+                if let (HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload), MemberProp::Ident(property)) = (&object_type, &member.prop) {
+                    if matches!(payload.expand(), HirType::Object(_)) {
+                        let reject = self.receiver_requires_narrowing(&member.obj);
+                        (object, object_type) = self.unwrap_required_optional_member(object, object_type, property.sym.as_ref(), reject)?;
+                    }
+                }
                 if let HirType::NonArrowReceiver(declared) = object_type {
                     let access = match &member.prop {
                         MemberProp::Ident(property) => {
