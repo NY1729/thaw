@@ -71,6 +71,9 @@ struct FnLowerer<'a> {
     /// Set by the `any` declaration/assignment sites: the next native array converted to
     /// `Json` is a live view that aliases the array instead of a copy.
     alias_native_arrays: bool,
+    /// Class layouts whose method results are being projected live right now; a method
+    /// handing back its own (or an enclosing) class is not projected again.
+    projecting_class_methods: Vec<HirType>,
     /// One-shot: parameter type for the next arrow passed to a live dynamic method call, instead of `JsValue`.
     dynamic_callback_parameter: Option<HirType>,
     /// Set while lowering the general `===` under a caught-Error identity check (no recursion).
@@ -98,6 +101,8 @@ struct FnLowerer<'a> {
     deferred_generic_binds: HashMap<Symbol, DeferredGenericBind>,
     native_method_values: HashMap<Symbol, NativeMethodValue>,
     native_class_aliases: HashMap<Symbol, HirType>,
+    /// Set when a class instance was converted to a distinct interface view object.
+    class_method_view_made: bool,
     member_receiver_bindings: HashSet<Symbol>,
     /// Names assigned somewhere after an uninitialized `let x: T;` in the
     /// same statement list (definite-assignment approximation).

@@ -1195,6 +1195,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         annotation_interfaces,
                         &generic_interfaces,
                         &type_substitution,
+                        func.body.as_ref().map(|body| body.stmts.as_slice()),
                     )?
                 } else if assertion_function {
                     HirType::Void
@@ -1586,6 +1587,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             &interfaces,
                             &generic_interfaces,
                             &HashMap::new(),
+                            method.function.body.as_ref().map(|body| body.stmts.as_slice()),
                         )?
                     } else if method.function.return_type.is_none()
                         && !method.is_abstract
@@ -1775,6 +1777,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         }
                     }
                 }
+                // `extends Date` takes the optional epoch milliseconds, `extends RegExp` its pattern.
+                None if base.sym.as_ref() == "Date" => (vec![HirType::Optional(Box::new(HirType::F64))], None),
+                None if base.sym.as_ref() == "RegExp" => (vec![HirType::Str], None),
                 None if matches!(base.sym.as_ref(), "Map" | "Set") => {
                     let iterable = match interfaces.get(derived_name).and_then(native_base_type) {
                         Some(HirType::Map(key, value)) => HirType::Array(Box::new(
@@ -1799,7 +1804,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             let base_omittable = signatures.get(&base_symbol).map_or_else(
                 || {
                     // The native collection's optional entries argument.
-                    let native = matches!(base.sym.as_ref(), "Map" | "Set");
+                    let native = matches!(base.sym.as_ref(), "Map" | "Set" | "Date");
                     HirOptionalMask::from_bools(&vec![native; base_params.len()])
                 },
                 |signature| signature.source_omittable.clone(),
@@ -1926,6 +1931,16 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 let mut signature = signatures[&base_symbol].clone();
                 if !method.is_static {
                     signature.params[0] = derived_type.clone();
+                }
+                // An unannotated method of an abstract base is never lowered (and its
+                // signature defaulted to `Void`); the derived copy infers its own return.
+                if base.class.is_abstract
+                    && !method.is_static
+                    && method.function.return_type.is_none()
+                    && !method.function.is_generator
+                    && method.kind != MethodKind::Setter
+                {
+                    signature.ret = HirType::Dynamic;
                 }
                 signatures.insert(derived_symbol.clone(), signature.clone());
                 if method.kind == MethodKind::Method && signature.uses_this {
@@ -2342,6 +2357,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 changed = true;
             }
         }
+        // A trial pass: top-level statements can consume a callee whose
+        // `Dynamic`-deferred signature (e.g. an unannotated generator's
+        // element type) converges later in this loop; the final pass
+        // re-lowers for real and surfaces any genuine error.
         let _ = lower_top_level_initializers(
             module,
             &global_types,
@@ -2353,7 +2372,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &enum_reverse_values,
             Some(&call_constraints),
             &value_referenced_classes,
-        )?;
+        );
         for fn_decl in &fn_decls {
             let name = fn_decl.ident.sym.to_string();
             // This whole loop is a *trial* pass whose only purpose is

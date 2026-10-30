@@ -223,6 +223,24 @@ impl<'a> FnLowerer<'a> {
         let mut visible = Vec::new();
         let mut hidden = Vec::new();
         for (name, expected) in declared_fields {
+            // A declared member the instance provides as a prototype method becomes a closure
+            // that calls the class method on the (live) instance.
+            if !actual_fields.iter().any(|(n, _)| n == name) {
+                let (Some(class), HirType::Function(params, ret)) = (class_name_from_type(&object_type), expected) else {
+                    return Err(format!("cannot project method `{name}` of a class instance"));
+                };
+                let lambda_params: Vec<HirParam> = params.iter().enumerate().map(|(i, ty)| HirParam {
+                    name: format!("__thaw_method_view_arg_{}_{i}", self.next_binding), ty: ty.clone(),
+                }).collect();
+                self.next_binding += 1;
+                let mut args = vec![HirExpr::Var(source.clone())];
+                args.extend(lambda_params.iter().map(|p| HirExpr::Var(p.name.clone())));
+                let call = HirExpr::Call(Box::new(HirExpr::Var(class_method_symbol(class, name))), args);
+                visible.push((name.clone(), HirExpr::Lambda(
+                    vec![capture.clone()], lambda_params, ret.as_ref().clone(), Box::new(call),
+                )));
+                continue;
+            }
             let read = HirExpr::PropAccess(Box::new(HirExpr::Var(source.clone())), object_type.clone(), name.clone());
             let read = self.lenient_uninit_read_as(read, f64::from_bits(crate::UNSET_NUMBER_BITS))?;
             let this_param = HirParam { name: format!("__thaw_live_this_{}", self.next_binding), ty: receiver.clone() };
@@ -531,6 +549,71 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// A callback with typed parameters (`(n: number) => ...`) stored in a `(...args: any[]) => R`
+    /// slot is entered with one rest array of `Json` values: wrap it so each argument is decoded
+    /// to the callback's own parameter type (an absent one reads `undefined`).
+    fn adapt_callback_to_json_rest(
+        &mut self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::CallableFunction(fixed, _, Some(rest), ret) = declared else {
+            return Ok(None);
+        };
+        if !fixed.is_empty() || **rest != HirType::Json {
+            return Ok(None);
+        }
+        let Ok(HirType::Function(params, actual_ret)) = self.infer_expr_type(value) else {
+            return Ok(None);
+        };
+        let rest_array = HirType::Array(rest.clone());
+        if params.is_empty()
+            || params == [rest_array.clone()]
+            || !(**ret == HirType::Void || *ret == actual_ret)
+            || params.iter().any(|ty| matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)))
+        {
+            return Ok(None);
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_rest_callback_{id}");
+        let args_name = format!("__thaw_rest_args_{id}");
+        let callback_type = HirType::Function(params.clone(), actual_ret.clone());
+        self.scope.insert(callback_name.clone(), callback_type.clone());
+        self.scope.insert(args_name.clone(), rest_array.clone());
+        let mut arguments = Vec::with_capacity(params.len());
+        for (index, ty) in params.iter().enumerate() {
+            let present = HirExpr::BinOp(
+                BinOp::Gt,
+                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(args_name.clone())))),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+            );
+            let element = HirExpr::TypedIndex(
+                Box::new(HirExpr::Var(args_name.clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                HirType::Json,
+            );
+            let absent = self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+            let json = HirExpr::Conditional(Box::new(present), Box::new(element), Box::new(absent), HirType::Json);
+            arguments.push(self.coerce_to_declared(ty, json)?);
+        }
+        let call = HirExpr::Call(Box::new(HirExpr::Var(callback_name.clone())), arguments);
+        let body = if **ret == HirType::Void {
+            HirExpr::Block(vec![HirStmt::Expr(call)])
+        } else {
+            call
+        };
+        let adapter = HirExpr::Lambda(
+            vec![HirParam { name: callback_name.clone(), ty: callback_type.clone() }],
+            vec![HirParam { name: args_name, ty: rest_array }],
+            ret.as_ref().clone(),
+            Box::new(body),
+        );
+        let closure = HirExpr::TypedClosure(declared.clone(), Box::new(adapter));
+        self.wrap_call_argument_bindings(closure, &[(callback_name, callback_type, value.clone())])
+            .map(Some)
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         // The function-name wrapper is transparent to a callable slot: coerce the closure and
         // keep its label (other slots wrap the labelled closure like any function value).
@@ -543,6 +626,9 @@ impl<'a> FnLowerer<'a> {
                     vec![coerced, HirExpr::Lit(HirLit::Str(label))],
                 ));
             }
+        }
+        if let Some(adapted) = self.adapt_callback_to_json_rest(declared, &value)? {
+            return Ok(adapted);
         }
         // An observed read of a maybe-uninitialised class field arrives with
         // its raw `Optional`; a slot that wants the bare payload unwraps it
@@ -1039,6 +1125,17 @@ impl<'a> FnLowerer<'a> {
                     self.class_method_signature_compatible(class, name, expected, false)
                 });
                 if compatible {
+                    // Interface members satisfied by prototype methods are not in the instance
+                    // layout, so the interface view needs bound closures, not the raw pointer.
+                    let provided_by_method = |name: &String, expected: &HirType| {
+                        matches!(expected, HirType::Function(..))
+                            && !actual_fields.iter().any(|(n, _)| n == name)
+                            && self.signatures.get(&class_method_symbol(class, name)).is_some_and(|s| !s.is_async)
+                    };
+                    if declared_fields.iter().any(|(n, t)| provided_by_method(n, t)) {
+                        self.class_method_view_made = true;
+                        return self.live_widened_structural_view(value, &actual_fields, declared_fields);
+                    }
                     return Ok(value);
                 }
                 // A structural target naming accessor properties of the class
