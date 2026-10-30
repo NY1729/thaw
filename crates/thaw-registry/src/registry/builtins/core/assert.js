@@ -37,7 +37,7 @@ function AssertionError(options) {
   options = options || {}; this.name = 'AssertionError'; this.code = 'ERR_ASSERTION';
   this.actual = options.actual; this.expected = options.expected; this.operator = options.operator;
   this.generatedMessage = options.generatedMessage !== undefined ? options.generatedMessage : options.message === undefined;
-  this.message = options.message === undefined ? 'Expected values to satisfy ' + (options.operator || 'assertion') : String(options.message);
+  this.message = options.message !== undefined ? String(options.message) : options.operator === 'strictEqual' ? strictText(options.actual, options.expected) : options.operator === 'deepStrictEqual' ? deepText(options.actual, options.expected) : 'Expected values to satisfy ' + (options.operator || 'assertion');
   if (Error.captureStackTrace) Error.captureStackTrace(this, options.stackStartFn || AssertionError);
 }
 AssertionError.prototype = Object.create(Error.prototype); AssertionError.prototype.constructor = AssertionError;
@@ -46,10 +46,12 @@ if (message instanceof Error) throw message;
 var final = message === undefined ? text : message;
 throw new AssertionError({ actual: actual, expected: expected, message: final, operator: operator, stackStartFn: start, generatedMessage: message === undefined && !custom });
 }
+var looseDeep = false;
 function deep(actual, expected, seen) {
 if (Object.is(actual, expected)) return true;
+if (looseDeep && (actual === null || typeof actual !== 'object')) return (expected === null || typeof expected !== 'object') && (actual == expected || (actual !== actual && expected !== expected));
 if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return false;
-if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;
+if (!looseDeep && Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;
 seen = seen || new Map(); if (seen.get(actual) === expected) return true; seen.set(actual, expected);
 if (actual instanceof Date) return expected instanceof Date && actual.getTime() === expected.getTime();
 if (actual instanceof RegExp) return expected instanceof RegExp && actual.source === expected.source && actual.flags === expected.flags;
@@ -81,24 +83,43 @@ if (typeof expected === 'function') { if (expected.prototype !== undefined && er
 if (expected !== null && typeof expected === 'object') { if (error === null || typeof error !== 'object') return false; var keys = Object.keys(expected); if (expected instanceof Error) keys.push('name', 'message'); return keys.every(function(key) { if (!(key in error)) return false; var want = expected[key]; if (want instanceof RegExp && typeof error[key] === 'string') return want.test(error[key]); return deep(error[key], want); }); }
 return true;
 }
+function mismatchText(caught, expected, message) {
+var text;
+if (message !== undefined) text = undefined;
+else if (expected instanceof RegExp) text = 'The input did not match the regular expression ' + String(expected) + '. Input:\n\n' + show(String(caught)) + '\n';
+else if (typeof expected === 'function' && expected.prototype !== undefined && Error.isPrototypeOf(expected)) text = 'The error is expected to be an instance of "' + expected.name + '". Received "' + (caught && caught.constructor && caught.constructor.name) + '"\n\nError message:\n\n' + (caught && caught.message);
+return text;
+}
 function throws(block, expected, message) {
 var caught, threw = false; try { block(); } catch (error) { caught = error; threw = true; }
 if (typeof expected === 'string') { message = expected; expected = undefined; }
 if (!threw) failure(undefined, expected, undefined, 'throws', throws, 'Missing expected exception' + (expected && expected.name ? ' (' + expected.name + ')' : '') + (message ? ': ' + message : '.'), true);
 if (!matches(caught, expected)) {
-var text;
-if (message !== undefined) text = undefined;
-else if (expected instanceof RegExp) text = 'The input did not match the regular expression ' + String(expected) + '. Input:\n\n' + show(String(caught)) + '\n';
-else if (typeof expected === 'function' && expected.prototype !== undefined && Error.isPrototypeOf(expected)) text = 'The error is expected to be an instance of "' + expected.name + '". Received "' + (caught && caught.constructor && caught.constructor.name) + '"\n\nError message:\n\n' + (caught && caught.message);
+var text = mismatchText(caught, expected, message);
 failure(caught, expected, message, 'throws', throws, text);
 }
 return caught;
 }
 function doesNotThrow(block, expected, message) { try { block(); } catch (error) { if (typeof expected === 'string') { message = expected; expected = undefined; } if (matches(error, expected)) failure(error, expected, undefined, 'doesNotThrow', doesNotThrow, 'Got unwanted exception' + (message ? ': ' + message : '.') + '\nActual message: "' + (error && error.message) + '"', true); throw error; } }
+function rejects(promiseFn, expected, message) {
+if (typeof expected === 'string') { message = expected; expected = undefined; }
+return Promise.resolve().then(function() { return typeof promiseFn === 'function' ? promiseFn() : promiseFn; }).then(function() {
+failure(undefined, expected, undefined, 'rejects', rejects, 'Missing expected rejection' + (expected && expected.name ? ' (' + expected.name + ')' : '') + (message ? ': ' + message : '.'), true);
+}, function(error) {
+if (!matches(error, expected)) failure(error, expected, message, 'rejects', rejects, mismatchText(error, expected, message));
+});
+}
+function doesNotReject(promiseFn, expected, message) {
+if (typeof expected === 'string') { message = expected; expected = undefined; }
+return Promise.resolve().then(function() { return typeof promiseFn === 'function' ? promiseFn() : promiseFn; }).then(function() {}, function(error) {
+if (matches(error, expected)) failure(error, expected, undefined, 'doesNotReject', doesNotReject, 'Got unwanted rejection' + (message ? ': ' + message : '.') + '\nActual message: "' + (error && error.message) + '"', true);
+throw error;
+});
+}
 ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = notEqual; ok.strictEqual = strictEqual; ok.notStrictEqual = notStrictEqual;
-// ponytail: loose deepEqual/notDeepEqual still use strict comparison; only the operator and (diff-free) message follow Node.
-function deepEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepEqual', deepEqual, deepText(actual, expected)); }
-function notDeepEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepEqual', notDeepEqual, notText(actual, 'Expected "actual" not to be loosely deep-equal to', 'Expected "actual" not to be loosely deep-equal to')); }
+function looseDeepEqual(actual, expected) { var prev = looseDeep; looseDeep = true; try { return deep(actual, expected); } finally { looseDeep = prev; } }
+function deepEqual(actual, expected, message) { if (!looseDeepEqual(actual, expected)) failure(actual, expected, message, 'deepEqual', deepEqual, 'Expected values to be loosely deep-equal:\n\n' + show(actual) + '\n\nshould loosely deep-equal\n\n' + show(expected)); }
+function notDeepEqual(actual, expected, message) { if (looseDeepEqual(actual, expected)) failure(actual, expected, message, 'notDeepEqual', notDeepEqual, notText(actual, 'Expected "actual" not to be loosely deep-equal to', 'Expected "actual" not to be loosely deep-equal to')); }
 ok.deepEqual = deepEqual; ok.notDeepEqual = notDeepEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;
 function received(value) {
 if (value === null || value === undefined) return String(value);
@@ -118,7 +139,7 @@ failure(input, regexp, message, operator, wantMatch ? match : doesNotMatch, text
 function match(input, regexp, message) { matchWith(true, 'match', input, regexp, message); }
 function doesNotMatch(input, regexp, message) { matchWith(false, 'doesNotMatch', input, regexp, message); }
 ok.ifError = ifError; ok.match = match; ok.doesNotMatch = doesNotMatch;
-ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.default = ok; ok.__esModule = true;
+ok.fail = fail; ok.rejects = rejects; ok.doesNotReject = doesNotReject; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.default = ok; ok.__esModule = true;
 function strict(value, message) { if (!value) failure(value, true, message, '==', strict, arguments.length ? show(value) + ' == true' : 'No value argument passed to `assert.ok()`'); }
 Object.assign(strict, ok, { equal: strictEqual, notEqual: notStrictEqual, deepEqual: deepStrictEqual, notDeepEqual: notDeepStrictEqual }); strict.strict = strict; strict.default = strict; ok.strict = strict;
 

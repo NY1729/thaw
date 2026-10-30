@@ -709,6 +709,33 @@ pub extern "C" fn thaw_json_host_from_borrowed_handle(handle: u64) -> *mut Value
     }
 }
 
+/// A thaw-js call result that is the one-key handle marker `{"__thaw_tjs_handle__": id}` becomes the
+/// live host lease for that handle (the marker's reference passes to the lease); any other value is
+/// returned unchanged.
+#[no_mangle]
+pub extern "C" fn thaw_json_adopt_handle_marker(value: *mut Value) -> *mut Value {
+    let handle = unsafe { value.as_ref() }
+        .and_then(Value::as_object)
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.get(b"__thaw_tjs_handle__".as_slice()))
+        .and_then(Value::as_f64)
+        .filter(|handle| handle.is_finite() && *handle > 0.0 && handle.fract() == 0.0)
+        .map(|handle| handle as u64);
+    let Some(handle) = handle else {
+        return value;
+    };
+    if HOST_OPERATIONS.with(|slot| slot.get()).is_none() {
+        return value;
+    }
+    match host_value_from_owned_handle(handle) {
+        Some(adopted) => {
+            unsafe { thaw_json_destroy(value) };
+            thaw_json_track_arena_owned_root(leak(materialize_native_wrapper(adopted)))
+        }
+        None => value,
+    }
+}
+
 /// Convert a borrowed retained JS value of any kind into a Json value: primitives
 /// materialize as native scalars, objects/functions as a live Host lease. The
 /// lease retains its own reference; the caller keeps its handle.

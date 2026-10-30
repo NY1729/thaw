@@ -54,10 +54,6 @@ use thaw_std as _;
 use thaw_runtime as _;
 
 use base64::Engine as _;
-use cbc::cipher::{
-    block_padding::{NoPadding, Pkcs7},
-    BlockDecryptMut, BlockEncryptMut, KeyIvInit,
-};
 use rquickjs::function::Args;
 use rquickjs::Persistent; // also used by api.rs (N-API Symbol ops), not only by wasm
 use rquickjs::{Array, ArrayBuffer, Context, Ctx, FromJs, Function, Object, Runtime, Value};
@@ -771,6 +767,7 @@ fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {
         "sha3256" => sha3_digest(value, 32),
         "sha3384" => sha3_digest(value, 48),
         "sha3512" => sha3_digest(value, 64),
+        "ripemd160" => ripemd160_digest(value),
         _ => Vec::new(),
     }
 }
@@ -2030,6 +2027,8 @@ include!("quickjs/intl_segmenter.rs");
 include!("quickjs/intl_relative_time.rs");
 
 include!("quickjs/asymmetric_crypto.rs");
+
+include!("quickjs/symmetric_cipher.rs");
 
 #[cfg(unix)]
 static PENDING_PROCESS_SIGNALS: AtomicU64 = AtomicU64::new(0);

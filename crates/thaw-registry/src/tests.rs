@@ -1550,3 +1550,5 @@ fn bare_node_builtin_specifiers_gain_the_node_prefix() {
         assert_eq!(bare_node_builtin_specifier(name), None, "{name}");
     }
 }
+
+include!("tests/audit2_node_api.rs");

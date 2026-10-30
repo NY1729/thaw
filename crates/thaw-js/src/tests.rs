@@ -1017,3 +1017,106 @@ fn large_maps_and_sets_agree_with_linear_semantics() {
         "400 51 8 nan zero false true true false true true false|false 50 again k0,0,k1 0,1,2,4|1 2 undefined big num undefined"
     );
 }
+
+#[test]
+fn crypto_global_fills_random_values_and_makes_uuids() {
+    assert_eq!(
+        one("var a = new Uint8Array(32), r = crypto.getRandomValues(a);
+             var u = crypto.randomUUID(), m = globalThis.__thaw_crypto_module;
+             var big = 0; try { crypto.getRandomValues(new Uint8Array(65537)); } catch (e) { big = e.name; }
+             var bad = ''; try { crypto.getRandomValues(new Float64Array(1)); } catch (e) { bad = e.name; }
+             console.log(r === a, a.some(function (x) { return x !== 0; }),
+               /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(u),
+               m.randomBytes(5).length, m.randomInt(3, 4), big, bad)"),
+        "true true true 5 3 QuotaExceededError TypeMismatchError"
+    );
+}
+
+#[test]
+fn crypto_create_hash_matches_node() {
+    assert_eq!(
+        one("var m = globalThis.__thaw_crypto_module;
+             console.log(m.createHash('sha1').update('a').update(Buffer.from('bc')).digest('hex'),
+               m.createHash('md5').update('abc').digest('base64'),
+               m.createHash('sha256').digest('hex'), m.createHash('sha1').digest().length)"),
+        "a9993e364706816aba3e25717850c26c9cd0d89d kAFQmDzST7DWlj99KOF/cg== e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 20"
+    );
+}
+
+#[test]
+fn blob_and_file_basics() {
+    assert_eq!(
+        one("var f = new File(['ab', new Uint8Array([99])], 'x.txt', { type: 'Text/Plain' });
+             console.log(f instanceof Blob, f instanceof File, f.name, f.size, f.type, new Blob([]) instanceof File,
+               f.slice(1).size)"),
+        "true true x.txt 3 text/plain false 2"
+    );
+}
+
+#[test]
+fn scan_accepts_esm_origin_calls_and_self_made_global_slots() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(__thaw_esm_origin_0) { return function(module, exports, require) {
+  if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.edge('./a', 1);
+  var _a; (_a = globalThis).__slot ?? (_a.__slot = {});
+  var tx = 1; exports.o = { tx }; exports.f = function () { return exports.o.tx(1); };
+  var s = globalThis.__slot;
+}; },
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+}
+
+// ----- live-handle intrinsics (`thaw_tjs_get_property_result`, selected method calls, ...) -----
+
+#[test]
+fn handle_intrinsics_read_properties_call_methods_and_capture_graphs() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let (name, source) = (
+        CString::new("kh").unwrap(),
+        CString::new(CLASS_BUNDLE).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let text =
+        |p: *mut std::ffi::c_char| unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+    let id: u64 = class_call("$new$kh::Box$arity1", "[40]", 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // a property read is a new handle; resolving it yields the plain wire
+    let key = CString::new("v").unwrap();
+    let property = thaw_tjs_get_property_result(id, key.as_ptr());
+    assert!(property.error.is_null());
+    let resolved = thaw_tjs_resolve_handle_graph_result(property.value);
+    assert_eq!(
+        text(resolved.value),
+        r#"{"root":{"v":40},"nodes":[],"leases":[],"napiLeases":[]}"#
+    );
+
+    // a selected method call returning `this` comes back as the receiver's own handle
+    let method = thaw_tjs_get_property_result(id, CString::new("add").unwrap().as_ptr());
+    let args =
+        CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"v":2}]}],"leases":[],"napiLeases":[]}"#)
+            .unwrap();
+    let call =
+        thaw_tjs_call_selected_method_graph_result(id, method.value, key.as_ptr(), args.as_ptr());
+    assert!(call.error.is_null());
+    assert_eq!(
+        text(call.value),
+        format!(r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{id}}}],"leases":[{id}],"napiLeases":[]}}"#)
+    );
+
+    // an object stays a handle when captured; a missing handle reports an error
+    let captured = thaw_tjs_capture_handle_graph_result(id);
+    assert!(text(captured.value).contains(r#""hdl""#));
+    assert!(!thaw_tjs_get_property_result(9999, key.as_ptr())
+        .error
+        .is_null());
+    assert_eq!(thaw_tjs_exception_native_token(id), 0);
+}
