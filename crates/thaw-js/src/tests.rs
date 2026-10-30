@@ -1070,3 +1070,53 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     let report = crate::scan::scan_bundle(src).ok().unwrap();
     assert!(report.is_clean(), "{:?}", report.blockers);
 }
+
+// ----- live-handle intrinsics (`thaw_tjs_get_property_result`, selected method calls, ...) -----
+
+#[test]
+fn handle_intrinsics_read_properties_call_methods_and_capture_graphs() {
+    use crate::host::*;
+    use std::ffi::{CStr, CString};
+    let (name, source) = (
+        CString::new("kh").unwrap(),
+        CString::new(CLASS_BUNDLE).unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let text =
+        |p: *mut std::ffi::c_char| unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+    let id: u64 = class_call("$new$kh::Box$arity1", "[40]", 0, true)
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // a property read is a new handle; resolving it yields the plain wire
+    let key = CString::new("v").unwrap();
+    let property = thaw_tjs_get_property_result(id, key.as_ptr());
+    assert!(property.error.is_null());
+    let resolved = thaw_tjs_resolve_handle_graph_result(property.value);
+    assert_eq!(
+        text(resolved.value),
+        r#"{"root":{"v":40},"nodes":[],"leases":[],"napiLeases":[]}"#
+    );
+
+    // a selected method call returning `this` comes back as the receiver's own handle
+    let method = thaw_tjs_get_property_result(id, CString::new("add").unwrap().as_ptr());
+    let args =
+        CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"v":2}]}],"leases":[],"napiLeases":[]}"#)
+            .unwrap();
+    let call =
+        thaw_tjs_call_selected_method_graph_result(id, method.value, key.as_ptr(), args.as_ptr());
+    assert!(call.error.is_null());
+    assert_eq!(
+        text(call.value),
+        format!(r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{id}}}],"leases":[{id}],"napiLeases":[]}}"#)
+    );
+
+    // an object stays a handle when captured; a missing handle reports an error
+    let captured = thaw_tjs_capture_handle_graph_result(id);
+    assert!(text(captured.value).contains(r#""hdl""#));
+    assert!(!thaw_tjs_get_property_result(9999, key.as_ptr())
+        .error
+        .is_null());
+    assert_eq!(thaw_tjs_exception_native_token(id), 0);
+}

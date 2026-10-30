@@ -841,8 +841,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.variable_hir_types.insert(name.to_string(), ty.clone());
         self.arena_variables.insert(name.to_string());
         if *ty == HirType::JsValue {
-            self.uses_quickjs = true;
-            self.uses_quickjs_handles = true;
+            self.js_mark_handles_used();
             self.builder.build_call(
                 self.module.get_function("thaw_js_retain_handle").unwrap(),
                 &[value.into()], "retain_iteration_js_handle",

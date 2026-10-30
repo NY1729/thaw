@@ -30,8 +30,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [receiver, key] = args else {
             return Err("getDynamicProperty expects a receiver and property key".into());
         };
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // A getter may enter native callbacks and graph capture on this first
         // property read, so publish the host operations before evaluating it.
         self.compile_register_js_callback_host_operations()?;
