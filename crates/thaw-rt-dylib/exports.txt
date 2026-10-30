@@ -344,9 +344,6 @@ thaw_json_root_unpin
 thaw_json_same_value_zero
 thaw_json_set_prototype
 thaw_json_share
-thaw_recursive_lookup
-thaw_recursive_register
-thaw_recursive_unregister
 thaw_json_state_key
 thaw_json_store_arena_binding
 thaw_json_store_global_binding
@@ -531,6 +528,9 @@ thaw_promise_state
 thaw_promise_subscribe
 thaw_promise_take_report_activity
 thaw_promise_take_unhandled_failure
+thaw_recursive_lookup
+thaw_recursive_register
+thaw_recursive_unregister
 thaw_regex_exec
 thaw_regex_exec_advance
 thaw_regex_exec_groups
