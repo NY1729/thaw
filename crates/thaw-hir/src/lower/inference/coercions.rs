@@ -1,3 +1,11 @@
+/// Hidden member of an interface view naming the class instance it projects.
+const VIEW_SOURCE: &str = "__thaw_view_source";
+
+/// Opaque static type of that instance (any native object pointer).
+fn view_source_type() -> HirType {
+    HirType::Object(vec![("__thaw_view_opaque".into(), HirType::Bool)])
+}
+
 fn promise_resolve_value_fits(actual: &HirType, resolved: &HirType) -> bool {
     if actual == resolved {
         return true;
@@ -204,6 +212,70 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `value as C` where `value` is interface-typed and `C` a native class: the instance behind
+    /// the value, checked against `C`'s identity.
+    fn lower_interface_view_class_cast(
+        &mut self,
+        assertion: &swc_ecma_ast::TsAsExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let TsType::TsTypeRef(reference) = assertion.type_ann.as_ref() else { return Ok(None) };
+        let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name else { return Ok(None) };
+        let Some(target) = self.interfaces.get(class.sym.as_ref()).cloned() else { return Ok(None) };
+        if class_name_from_type(&target) != Some(class.sym.as_ref()) {
+            return Ok(None);
+        }
+        let Some(source) = self.peek_type_without_lowering(&assertion.expr) else {
+            return Ok(None);
+        };
+        let HirType::Object(fields) = &source else { return Ok(None) };
+        if fields.is_empty() || fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+            return Ok(None);
+        }
+        let value = self.lower_expr(&assertion.expr)?;
+        let unwrapped = self.view_unwrap(value, &source)?;
+        let checked = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
+            vec![unwrapped, HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+        );
+        let name = format!("__thaw_view_cast_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), target.clone());
+        self.wrap_call_argument_bindings(HirExpr::Var(name.clone()), &[(name, target, checked)]).map(Some)
+    }
+
+    /// The instance behind an interface view (or `value` itself when it is not a view), typed
+    /// as the opaque source object. Evaluates `value` once.
+    fn view_unwrap(&mut self, value: HirExpr, value_type: &HirType) -> Result<HirExpr, String> {
+        let HirType::Object(declared) = value_type else {
+            return Err("interface view unwrap needs an object".into());
+        };
+        let name = format!("__thaw_view_unwrap_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), value_type.clone());
+        let mut receiver_fields = declared.clone();
+        receiver_fields.push(("__thaw_object_method_receiver".into(), HirType::Undefined));
+        let mut probe = declared.clone();
+        probe.push((VIEW_SOURCE.into(), view_source_type()));
+        probe.push((
+            format!("__thaw_getter_{VIEW_SOURCE}"),
+            HirType::Function(
+                vec![HirType::NonArrowReceiver(Box::new(HirType::Object(receiver_fields)))],
+                Box::new(view_source_type()),
+            ),
+        ));
+        let read = HirExpr::PropAccess(
+            Box::new(HirExpr::Var(name.clone())), HirType::Object(probe), VIEW_SOURCE.into(),
+        );
+        let has_view = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_has_accessor".into())),
+            vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str(VIEW_SOURCE.into())), HirExpr::Lit(HirLit::Bool(false))],
+        );
+        let unwrapped = HirExpr::Conditional(
+            Box::new(has_view), Box::new(read), Box::new(HirExpr::Var(name.clone())), view_source_type(),
+        );
+        self.wrap_call_argument_bindings(unwrapped, &[(name, value_type.clone(), value)])
+    }
+
     /// A structural view of a class instance whose fields are accessors over
     /// the instance (`get`: current value, `set`: store through to the field).
     fn live_widened_structural_view(
@@ -262,6 +334,13 @@ impl<'a> FnLowerer<'a> {
             hidden.push((format!("__thaw_getter_{name}"), getter));
             hidden.push((format!("__thaw_setter_{name}"), setter));
         }
+        // The view remembers the instance it projects so `instanceof`/narrowing can recover it.
+        let this_param = HirParam { name: format!("__thaw_live_this_{}", self.next_binding), ty: receiver.clone() };
+        self.next_binding += 1;
+        hidden.push((
+            format!("__thaw_getter_{VIEW_SOURCE}"),
+            HirExpr::Lambda(vec![capture.clone()], vec![this_param], view_source_type(), Box::new(HirExpr::Var(source.clone()))),
+        ));
         visible.extend(hidden);
         let literal = HirExpr::ObjectLit(visible);
         self.wrap_call_argument_bindings(literal, &[(source, object_type, value)])

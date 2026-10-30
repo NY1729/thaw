@@ -3427,6 +3427,11 @@
       "name": "audit2 generic class with a generic method named map returning the class",
       "expect": "matched",
       "source": "class Stack<T> {\n  private items: T[] = [];\n  push(x: T): this { this.items.push(x); return this; }\n  map<U>(f: (x: T) => U): Stack<U> { const s = new Stack<U>(); this.items.forEach((i) => s.push(f(i))); return s; }\n  toArray(): T[] { return [...this.items]; }\n}\nclass Box<T> {\n  constructor(public v: T) {}\n  map<U>(f: (x: T) => U): Box<U> { return new Box<U>(f(this.v)); }\n}\nfunction main(): void {\n  const st = new Stack<number>().push(1).push(2);\n  console.log(st.map((x) => x * 2).toArray(), st.map((x) => \"n\" + x).toArray());\n  const b = new Box<number>(2);\n  console.log(b.map((x) => x * 2).v, b.map((x) => \"s\" + x).v);\n}"
+    },
+    {
+      "name": "audit2 interface-typed values keep class identity for instanceof as and narrowing, abstract base receivers dispatch",
+      "expect": "matched",
+      "source": "interface Shape { area(): number; name: string }\nabstract class Base implements Shape {\n  constructor(public name: string) {}\n  abstract area(): number;\n  describe(): string { return this.name + \":\" + this.area(); }\n}\nclass Circle extends Base { constructor(private r: number) { super(\"circle\"); } area(): number { return 3 * this.r; } }\nclass Rect extends Base { constructor(private w: number, private h: number) { super(\"rect\"); } area(): number { return this.w * this.h; } }\ninterface Sized { size: number }\nclass Sq implements Sized { size = 2; constructor(public s: number) {} }\nfunction side(s: Sized): number { return s instanceof Sq ? s.s : -1; }\nfunction describe(b: Base): string { return b.describe() + \"/\" + b.area(); }\nfunction main(): void {\n  const shapes: Shape[] = [new Circle(2), new Rect(3, 4)];\n  console.log(shapes[0] instanceof Circle, shapes[1] instanceof Circle, shapes[0] instanceof Base);\n  shapes.forEach((s) => console.log((s as Base).describe()));\n  for (const s of shapes) { if (s instanceof Rect) console.log(\"rect\", s.area()); }\n  console.log(describe(new Circle(1)), describe(new Rect(1, 5)));\n  console.log(side(new Sq(7)), side({ size: 1 }));\n}"
     }
   ]
 }

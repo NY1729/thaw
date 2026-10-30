@@ -1812,18 +1812,30 @@ impl<'a> FnLowerer<'a> {
         };
         let current = self.resolve_binding(value.sym.as_ref());
         let base = self.scope.get(&current)?;
-        let base_name = class_name_from_type(base)?;
         let derived = self.interfaces.get(class.sym.as_ref())?;
-        (derived != base && class_name_from_type(derived) == Some(class.sym.as_ref())
-            && class_type_has_identity(derived, base_name))
-        .then(|| (value.sym.to_string(), current, derived.clone()))
+        if class_name_from_type(derived) != Some(class.sym.as_ref()) {
+            return None;
+        }
+        // An interface-typed object (no class identity of its own) narrows to the class too.
+        let applies = match class_name_from_type(base) {
+            Some(base_name) => derived != base && class_type_has_identity(derived, base_name),
+            None => matches!(base, HirType::Object(fields) if !fields.is_empty()),
+        };
+        applies.then(|| (value.sym.to_string(), current, derived.clone()))
     }
 
     /// Rebinds `source` to a `derived`-typed local aliasing the same instance.
     fn begin_class_downcast(&mut self, narrowing: &(String, Symbol, HirType)) -> (Symbol, HirStmt) {
         let (source, current, derived) = narrowing;
+        let mut value = HirExpr::Var(current.clone());
+        if let Some(base) = self.scope.get(current).cloned().filter(|base| class_name_from_type(base).is_none()) {
+            // Interface-typed: continue with the instance behind the value.
+            if let Ok(unwrapped) = self.view_unwrap(value.clone(), &base) {
+                value = unwrapped;
+            }
+        }
         let hir_name = self.bind_local(source, derived.clone());
-        (hir_name.clone(), HirStmt::Let(hir_name, derived.clone(), HirExpr::Var(current.clone())))
+        (hir_name.clone(), HirStmt::Let(hir_name, derived.clone(), value))
     }
 
     fn end_class_downcast(&mut self, source: &str) {
