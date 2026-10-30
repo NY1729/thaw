@@ -335,11 +335,18 @@ fn class_property_name(name: &PropName) -> Result<Symbol, String> {
     })
 }
 
-/// Infers a class field's type from a self-contained literal initializer.
-/// This runs before the class body is resolved, so identifiers, calls,
-/// spreads, empty arrays, and mixed-element arrays still require an explicit
-/// annotation rather than introducing a lowering-order dependency or guessing
-/// a union layout.
+/// Field type from the initializer: main's general expression inference first, then the
+/// `new C<T..>()` / enum member (`E.A`) forms that need the declared types to resolve.
+fn infer_class_field_type(
+    expr: &Expr,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    lookup: &dyn Fn(Option<&str>, &str) -> Option<HirType>,
+) -> Option<HirType> {
+    infer_class_field_expr_type(expr, lookup)
+        .or_else(|| infer_class_field_reference_type(expr, interfaces, generic_interfaces))
+}
+
 /// The type of a class field initializer that is more than a literal: arithmetic, comparisons,
 /// `++C.count`, `this.x + 1`, `(a, b)` and the like. `lookup(class, name)` types `this.name`
 /// (`class == None`) or the static `Class.name`. `None` when the shape is not recognised, which
@@ -402,6 +409,52 @@ fn infer_class_field_expr_type(
     }
 }
 
+/// Field type from the initializer: literals, plus `new C<T..>()` of a known class/collection
+/// and an enum member (`E.A`), which need the declared types to resolve.
+fn infer_class_field_reference_type(
+    expr: &Expr,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Option<HirType> {
+    if let Some(ty) = infer_class_field_literal_type(expr) {
+        return Some(ty);
+    }
+    let reference = |name: &swc_ecma_ast::Ident, params| {
+        lower_ts_type(
+            &TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                span: name.span,
+                type_name: swc_ecma_ast::TsEntityName::Ident(name.clone()),
+                type_params: params,
+            }),
+            interfaces,
+            generic_interfaces,
+        )
+        .ok()
+    };
+    match expr {
+        Expr::Paren(parenthesized) => infer_class_field_reference_type(&parenthesized.expr, interfaces, generic_interfaces),
+        Expr::New(construction) => {
+            let class = construction.callee.as_ident()?;
+            match &construction.type_args {
+                Some(args) => reference(class, Some(args.clone())),
+                None => interfaces.get(class.sym.as_ref()).cloned(),
+            }
+        }
+        Expr::Member(member) => {
+            let (Expr::Ident(owner), MemberProp::Ident(_)) = (member.obj.as_ref(), &member.prop) else {
+                return None;
+            };
+            reference(owner, None).filter(|ty| matches!(ty, HirType::F64 | HirType::Str))
+        }
+        _ => None,
+    }
+}
+
+/// Infers a class field's type from a self-contained literal initializer.
+/// This runs before the class body is resolved, so identifiers, calls,
+/// spreads, empty arrays, and mixed-element arrays still require an explicit
+/// annotation rather than introducing a lowering-order dependency or guessing
+/// a union layout.
 fn infer_class_field_literal_type(expr: &Expr) -> Option<HirType> {
     match expr {
         Expr::Lit(Lit::Num(_)) => Some(HirType::F64),

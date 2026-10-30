@@ -1799,6 +1799,51 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// `x instanceof Derived` where `x` is a native instance of a base class: the guarded
+    /// branch sees `x` as `Derived` (same pointer; a derived layout extends its base's).
+    fn class_downcast_narrowing(&self, expr: &Expr) -> Option<(String, Symbol, HirType)> {
+        let Expr::Bin(binary) = expr else { return None };
+        if binary.op != BinaryOp::InstanceOf {
+            return None;
+        }
+        let (Expr::Ident(value), Expr::Ident(class)) = (binary.left.as_ref(), binary.right.as_ref())
+        else {
+            return None;
+        };
+        let current = self.resolve_binding(value.sym.as_ref());
+        let base = self.scope.get(&current)?;
+        let derived = self.interfaces.get(class.sym.as_ref())?;
+        if class_name_from_type(derived) != Some(class.sym.as_ref()) {
+            return None;
+        }
+        // An interface-typed object (no class identity of its own) narrows to the class too.
+        let applies = match class_name_from_type(base) {
+            Some(base_name) => derived != base && class_type_has_identity(derived, base_name),
+            None => matches!(base, HirType::Object(fields) if !fields.is_empty()),
+        };
+        applies.then(|| (value.sym.to_string(), current, derived.clone()))
+    }
+
+    /// Rebinds `source` to a `derived`-typed local aliasing the same instance.
+    fn begin_class_downcast(&mut self, narrowing: &(String, Symbol, HirType)) -> (Symbol, HirStmt) {
+        let (source, current, derived) = narrowing;
+        let mut value = HirExpr::Var(current.clone());
+        if let Some(base) = self.scope.get(current).cloned().filter(|base| class_name_from_type(base).is_none()) {
+            // Interface-typed: continue with the instance behind the value.
+            if let Ok(unwrapped) = self.view_unwrap(value.clone(), &base) {
+                value = unwrapped;
+            }
+        }
+        let hir_name = self.bind_local(source, derived.clone());
+        (hir_name.clone(), HirStmt::Let(hir_name, derived.clone(), value))
+    }
+
+    fn end_class_downcast(&mut self, source: &str) {
+        if let Some(stack) = self.bindings.get_mut(source) {
+            stack.pop();
+        }
+    }
+
     fn exception_instanceof_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType)> {
         let Expr::Bin(binary) = expr else {
             return None;

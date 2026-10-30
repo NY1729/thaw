@@ -1048,6 +1048,15 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_nullish_coalescing(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
+        // `maybeList ?? []`: the empty default takes the list's own array type.
+        let rhs = match (&rhs, &lhs_type) {
+            (HirExpr::ArrayLit(items), HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload))
+                if items.is_empty() && matches!(payload.as_ref(), HirType::Array(_)) =>
+            {
+                HirExpr::TypedClosure(payload.as_ref().clone(), Box::new(rhs))
+            }
+            _ => rhs,
+        };
         if let HirType::Union(elements) = &lhs_type {
             if !elements
                 .iter()

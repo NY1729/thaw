@@ -350,13 +350,38 @@ fn is_string_keyword(ty: &TsType) -> bool {
     )
 }
 
-fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
-    fn collect(ty: &TsType, keys: &mut Vec<Symbol>) -> Result<(), String> {
+fn finite_property_keys(
+    ty: &TsType,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Vec<Symbol>, String> {
+    fn collect(
+        ty: &TsType,
+        aliases: &GenericInterfaces,
+        depth: usize,
+        keys: &mut Vec<Symbol>,
+    ) -> Result<(), String> {
         match ty {
-            TsType::TsParenthesizedType(parenthesized) => collect(&parenthesized.type_ann, keys),
+            TsType::TsParenthesizedType(parenthesized) => {
+                collect(&parenthesized.type_ann, aliases, depth, keys)
+            }
+            // A plain alias of a literal union (`type State = "a" | "b"`) is a key set too.
+            TsType::TsTypeRef(reference) if depth < 16 => {
+                let alias = match (&reference.type_name, &reference.type_params) {
+                    (TsEntityName::Ident(name), None) => {
+                        aliases.plain_aliases.get(name.sym.as_ref())
+                    }
+                    _ => None,
+                };
+                match alias {
+                    Some(alias) => collect(&alias.type_ann, aliases, depth + 1, keys),
+                    None => Err(
+                        "utility type keys must be a finite string or number literal union".into(),
+                    ),
+                }
+            }
             TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
                 for ty in &union.types {
-                    collect(ty, keys)?;
+                    collect(ty, aliases, depth, keys)?;
                 }
                 Ok(())
             }
@@ -380,7 +405,7 @@ fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
     }
 
     let mut keys = Vec::new();
-    collect(ty, &mut keys)?;
+    collect(ty, generic_interfaces, 0, &mut keys)?;
     Ok(keys)
 }
 
@@ -427,7 +452,7 @@ fn generic_utility_keys(
             )?);
         }
     }
-    finite_property_keys(ty)
+    finite_property_keys(ty, generic_interfaces)
 }
 
 fn utility_keys(
@@ -444,7 +469,7 @@ fn utility_keys(
             )?);
         }
     }
-    finite_property_keys(ty)
+    finite_property_keys(ty, generic_interfaces)
 }
 
 fn substituted_utility_keys(
@@ -472,7 +497,7 @@ fn substituted_utility_keys(
             )?);
         }
     }
-    finite_property_keys(ty)
+    finite_property_keys(ty, generic_interfaces)
 }
 
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {

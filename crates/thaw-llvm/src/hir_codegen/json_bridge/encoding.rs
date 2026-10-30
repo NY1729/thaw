@@ -465,6 +465,29 @@ impl<'ctx> HirCompiler<'ctx> {
         order
     }
 
+    /// Strict subclasses of the class `fields` describes, most derived first.
+    fn derived_class_layouts(&self, fields: &[(String, HirType)]) -> Vec<HirType> {
+        let Some(base) = fields.first().and_then(|(marker, _)| {
+            marker.strip_prefix("__thaw_class_identity_\u{1e}")?.split('\u{1f}').next()
+        }) else {
+            return Vec::new();
+        };
+        let mut found = self
+            .class_layouts
+            .iter()
+            .filter_map(|layout| {
+                let HirType::Object(derived) = layout else { return None };
+                let ancestry = derived.first()?.0.strip_prefix("__thaw_class_identity_\u{1e}")?;
+                let chain: Vec<&str> = ancestry.split('\u{1f}').collect();
+                (chain[1..].contains(&base) && derived.len() >= fields.len()
+                    && derived[1..fields.len()] == fields[1..])
+                    .then(|| (chain.len(), layout.clone()))
+            })
+            .collect::<Vec<_>>();
+        found.sort_by_key(|a| std::cmp::Reverse(a.0));
+        found.into_iter().map(|(_, layout)| layout).collect()
+    }
+
     /// Encodes an object reached through a `Recursive` back-edge. Its layout is unbounded, so
     /// it cannot be unrolled inline: one internal helper per (layout, mode) encodes a node and
     /// calls itself for the nested back-edges, with its own clean function context.
@@ -587,7 +610,151 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(json)
     }
 
+    /// Converting through a base-class type: an allocation of a more derived class converts with
+    /// its own fields and name, like the real object prints.
     fn compile_native_object_to_json_with_undefined(
+        &mut self,
+        object: PointerValue<'ctx>,
+        ty: &HirType,
+        preserve_undefined: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let HirType::Object(fields) = ty else {
+            return self.compile_native_object_to_json_monomorphic(object, ty, preserve_undefined);
+        };
+        if self.console_omit_absent_fields
+            && !self.class_layouts.is_empty()
+            && !fields.is_empty()
+            && !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}") || is_hidden_accessor_field(name))
+        {
+            return self.compile_interface_view_to_json(object, ty, fields, preserve_undefined);
+        }
+        let derived = if self.console_omit_absent_fields && !fields.iter().any(|(name, _)| name == "__thaw_base") {
+            self.derived_class_layouts(fields)
+        } else {
+            Vec::new()
+        };
+        if derived.is_empty() {
+            return self.compile_native_object_to_json_monomorphic(object, ty, preserve_undefined);
+        }
+        let function = self.current_function();
+        let done = self.context.append_basic_block(function, "poly_json_done");
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        for layout in derived {
+            let HirType::Object(derived_fields) = &layout else { continue };
+            let Some(name) = derived_fields[0].0
+                .strip_prefix("__thaw_class_identity_\u{1e}")
+                .and_then(|ancestry| ancestry.split('\u{1f}').next())
+            else {
+                continue;
+            };
+            let expected = self.builder.build_global_string_ptr(name, "poly_class_name")
+                .map_err(|error| error.to_string())?;
+            let matches = self.builder.build_call(
+                self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                &[object.into(), expected.as_pointer_value().into()],
+                "poly_has_identity",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("class identity query returned no value")?.into_int_value();
+            let yes = self.context.append_basic_block(function, "poly_json_derived");
+            let no = self.context.append_basic_block(function, "poly_json_next");
+            self.builder.build_conditional_branch(matches, yes, no).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(yes);
+            let json = self.compile_native_object_to_json_monomorphic(object, &layout, preserve_undefined)?;
+            let end = self.builder.get_insert_block().ok_or("no insertion block")?;
+            self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+            incoming.push((json, end));
+            self.builder.position_at_end(no);
+        }
+        let base = self.compile_native_object_to_json_monomorphic(object, ty, preserve_undefined)?;
+        let end = self.builder.get_insert_block().ok_or("no insertion block")?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        incoming.push((base, end));
+        self.builder.position_at_end(done);
+        let phi = self.builder.build_phi(incoming[0].0.get_type(), "poly_json").map_err(|error| error.to_string())?;
+        for (value, block) in &incoming {
+            phi.add_incoming(&[(value, *block)]);
+        }
+        Ok(phi.as_basic_value())
+    }
+
+    /// An interface-typed object that is a view of a class instance converts as that instance
+    /// (its real class and fields); any other object converts by its declared interface fields.
+    fn compile_interface_view_to_json(
+        &mut self,
+        object: PointerValue<'ctx>,
+        ty: &HirType,
+        fields: &[(String, HirType)],
+        preserve_undefined: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let getter = self.compile_object_accessor(object, "__thaw_view_source", false)?;
+        let function = self.current_function();
+        let is_view = self.builder.build_is_not_null(getter, "object_is_view").map_err(|error| error.to_string())?;
+        let view_block = self.context.append_basic_block(function, "view_json");
+        let plain_block = self.context.append_basic_block(function, "view_plain_json");
+        let done = self.context.append_basic_block(function, "view_json_done");
+        self.builder.build_conditional_branch(is_view, view_block, plain_block).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(plain_block);
+        let plain = self.compile_native_object_to_json_monomorphic(object, ty, preserve_undefined)?;
+        let plain_end = self.builder.get_insert_block().ok_or("no insertion block")?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(view_block);
+        let mut receiver_fields = fields.to_vec();
+        receiver_fields.push(("__thaw_object_method_receiver".into(), HirType::Undefined));
+        let params = vec![HirType::NonArrowReceiver(Box::new(HirType::Object(receiver_fields)))];
+        let opaque = HirType::Object(vec![("__thaw_view_opaque".into(), HirType::Bool)]);
+        let source = self
+            .compile_registered_accessor_call(getter, &params, &opaque, &[object.into()], "view_source_call")?
+            .ok_or("view source getter returned no value")?
+            .into_pointer_value();
+        let mut classes = self.class_layouts.clone();
+        classes.sort_by_key(|layout| match layout {
+            HirType::Object(fields) => std::cmp::Reverse(
+                fields.first().map_or(0, |(marker, _)| marker.matches('\u{1f}').count()),
+            ),
+            _ => std::cmp::Reverse(0),
+        });
+        let mut incoming = vec![(plain, plain_end)];
+        for layout in classes {
+            let HirType::Object(class_fields) = &layout else { continue };
+            let Some(name) = class_fields[0].0
+                .strip_prefix("__thaw_class_identity_\u{1e}")
+                .and_then(|ancestry| ancestry.split('\u{1f}').next())
+            else {
+                continue;
+            };
+            let expected = self.builder.build_global_string_ptr(name, "view_class_name")
+                .map_err(|error| error.to_string())?;
+            let matches = self.builder.build_call(
+                self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                &[source.into(), expected.as_pointer_value().into()],
+                "view_has_identity",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("class identity query returned no value")?.into_int_value();
+            let yes = self.context.append_basic_block(function, "view_json_class");
+            let no = self.context.append_basic_block(function, "view_json_next");
+            self.builder.build_conditional_branch(matches, yes, no).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(yes);
+            let json = self.compile_native_object_to_json_monomorphic(source, &layout, preserve_undefined)?;
+            let end = self.builder.get_insert_block().ok_or("no insertion block")?;
+            self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+            incoming.push((json, end));
+            self.builder.position_at_end(no);
+        }
+        let fallback = self.compile_native_object_to_json_monomorphic(object, ty, preserve_undefined)?;
+        let end = self.builder.get_insert_block().ok_or("no insertion block")?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        incoming.push((fallback, end));
+        self.builder.position_at_end(done);
+        let phi = self.builder.build_phi(incoming[0].0.get_type(), "view_json").map_err(|error| error.to_string())?;
+        for (value, block) in &incoming {
+            phi.add_incoming(&[(value, *block)]);
+        }
+        Ok(phi.as_basic_value())
+    }
+
+    fn compile_native_object_to_json_monomorphic(
         &mut self,
         object: PointerValue<'ctx>,
         ty: &HirType,

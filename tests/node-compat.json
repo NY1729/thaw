@@ -3534,6 +3534,61 @@
       "source": "interface Shape { area(): number; name: string }\nclass Circle implements Shape { name = \"c\"; r: number; constructor(r: number) { this.r = r; } area(): number { return 2 * this.r; } }\nclass Rect implements Shape { name = \"r\"; w: number; h: number; constructor(w: number, h: number) { this.w = w; this.h = h; } area(): number { return this.w * this.h; } }\ninterface Counter { n: number; inc(by: number): number }\nclass C implements Counter { n = 0; inc(by: number): number { this.n += by; return this.n; } }\nfunction show(s: Shape) { return s.name + \":\" + s.area(); }\nfunction bump(c: Counter) { c.inc(2); c.n += 1; return c.n; }\nfunction main(): void {\n  console.log(show(new Circle(1)), show(new Rect(2, 3)));\n  const shapes: Shape[] = [new Circle(2), new Rect(1, 1)];\n  console.log(shapes.map((s) => s.area()), shapes[0].area());\n  const c = new C();\n  console.log(bump(c), c.n);\n  const k: Counter = c;\n  console.log(k.inc(5), c.n);\n  const d = new Circle(3);\n  const s: Shape = d;\n  console.log(s.name, s.area());\n}"
     },
     {
+      "name": "audit2 instanceof narrows a base-class value to its subclass",
+      "expect": "matched",
+      "source": "class A { x = 1; }\nclass B extends A { y = 2; }\nclass C extends B { z = 3; }\nfunction f(a: A): number { return a instanceof B ? a.y : a.x; }\nfunction g(a: A): string {\n  if (a instanceof C) { return \"C\" + a.z + a.y; }\n  else if (a instanceof B) { a.y += 1; return \"B\" + a.y; }\n  return \"A\" + a.x;\n}\nfunction main(): void { console.log(f(new A()), f(new B()), g(new A()), g(new B()), g(new C())); }"
+    },
+    {
+      "name": "audit2 class field initialised with new Map/Set and an enum member needs no annotation",
+      "expect": "matched",
+      "source": "const State = { Idle: 0, Running: 1 } as const;\ntype State = 0 | 1;\nclass M {\n  private m = new Map<string, number>();\n  seen = new Set<string>();\n  state = State.Idle;\n  set(k: string, v: number) { this.m.set(k, v); this.seen.add(k); }\n  size() { return this.m.size + this.seen.size; }\n  go() { this.state = State.Running; }\n}\nfunction main(): void { const m = new M(); m.set(\"a\", 1); m.go(); console.log(m.size(), m.state); }"
+    },
+    {
+      "name": "audit2 abstract method override without return annotation",
+      "expect": "matched",
+      "source": "abstract class Base { abstract area(): number; d() { return this.area(); } }\nclass Rect extends Base { w: number; constructor(w: number) { super(); this.w = w; } area() { return this.w * 2; } }\nclass Sq extends Base { area(): number { return 4; } }\nfunction main(): void { console.log(new Rect(2).d(), new Sq().d()); }"
+    },
+    {
+      "name": "audit2 interface methods in array params callbacks and constrained generics",
+      "expect": "matched",
+      "source": "interface Shape { area(): number; name: string }\nclass Circle implements Shape { name = \"c\"; r: number; constructor(r: number) { this.r = r; } area(): number { return 3 * this.r * this.r; } }\nclass Rect implements Shape { name = \"r\"; w: number; h: number; constructor(w: number, h: number) { this.w = w; this.h = h; } area(): number { return this.w * this.h; } }\nfunction largest(xs: Shape[]): Shape { return xs.reduce((a, b) => (a.area() >= b.area() ? a : b)); }\nfunction total(xs: Shape[]): number { let t = 0; for (const x of xs) t += x.area(); return t; }\nfunction areas(xs: Shape[]): number[] { return xs.map((s) => s.area()); }\nfunction biggest<T extends Shape>(xs: T[]): T { let m = xs[0]; for (const x of xs) if (x.area() > m.area()) m = x; return m; }\nfunction one<T extends Shape>(x: T): number { return x.area(); }\nfunction main(): void {\n  const shapes: Shape[] = [new Circle(2), new Rect(3, 5), new Circle(1)];\n  console.log(largest(shapes).name, total(shapes), areas(shapes));\n  console.log(biggest(shapes).name, one(new Rect(2, 2)));\n}"
+    },
+    {
+      "name": "audit2 generic class with a generic method named map returning the class",
+      "expect": "matched",
+      "source": "class Stack<T> {\n  private items: T[] = [];\n  push(x: T): this { this.items.push(x); return this; }\n  map<U>(f: (x: T) => U): Stack<U> { const s = new Stack<U>(); this.items.forEach((i) => s.push(f(i))); return s; }\n  toArray(): T[] { return [...this.items]; }\n}\nclass Box<T> {\n  v: T;\n  constructor(v: T) { this.v = v; }\n  map<U>(f: (x: T) => U): Box<U> { return new Box<U>(f(this.v)); }\n}\nfunction main(): void {\n  const st = new Stack<number>().push(1).push(2);\n  console.log(st.map((x) => x * 2).toArray(), st.map((x) => \"n\" + x).toArray());\n  const b = new Box<number>(2);\n  console.log(b.map((x) => x * 2).v, b.map((x) => \"s\" + x).v);\n}"
+    },
+    {
+      "name": "audit2 interface-typed values keep class identity for instanceof as and narrowing, abstract base receivers dispatch",
+      "expect": "matched",
+      "source": "interface Shape { area(): number; name: string }\nabstract class Base implements Shape {\n  name: string;\n  constructor(name: string) { this.name = name; }\n  abstract area(): number;\n  describe(): string { return this.name + \":\" + this.area(); }\n}\nclass Circle extends Base { r: number; constructor(r: number) { super(\"circle\"); this.r = r; } area(): number { return 3 * this.r; } }\nclass Rect extends Base { w: number; h: number; constructor(w: number, h: number) { super(\"rect\"); this.w = w; this.h = h; } area(): number { return this.w * this.h; } }\ninterface Sized { size: number }\nclass Sq implements Sized { size = 2; s: number; constructor(s: number) { this.s = s; } }\nfunction side(s: Sized): number { return s instanceof Sq ? s.s : -1; }\nfunction describe(b: Base): string { return b.describe() + \"/\" + b.area(); }\nfunction main(): void {\n  const shapes: Shape[] = [new Circle(2), new Rect(3, 4)];\n  console.log(shapes[0] instanceof Circle, shapes[1] instanceof Circle, shapes[0] instanceof Base);\n  shapes.forEach((s) => console.log((s as Base).describe()));\n  for (const s of shapes) { if (s instanceof Rect) console.log(\"rect\", s.area()); }\n  console.log(describe(new Circle(1)), describe(new Rect(1, 5)));\n  console.log(side(new Sq(7)), side({ size: 1 }));\n}"
+    },
+    {
+      "name": "audit2 type alias and interface declared inside a function body",
+      "expect": "matched",
+      "source": "function make(): number {\n  type Pair = { a: number; b: number };\n  interface Named { label: string }\n  const p: Pair = { a: 1, b: 2 };\n  const n: Named = { label: \"x\" };\n  return p.a + p.b + n.label.length;\n}\nfunction main(): void {\n  type Local = { v: string };\n  const l: Local = { v: \"ok\" };\n  console.log(make(), l, l.v);\n}"
+    },
+    {
+      "name": "audit2 empty array reassignment and nullish empty default take the declared element type",
+      "expect": "matched",
+      "source": "function main(): void {\n  let row: string[] = [];\n  const rows: string[][] = [];\n  row.push(\"a\"); rows.push(row); row = []; row.push(\"b\"); rows.push(row);\n  console.log(rows);\n  const g = new Map<string, [string, number][]>([[\"A\", [[\"B\", 1]]]]);\n  for (const [v, w] of g.get(\"A\") ?? []) console.log(v, w);\n  for (const [v, w] of g.get(\"Z\") ?? []) console.log(v, w);\n  console.log(\"done\");\n}"
+    },
+    {
+      "name": "audit2 Object.fromEntries of mapped pairs and Record over an enum key",
+      "expect": "matched",
+      "source": "const StateV = { Idle: \"idle\", Running: \"running\", Done: \"done\" } as const;\ntype State = \"idle\" | \"running\" | \"done\";\nconst next: Record<State, State[]> = { idle: [\"running\"], running: [\"done\"], done: [] };\nconst labels: { [K in State]: string } = { idle: \"i\", running: \"r\", done: \"d\" };\ninterface U { id: number; name: string }\nfunction main(): void {\n  const users: U[] = [{ id: 1, name: \"a\" }, { id: 2, name: \"b\" }];\n  console.log(Object.fromEntries(users.map((u) => [u.id, u.name])), Object.fromEntries(users.map((u) => [u.name, u.id])));\n  const s: State = StateV.Running;\n  console.log(next[StateV.Idle], s, labels[StateV.Done], labels[s]);\n}"
+    },
+    {
+      "name": "audit2 subclass instance prints with its own class through a base-typed and interface-typed slot",
+      "expect": "matched",
+      "source": "interface Shape { area(): number; name: string }\nclass Animal { name: string; constructor(name: string) { this.name = name; } speak(): string { return this.name; } }\nclass Dog extends Animal { tricks: string[] = [\"sit\"]; speak(): string { return \"woof \" + this.name; } }\nclass Circle implements Shape { r: number; name = \"c\"; constructor(r: number) { this.r = r; } area(): number { return 3 * this.r; } }\nfunction main(): void {\n  const d = new Dog(\"Rex\");\n  const a: Animal = d;\n  const xs: Animal[] = [new Animal(\"Cat\"), d];\n  console.log(a, xs);\n  const s: Shape = new Circle(2);\n  const shapes: Shape[] = [new Circle(1)];\n  console.log(s, shapes, s.constructor.name, shapes[0].constructor.name);\n  const plain: Shape = { name: \"p\", area: () => 1 };\n  console.log(plain.name);\n}"
+    },
+    {
+      "name": "audit2 dictionary element reads, generic element args, async interface members and fromEntries of a map",
+      "expect": "matched",
+      "source": "const StateV = { Idle: \"idle\", Running: \"running\", Done: \"done\" } as const;\ntype State = \"idle\" | \"running\" | \"done\";\nconst next: Record<State, State[]> = { idle: [\"running\"], running: [\"done\"], done: [] };\ninterface Shape { area(): number }\nclass Sq implements Shape { w: number; constructor(w: number) { this.w = w; } area(): number { return this.w * this.w; } }\nfunction one<T extends Shape>(x: T): number { return x.area(); }\ninterface Repo { get(id: number): Promise<string>; name: string }\nclass Mem implements Repo { name = \"mem\"; async get(id: number): Promise<string> { return \"item\" + id; } }\nasync function use(r: Repo): Promise<string> { return r.name + \":\" + (await r.get(7)); }\nasync function main(): Promise<void> {\n  let s: State = StateV.Idle;\n  s = next[s][0];\n  const n: State = next[s][0];\n  console.log(s, n);\n  const shapes: Shape[] = [new Sq(2), new Sq(3)];\n  console.log(one(shapes[0]), one(shapes[1]));\n  console.log(await use(new Mem()));\n  console.log(Object.fromEntries(new Map([[\"k\", 1]])));\n}"
+    },
+    {
       "name": "class extends EventEmitter from node:events emits to listeners, once, instanceof",
       "expect": "matched",
       "source": "import { EventEmitter } from 'node:events';\nclass Svc extends EventEmitter { n: number = 0; run(): void { this.n++; this.emit('ran', this.n); } }\nfunction main(): void {\n  const s = new Svc();\n  s.on('ran', (n: number) => console.log('ran', n));\n  s.once('ran', (n: number) => console.log('once', n));\n  s.run(); s.run();\n  console.log(s instanceof EventEmitter, s instanceof Svc, s.listenerCount('ran'), s.eventNames());\n  try { s.emit('error', new Error('boom')); } catch (e: any) { console.log(e.message); }\n}"
@@ -3567,6 +3622,36 @@
       "name": "bigint arbitrary precision: errors json and catch",
       "expect": "matched",
       "source": "function main(): void {\n  try { console.log(1n / 0n); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { console.log(2n ** -1n); } catch (e) { console.log((e as Error).name); }\n  try { console.log(BigInt(\"12x\")); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { throw 2n ** 70n; } catch (e) { console.log(e); }\n  console.log(BigInt(\"0xff\"), BigInt(\"  42 \"), BigInt(\"\"), [2n ** 65n], { v: 2n ** 65n });\n}"
+    },
+    {
+      "name": "audit2 D U+0001-prefixed strings stay plain",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s: string = \"\\u0001abc\";\n  console.log(s.length, s === \"\\u0001abc\", JSON.stringify(s), s.charCodeAt(0));\n  console.log([\"\\u0001\", \"\\u0001x\"], { k: \"\\u0001y\" });\n  console.log(\"\\u0001q\");\n}"
+    },
+    {
+      "name": "audit2 D util.format matches node",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.format(\"%s\", -0), util.format(\"%d\", -0), util.format(\"%i\", \"0x10\"));\n  console.log(util.format(\"%s\", { a: 1 }), util.format(\"%s\", [1, 2]));\n  console.log(util.format(\"%x\", 1), util.format(\"%s\"), util.format(1, 2), util.format(\"%c styled\", \"css\"), util.format(\"%d\", \"x\"), util.format(\"%s\", 5n), util.format(\"%d\", 5n));\n  console.log(util.format(\"%o\", [1]), util.format(\"%O\", { a: { b: { c: { d: 1 } } } }), util.format(\"%j\", { a: 1 }), util.format(\"%s:%s\", \"a\"));\n  console.log(util.format(\"%s\", null, undefined), util.format(\"%s\", \"a\", { b: 1 }, [2]), util.format(\"%%s\"), util.format(\"%s%%\", 1));\n}"
+    },
+    {
+      "name": "audit2 D console format nullish bigint symbol",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(\"%s\", null, undefined, 5n, Symbol(\"q\"));\n  console.log(\"%d\", 5n, \"%i\", 7n);\n  console.log(\"%s\", 5n);\n  console.log(\"%s\", Symbol(\"r\"));\n}"
+    },
+    {
+      "name": "audit2 D util.inspect bigint typed arrays buffer",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.inspect({ a: 1n }), util.inspect([1n, -2n]), util.inspect(5n), util.inspect(-0));\n  console.log(util.inspect(new Uint8Array(3)), util.inspect(new Float64Array(2)), util.inspect(new Uint16Array([1, 2])), util.inspect(new Int8Array(0)));\n  console.log(util.inspect(Buffer.from(\"ab\")), util.inspect({ b: new Uint8Array(2) }));\n}"
+    },
+    {
+      "name": "audit2 D console.table Map and Set",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.table(new Map<string, number>([[\"k\", 1], [\"j\", 2]]));\n  console.table(new Set<number>([1, 2]));\n}"
+    },
+    {
+      "name": "audit2 D console.log symbol keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const k = Symbol(\"k\");\n  const o: any = { a: 2 };\n  o[k] = 1;\n  console.log(o);\n  const p = { a: 2, [k]: 1 };\n  console.log(p);\n}"
     }
   ]
 }

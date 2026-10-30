@@ -2921,8 +2921,22 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         }
         let instance = self.lower_expr(&member.obj)?;
-        let is_instance = class_name_from_type(&self.infer_expr_type(&instance)?).is_some();
-        Ok(is_instance.then_some(instance))
+        let ty = self.infer_expr_type(&instance)?;
+        let (instance, ty) = match &ty {
+            HirType::Optional(payload) if matches!(payload.as_ref(), HirType::Object(_)) => {
+                let strict = self.receiver_requires_narrowing(&member.obj);
+                self.unwrap_required_optional_member(instance, ty.clone(), "constructor", strict)?
+            }
+            _ => (instance, ty),
+        };
+        if class_name_from_type(&ty).is_some() {
+            return Ok(Some(instance));
+        }
+        // An interface-typed value: the class instance behind it (a view remembers it).
+        if matches!(&ty, HirType::Object(fields) if !fields.is_empty()) {
+            return self.view_unwrap(instance, &ty).map(Some);
+        }
+        Ok(None)
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
@@ -3332,6 +3346,26 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     HirType::Object(fields) => {
+                        // A constant numeric key (a literal or an enum member) names a property.
+                        let constant_number = match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Num(number)) => Some(number.value),
+                            Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                                (Expr::Ident(owner), MemberProp::Ident(property)) => {
+                                    match self.enum_values.get(&(self.resolve_binding(owner.sym.as_ref()), property.sym.to_string())) {
+                                        Some(HirLit::F64(number)) => Some(*number),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(number) = constant_number {
+                            let key = if number.fract() == 0.0 { format!("{}", number as i64) } else { number.to_string() };
+                            if fields.iter().any(|(name, _)| name == &key) {
+                                return self.lower_fixed_object_property_read(obj, &fields, &key);
+                            }
+                        }
                         if let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() {
                             let key = key.value.to_string_lossy().into_owned();
                             if fields.iter().any(|(name, _)| name == &key) {
@@ -3398,6 +3432,7 @@ impl<'a> FnLowerer<'a> {
                             if !members.contains(&HirType::Undefined) {
                                 members.push(HirType::Undefined);
                             }
+                            let key = if self.infer_expr_type(&key)? == HirType::F64 { self.coerce_primitive_to_string(key)? } else { key };
                             self.expect_type(&HirType::Str, &key, "computed object key")?;
                             return Ok(HirExpr::DynamicPropAccess(
                                 Box::new(obj),
@@ -3413,7 +3448,8 @@ impl<'a> FnLowerer<'a> {
                             }
                             other => HirType::Optional(Box::new(other.clone())),
                         };
-                        self.expect_type(&HirType::Str, &key, "computed object key")?;
+                        let key = if self.infer_expr_type(&key)? == HirType::F64 { self.coerce_primitive_to_string(key)? } else { key };
+                            self.expect_type(&HirType::Str, &key, "computed object key")?;
                         Ok(HirExpr::DynamicPropAccess(
                             Box::new(obj),
                             Box::new(key),
@@ -5236,6 +5272,27 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_fixed_object_as_dynamic_accessor_object(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        factory_body: bool,
+        live: bool,
+        class_methods: bool,
+    ) -> Result<HirExpr, String> {
+        // A class whose methods return its own type projects itself without end; report it
+        // instead of overflowing the compiler's stack.
+        if self.accessor_projection_depth >= 24 {
+            return Err("a recursive class type (a method returning its own class, or a self-referential field) cannot be projected as a dynamic object".into());
+        }
+        self.accessor_projection_depth += 1;
+        let result = self.lower_fixed_object_as_dynamic_accessor_object_inner(
+            value, fields, factory_body, live, class_methods,
+        );
+        self.accessor_projection_depth -= 1;
+        result
+    }
+
+    fn lower_fixed_object_as_dynamic_accessor_object_inner(
         &mut self,
         value: HirExpr,
         fields: &[(Symbol, HirType)],
