@@ -3739,6 +3739,31 @@
       "source": "function main(): void {\n  const P: any = (globalThis as any).Promise;\n  const p: any = new P((r: any) => r(1));\n  const o: any = {};\n  console.log(p instanceof Promise, o instanceof Promise);\n}"
     },
     {
+      "name": "audit2 leftovers arguments.length counts passed arguments",
+      "expect": "matched",
+      "source": "function f(a?: number, b?: number): number { return arguments.length; }\nfunction h(a: number, b: number): string { return `${arguments.length}:${arguments[0]}`; }\nfunction s(): number { let t = 0; for (let i = 0; i < arguments.length; i++) t += arguments[i]; return t; }\nfunction main(): void {\n  console.log(f(), f(1), f(1, 2));\n  console.log((h as any)(7, 8, 9), (s as any)(1, 2, 3));\n}"
+    },
+    {
+      "name": "audit2 leftovers Object.fromEntries of a number-keyed Map",
+      "expect": "matched",
+      "source": "function main(): void {\n  const m = new Map<number, string>([[1, \"a\"], [2, \"b\"]]);\n  console.log(Object.fromEntries(m));\n  const n = new Map<string, number>([[\"x\", 1]]);\n  console.log(Object.fromEntries(n));\n  console.log(Object.keys(Object.fromEntries(new Map<number, number>([[10, 1], [3, 2]]))));\n}"
+    },
+    {
+      "name": "audit2 leftovers finished generator result prints value undefined",
+      "expect": "matched",
+      "source": "function* g(): Generator<number, void, undefined> { yield 1; yield 2; }\nfunction* h(): Generator<number, string, undefined> { yield 1; return \"r\"; }\nfunction main(): void {\n  const it = g();\n  console.log(it.next(), it.next(), it.next(), it.next());\n  const it3 = h();\n  console.log(it3.next(), it3.next(), it3.next());\n  const r = g().next();\n  if (!r.done) console.log(r.value + 1);\n}"
+    },
+    {
+      "name": "audit2 leftovers class field inferred from a conditional of constructions",
+      "expect": "matched",
+      "source": "class A { x = 1; hi(): string { return \"hi\" + this.x; } }\nclass B {\n  a = process.argv.length > 0 ? new A() : new A();\n  c = process.argv.length > 0 ? [1, 2] : [3];\n}\nfunction main(): void {\n  const b = new B();\n  b.a.x = 7;\n  console.log(b.a.hi(), b.c.length, b);\n}"
+    },
+    {
+      "name": "audit2 leftovers closure referencing a later-declared binding",
+      "expect": "matched",
+      "source": "const f = () => y;\nlet y = 2;\nconsole.log(f());\nfunction main(): void {\n  const k = () => w + y;\n  let w = 5;\n  console.log(k());\n  const p = (): number => q() + 1;\n  const q = (): number => 10;\n  console.log(p());\n}"
+    },
+    {
       "name": "this field method call on a class-typed field",
       "expect": "matched",
       "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
