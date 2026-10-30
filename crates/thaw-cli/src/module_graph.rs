@@ -903,6 +903,12 @@ fn load_module(
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
     let mut module = thaw_hir::normalize_top_level_destructuring(&module)
         .map_err(|error| format!("failed to normalize `{}`: {error}", path.display()))?;
+    crate::event_emitter_base::inline_event_emitter_base(&mut module).map_err(|error| {
+        format!(
+            "failed to inline the EventEmitter base of `{}`: {error}",
+            path.display()
+        )
+    })?;
     for item in &mut module.body {
         let ModuleItem::ModuleDecl(decl) = item else {
             continue;

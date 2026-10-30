@@ -338,7 +338,18 @@ fn lower_class_constructor(
                     Box::new(base),
                 )));
                 initializer_body.append(&mut own_initializers);
-            } else if matches!(base_name.as_str(), "Map" | "Set")
+            } else if base_name == "RegExp" && !signatures.contains_key(&base_initializer) {
+                let pattern = params.first().ok_or("implicit RegExp constructor is missing its pattern")?;
+                let argument = swc_ecma_ast::ExprOrSpread {
+                    spread: None,
+                    expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        pattern.name.as_str().into(),
+                        swc_common::DUMMY_SP,
+                    ))),
+                };
+                initializer_body.push(HirStmt::Expr(lowerer.lower_native_collection_super(&base_name, &[argument])?));
+                initializer_body.append(&mut own_initializers);
+            } else if matches!(base_name.as_str(), "Map" | "Set" | "Date")
                 && !signatures.contains_key(&base_initializer)
             {
                 let entries = params
