@@ -788,7 +788,11 @@ fn effective_name_message(pointer: *const c_char, text: &str) -> (String, String
 }
 
 fn is_framed_error_text(pointer: *const c_char) -> bool {
-    !pointer.is_null() && unsafe { *pointer } == ERROR_TAG_MARKER as c_char
+    // A frame is `\u{1}Name\u{1}message`; a user string that merely starts with U+0001
+    // has no closing delimiter and is plain text.
+    !pointer.is_null()
+        && unsafe { *pointer } == ERROR_TAG_MARKER as c_char
+        && unsafe { CStr::from_ptr(pointer) }.to_bytes()[1..].contains(&(ERROR_TAG_MARKER as u8))
 }
 
 /// Keys of the JS-origin `\u{5}` property bag, in bag order.
