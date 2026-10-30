@@ -1537,6 +1537,7 @@ fn has_test_json_coercion(expr: &HirExpr, expected: &HirType) -> bool {
     match expr {
         HirExpr::JsonAsString(_) => expected == &HirType::Str,
         HirExpr::JsonAsNumber(_) => expected == &HirType::F64,
+        HirExpr::JsonAsNative(_, ty) => ty == expected,
         HirExpr::Call(callee, args) => has_test_json_coercion(callee, expected)
             || args.iter().any(|arg| has_test_json_coercion(arg, expected)),
         HirExpr::Block(statements) => statements.iter().any(|statement| match statement {

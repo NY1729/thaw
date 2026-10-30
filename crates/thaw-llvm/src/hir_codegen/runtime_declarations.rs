@@ -2658,6 +2658,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_as_string_value",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_console_string",
             json_as_string_type,
             Some(Linkage::External),
