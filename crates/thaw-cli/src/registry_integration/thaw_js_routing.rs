@@ -6,10 +6,18 @@ fn thaw_js_routing_enabled() -> bool {
     std::env::var("THAW_JS_RUNTIME").as_deref() == Ok("1")
 }
 
-/// Whether the program text names `name` (the last segment of a dotted path). Conservative: a
-/// substring match, so it can only over-report, which keeps a package on QuickJS.
+/// Whether the program text names `name` (the last segment of a dotted path) as a whole
+/// identifier (`hash` is not mentioned by `hashSync`).
 fn thaw_js_mentions(user_source: &str, name: &str) -> bool {
-    user_source.contains(name.rsplit('.').next().unwrap_or(name))
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    user_source.match_indices(name).any(|(start, _)| {
+        !user_source[..start].chars().next_back().is_some_and(is_word)
+            && !user_source[start + name.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_word)
+    })
 }
 
 /// Whether the program uses the package's value export `name` in a way thaw-js cannot serve: any
@@ -333,4 +341,13 @@ fn thaw_js_package_eligible(
                 thaw_js_declaration_plain(line) || reject(format!("`{}`: {line}", function.name))
             })
         })
+}
+
+#[cfg(test)]
+#[test]
+fn thaw_js_mentions_matches_whole_identifiers_only() {
+    assert!(!thaw_js_mentions("bcrypt.hashSync(a)", "hash"));
+    assert!(thaw_js_mentions("bcrypt.hash(a)", "hash"));
+    assert!(thaw_js_mentions("import { $x } from 'p'", "$x"));
+    assert!(thaw_js_mentions("ns.sub.hash(1)", "a.b.hash"));
 }

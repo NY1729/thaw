@@ -3212,9 +3212,12 @@ name = "thaw-js"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "md-5",
  "num-bigint",
  "num-traits",
  "regress",
+ "sha1",
+ "sha2",
  "swc_ecma_visit",
  "thaw-arena",
  "thaw-parser",
