@@ -807,22 +807,6 @@ impl<'a> FnLowerer<'a> {
             ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
-                if let Some((_, placeholder)) = self.tdz_pending.get(&*ident.sym).filter(|(bound, _)| *bound == name) {
-                    let message = format!(
-                        "Cannot access '{}' before initialization",
-                        display_class_name(ident.sym.as_ref())
-                    );
-                    return Ok(HirExpr::ThrowValue(
-                        Box::new(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_error_frame".into())),
-                            vec![
-                                HirExpr::Lit(HirLit::Str("ReferenceError".into())),
-                                HirExpr::Lit(HirLit::Str(message)),
-                            ],
-                        )),
-                        Box::new(HirExpr::Lit(placeholder.clone())),
-                    ));
-                }
                 if self.deferred_generic_binds.contains_key(&name) {
                     return Err(format!(
                         "generic bound function `{name}` needs a call-site specialization before it can be used as a value"
