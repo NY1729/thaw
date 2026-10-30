@@ -3442,6 +3442,16 @@
       "name": "audit2 method call on narrowed property local",
       "expect": "matched",
       "source": "class B { v = 1; m(): number { return this.v; } }\nclass A { b: B | null = null; }\nfunction main(): void {\n  const a = new A(); a.b = new B();\n  const x = a.b;\n  if (x !== null) console.log(x.m());\n  let c: B | null = new B();\n  while (c !== null) { c.v = 5; console.log(c.v); c = null; }\n}"
+    },
+    {
+      "name": "audit2 recursive instances print stringify and instanceof",
+      "expect": "matched",
+      "source": "class N { next: N | null = null; v: number; constructor(v: number) { this.v = v; } }\nclass T { kids: T[] = []; label: string; constructor(l: string) { this.label = l; } }\nfunction main(): void {\n  const a = new N(1); a.next = new N(2); a.next.next = new N(3);\n  console.log(a);\n  console.log(JSON.stringify(a));\n  console.log(a instanceof N, a.next instanceof N);\n  const t = new T(\"r\"); t.kids.push(new T(\"a\")); t.kids[0].kids.push(new T(\"b\")); t.kids.push(new T(\"c\"));\n  console.log(t);\n  console.log(JSON.stringify(t));\n  const c = new N(9); c.next = c;\n  try { console.log(JSON.stringify(c)); } catch (e) { console.log((e as Error).name); }\n}"
+    },
+    {
+      "name": "audit2 generic recursive classes",
+      "expect": "matched",
+      "source": "class Node<T> { next: Node<T> | null = null; value: T; constructor(v: T) { this.value = v; } }\nclass Stack<T> {\n  head: Node<T> | null = null; size = 0;\n  push(v: T): void { const n = new Node<T>(v); n.next = this.head; this.head = n; this.size++; }\n  pop(): T | undefined { const h = this.head; if (h === null) return undefined; this.head = h.next; this.size--; return h.value; }\n}\nfunction main1(): void {\n  const s = new Stack<number>(); s.push(1); s.push(2); s.push(3);\n  console.log(s.pop(), s.pop(), s.size);\n  const t = new Stack<string>(); t.push(\"a\"); console.log(t.pop(), t.pop());\n}\n\nclass TNode<K, V> {\n  left: TNode<K, V> | null = null; right: TNode<K, V> | null = null;\n  key: K; val: V;\n  constructor(k: K, v: V) { this.key = k; this.val = v; }\n}\nclass Tree<V> {\n  root: TNode<number, V> | null = null;\n  put(k: number, v: V): void {\n    const n = new TNode<number, V>(k, v);\n    let cur = this.root;\n    if (cur === null) { this.root = n; return; }\n    while (true) {\n      if (k < cur.key) { const l: TNode<number, V> | null = cur.left; if (l === null) { cur.left = n; return; } cur = l; }\n      else { const r: TNode<number, V> | null = cur.right; if (r === null) { cur.right = n; return; } cur = r; }\n    }\n  }\n  walk(n: TNode<number, V> | null, out: V[]): void {\n    if (n === null) return;\n    this.walk(n.left, out); out.push(n.val); this.walk(n.right, out);\n  }\n  all(): V[] { const out: V[] = []; this.walk(this.root, out); return out; }\n}\nclass Link<T> { next: Link<T> | null = null; v: T; constructor(v: T) { this.v = v; } }\nfunction main(): void {\n  main1();\n  const t = new Tree<string>();\n  t.put(5, \"five\"); t.put(2, \"two\"); t.put(8, \"eight\"); t.put(1, \"one\");\n  console.log(t.all());\n  const n = new Tree<number>(); n.put(2, 20); n.put(1, 10); console.log(n.all());\n  const l = new Link<number>(1); l.next = new Link<number>(2);\n  console.log(l.v, l.next !== null);\n}"
     }
   ]
 }

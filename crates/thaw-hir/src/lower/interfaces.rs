@@ -295,17 +295,11 @@ fn recursive_back_edge(name: &str, resolved: &mut HashMap<Symbol, HirType>) -> H
 /// Publishes the finished layout of `name` if a back-edge to it was handed out.
 fn publish_recursive_layout(name: &str, ty: &HirType, resolved: &HashMap<Symbol, HirType>) -> Result<(), String> {
     if let Some(HirType::Recursive(key)) = resolved.get(&format!("{RECURSIVE_KEY_PREFIX}{name}")) {
-        // Only an object may be referenced from inside itself, and only through an array,
-        // nullable or optional slot: a *required* direct field of its own type would need an
-        // infinite (or cyclic) value, which Thaw's fixed-size layout does not represent.
-        let HirType::Object(fields) = ty else {
+        // Only an object may be referenced from inside itself; `type A = B; type B = A` is a
+        // plain cycle with no layout at all.
+        if !matches!(ty, HirType::Object(_)) {
             return Err(format!(
                 "type declaration cycle `{name}` cannot use Thaw's fixed-size native layout"
-            ));
-        };
-        if fields.iter().any(|(_, field)| field == &HirType::Recursive(key.clone())) {
-            return Err(format!(
-                "`{name}` is (indirectly) self-referential, which Thaw's fixed-size object layout can't represent"
             ));
         }
         crate::register_recursive_layout(key, ty.clone());
