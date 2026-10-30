@@ -2711,7 +2711,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
 
     let mut specialized = Vec::new();
     for fn_decl in fn_decls {
-        let function = lower_fn_decl(
+        let lowered = lower_fn_decl(
             fn_decl,
             &signatures,
             &interfaces,
@@ -2721,10 +2721,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &global_types,
             &immutable_globals,
             None,
-        )?;
-        if !signatures[&function.name].generic_type_params.is_empty() {
+        );
+        // A generic body is only a template here (its `T` is `Dynamic`, so e.g. a method call on
+        // a `T extends Shape` value cannot resolve); each instantiation is lowered and checked
+        // with its concrete types.
+        if !signatures[fn_decl.ident.sym.as_ref()].generic_type_params.is_empty() {
             continue;
         }
+        let function = lowered?;
         specialized.push(function);
     }
     for declaration in &class_decls {

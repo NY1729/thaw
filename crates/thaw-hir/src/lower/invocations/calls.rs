@@ -2065,6 +2065,18 @@ impl<'a> FnLowerer<'a> {
                 };
                 if let Some((object_expr, object_ty, object_label)) = lowered_object {
                     let requested_property = property.as_str();
+                    // An element read that only looks optional (the native types are more
+                    // conservative than TypeScript's) before calling a method-bearing object.
+                    let (object_expr, object_ty) = match &object_ty {
+                        HirType::Optional(payload) if matches!(payload.as_ref(), HirType::Object(fields)
+                            if fields.iter().any(|(name, ty)| name == requested_property
+                                && matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)))) =>
+                        {
+                            let strict = self.receiver_requires_narrowing(&member.obj);
+                            self.unwrap_required_optional_member(object_expr, object_ty, requested_property, strict)?
+                        }
+                        _ => (object_expr, object_ty),
+                    };
                     if matches!(object_expr, HirExpr::NonArrowThis { .. })
                         || matches!(object_ty, HirType::NonArrowReceiver(_))
                     {

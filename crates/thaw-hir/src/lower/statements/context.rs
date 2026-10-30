@@ -231,7 +231,13 @@ impl<'a> FnLowerer<'a> {
             }),
             Expr::Ident(ident) => {
                 let resolved = self.resolve_binding(ident.sym.as_ref());
-                self.sparse_arrays.contains(&resolved)
+                // Elements with methods (class instances, interfaces) cannot be called through an
+                // `Optional`: a hole there is outside what the declared element type allows.
+                let method_elements = matches!(self.scope.get(&resolved),
+                    Some(HirType::Array(element)) if matches!(element.as_ref(), HirType::Object(fields)
+                        if class_name_from_type(element).is_some()
+                            || fields.iter().any(|(_, field)| matches!(field, HirType::Function(..) | HirType::CallableFunction(..)))));
+                !method_elements && self.sparse_arrays.contains(&resolved)
             }
             Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
                 Some(Expr::Member(member))
