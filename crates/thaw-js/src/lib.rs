@@ -42,6 +42,8 @@ mod typed;
 mod url;
 #[path = "web/abort.rs"]
 mod web_abort;
+#[path = "web/blob.rs"]
+mod web_blob;
 #[path = "web/crypto.rs"]
 mod web_crypto;
 #[path = "web/dom_exception.rs"]
@@ -677,6 +679,7 @@ impl Interp {
         web_text_codec::install(&mut it);
         web_event_target::install(&mut it);
         web_abort::install(&mut it);
+        web_blob::install(&mut it);
         web_crypto::install(&mut it);
         it.install_url();
         it.run(extras::EXTRAS_LATE)

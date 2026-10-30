@@ -83,6 +83,12 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         return it.get(&m, "exports");
     }
     let Some(factory) = loader.factories.get(key).cloned() else {
+        // ponytail: only the crypto stand-in is a builtin module; add others as packages need them
+        if matches!(key, "node:crypto" | "crypto") {
+            return Ok(it
+                .lookup(&it.global.clone(), "__thaw_crypto_module")
+                .unwrap_or(Value::Undefined));
+        }
         return Err(Ctl::Throw(Value::str(&format!(
             "Cannot find module '{key}'"
         ))));
@@ -111,11 +117,11 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         &[
             module.clone(),
             exports.clone(),
-            require,
+            require.clone(),
             Value::Undefined,
             file,
             Value::str("/"),
-            Value::Undefined,
+            require,
         ],
     )?;
     it.get(&module, "exports")

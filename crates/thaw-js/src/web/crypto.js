@@ -53,7 +53,28 @@ function randomInt(min, max, cb) {
   if (typeof cb === 'function') { setImmediate(function () { cb(null, v); }); return undefined; }
   return v;
 }
+var hashSizes = { md5: 16, sha1: 20, sha256: 32, sha512: 64 };
+function Hash(alg) {
+  var name = String(alg).toLowerCase().replace('-', '');
+  if (!hashSizes[name]) throw new Error('Digest method not supported');
+  this._alg = name; this._parts = []; this._done = false;
+}
+Hash.prototype.update = function (data, enc) {
+  if (this._done) { var e = new Error('Digest already called'); e.code = 'ERR_CRYPTO_HASH_FINALIZED'; throw e; }
+  this._parts.push(typeof data === 'string' ? Buffer.from(data, enc) : Buffer.from(data.buffer ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : data));
+  return this;
+};
+Hash.prototype.digest = function (enc) {
+  if (this._done) { var e = new Error('Digest already called'); e.code = 'ERR_CRYPTO_HASH_FINALIZED'; throw e; }
+  this._done = true;
+  var out = Buffer.alloc(hashSizes[this._alg]);
+  __thaw_hash(this._alg, Buffer.concat(this._parts), out);
+  return enc === undefined || enc === 'buffer' ? out : out.toString(enc);
+};
+def(globalThis, '__thaw_Hash', Hash); // global so the scan knows update/digest
+function createHash(alg) { return new Hash(alg); }
 def(globalThis, '__thaw_crypto_module', {
+  createHash: createHash,
   getRandomValues: getRandomValues, randomUUID: randomUUID, randomBytes: randomBytes,
   randomFillSync: randomFillSync, randomInt: randomInt, webcrypto: webcrypto,
 });
