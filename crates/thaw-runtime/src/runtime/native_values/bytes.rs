@@ -897,7 +897,7 @@ pub unsafe extern "C" fn thaw_bytes_read_i64(buf: *const u8, offset: f64, le: f6
             bytes[offset + 8 - 1 - index]
         };
     }
-    i64::from_le_bytes(le_bytes)
+    thaw_bigint_from_i64(i64::from_le_bytes(le_bytes))
 }
 
 #[no_mangle]
@@ -916,6 +916,7 @@ pub unsafe extern "C" fn thaw_bytes_write_i64(
     value: i64,
     le: f64,
 ) -> f64 {
+    let value = thaw_bigint_to_i64_wrapping(value);
     let Some(target) = (unsafe { view_bytes_mut(buf) }) else {
         return offset;
     };

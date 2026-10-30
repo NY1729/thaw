@@ -226,7 +226,7 @@ impl<'a> FnLowerer<'a> {
             ("aggregate", HirType::Object(Vec::new()), Some("__thaw_pending_exception_aggregate")),
             ("tag", HirType::I64, Some("__thaw_pending_exception_tag")),
             ("f64", HirType::F64, Some("__thaw_pending_exception_f64")),
-            ("i64", HirType::I64, Some("__thaw_pending_exception_i64")),
+            ("i64", HirType::BigInt, Some("__thaw_pending_exception_i64")),
             ("bool", HirType::Bool, Some("__thaw_pending_exception_bool")),
             ("object", HirType::Object(Vec::new()), Some("__thaw_pending_exception_object")),
             ("native", HirType::NativeException, Some("__thaw_pending_exception_native")),
@@ -330,7 +330,7 @@ impl<'a> FnLowerer<'a> {
             ("native", HirType::NativeException),
             ("tag", HirType::I64),
             ("f64", HirType::F64),
-            ("i64", HirType::I64),
+            ("i64", HirType::BigInt),
             ("bool", HirType::Bool),
         ];
         HirExpr::Call(
@@ -395,7 +395,7 @@ impl<'a> FnLowerer<'a> {
                     HirType::Function(fixed, _) if fixed.len() == parameter_types.len()
                         && fixed.iter().zip(parameter_types).any(|(physical, supplied)| {
                             supplied == &HirType::Json
-                                && matches!(physical, HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str)
+                                && matches!(physical, HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str)
                         })
                 );
                 return if mismatched {
