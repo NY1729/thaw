@@ -65,7 +65,7 @@ fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
         (
             HirType::Json,
             HirType::F64
-                | HirType::I64
+                | HirType::I64 | HirType::BigInt
                 | HirType::Bool
                 | HirType::Undefined
                 | HirType::Null
@@ -382,6 +382,7 @@ impl<'a> FnLowerer<'a> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Ok(HirType::I64),
+            HirExpr::Lit(HirLit::BigInt(_)) => Ok(HirType::BigInt),
             HirExpr::Lit(HirLit::Str(_)) | HirExpr::Lit(HirLit::Wtf8(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Ok(HirType::Undefined),
@@ -583,7 +584,7 @@ impl<'a> FnLowerer<'a> {
                         Ok(HirType::Bool)
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-                        if left_ty == HirType::I64 && right_ty == HirType::I64 {
+                        if left_ty == HirType::BigInt && right_ty == HirType::BigInt {
                             return Ok(HirType::Bool);
                         }
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
@@ -607,11 +608,11 @@ impl<'a> FnLowerer<'a> {
                     | BinOp::LShift
                     | BinOp::RShift
                     | BinOp::ZeroFillRShift => {
-                        if left_ty == HirType::I64 && right_ty == HirType::I64 {
+                        if left_ty == HirType::BigInt && right_ty == HirType::BigInt {
                             if *op == BinOp::ZeroFillRShift {
                                 return Err("bigint does not support unsigned right shift".into());
                             }
-                            return Ok(HirType::I64);
+                            return Ok(HirType::BigInt);
                         }
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
@@ -1125,7 +1126,7 @@ impl<'a> FnLowerer<'a> {
                             ("written".to_string(), HirType::F64),
                         ]));
                     }
-                    "__thaw_bytes_read_i64" => return Ok(HirType::I64),
+                    "__thaw_bytes_read_i64" => return Ok(HirType::BigInt),
                     "__thaw_bytes_equals" => return Ok(HirType::Bool),
                     "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
                     | "__thaw_arraybuffer_alloc" | "__thaw_dataview_new" | "__thaw_arraybuffer_transfer"
@@ -1509,14 +1510,14 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err("bigint string conversion expects one operand".into());
                         };
-                        self.expect_type(&HirType::I64, value, "String bigint argument")?;
+                        self.expect_type(&HirType::BigInt, value, "String bigint argument")?;
                         return Ok(HirType::Str);
                     }
                     "__thaw_i64_to_radix_string" => {
                         let [value, radix] = args.as_slice() else {
                             return Err("bigint radix string conversion expects two operands".into());
                         };
-                        self.expect_type(&HirType::I64, value, "bigint toString receiver")?;
+                        self.expect_type(&HirType::BigInt, value, "bigint toString receiver")?;
                         self.expect_type(&HirType::F64, radix, "bigint toString radix")?;
                         return Ok(HirType::Str);
                     }
@@ -1525,7 +1526,7 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err("bigint number conversion expects one operand".into());
                         };
-                        self.expect_type(&HirType::I64, value, "bigint number conversion")?;
+                        self.expect_type(&HirType::BigInt, value, "bigint number conversion")?;
                         return Ok(HirType::F64);
                     }
                     "__thaw_i64_from_number" => {
@@ -1533,22 +1534,22 @@ impl<'a> FnLowerer<'a> {
                             return Err("bigint number conversion expects one operand".into());
                         };
                         self.expect_type(&HirType::F64, value, "BigInt number argument")?;
-                        return Ok(HirType::I64);
+                        return Ok(HirType::BigInt);
                     }
                     "__thaw_i64_from_string" => {
                         let [value] = args.as_slice() else {
                             return Err("bigint string parsing expects one operand".into());
                         };
                         self.expect_type(&HirType::Str, value, "BigInt string argument")?;
-                        return Ok(HirType::I64);
+                        return Ok(HirType::BigInt);
                     }
                     "__thaw_i64_as_int_n" | "__thaw_i64_as_uint_n" => {
                         let [value, bits] = args.as_slice() else {
                             return Err("`BigInt.asIntN`/`asUintN` expects two operands".into());
                         };
-                        self.expect_type(&HirType::I64, value, "BigInt.asIntN/asUintN value")?;
+                        self.expect_type(&HirType::BigInt, value, "BigInt.asIntN/asUintN value")?;
                         self.expect_type(&HirType::F64, bits, "BigInt.asIntN/asUintN bits")?;
-                        return Ok(HirType::I64);
+                        return Ok(HirType::BigInt);
                     }
                     "__thaw_symbol_new" => {
                         let [description] = args.as_slice() else {
@@ -1841,7 +1842,7 @@ impl<'a> FnLowerer<'a> {
                             HirType::NativeException,
                             HirType::I64,
                             HirType::F64,
-                            HirType::I64,
+                            HirType::BigInt,
                             HirType::Bool,
                         ];
                         if args.len() != expected.len() {
@@ -1886,7 +1887,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let expected = match name.as_str() {
                             "__thaw_set_pending_exception_f64" => HirType::F64,
-                            "__thaw_set_pending_exception_i64" => HirType::I64,
+                            "__thaw_set_pending_exception_i64" => HirType::BigInt,
                             _ => HirType::Bool,
                         };
                         self.expect_type(&expected, value, name)?;
@@ -1917,9 +1918,8 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_pending_exception_tag" | "__thaw_pending_exception_i64" => {
-                        return Ok(HirType::I64);
-                    }
+                    "__thaw_pending_exception_tag" => return Ok(HirType::I64),
+                    "__thaw_pending_exception_i64" => return Ok(HirType::BigInt),
                     "__thaw_pending_exception_f64" => return Ok(HirType::F64),
                     "__thaw_pending_exception_bool" => return Ok(HirType::Bool),
                     "__thaw_set_pending_exception_tag" => {
@@ -2764,7 +2764,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("retained handle comparison expects two operands".into());
                         };
                         for operand in [left, right] {
-                            if !matches!(self.infer_expr_type(operand)?, HirType::I64 | HirType::JsValue) {
+                            if !matches!(self.infer_expr_type(operand)?, HirType::BigInt | HirType::JsValue) {
                                 return Err("retained handle comparison expects handle operands".into());
                             }
                         }
@@ -2774,7 +2774,7 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err("JSON bigint expects one operand".into());
                         };
-                        self.expect_type(&HirType::I64, value, "JSON bigint")?;
+                        self.expect_type(&HirType::BigInt, value, "JSON bigint")?;
                         return Ok(HirType::Json);
                     }
                     "__thaw_json_as_bigint_i64" => {
@@ -2782,7 +2782,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("checked Json BigInt assertion expects one operand".into());
                         };
                         self.expect_type(&HirType::Json, value, "checked Json BigInt assertion")?;
-                        return Ok(HirType::I64);
+                        return Ok(HirType::BigInt);
                     }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
                     "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable"

@@ -258,12 +258,12 @@ impl<'a> FnLowerer<'a> {
                 )),
                 Box::new(false_lit()),
             )),
-            HirType::I64 => Ok(HirExpr::BinOp(
+            HirType::BigInt => Ok(HirExpr::BinOp(
                 BinOp::EqEqEq,
                 Box::new(HirExpr::BinOp(
                     BinOp::EqEqEq,
                     Box::new(value),
-                    Box::new(HirExpr::Lit(HirLit::I64(0))),
+                    Box::new(HirExpr::Lit(HirLit::BigInt("0".into()))),
                 )),
                 Box::new(false_lit()),
             )),
@@ -1248,7 +1248,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                 vec![value],
             )),
-            HirType::I64 => Ok(HirExpr::Call(
+            HirType::BigInt => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
                 vec![value],
             )),
@@ -2521,7 +2521,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(json),
                 Box::new(HirExpr::TypedClosure(HirType::Json, Box::new(native))),
             ),
-            HirType::I64 => HirExpr::BinOp(
+            HirType::BigInt => HirExpr::BinOp(
                 BinOp::EqEqEq,
                 Box::new(json),
                 Box::new(HirExpr::Call(
@@ -2652,7 +2652,7 @@ impl<'a> FnLowerer<'a> {
                 let json = self.coerce_to_declared(&HirType::Json, text)?;
                 ("__thaw_strict_equal_number_dynamic", vec![json])
             }
-            HirType::I64 => {
+            HirType::BigInt => {
                 let text = self.bigint_decimal_string(native, ty)?;
                 let json = self.coerce_to_declared(&HirType::Json, text)?;
                 ("__thaw_strict_equal_bigint_dynamic", vec![json])
@@ -2734,7 +2734,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<(HirExpr, f64), String> {
         let (value, kind) = match ty {
             HirType::Function(_, _) | HirType::CallableFunction(..) => (value, 3.0),
-            HirType::I64 => (self.bigint_decimal_string(value, ty)?, 1.0),
+            HirType::BigInt => (self.bigint_decimal_string(value, ty)?, 1.0),
             HirType::Symbol => (HirExpr::TypedClosure(HirType::Str, Box::new(value)), 2.0),
             HirType::StrLiteral(_) => (HirExpr::TypedClosure(HirType::Str, Box::new(value)), 0.0),
             HirType::Dictionary(_) => (HirExpr::TypedClosure(HirType::Json, Box::new(value)), 0.0),
@@ -2993,7 +2993,7 @@ impl<'a> FnLowerer<'a> {
                 | HirType::Str
                 | HirType::StrLiteral(_)
                 | HirType::Bool
-                | HirType::I64
+                | HirType::I64 | HirType::BigInt
                 | HirType::Symbol
                 | HirType::Json
                 | HirType::JsValue
@@ -3004,7 +3004,7 @@ impl<'a> FnLowerer<'a> {
                 | HirType::Str
                 | HirType::StrLiteral(_)
                 | HirType::Bool
-                | HirType::I64
+                | HirType::I64 | HirType::BigInt
                 | HirType::Symbol
                 | HirType::Json
                 | HirType::JsValue
@@ -3195,7 +3195,7 @@ impl<'a> FnLowerer<'a> {
         // equal exactly when their decimal digits agree.
         if matches!(
             (&lhs_type, &rhs_type),
-            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+            (HirType::JsValue, HirType::BigInt) | (HirType::BigInt, HirType::JsValue)
         ) {
             let left = self.bigint_decimal_string(lhs, &lhs_type)?;
             let right = self.bigint_decimal_string(rhs, &rhs_type)?;
@@ -3488,12 +3488,14 @@ impl<'a> FnLowerer<'a> {
         for_add: bool,
     ) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
-            HirType::I64 if for_add => Ok(HirExpr::ThrowValue(
+            HirType::BigInt if for_add => Ok(HirExpr::ThrowValue(
                 Box::new(HirExpr::Lit(HirLit::Str(
                     "\u{1}TypeError\u{1}Cannot mix BigInt and other types".into(),
                 ))),
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
             )),
+            // Arithmetic between two bigints stays bigint; the operator type check rejects a mix.
+            HirType::BigInt => Ok(value),
             HirType::Symbol if for_add => Ok(HirExpr::ThrowValue(
                 Box::new(HirExpr::Lit(HirLit::Str(
                     "\u{1}TypeError\u{1}Cannot convert a Symbol value to a number".into(),
@@ -3908,7 +3910,7 @@ impl<'a> FnLowerer<'a> {
 
     fn add_operand_may_be_bigint(ty: &HirType) -> bool {
         match ty {
-            HirType::I64 | HirType::Json => true,
+            HirType::I64 | HirType::BigInt | HirType::Json => true,
             HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
                 Self::add_operand_may_be_bigint(payload)
             }
@@ -3933,7 +3935,7 @@ impl<'a> FnLowerer<'a> {
         match ty {
             HirType::Str | HirType::StrLiteral(_) => bool_lit(primitive == "string"),
             HirType::Symbol => bool_lit(primitive == "symbol"),
-            HirType::I64 => bool_lit(primitive == "bigint"),
+            HirType::BigInt => bool_lit(primitive == "bigint"),
             HirType::Json => HirExpr::BinOp(
                 BinOp::EqEqEq,
                 Box::new(HirExpr::Call(
@@ -4224,7 +4226,7 @@ impl<'a> FnLowerer<'a> {
     /// fixed-width native `bigint` against one outside its range.
     fn bigint_decimal_string(&mut self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
         match ty {
-            HirType::I64 => Ok(HirExpr::Call(
+            HirType::BigInt => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_i64_to_string".into())),
                 vec![value],
             )),
@@ -4271,7 +4273,7 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(rhs)?;
         let mixed = matches!(
             (&lhs_type, &rhs_type),
-            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+            (HirType::JsValue, HirType::BigInt) | (HirType::BigInt, HirType::JsValue)
         );
         // Two beyond-`i64` handles (e.g. two large literals) only for the
         // operations the ordinary path rejects outright; `+` between two
@@ -4310,7 +4312,7 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         if !matches!(
             (&lhs_type, &rhs_type),
-            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+            (HirType::JsValue, HirType::BigInt) | (HirType::BigInt, HirType::JsValue)
         ) {
             return Ok(None);
         }
@@ -4335,14 +4337,14 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
-        if lhs_type == HirType::I64 && rhs_type == HirType::I64 {
+        if lhs_type == HirType::BigInt && rhs_type == HirType::BigInt {
             return Ok(HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs)));
         }
         // A native `bigint` against a beyond-`i64` one (a live handle):
         // compare their decimal digits, which orders integers exactly.
         if matches!(
             (&lhs_type, &rhs_type),
-            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+            (HirType::JsValue, HirType::BigInt) | (HirType::BigInt, HirType::JsValue)
         ) {
             let left = self.bigint_decimal_string(lhs, &lhs_type)?;
             let right = self.bigint_decimal_string(rhs, &rhs_type)?;
@@ -4445,7 +4447,7 @@ impl<'a> FnLowerer<'a> {
     /// A native `bigint` compared with a `number` (`1n < 2`, `3n == 3`) is compared as a
     /// number; exact within 2^53. Arithmetic still rejects the mix, as JS throws there.
     pub(crate) fn bigint_to_number(&self, value: HirExpr) -> Result<HirExpr, String> {
-        Ok(if self.infer_expr_type(&value)? == HirType::I64 {
+        Ok(if self.infer_expr_type(&value)? == HirType::BigInt {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_i64_to_number".to_string())),
                 vec![value],

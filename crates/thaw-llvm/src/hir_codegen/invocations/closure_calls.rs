@@ -186,7 +186,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null => 1,
             HirType::Bool => 2,
             HirType::F64 => 3,
-            HirType::I64 => 4,
+            HirType::I64 | HirType::BigInt => 4,
             HirType::Str | HirType::StrLiteral(_) => 5,
             HirType::Symbol => 6,
             HirType::Json | HirType::Dictionary(_) => 7,

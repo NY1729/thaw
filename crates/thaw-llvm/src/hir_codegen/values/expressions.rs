@@ -132,6 +132,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::I64(n)) => {
                 Ok(self.context.i64_type().const_int(*n as u64, true).into())
             }
+            HirExpr::Lit(HirLit::BigInt(text)) => self.compile_bigint_literal(text),
             HirExpr::Lit(HirLit::Bool(b)) => {
                 Ok(self.context.bool_type().const_int(*b as u64, false).into())
             }

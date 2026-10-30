@@ -238,7 +238,7 @@ fn erase_ty(ty: &mut HirType) {
         }
         HirType::Recursive(_)
         | HirType::F64
-        | HirType::I64
+        | HirType::I64 | HirType::BigInt
         | HirType::Bool
         | HirType::Undefined
         | HirType::Null

@@ -112,7 +112,7 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         // produce this shape for that case anymore, so this check
         // staying strict is a real safety net, not just an unfixed gap.
         HirType::F64
-        | HirType::I64
+        | HirType::I64 | HirType::BigInt
         | HirType::Bool
         | HirType::Str
         | HirType::StrLiteral(_)
@@ -480,6 +480,7 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
         match ty {
             HirType::F64 => "f64".into(),
             HirType::I64 => "i64".into(),
+            HirType::BigInt => "bigint".into(),
             HirType::Bool => "bool".into(),
             HirType::Str => "str".into(),
             HirType::StrLiteral(value) => format!(
