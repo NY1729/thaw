@@ -3402,6 +3402,11 @@
       "name": "audit2 Error-annotated callback param receives a real Error",
       "expect": "matched",
       "source": "import { EventEmitter } from \"node:events\"; function main(): void { const ee = new EventEmitter(); ee.on(\"error\", (er: Error) => console.log(\"ee\", er.message, er instanceof Error, er.name)); ee.emit(\"error\", new RangeError(\"boom\")); const ac = new AbortController(); ac.signal.addEventListener(\"abort\", () => { const r = ac.signal.reason as Error; console.log(\"abort\", r.name, r instanceof Error); }); ac.abort(); }"
+    },
+    {
+      "name": "audit2 unhandledRejection handler with a Promise parameter",
+      "expect": "matched",
+      "source": "function main(): void { process.on(\"unhandledRejection\", (r: unknown, p: Promise<unknown>) => { console.log(\"UR\", r instanceof Error ? r.message : r, p instanceof Promise); }); Promise.reject(new Error(\"one\")); Promise.reject(\"two\"); const p = Promise.reject(new Error(\"handled later\")); setTimeout(() => p.catch(() => console.log(\"late catch\")), 5); }"
     }
   ]
 }
