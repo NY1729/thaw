@@ -337,7 +337,7 @@ impl<'a> FnLowerer<'a> {
                 if matches!(
                     field,
                     HirType::F64
-                        | HirType::I64
+                        | HirType::I64 | HirType::BigInt
                         | HirType::Bool
                         | HirType::Str
                         | HirType::Json

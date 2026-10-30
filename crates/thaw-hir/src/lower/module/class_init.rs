@@ -144,7 +144,7 @@ fn can_be_uninit(ty: &HirType) -> bool {
     matches!(
         ty,
         HirType::F64
-            | HirType::I64
+            | HirType::I64 | HirType::BigInt
             | HirType::Bool
             | HirType::Str
             | HirType::Array(_)

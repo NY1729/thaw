@@ -236,7 +236,7 @@ fn map_value_get_suffix(value_type: &HirType) -> Result<(&'static str, bool), St
         // `Bool` (see `functions.rs`'s LLVM-type mapping: `I64`/`JsValue`
         // are both a plain `i64`, no boxing/pointer indirection), so no
         // `TypedClosure` wrap is needed either -- same as `F64`/`Bool`.
-        HirType::I64 | HirType::JsValue => Ok(("i64", false)),
+        HirType::I64 | HirType::BigInt | HirType::JsValue => Ok(("i64", false)),
         _ => Ok(("ptr", true)),
     }
 }

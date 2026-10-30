@@ -182,8 +182,8 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 self.wrap_call_argument_bindings(timestamp, &[(name, HirType::Json, value)])
             }
-            HirType::I64 | HirType::Symbol => {
-                let message = if ty == HirType::I64 {
+            HirType::BigInt | HirType::Symbol => {
+                let message = if ty == HirType::BigInt {
                     "Cannot convert a BigInt value to a number"
                 } else {
                     "Cannot convert a Symbol value to a number"
@@ -788,31 +788,7 @@ impl<'a> FnLowerer<'a> {
         }
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
-            Expr::Lit(Lit::BigInt(n)) => {
-                let text = n.value.to_string();
-                match text.parse::<i64>() {
-                    Ok(value) => Ok(HirExpr::Lit(HirLit::I64(value))),
-                    // A `bigint` beyond Thaw's fixed-width `i64` is kept as
-                    // the real QuickJS BigInt, so `.toString()`, radix
-                    // conversion, and comparisons stay exact. Arithmetic on
-                    // it stays dynamic (Thaw's native `bigint` operators
-                    // only cover the `i64` range).
-                    Err(_) => {
-                        let constructor = HirExpr::Call(
-                            Box::new(HirExpr::Var("getDynamicValue".into())),
-                            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
-                        );
-                        let arguments = self.coerce_to_declared(
-                            &HirType::Json,
-                            HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Str(text))]),
-                        )?;
-                        Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
-                            vec![constructor, arguments],
-                        ))
-                    }
-                }
-            }
+            Expr::Lit(Lit::BigInt(n)) => Ok(HirExpr::Lit(HirLit::BigInt(n.value.to_string()))),
             Expr::Lit(Lit::Str(s)) => Ok(HirExpr::Lit(hir_string_literal_from_wtf8(
                 s.value.as_wtf8().as_bytes(),
             ))),
@@ -1481,7 +1457,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let projection = match &target {
                             HirType::F64 => Some((0, "number")),
-                            HirType::I64 => Some((1, "bigint")),
+                            HirType::BigInt => Some((1, "bigint")),
                             HirType::Bool => Some((2, "boolean")),
                             _ => None,
                         };
@@ -1519,7 +1495,7 @@ impl<'a> FnLowerer<'a> {
                             // must never be passed to a Json FFI as a pointer.
                             let projected_json = match &target {
                                 HirType::F64 => HirExpr::JsonAsNumber(Box::new(json.clone())),
-                                HirType::I64 => HirExpr::Call(
+                                HirType::BigInt => HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())),
                                     vec![json.clone()],
                                 ),
@@ -1569,7 +1545,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let suffix = match target {
                             HirType::F64 => Some("f64"),
-                            HirType::I64 => Some("i64"),
+                            HirType::BigInt => Some("i64"),
                             HirType::Bool => Some("bool"),
                             _ => None,
                         };
@@ -2948,7 +2924,7 @@ impl<'a> FnLowerer<'a> {
                             )
                         } else if matches!(&right_type, HirType::Array(_)) {
                             let mut key_type = self.infer_expr_type(&lhs)?;
-                            if matches!(key_type, HirType::Bool | HirType::I64) {
+                            if matches!(key_type, HirType::Bool | HirType::I64 | HirType::BigInt) {
                                 lhs = self.coerce_primitive_to_string(lhs)?;
                                 key_type = HirType::Str;
                             }
@@ -3186,7 +3162,7 @@ impl<'a> FnLowerer<'a> {
                             for (index, element) in elements.iter().enumerate().rev() {
                                 if !matches!(
                                     element,
-                                    HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
+                                    HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str
                                         | HirType::StrLiteral(_) | HirType::Symbol
                                         | HirType::Null | HirType::Undefined | HirType::Void
                                 ) {
@@ -3691,7 +3667,7 @@ impl<'a> FnLowerer<'a> {
                     value
                 };
                 let lowered = match unary.op {
-                    UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::I64 => {
+                    UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::BigInt => {
                         // No dedicated native negation for `I64` -- `0n -
                         // x` reuses the existing `bigint_sub` codegen
                         // (two's-complement wraps exactly the way real
@@ -3701,7 +3677,7 @@ impl<'a> FnLowerer<'a> {
                         // subset).
                         HirExpr::BinOp(
                             BinOp::Sub,
-                            Box::new(HirExpr::Lit(HirLit::I64(0))),
+                            Box::new(HirExpr::Lit(HirLit::BigInt("0".into()))),
                             Box::new(value),
                         )
                     }
@@ -3776,12 +3752,12 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     UnaryOp::Tilde => {
-                        if self.infer_expr_type(&value)? == HirType::I64 {
+                        if self.infer_expr_type(&value)? == HirType::BigInt {
                             // `~n` is `-n - 1n`, i.e. `n ^ -1n`.
                             return Ok(HirExpr::BinOp(
                                 BinOp::BitXor,
                                 Box::new(value),
-                                Box::new(HirExpr::Lit(HirLit::I64(-1))),
+                                Box::new(HirExpr::Lit(HirLit::BigInt("-1".into()))),
                             ));
                         }
                         self.expect_type(&HirType::F64, &value, "bitwise not")?;
@@ -6102,7 +6078,7 @@ impl<'a> FnLowerer<'a> {
     fn constructor_slot_can_widen_to_json(source_type: &HirType) -> bool {
         match source_type {
             HirType::F64
-            | HirType::I64
+            | HirType::I64 | HirType::BigInt
             | HirType::Str
             | HirType::StrLiteral(_)
             | HirType::Bool
