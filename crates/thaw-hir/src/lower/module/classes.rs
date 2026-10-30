@@ -236,7 +236,37 @@ fn collect_native_classes<'a>(
                 None => property
                     .value
                     .as_deref()
-                    .and_then(infer_class_field_literal_type)
+                    .and_then(|value| {
+                        infer_class_field_expr_type(value, &|class, member| match class {
+                            None => fields
+                                .iter()
+                                .find(|(candidate, _)| candidate == member)
+                                .map(|(_, ty)| ty.clone()),
+                            Some(class) => declarations.get(class).and_then(|owner| {
+                                owner.class.body.iter().find_map(|candidate| {
+                                    let ClassMember::ClassProp(candidate) = candidate else {
+                                        return None;
+                                    };
+                                    (candidate.is_static
+                                        && class_property_name(&candidate.key).ok().as_deref()
+                                            == Some(member))
+                                    .then(|| match &candidate.type_ann {
+                                        Some(annotation) => lower_ts_type(
+                                            &annotation.type_ann,
+                                            interfaces,
+                                            generic_interfaces,
+                                        )
+                                        .ok(),
+                                        None => candidate
+                                            .value
+                                            .as_deref()
+                                            .and_then(infer_class_field_literal_type),
+                                    })
+                                    .flatten()
+                                })
+                            }),
+                        })
+                    })
                     .ok_or_else(|| {
                         format!("class `{name}` field `{field_name}` needs a type annotation")
                     })?,

@@ -392,6 +392,17 @@ pub fn register_recursive_layout(key: &str, layout: HirType) {
         .insert(key.to_string(), layout);
 }
 
+/// The key of the registered recursive layout equal to `ty` (the whole object type).
+pub fn recursive_key_for_layout(ty: &HirType) -> Option<Symbol> {
+    RECURSIVE_LAYOUTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, layout)| *layout == ty)
+        .map(|(key, _)| key.clone())
+}
+
 impl HirType {
     /// Replaces a `Recursive` back-edge reachable through value wrappers (nullable/optional/
     /// array/tuple/union/promise) by the layout it names. Never descends into an `Object`'s

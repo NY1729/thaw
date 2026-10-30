@@ -533,11 +533,34 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.builder.build_unreachable().map_err(|error| error.to_string())?;
                     }
                     self.builder.position_at_end(body_bb);
+                    let node = helper.get_first_param().ok_or("recursive encoder has no parameter")?.into_pointer_value();
+                    let node_id = self.builder.build_ptr_to_int(node, i64_type, "recursive_node_id")
+                        .map_err(|error| error.to_string())?;
+                    let seen = self.builder.build_call(
+                        self.module.get_function("thaw_recursive_lookup").unwrap(),
+                        &[node_id.into()], "recursive_seen",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("recursive lookup returned no value")?.into_pointer_value();
+                    let is_cycle = self.builder.build_is_not_null(seen, "recursive_is_cycle")
+                        .map_err(|error| error.to_string())?;
+                    let cycle_bb = self.context.append_basic_block(helper, "recursive_json_cycle");
+                    let fresh_bb = self.context.append_basic_block(helper, "recursive_json_fresh");
+                    self.builder.build_conditional_branch(is_cycle, cycle_bb, fresh_bb).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(cycle_bb);
+                    self.builder.build_return(Some(&seen)).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(fresh_bb);
                     let next = self.builder.build_int_add(depth, i64_type.const_int(1, false), "recursive_json_next")
                         .map_err(|error| error.to_string())?;
                     self.builder.build_store(depth_cell, next).map_err(|error| error.to_string())?;
-                    let node = helper.get_first_param().ok_or("recursive encoder has no parameter")?.into_pointer_value();
+                    self.recursive_register = Some(node);
+                    self.bypass_recursive_route = true;
                     let json = self.compile_native_object_to_json_with_undefined(node, &layout, preserve_undefined)?;
+                    self.recursive_register = None;
+                    self.bypass_recursive_route = false;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_recursive_unregister").unwrap(),
+                        &[node_id.into()], "unregister_recursive_node",
+                    ).map_err(|error| error.to_string())?;
                     self.builder.build_store(depth_cell, depth).map_err(|error| error.to_string())?;
                     self.builder.build_return(Some(&json)).map_err(|error| error.to_string())?;
                     Ok(())
@@ -573,6 +596,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let HirType::Object(fields) = ty else {
             return Err("dynamic object marshaling requires an object type".to_string());
         };
+        // A layout that can reach itself is encoded through its recursive helper (also at the
+        // top), so a reference cycle in the data is found instead of unrolled forever.
+        let bypass = std::mem::take(&mut self.bypass_recursive_route);
+        if !bypass && fields.iter().any(|(_, field)| field.contains_recursive()) {
+            if let Some(key) = recursive_key_for_layout(ty) {
+                return self.compile_recursive_to_json(object, &key, preserve_undefined);
+            }
+        }
         // console.log of a `Map`/`Set` subclass instance: the collection wrapper
         // the inspector knows, named after the most-derived class.
         if self.console_omit_absent_fields && fields.get(1).is_some_and(|(name, _)| name == "__thaw_base") {
@@ -622,6 +653,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
             &[json.into()], "track_marshaled_object",
         ).map_err(|error| error.to_string())?;
+        if let Some(node) = self.recursive_register.take() {
+            let node = self.builder.build_ptr_to_int(node, self.context.i64_type(), "recursive_node")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_recursive_register").unwrap(),
+                &[node.into(), json.into()], "register_recursive_node",
+            ).map_err(|error| error.to_string())?;
+        }
         // Only ClassAlloc records this native Date identity. An ordinary
         // object with the same fields is still serialized as ordinary data.
         let date_identity = if fields.len() == 2
@@ -2500,4 +2539,9 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+}
+
+/// The recursive-layout key whose registered layout is exactly `ty`, if any.
+fn recursive_key_for_layout(ty: &HirType) -> Option<String> {
+    thaw_hir::recursive_key_for_layout(ty)
 }

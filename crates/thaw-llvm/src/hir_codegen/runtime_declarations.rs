@@ -3082,6 +3082,21 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_recursive_lookup",
+            i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_recursive_register",
+            self.context.void_type().fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_recursive_unregister",
+            self.context.void_type().fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
         for (name, value_type) in [
             ("thaw_json_object_set_number", f64_type.into()),
             ("thaw_json_object_set_string", i8_ptr.into()),

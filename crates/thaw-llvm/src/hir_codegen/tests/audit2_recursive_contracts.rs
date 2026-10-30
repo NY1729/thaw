@@ -296,3 +296,39 @@ function main(): void {
         "3 2 1\na undefined\n[ 'one', 'two', 'five', 'eight' ]\n[ 10, 20 ]\n1 true\n"
     );
 }
+
+#[test]
+fn audit2_contract_cyclic_recursive_instances_print_circular_refs() {
+    let source = r##"class N { next: N | null = null; v = 1; }
+class P { kids: P[] = []; up: P | null = null; name: string; constructor(n: string) { this.name = n; } }
+function main(): void {
+  const a = new N(); a.next = a; console.log(a);
+  console.log(a.next === a);
+  try { console.log(JSON.stringify(a)); } catch (e) { console.log((e as Error).name); }
+  const r = new P("r"); const c = new P("c"); c.up = r; r.kids.push(c); console.log(r);
+  const x = new N(); x.next = new N(); x.next.next = x; console.log(x);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_cyclic_recursive_instances"),
+        "<ref *1> N { next: [Circular *1], v: 1 }\ntrue\nTypeError\n<ref *1> P {\n  kids: [ P { kids: [], up: [Circular *1], name: 'c' } ],\n  up: null,\n  name: 'r'\n}\n<ref *1> N { next: N { next: [Circular *1], v: 1 }, v: 1 }\n"
+    );
+}
+
+#[test]
+fn audit2_contract_non_literal_class_field_initializers_infer_their_type() {
+    let source = r##"class A { static x = 1; static y = A.x + 1; static f = (A.x, "s" + A.x); }
+class C { static count = 0; id = ++C.count; label = "n" + this.id; }
+class B0 { x = 1; }
+class B extends B0 { y = this.x + 1; big = this.y > 1; }
+function main(): void {
+  console.log(A.y, A.f);
+  new C(); const c = new C();
+  console.log(c.id, c.label, new B().y, new B().big);
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_contract_non_literal_class_field_initializers"),
+        "2 s1\n2 n2 2 true\n"
+    );
+}

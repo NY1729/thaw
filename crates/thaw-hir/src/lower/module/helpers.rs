@@ -340,6 +340,68 @@ fn class_property_name(name: &PropName) -> Result<Symbol, String> {
 /// spreads, empty arrays, and mixed-element arrays still require an explicit
 /// annotation rather than introducing a lowering-order dependency or guessing
 /// a union layout.
+/// The type of a class field initializer that is more than a literal: arithmetic, comparisons,
+/// `++C.count`, `this.x + 1`, `(a, b)` and the like. `lookup(class, name)` types `this.name`
+/// (`class == None`) or the static `Class.name`. `None` when the shape is not recognised, which
+/// keeps the "needs a type annotation" error.
+fn infer_class_field_expr_type(
+    expr: &Expr,
+    lookup: &dyn Fn(Option<&str>, &str) -> Option<HirType>,
+) -> Option<HirType> {
+    use swc_ecma_ast::{BinaryOp, UnaryOp};
+    if let Some(literal) = infer_class_field_literal_type(expr) {
+        return Some(literal);
+    }
+    let infer = |expr: &Expr| infer_class_field_expr_type(expr, lookup);
+    match expr {
+        Expr::Paren(parenthesized) => infer(&parenthesized.expr),
+        Expr::Seq(sequence) => sequence.exprs.last().and_then(|last| infer(last)),
+        Expr::Tpl(_) => Some(HirType::Str),
+        Expr::Update(_) => Some(HirType::F64),
+        Expr::Unary(unary) => match unary.op {
+            UnaryOp::Minus | UnaryOp::Plus | UnaryOp::Tilde => Some(HirType::F64),
+            UnaryOp::Bang => Some(HirType::Bool),
+            UnaryOp::TypeOf => Some(HirType::Str),
+            _ => None,
+        },
+        Expr::Member(member) => {
+            let swc_ecma_ast::MemberProp::Ident(property) = &member.prop else {
+                return None;
+            };
+            match member.obj.as_ref() {
+                Expr::This(_) => lookup(None, property.sym.as_ref()),
+                Expr::Ident(class) => lookup(Some(class.sym.as_ref()), property.sym.as_ref()),
+                _ => None,
+            }
+        }
+        Expr::Cond(conditional) => {
+            let consequent = infer(&conditional.cons)?;
+            (infer(&conditional.alt)? == consequent).then_some(consequent)
+        }
+        Expr::Bin(binary) => match binary.op {
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::EqEq
+            | BinaryOp::NotEq | BinaryOp::EqEqEq | BinaryOp::NotEqEq | BinaryOp::In
+            | BinaryOp::InstanceOf => Some(HirType::Bool),
+            BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Exp
+            | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::BitAnd | BinaryOp::LShift
+            | BinaryOp::RShift | BinaryOp::ZeroFillRShift => {
+                (infer(&binary.left)? == HirType::F64 && infer(&binary.right)? == HirType::F64)
+                    .then_some(HirType::F64)
+            }
+            BinaryOp::Add => match (infer(&binary.left)?, infer(&binary.right)?) {
+                (HirType::F64, HirType::F64) => Some(HirType::F64),
+                (HirType::Str, _) | (_, HirType::Str) => Some(HirType::Str),
+                _ => None,
+            },
+            BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing => {
+                let left = infer(&binary.left)?;
+                (infer(&binary.right)? == left).then_some(left)
+            }
+        },
+        _ => None,
+    }
+}
+
 fn infer_class_field_literal_type(expr: &Expr) -> Option<HirType> {
     match expr {
         Expr::Lit(Lit::Num(_)) => Some(HirType::F64),
