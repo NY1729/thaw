@@ -223,6 +223,24 @@ impl<'a> FnLowerer<'a> {
         let mut visible = Vec::new();
         let mut hidden = Vec::new();
         for (name, expected) in declared_fields {
+            // A declared member the instance provides as a prototype method becomes a closure
+            // that calls the class method on the (live) instance.
+            if !actual_fields.iter().any(|(n, _)| n == name) {
+                let (Some(class), HirType::Function(params, ret)) = (class_name_from_type(&object_type), expected) else {
+                    return Err(format!("cannot project method `{name}` of a class instance"));
+                };
+                let lambda_params: Vec<HirParam> = params.iter().enumerate().map(|(i, ty)| HirParam {
+                    name: format!("__thaw_method_view_arg_{}_{i}", self.next_binding), ty: ty.clone(),
+                }).collect();
+                self.next_binding += 1;
+                let mut args = vec![HirExpr::Var(source.clone())];
+                args.extend(lambda_params.iter().map(|p| HirExpr::Var(p.name.clone())));
+                let call = HirExpr::Call(Box::new(HirExpr::Var(class_method_symbol(class, name))), args);
+                visible.push((name.clone(), HirExpr::Lambda(
+                    vec![capture.clone()], lambda_params, ret.as_ref().clone(), Box::new(call),
+                )));
+                continue;
+            }
             let read = HirExpr::PropAccess(Box::new(HirExpr::Var(source.clone())), object_type.clone(), name.clone());
             let read = self.lenient_uninit_read_as(read, f64::from_bits(crate::UNSET_NUMBER_BITS))?;
             let this_param = HirParam { name: format!("__thaw_live_this_{}", self.next_binding), ty: receiver.clone() };
@@ -1039,6 +1057,17 @@ impl<'a> FnLowerer<'a> {
                     self.class_method_signature_compatible(class, name, expected, false)
                 });
                 if compatible {
+                    // Interface members satisfied by prototype methods are not in the instance
+                    // layout, so the interface view needs bound closures, not the raw pointer.
+                    let provided_by_method = |name: &String, expected: &HirType| {
+                        matches!(expected, HirType::Function(..))
+                            && !actual_fields.iter().any(|(n, _)| n == name)
+                            && self.signatures.get(&class_method_symbol(class, name)).is_some_and(|s| !s.is_async)
+                    };
+                    if declared_fields.iter().any(|(n, t)| provided_by_method(n, t)) {
+                        self.class_method_view_made = true;
+                        return self.live_widened_structural_view(value, &actual_fields, declared_fields);
+                    }
                     return Ok(value);
                 }
                 // A structural target naming accessor properties of the class
