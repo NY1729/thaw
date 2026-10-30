@@ -210,9 +210,7 @@ impl<'ctx> HirCompiler<'ctx> {
         field: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let obj_val = self.compile_expr(obj)?;
-        let key_global = self
-            .builder
-            .build_global_string_ptr(field, "jsonkey")
+        let key_global = self.intern_string(field, "jsonkey")
             .map_err(|e| e.to_string())?;
         let get_fn = self
             .module
@@ -462,9 +460,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_json_object_new did not return a value")?;
         for (name, expression) in fields {
             let value = self.compile_expr(expression)?;
-            let key = self
-                .builder
-                .build_global_string_ptr(name, "dictionary_key")
+            let key = self.intern_string(name, "dictionary_key")
                 .map_err(|error| error.to_string())?;
             self.compile_json_object_set_native(
                 object,
