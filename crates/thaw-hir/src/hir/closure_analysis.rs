@@ -286,3 +286,126 @@ mod thaw_remaining_traversals_closure_controls {
         );
     }
 }
+
+/// How an early-return guard of an immediately-invoked lambda leaves the body.
+pub enum IifeExit {
+    Return(HirExpr),
+    Throw(HirExpr),
+}
+
+/// An immediately-invoked lambda body that is straight-line apart from early exits: guards
+/// `if (c) return x;` / `if (c) throw e;` in order, then the final value.
+pub struct IifePlan {
+    pub guards: Vec<(HirExpr, IifeExit)>,
+    pub value: HirExpr,
+}
+
+/// The shape of `body` as an [`IifePlan`]: a plain expression, or a block of early-exit guards
+/// ending in `return value`. Anything else (loops, declarations, other statements) is `None`.
+pub fn iife_body_plan(body: &HirExpr) -> Option<IifePlan> {
+    let HirExpr::Block(statements) = body else {
+        return Some(IifePlan {
+            guards: Vec::new(),
+            value: body.clone(),
+        });
+    };
+    let (HirStmt::Return(Some(value)), guards) = statements.split_last()? else {
+        return None;
+    };
+    let mut plan = IifePlan {
+        guards: Vec::new(),
+        value: value.clone(),
+    };
+    for guard in guards {
+        let HirStmt::If(test, then, otherwise) = guard else {
+            return None;
+        };
+        if !otherwise.is_empty() {
+            return None;
+        }
+        let exit = match then.as_slice() {
+            [HirStmt::Return(Some(early))] => IifeExit::Return(early.clone()),
+            [HirStmt::Throw(thrown)] => IifeExit::Throw(thrown.clone()),
+            _ => return None,
+        };
+        plan.guards.push((test.clone(), exit));
+    }
+    Some(plan)
+}
+
+/// Whether `callee(args)` is an immediately-invoked lambda that codegen compiles in place
+/// (its parameters become locals of the enclosing function) instead of allocating a closure.
+/// Only a lambda whose body is a plain value expression qualifies: no `return` (other than
+/// early-exit guards), `await`, nested block or nested closure whose meaning would change when
+/// the body is not its own function. Anything unrecognised stays a closure.
+pub fn is_inlinable_iife(callee: &HirExpr, args: &[HirExpr]) -> bool {
+    let HirExpr::Lambda(_, params, ret, body) = callee else {
+        return false;
+    };
+    let has_promise = |ty: &HirType| match ty {
+        HirType::Promise(_) => true,
+        HirType::Union(members) => members
+            .iter()
+            .any(|member| matches!(member, HirType::Promise(_))),
+        _ => false,
+    };
+    params.len() == args.len()
+        && *ret != HirType::Void
+        && !has_promise(ret)
+        && params
+            .iter()
+            .all(|param| param.name != "__thaw_this" && !has_promise(&param.ty))
+        && iife_body_plan(body).is_some_and(|plan| {
+            is_plain_value_expr(&plan.value)
+                && plan.guards.iter().all(|(test, exit)| {
+                    is_plain_value_expr(test)
+                        && match exit {
+                            IifeExit::Return(value) | IifeExit::Throw(value) => {
+                                is_plain_value_expr(value)
+                            }
+                        }
+                })
+        })
+}
+
+fn is_plain_value_expr(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Lit(_) | HirExpr::Var(_) => true,
+        HirExpr::OptionalNone(_)
+        | HirExpr::NullableNone(_)
+        | HirExpr::NullishNull(_)
+        | HirExpr::NullishUndefined(_) => true,
+        HirExpr::BinOp(_, left, right) | HirExpr::EvalThen(left, right) => {
+            is_plain_value_expr(left) && is_plain_value_expr(right)
+        }
+        HirExpr::Conditional(test, consequent, alternate, _) => {
+            is_plain_value_expr(test)
+                && is_plain_value_expr(consequent)
+                && is_plain_value_expr(alternate)
+        }
+        HirExpr::ArrayLen(inner)
+        | HirExpr::PropAccess(inner, _, _)
+        | HirExpr::OptionalSome(inner, _)
+        | HirExpr::OptionalIsNone(inner, _)
+        | HirExpr::OptionalValue(inner, _)
+        | HirExpr::NullableSome(inner, _)
+        | HirExpr::NullableIsNone(inner, _)
+        | HirExpr::NullableValue(inner, _)
+        | HirExpr::NullishSome(inner, _)
+        | HirExpr::NullishIsNull(inner, _)
+        | HirExpr::NullishIsUndefined(inner, _)
+        | HirExpr::NullishIsNone(inner, _)
+        | HirExpr::NullishValue(inner, _) => is_plain_value_expr(inner),
+        HirExpr::TypedIndex(array, index, _) => {
+            is_plain_value_expr(array) && is_plain_value_expr(index)
+        }
+        HirExpr::Call(callee, args) => {
+            let callee_ok = match callee.as_ref() {
+                HirExpr::Var(_) => true,
+                nested => is_inlinable_iife(nested, args),
+            };
+            callee_ok && args.iter().all(is_plain_value_expr)
+        }
+        _ => false,
+    }
+}

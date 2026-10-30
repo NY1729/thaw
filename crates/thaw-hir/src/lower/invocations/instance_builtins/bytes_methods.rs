@@ -646,6 +646,37 @@ impl<'a> FnLowerer<'a> {
                     )),
                 )
             }
+            // `new Uint8Array()` / `new Uint8Array(length)`: a native
+            // byte store (O(1) element access) instead of a JS-realm typed array whose every
+            // element access would cross the bridge.
+            ("Uint8Array", 0 | 1) => {
+                let as_u8 = |buffer: HirExpr| {
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_as_u8".into())), vec![buffer])
+                };
+                let alloc = |size: HirExpr| HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_alloc".into())), vec![size]);
+                let Some(argument) = args.first() else {
+                    return Ok(Some(as_u8(alloc(number(0.0)))));
+                };
+                let value = self.lower_expr(&argument.expr)?;
+                match self.infer_expr_type_inner(&value)? {
+                    HirType::F64 => {
+                        let size = self.bind_bytes_number("__thaw_u8_length", value, &mut bindings);
+                        let error =
+                            Self::bytes_range_throw(vec![text("Invalid typed array length: "), to_text(&size)], "");
+                        let check = branch(
+                            HirExpr::BinOp(BinOp::Lt, Box::new(size.clone()), Box::new(number(0.0))),
+                            error.clone(),
+                            branch(
+                                HirExpr::BinOp(BinOp::Gt, Box::new(size.clone()), Box::new(number(9007199254740991.0))),
+                                error,
+                                number(0.0),
+                            ),
+                        );
+                        as_u8(alloc(HirExpr::EvalThen(Box::new(check), Box::new(size))))
+                    }
+                    _ => return Ok(None),
+                }
+            }
             _ => return Ok(None),
         };
         Ok(Some(self.wrap_call_argument_bindings(result, &bindings)?))
