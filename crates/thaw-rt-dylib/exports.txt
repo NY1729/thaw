@@ -146,11 +146,13 @@ thaw_error_assign_json
 thaw_error_canonical_pointer
 thaw_error_cause
 thaw_error_code
+thaw_error_console_inspect
 thaw_error_constructor_name
 thaw_error_delete_prop
 thaw_error_entries_json
 thaw_error_frame
 thaw_error_frame_own
+thaw_error_frames
 thaw_error_get_prop_json
 thaw_error_has_prop
 thaw_error_inspect

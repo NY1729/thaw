@@ -3317,7 +3317,12 @@ pub extern "C" fn thaw_json_parse_error_property(text: *const c_char) -> *mut Va
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
     let value = JsonParser::new(bytes).parse();
     PARSE_ERROR.with(|error| error.set(value.is_none()));
-    leak(revive_framed_errors(value.unwrap_or(Value::Null)))
+    let value = value.unwrap_or(Value::Null);
+    // A stored Error that is still alive stays that Error, so `err.cause.stack = x` edits it.
+    if error_ref(&value).is_some() {
+        return leak(value);
+    }
+    leak(revive_framed_errors(value))
 }
 
 enum DestroyNode {
@@ -5561,11 +5566,12 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         Value::Bool(value) => Node::Bool(*value),
         Value::Number(number) => Node::Number(number.as_f64().unwrap_or(f64::NAN)),
         Value::BigInt(text) => Node::BigInt(text.clone()),
-        Value::String(text) => tagged_error_node(&live_error_bytes(text.as_bytes()), stack)
-            .unwrap_or_else(|| Node::Str(text.encode_utf16().collect())),
-        Value::Wtf8(bytes) => {
-            tagged_error_node(bytes, stack).unwrap_or_else(|| Node::Str(wtf8_decode_utf16(bytes)))
+        Value::String(text) => {
+            tagged_error_node(&live_error_bytes(text.as_bytes()), stack, error_ref(value))
+                .unwrap_or_else(|| Node::Str(text.encode_utf16().collect()))
         }
+        Value::Wtf8(bytes) => tagged_error_node(bytes, stack, None)
+            .unwrap_or_else(|| Node::Str(wtf8_decode_utf16(bytes))),
         Value::Array(items) => {
             let items = shared_array_ref(items);
             let array = match value {
@@ -5772,7 +5778,14 @@ fn frame_bag_has(suffix: &[u8], key: &[u8]) -> bool {
 /// Props baked into the text (`thaw_error_with_props`'s `\u{5}` bag, a cause) print like Node:
 /// `[Name: message] { code: 'E_X' }`, or `<stack> {\n  code: 'E_X'\n}` when `stack` was overridden
 /// with frames.
-fn tagged_error_node(bytes: &[u8], stack: &mut Vec<usize>) -> Option<crate::inspect::Node> {
+///
+/// `live` is the framed Error the bytes were read from; its call-stack frames follow the header
+/// like Node's stack (a copy without identity stays bracketed).
+fn tagged_error_node(
+    bytes: &[u8],
+    stack: &mut Vec<usize>,
+    live: Option<*const c_char>,
+) -> Option<crate::inspect::Node> {
     use crate::inspect::{Ctor, Node};
     let frame = thaw_arena::error_wire::parse_tagged(bytes)?;
     let mut fields = indexmap::IndexMap::new();
@@ -5800,7 +5813,18 @@ fn tagged_error_node(bytes: &[u8], stack: &mut Vec<usize>) -> Option<crate::insp
     let base = match text(&mut fields, b"stack") {
         Some(stack) if stack.contains("\n    at ") => stack,
         Some(stack) => format!("[{stack}]"),
-        None => error_header(&name, &message),
+        None => {
+            let frames = live
+                .map(|error| unsafe { CStr::from_ptr(thaw_error_frames(error)) }.to_string_lossy())
+                .unwrap_or_default();
+            // The lone placeholder frame of an Error that captured none stays stackless.
+            if frames.is_empty() || frames == "\n    at <anonymous>" {
+                error_header(&name, &message)
+            } else {
+                let header = error_header(&name, &message);
+                format!("{}{frames}", &header[1..header.len() - 1])
+            }
+        }
     };
     // Node drops `name`/`message` from the key list when the stack already shows them.
     // A `cause` from the frame's cause marker (the constructor option) is non-enumerable.
@@ -5823,7 +5847,15 @@ fn tagged_error_node(bytes: &[u8], stack: &mut Vec<usize>) -> Option<crate::insp
     }
     let mut entries: Vec<(Vec<u16>, Node)> = ordered_object_fields(&fields)
         .into_iter()
-        .map(|(key, value)| (wtf8_decode_utf16(key), inspect_node(value, stack)))
+        .map(|(key, value)| {
+            // `errors` is non-enumerable on an AggregateError: Node shows it as `[errors]`.
+            let label = if name == "AggregateError" && key == b"errors".as_slice() {
+                "\u{1}[errors]".encode_utf16().collect()
+            } else {
+                wtf8_decode_utf16(key)
+            };
+            (label, inspect_node(value, stack))
+        })
         .collect();
     if let Some(cause) = hidden_cause {
         entries.push((
@@ -5853,6 +5885,20 @@ fn tagged_error_node(bytes: &[u8], stack: &mut Vec<usize>) -> Option<crate::insp
 /// `value` must be null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_inspect(value: *const c_char) -> *const c_char {
+    unsafe { error_inspect(value, false) }
+}
+
+/// `console.log(error)`: `thaw_error_inspect` plus the Error's call-stack frames and every own
+/// property, `cause` and `errors` entry, like Node.
+///
+/// # Safety
+/// `value` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_console_inspect(value: *const c_char) -> *const c_char {
+    unsafe { error_inspect(value, true) }
+}
+
+unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
     if value.is_null() {
         return value;
     }
@@ -5878,10 +5924,16 @@ pub unsafe extern "C" fn thaw_error_inspect(value: *const c_char) -> *const c_ch
                         })
                 })
     });
-    if !has_extras {
+    // A frameless error (a foreign/QuickJS one) keeps the plain `Name: message` line.
+    let framed = console && unsafe { *value } == 1 && {
+        let frames = unsafe { CStr::from_ptr(thaw_error_frames(value)) }.to_bytes();
+        !frames.is_empty() && frames != b"\n    at <anonymous>"
+    };
+    if !(has_extras || framed) {
         return unsafe { thaw_error_to_string(value) };
     }
-    match tagged_error_node(bytes, &mut Vec::new()) {
+    let live = if console { Some(value) } else { None };
+    match tagged_error_node(bytes, &mut Vec::new(), live) {
         Some(node) => thaw_arena::owned_string(crate::inspect::inspect(
             &node,
             &crate::inspect::InspectOptions::default(),
@@ -5991,7 +6043,7 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
         // string) goes through `util.inspect`.
         Value::String(text) if text.as_bytes().first() == Some(&1) => CString::new(text.as_bytes())
             .ok()
-            .map(|owned| to_str(unsafe { thaw_error_inspect(owned.as_ptr()) }))
+            .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
             .unwrap_or_else(|| text.clone()),
         Value::String(value) => value.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
@@ -6211,7 +6263,7 @@ fn console_format(args: &[Value]) -> String {
         // A framed Error argument prints like a lone `console.log(error)`.
         Value::String(text) if text.as_bytes().first() == Some(&1) => CString::new(text.as_bytes())
             .ok()
-            .map(|owned| to_str(unsafe { thaw_error_inspect(owned.as_ptr()) }))
+            .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
             .unwrap_or_else(|| text.clone()),
         Value::String(text) => text.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
@@ -7125,6 +7177,7 @@ unsafe extern "C" {
     fn thaw_error_entries_json(error: *const c_char) -> *const c_char;
     fn thaw_error_is_instance(message: *const c_char, class_name: *const c_char) -> bool;
     fn thaw_error_stack_frames(frame: usize, ra: usize) -> *const c_char;
+    fn thaw_error_frames(error: *const c_char) -> *const c_char;
     fn thaw_error_cause(message: *const c_char) -> *const c_char;
     fn thaw_error_code(message: *const c_char) -> *const c_char;
     fn thaw_error_to_string(message: *const c_char) -> *const c_char;

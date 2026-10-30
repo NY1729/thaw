@@ -100,7 +100,7 @@ fn errrest_aggregate_error_prints_cause_and_errors() {
 "#;
     assert_eq!(
         compile_and_run(source, "errrest_aggregate_error_prints_cause_and_errors"),
-        "[AggregateError: multi] { [errors]: [ [Error: a], [TypeError: b] ] }\n[AggregateError: multi] {\n  [errors]: [\n    Error: a\n        at d (x:4:1),\n    TypeError: b\n        at e (x:5:1)\n  ]\n}\n[AggregateError: m2] { [cause]: 's', [errors]: [ 1, 'x' ] }\ns [ 1, 'x' ] m2 AggregateError\n[AggregateError: m3] {\n  [cause]: Error: why\n      at w (x:6:1),\n  [errors]: [ 1 ]\n}\n"
+        "[AggregateError: multi] {\n  [errors]: [\n    Error: a\n        at main (input.ts:1:1),\n    TypeError: b\n        at main (input.ts:1:1)\n  ]\n}\n[AggregateError: multi] {\n  [errors]: [\n    Error: a\n        at d (x:4:1),\n    TypeError: b\n        at e (x:5:1)\n  ]\n}\n[AggregateError: m2] { [cause]: 's', [errors]: [ 1, 'x' ] }\ns [ 1, 'x' ] m2 AggregateError\n[AggregateError: m3] {\n  [cause]: Error: why\n      at w (x:6:1),\n  [errors]: [ 1 ]\n}\n"
     );
 }
 
