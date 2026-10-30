@@ -1883,7 +1883,12 @@ pub extern "C" fn thaw_js_drain_next_ticks() {
                 error.to_string()
             };
             eprintln!("{message}");
-            std::process::exit(1);
+            // `std::process::exit` runs TLS destructors that free this still-live
+            // QuickJS runtime (assertion/core dump): emit `exit`, then `_exit`.
+            let _ = fail_process(&ctx);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            crate::restore_stdin_termios();
+            unsafe { libc::_exit(1) };
         }
     });
 }

@@ -3652,6 +3652,31 @@
       "name": "audit2 D console.log symbol keys",
       "expect": "matched",
       "source": "function main(): void {\n  const k = Symbol(\"k\");\n  const o: any = { a: 2 };\n  o[k] = 1;\n  console.log(o);\n  const p = { a: 2, [k]: 1 };\n  console.log(p);\n}"
+    },
+    {
+      "name": "audit2 C async generator with timer await under for await",
+      "expect": "matched",
+      "source": "const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));\nasync function* gen() { await sleep(1); yield 1; await sleep(1); yield 2; }\nasync function main() {\n  for await (const v of gen()) console.log(\"g\", v);\n  console.log(\"end\");\n  for await (const v of gen()) { if (v === 1) break; }\n  console.log(\"broke\");\n}"
+    },
+    {
+      "name": "audit2 C Promise catch void callback widens result",
+      "expect": "matched",
+      "source": "async function fail(): Promise<number> { throw new Error(\"x\"); }\nasync function main(): Promise<void> {\n  const ok: Promise<number> = Promise.resolve(1);\n  const swallowed = ok.catch(() => {});\n  const failed = fail().catch(() => {});\n  console.log(await swallowed, await failed);\n  const mapped = fail().catch((e: Error) => e.message.length);\n  console.log(await mapped);\n  const chain = Promise.resolve().catch(() => 5);\n  console.log(await chain);\n}"
+    },
+    {
+      "name": "audit2 C Readable readable event and Writable highWaterMark",
+      "expect": "matched",
+      "source": "import { Readable, Writable } from \"node:stream\";\nfunction main(): void {\n  const r = new Readable({ read() {} });\n  r.push(\"abc\"); r.push(\"def\"); r.push(null);\n  r.setEncoding(\"utf8\");\n  r.on(\"readable\", () => { let c; while ((c = r.read()) !== null) console.log(\"read\", c); });\n  r.on(\"end\", () => console.log(\"end\"));\n  const log: string[] = [];\n  const w = new Writable({ highWaterMark: 3, write(c: any, _e: any, cb: any) { log.push(\"w:\" + String(c)); setTimeout(cb, 1); } });\n  console.log(w.write(\"ab\"), w.writableLength, w.writableHighWaterMark);\n  console.log(w.write(\"cd\"), w.writableLength, w.writableNeedDrain);\n  w.on(\"drain\", () => console.log(\"drain\", w.writableLength));\n  w.on(\"finish\", () => console.log(\"finish\", log.join()));\n  w.end();\n}"
+    },
+    {
+      "name": "audit2 C this in EventEmitter listener is the emitter",
+      "expect": "matched",
+      "source": "import { EventEmitter } from \"node:events\";\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on(\"y\", function (this: any) { console.log(typeof this, this === e); });\n  e.on(\"z\", function (this: any, a: number) { console.log(this === e, a); });\n  e.once(\"w\", function (this: EventEmitter) { console.log(this === e); });\n  e.emit(\"y\"); e.emit(\"z\", 5); e.emit(\"w\");\n}"
+    },
+    {
+      "name": "audit2 C instanceof Promise on any-typed JS promise",
+      "expect": "matched",
+      "source": "function main(): void {\n  const P: any = (globalThis as any).Promise;\n  const p: any = new P((r: any) => r(1));\n  const o: any = {};\n  console.log(p instanceof Promise, o instanceof Promise);\n}"
     }
   ]
 }

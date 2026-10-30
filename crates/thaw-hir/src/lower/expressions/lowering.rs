@@ -2200,6 +2200,45 @@ impl<'a> FnLowerer<'a> {
                                         &[(temp, HirType::Json, value)],
                                     );
                                 }
+                                // An `any` holding a live JS Promise crosses as the handle
+                                // placeholder (same recovery as the Uint8Array case above); any
+                                // other Json value is never a Promise.
+                                if class.sym == *"Promise" {
+                                    let value = self.lower_expr(&bin.left)?;
+                                    let temp = format!(
+                                        "__thaw_instanceof_promise_source_{}",
+                                        self.next_binding
+                                    );
+                                    self.next_binding += 1;
+                                    self.scope.insert(temp.clone(), HirType::Json);
+                                    let is_handle = HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_json_has_wrapper_key".to_string(),
+                                        )),
+                                        vec![
+                                            HirExpr::Var(temp.clone()),
+                                            HirExpr::Lit(HirLit::Str(
+                                                "__thaw_js_handle_id__".to_string(),
+                                            )),
+                                        ],
+                                    );
+                                    let resolved = self.coerce_to_declared(
+                                        &HirType::JsValue,
+                                        HirExpr::Var(temp.clone()),
+                                    )?;
+                                    let live_check =
+                                        self.dynamic_value_check_by_name("Promise", resolved)?;
+                                    let body = HirExpr::Conditional(
+                                        Box::new(is_handle),
+                                        Box::new(live_check),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                        HirType::Bool,
+                                    );
+                                    return self.wrap_call_argument_bindings(
+                                        body,
+                                        &[(temp, HirType::Json, value)],
+                                    );
+                                }
                                 if let Some(key) =
                                     native_builtin_instanceof_json_sentinel(class.sym.as_ref())
                                 {
