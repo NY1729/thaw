@@ -751,7 +751,7 @@ impl<'a> FnLowerer<'a> {
             ("Array", "of" | "from" | "isArray" | "fromAsync")
                 | (
                     "Buffer",
-                    "from" | "alloc" | "concat" | "byteLength" | "isBuffer"
+                    "from" | "alloc" | "allocUnsafe" | "allocUnsafeSlow" | "concat" | "byteLength" | "isBuffer"
                 )
                 | ("Uint8Array", "fromHex" | "fromBase64" | "from")
                 | ("BigInt", "asIntN" | "asUintN")
@@ -2716,7 +2716,7 @@ impl<'a> FnLowerer<'a> {
                                 &bindings,
                             );
                         }
-                        if property.sym == *"alloc" {
+                        if property.sym == *"alloc" || property.sym == *"allocUnsafe" || property.sym == *"allocUnsafeSlow" {
                             let (arguments, bindings) =
                                 self.lower_native_spread_values(&call.args, "Buffer.alloc")?;
                             // `Buffer.alloc(size, fill?, encoding?)`: a string fill is
@@ -5064,13 +5064,26 @@ impl<'a> FnLowerer<'a> {
                     }
                     if object.sym == *"Object" && property.sym == *"fromEntries" {
                         let contextual_args = contextual_from_entries_arguments(&call.args);
-                        let (arguments, bindings) =
+                        let (mut arguments, mut bindings) =
                             self.lower_native_spread_values(contextual_args.as_deref().unwrap_or(&call.args), "Object.fromEntries")?;
                         let [entries] = arguments.as_slice() else {
                             return Err("`Object.fromEntries` expects exactly one argument".into());
                         };
-                        let entries = entries.clone();
-                        let ty = self.infer_expr_type(&entries)?;
+                        let mut entries = entries.clone();
+                        let mut ty = self.infer_expr_type(&entries)?;
+                        // A number-keyed map: keys become property-name strings, so re-lower
+                        // `Array.from(map).map(e => [String(e[0]), e[1]])` (the first lowering is discarded).
+                        if matches!(&ty, HirType::Map(key, _) if **key == HirType::F64) {
+                            if let Some(rewritten) = number_map_entries_arguments(&call.args) {
+                                let contextual = contextual_from_entries_arguments(&rewritten);
+                                (arguments, bindings) = self.lower_native_spread_values(
+                                    contextual.as_deref().unwrap_or(&rewritten),
+                                    "Object.fromEntries",
+                                )?;
+                                entries = arguments[0].clone();
+                                ty = self.infer_expr_type(&entries)?;
+                            }
+                        }
                         // `Object.fromEntries(map)`: a string-keyed map iterates as its entries.
                         let (entries, ty) = match &ty {
                             HirType::Map(key, _) if **key == HirType::Str => {
@@ -6430,6 +6443,63 @@ fn supported_values_of(key: &str) -> Vec<String> {
     .collect()
 }
 
+
+/// `Object.fromEntries(map)` -> `Object.fromEntries(Array.from(map).map((e) => [String(e[0]), e[1]]))`
+/// arguments, for maps whose keys are not already strings.
+fn number_map_entries_arguments(args: &[swc_ecma_ast::ExprOrSpread]) -> Option<Vec<swc_ecma_ast::ExprOrSpread>> {
+    use swc_common::DUMMY_SP;
+    use swc_ecma_ast::*;
+    let [argument] = args else { return None };
+    if argument.spread.is_some() {
+        return None;
+    }
+    let ident = |name: &str| Box::new(Expr::Ident(Ident::new_no_ctxt(name.into(), DUMMY_SP)));
+    let member = |obj: Box<Expr>, prop: &str| {
+        Box::new(Expr::Member(MemberExpr {
+            span: DUMMY_SP,
+            obj,
+            prop: MemberProp::Ident(IdentName::new(prop.into(), DUMMY_SP)),
+        }))
+    };
+    let call = |callee: Box<Expr>, args: Vec<Box<Expr>>| {
+        Box::new(Expr::Call(CallExpr {
+            span: DUMMY_SP,
+            ctxt: Default::default(),
+            callee: Callee::Expr(callee),
+            args: args.into_iter().map(|expr| ExprOrSpread { spread: None, expr }).collect(),
+            type_args: None,
+        }))
+    };
+    let index = |position: f64| {
+        Box::new(Expr::Member(MemberExpr {
+            span: DUMMY_SP,
+            obj: ident("e"),
+            prop: MemberProp::Computed(ComputedPropName {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: position, raw: None }))),
+            }),
+        }))
+    };
+    let entry = Box::new(Expr::Array(ArrayLit {
+        span: DUMMY_SP,
+        elems: vec![
+            Some(ExprOrSpread { spread: None, expr: call(ident("String"), vec![index(0.0)]) }),
+            Some(ExprOrSpread { spread: None, expr: index(1.0) }),
+        ],
+    }));
+    let arrow = Box::new(Expr::Arrow(ArrowExpr {
+        span: DUMMY_SP,
+        ctxt: Default::default(),
+        params: vec![Pat::Ident(BindingIdent { id: Ident::new_no_ctxt("e".into(), DUMMY_SP), type_ann: None })],
+        body: Box::new(ArrowFunctionBody::Expr(entry)),
+        is_async: false,
+        is_generator: false,
+        type_params: None,
+        return_type: None,
+    }));
+    let array = call(member(ident("Array"), "from"), vec![argument.expr.clone()]);
+    Some(vec![ExprOrSpread { spread: None, expr: call(member(array, "map"), vec![arrow]) }])
+}
 
 /// `Object.fromEntries(xs.map((x) => [k, v]))`: the callback's pair literal is an entry, not a
 /// heterogeneous array, so give it the `[string, any]` entry type (`k` keys are property names).
