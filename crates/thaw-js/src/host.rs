@@ -486,6 +486,160 @@ pub extern "C" fn thaw_tjs_class_call(
     })())
 }
 
+fn graph_field<'a>(fields: &'a [(String, Native)], key: &str) -> Option<&'a Native> {
+    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// One graph-wire token (`{"v":..}`, `{"r":i}`, `{"nf":..}`, `{"u":1}`) as a value.
+fn graph_token(
+    it: &mut Interp,
+    token: &Native,
+    nodes: &[Native],
+    memo: &mut Vec<Option<Value>>,
+    busy: &mut Vec<bool>,
+) -> Result<Value, String> {
+    let Native::Object(fields) = token else {
+        return Err("malformed graph token".into());
+    };
+    let [(key, payload)] = fields.as_slice() else {
+        return Err("malformed graph token".into());
+    };
+    match (key.as_str(), payload) {
+        ("v", v) => Ok(to_value(it, v)),
+        ("u", _) => Ok(Value::Undefined),
+        ("nf", Native::Str(s)) => Ok(Value::Number(match s.as_str() {
+            "-0" => -0.0,
+            "NaN" => f64::NAN,
+            "Infinity" => f64::INFINITY,
+            "-Infinity" => f64::NEG_INFINITY,
+            _ => return Err("malformed graph number".into()),
+        })),
+        ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, memo, busy),
+        _ => Err(format!("unsupported graph token `{key}`")),
+    }
+}
+
+/// Node `index` of a graph wire; shared nodes decode to one value (identity kept).
+fn graph_node(
+    it: &mut Interp,
+    index: usize,
+    nodes: &[Native],
+    memo: &mut Vec<Option<Value>>,
+    busy: &mut Vec<bool>,
+) -> Result<Value, String> {
+    if let Some(Some(v)) = memo.get(index) {
+        return Ok(v.clone());
+    }
+    let node = nodes.get(index).ok_or("graph node out of range")?;
+    // ponytail: cyclic graphs are rejected (containers are built whole); fill-after-create if a package needs them.
+    if std::mem::replace(&mut busy[index], true) {
+        return Err("cyclic graph is not supported".into());
+    }
+    let Native::Object(fields) = node else {
+        return Err("malformed graph node".into());
+    };
+    let value = match fields.as_slice() {
+        [(k, Native::Array(items))] if k == "a" => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(match item {
+                    Native::Object(f) if graph_field(f, "h").is_some() => Value::Hole,
+                    _ => graph_token(it, item, nodes, memo, busy)?,
+                });
+            }
+            it.array(out)
+        }
+        [(k, Native::Array(pairs))] if k == "o" => {
+            // The marker compiled code puts in a `Json` for a live thaw-js value (unleased).
+            if let [Native::Array(kv)] = pairs.as_slice() {
+                if let [Native::Str(name), Native::Object(v)] = kv.as_slice() {
+                    if name == HANDLE_KEY {
+                        if let Some(Native::Number(id)) = graph_field(v, "v") {
+                            let id = *id as usize;
+                            let found = HANDLES.with(|h| {
+                                h.borrow().get(id.wrapping_sub(1)).map(|(_, v)| v.clone())
+                            });
+                            if let Some(found) = found {
+                                memo[index] = Some(found.clone());
+                                return Ok(found);
+                            }
+                        }
+                    }
+                }
+            }
+            let o = it.plain();
+            for pair in pairs {
+                let Native::Array(kv) = pair else {
+                    return Err("malformed graph property".into());
+                };
+                let [Native::Str(name), token] = kv.as_slice() else {
+                    return Err("malformed graph property".into());
+                };
+                let v = graph_token(it, token, nodes, memo, busy)?;
+                crate::put(&o, name, v);
+            }
+            Value::Object(o)
+        }
+        [(k, Native::Number(id))] if k == "hdl" => {
+            let v = HANDLES
+                .with(|h| {
+                    h.borrow()
+                        .get((*id as usize).wrapping_sub(1))
+                        .map(|(_, v)| v.clone())
+                })
+                .unwrap_or(Value::Undefined);
+            // The encoder retained this reference for the wire; the decoded value holds its own.
+            thaw_tjs_release_handle(*id as i64);
+            v
+        }
+        _ => return Err("unsupported graph node (Date, Buffer, Map, Set, RegExp, BigInt)".into()),
+    };
+    memo[index] = Some(value.clone());
+    Ok(value)
+}
+
+#[repr(C)]
+pub struct HandleResult {
+    pub value: u64,
+    pub error: *mut c_char,
+}
+
+/// Retain the value a graph wire (`thaw_json_graph_encode`) describes as a thaw-js handle. The
+/// counterpart of QuickJS's `thaw_js_retain_graph_result`. The value is kept under the first loaded
+/// package (ponytail: a handle only needs a package for later method calls on it).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_retain_graph_result(wire: *const c_char) -> HandleResult {
+    let result = (|| -> Result<i64, String> {
+        let wire = cstr(wire).ok_or("invalid graph wire")?;
+        let Native::Object(top) = Native::from_json(&wire).map_err(|e| e.to_string())? else {
+            return Err("malformed graph wire".into());
+        };
+        let root = graph_field(&top, "root").ok_or("graph wire has no root")?;
+        let nodes = match graph_field(&top, "nodes") {
+            Some(Native::Array(nodes)) => nodes.as_slice(),
+            _ => &[],
+        };
+        with_package(0, |p| {
+            let mut memo = vec![None; nodes.len()];
+            let mut busy = vec![false; nodes.len()];
+            let value = graph_token(&mut p.interp, root, nodes, &mut memo, &mut busy)
+                .map_err(HostError::Bundle)?;
+            Ok(store_handle(0, value))
+        })
+        .map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(handle) => HandleResult {
+            value: handle as u64,
+            error: ptr::null_mut(),
+        },
+        Err(e) => HandleResult {
+            value: 0,
+            error: thaw_arena::owned_string(e),
+        },
+    }
+}
+
 /// Register a compiled closure callable from JS; returns its id. The same closure registered twice
 /// keeps one id, so the function identity JS sees is stable.
 #[no_mangle]

@@ -2413,6 +2413,8 @@ include!("hir_codegen/builtins.rs");
 
 include!("hir_codegen/json_values.rs");
 
+include!("hir_codegen/js_engine.rs");
+
 include!("hir_codegen/dynamic_host.rs");
 
 include!("hir_codegen/json_bridge.rs");
