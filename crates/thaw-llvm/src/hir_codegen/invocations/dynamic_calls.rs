@@ -734,7 +734,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let source = self.compile_expr(source)?.into_pointer_value();
-        let layout = self.builder.build_global_string_ptr(layout, "cached_native_object_layout")
+        let layout = self.intern_string(layout, "cached_native_object_layout")
             .map_err(|error| error.to_string())?;
         let result = self.builder.build_call(
             self.module.get_function("thaw_js_lookup_native_object").unwrap(),
@@ -786,7 +786,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 } else {
                     "thaw_json_link_native_object_by_serial"
                 },
-                self.builder.build_global_string_ptr(layout, "native_link_layout")
+                self.intern_string(layout, "native_link_layout")
                     .map_err(|error| error.to_string())?.as_pointer_value().into(),
             ),
             _ => return Err("json link detail must be a literal".into()),
@@ -812,7 +812,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let handle = self.compile_expr(item)?.into_int_value();
-        let layout = self.builder.build_global_string_ptr(layout, "native_view_target_layout")
+        let layout = self.intern_string(layout, "native_view_target_layout")
             .map_err(|error| error.to_string())?;
         let result = self.builder.build_call(
             self.module.get_function("thaw_js_native_object_pointer").unwrap(),
@@ -887,9 +887,9 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let descriptor = thaw_hir::native_object_layout_token(&fields);
         let owner = self.compile_expr(owner)?.into_pointer_value();
-        let layout = self.builder.build_global_string_ptr(&layout, "native_field_offsets")
+        let layout = self.intern_string(&layout, "native_field_offsets")
             .map_err(|error| error.to_string())?;
-        let descriptor = self.builder.build_global_string_ptr(&descriptor, "native_field_descriptor")
+        let descriptor = self.intern_string(&descriptor, "native_field_descriptor")
             .map_err(|error| error.to_string())?;
         let accepted = self.builder.build_call(
             self.module.get_function("thaw_object_register_field_offsets").unwrap(),
@@ -924,7 +924,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // programs, even though HIR records an erasure site.
             return Ok(self.context.bool_type().const_int(1, false).into());
         }
-        let layout = self.builder.build_global_string_ptr(layout, "native_projector_layout")
+        let layout = self.intern_string(layout, "native_projector_layout")
             .map_err(|error| error.to_string())?;
         let factory = self.compile_expr(factory)?.into_pointer_value();
         let accepted = self.builder.build_call(
@@ -1005,7 +1005,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("native projector lookup expects owner and static layout".into());
         };
         let owner = self.compile_expr(owner)?.into_pointer_value();
-        let layout = self.builder.build_global_string_ptr(layout, "native_projector_query")
+        let layout = self.intern_string(layout, "native_projector_query")
             .map_err(|error| error.to_string())?;
         let projector = self.builder.build_call(
             self.module.get_function("thaw_object_projector").unwrap(),
@@ -1032,7 +1032,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let source = self.compile_expr(source)?.into_pointer_value();
-        let layout = self.builder.build_global_string_ptr(layout, "native_object_layout")
+        let layout = self.intern_string(layout, "native_object_layout")
             .map_err(|error| error.to_string())?;
         let candidate = self.compile_expr(candidate)?.into_int_value();
         let result = self.builder.build_call(

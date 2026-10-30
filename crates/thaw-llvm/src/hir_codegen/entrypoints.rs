@@ -515,7 +515,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(ok, ready, failed)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(failed);
-            let message = self.builder.build_global_string_ptr(
+            let message = self.intern_string(
                 "\u{1}ThawError\u{1}failed to synchronize Lambda trace environment",
                 "lambda_trace_sync_error",
             ).map_err(|error| error.to_string())?;

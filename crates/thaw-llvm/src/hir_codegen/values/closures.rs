@@ -560,9 +560,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.context.i64_type().const_zero(),
                 )?
             } else if *receiver == HirType::JsValue {
-                let name = self
-                    .builder
-                    .build_global_string_ptr("undefined", "ordinary_this_name")
+                let name = self.intern_string("undefined", "ordinary_this_name")
                     .map_err(|error| error.to_string())?;
                 self.builder
                     .build_call(
@@ -738,9 +736,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.context.bool_type().const_zero(),
             ));
         }
-        let expected = self
-            .builder
-            .build_global_string_ptr(expected, "native_receiver_layout")
+        let expected = self.intern_string(expected, "native_receiver_layout")
             .map_err(|error| error.to_string())?;
         let handle = self
             .builder
@@ -984,9 +980,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 let class = marker.split('\u{1f}').next().unwrap();
-                let expected = self
-                    .builder
-                    .build_global_string_ptr(class, "receiver_expected_class")
+                let expected = self.intern_string(class, "receiver_expected_class")
                     .map_err(|error| error.to_string())?;
                 let identity = self
                     .builder
@@ -1514,9 +1508,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 "receiver_union_class_pointer",
                             )
                             .map_err(|error| error.to_string())?;
-                        let expected = self
-                            .builder
-                            .build_global_string_ptr(&class, "receiver_union_class_name")
+                        let expected = self.intern_string(&class, "receiver_union_class_name")
                             .map_err(|error| error.to_string())?;
                         let is_class = self
                             .builder
@@ -1655,9 +1647,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .strip_prefix("__thaw_class_identity_\u{1e}")
                 .unwrap();
             let class = marker.split('\u{1f}').next().unwrap();
-            let expected_class = self
-                .builder
-                .build_global_string_ptr(class, "receiver_expected_class")
+            let expected_class = self.intern_string(class, "receiver_expected_class")
                 .map_err(|error| error.to_string())?;
             let identity = self
                 .builder
@@ -1945,9 +1935,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .builder
                         .build_int_to_ptr(word, pointer, "receiver_native_object")
                         .map_err(|error| error.to_string())?;
-                    let empty_layout = self
-                        .builder
-                        .build_global_string_ptr("", "receiver_full_projector_layout")
+                    let empty_layout = self.intern_string("", "receiver_full_projector_layout")
                         .map_err(|error| error.to_string())?;
                     let projector = self
                         .builder
@@ -2307,9 +2295,7 @@ impl<'ctx> HirCompiler<'ctx> {
         closure: BasicValueEnum<'ctx>,
         label: &str,
     ) -> Result<(), String> {
-        let label = self
-            .builder
-            .build_global_string_ptr(label, "function_label")
+        let label = self.intern_string(label, "function_label")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
@@ -2482,9 +2468,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     "method_receiver",
                 )
                 .map_err(|error| error.to_string())?;
-            let expected = self
-                .builder
-                .build_global_string_ptr(receiver_class, "expected_receiver_class")
+            let expected = self.intern_string(receiver_class, "expected_receiver_class")
                 .map_err(|error| error.to_string())?;
             let actual_class = self
                 .builder
