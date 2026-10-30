@@ -3407,6 +3407,16 @@
       "name": "audit2 instanceof narrows a base-class value to its subclass",
       "expect": "matched",
       "source": "class A { x = 1; }\nclass B extends A { y = 2; }\nclass C extends B { z = 3; }\nfunction f(a: A): number { return a instanceof B ? a.y : a.x; }\nfunction g(a: A): string {\n  if (a instanceof C) { return \"C\" + a.z + a.y; }\n  else if (a instanceof B) { a.y += 1; return \"B\" + a.y; }\n  return \"A\" + a.x;\n}\nfunction main(): void { console.log(f(new A()), f(new B()), g(new A()), g(new B()), g(new C())); }"
+    },
+    {
+      "name": "audit2 class field initialised with new Map/Set and an enum member needs no annotation",
+      "expect": "matched",
+      "source": "enum State { Idle, Running }\nclass M {\n  private m = new Map<string, number>();\n  seen = new Set<string>();\n  state = State.Idle;\n  set(k: string, v: number) { this.m.set(k, v); this.seen.add(k); }\n  size() { return this.m.size + this.seen.size; }\n  go() { this.state = State.Running; }\n}\nfunction main(): void { const m = new M(); m.set(\"a\", 1); m.go(); console.log(m.size(), m.state); }"
+    },
+    {
+      "name": "audit2 abstract method override without return annotation",
+      "expect": "matched",
+      "source": "abstract class Base { abstract area(): number; d() { return this.area(); } }\nclass Rect extends Base { constructor(private w: number) { super(); } area() { return this.w * 2; } }\nclass Sq extends Base { area(): number { return 4; } }\nfunction main(): void { console.log(new Rect(2).d(), new Sq().d()); }"
     }
   ]
 }

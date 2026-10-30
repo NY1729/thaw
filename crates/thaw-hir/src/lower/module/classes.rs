@@ -236,7 +236,7 @@ fn collect_native_classes<'a>(
                 None => property
                     .value
                     .as_deref()
-                    .and_then(infer_class_field_literal_type)
+                    .and_then(|value| infer_class_field_type(value, interfaces, generic_interfaces))
                     .ok_or_else(|| {
                         format!("class `{name}` field `{field_name}` needs a type annotation")
                     })?,
