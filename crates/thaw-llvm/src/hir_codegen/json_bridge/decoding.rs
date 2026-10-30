@@ -861,20 +861,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 physical.push(HirType::Array(rest.clone()));
                 self.compile_js_callback_from_json_spreading(json, &physical, ret, true)
             }
-            // A native Promise resolver accepts `Promise<T> | undefined` (`Optional(Promise)`):
-            // `setTimeout(resolve, 5)` calls it with no argument and never reaches this arm.
-            // A JS promise handed to it has no native adoption path, so it is a TypeError.
-            HirType::Promise(_) => {
-                self.compile_throw_type_error(
-                    "a JavaScript Promise cannot be adopted by a native Promise resolver",
-                )?;
-                let function = self.current_function();
-                let unreachable = self
-                    .context
-                    .append_basic_block(function, "promise_adoption_unreachable");
-                self.builder.position_at_end(unreachable);
-                self.compile_zero_value(ty)
-            }
+            // A live JS Promise handed to a `Promise<T>`-typed callback parameter (e.g.
+            // `process.on("unhandledRejection", (reason, promise: Promise<unknown>) => ...)`)
+            // becomes a fresh native Promise that never settles: it is a real Promise for
+            // `instanceof`/identity use and does not abort the callback.
+            // ponytail: no settlement mirroring; adopt the JS promise's state if callers need `.then`.
+            HirType::Promise(_) => Ok(self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_promise_new").unwrap(),
+                    &[],
+                    "foreign_promise_placeholder",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_promise_new returned no value")?),
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }
     }
