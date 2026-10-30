@@ -1008,13 +1008,23 @@ impl<'ctx> HirCompiler<'ctx> {
         let cond_result = self.compile_expr(cond);
         self.loop_promotion_scopes.truncate(promotion_scope_index);
         let cond_val = cond_result?.into_int_value();
-        self.builder
-            .build_conditional_branch(cond_val, body_bb, after_bb)
-            .map_err(|e| e.to_string())?;
+        let forever = matches!(cond, HirExpr::Lit(HirLit::Bool(true)));
+        if forever {
+            self.builder.build_unconditional_branch(body_bb).map_err(|e| e.to_string())?;
+        } else {
+            self.builder
+                .build_conditional_branch(cond_val, body_bb, after_bb)
+                .map_err(|e| e.to_string())?;
+        }
 
         self.builder.position_at_end(after_bb);
-        // `after_bb` is always reachable (the condition can be false on the
-        // first check), so a `while` never terminates its enclosing block.
+        // `while (true)` with no `break` aimed at it never reaches `after_bb`, so
+        // it terminates the enclosing block (a value-returning function may end
+        // with it). Any other loop's condition can be false on the first check.
+        if forever && after_bb.get_first_use().is_none() {
+            self.builder.build_unreachable().map_err(|e| e.to_string())?;
+            return Ok(true);
+        }
         Ok(false)
     }
 

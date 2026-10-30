@@ -80,6 +80,8 @@ impl<'ctx> HirCompiler<'ctx> {
             // interface is already rejected at lowering time
             // (`thaw_hir::lower::resolve_interface`), so a genuinely
             // cyclic `HirType::Object` should never reach codegen.
+            // A back-edge to a class layout: same pointer representation as `Object`.
+            HirType::Recursive(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Object(fields) => {
                 for (name, ty) in fields {
                     self.basic_type(ty)

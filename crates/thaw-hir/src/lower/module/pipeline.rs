@@ -2049,7 +2049,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 None => property
                     .value
                     .as_deref()
-                    .and_then(|value| infer_class_field_type(value, &interfaces, &generic_interfaces))
+                    .and_then(|value| {
+                        infer_class_field_type(value, &interfaces, &generic_interfaces, &|class, member| {
+                            let owner = class?;
+                            global_types.get(&class_static_field_symbol(owner, member)).cloned()
+                        })
+                    })
                     .ok_or_else(|| {
                         format!(
                             "class `{class_name}` static field `{field}` needs a type annotation"

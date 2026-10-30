@@ -1246,10 +1246,9 @@ impl<'a> FnLowerer<'a> {
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))
                 } else {
-                    Err(
-                        "`this` is only available inside a native class constructor or method"
-                            .into(),
-                    )
+                    // A plain function (or an arrow inside one) called without a receiver: modules are
+                    // strict, so `this` is `undefined`.
+                    Ok(HirExpr::Lit(HirLit::Undefined))
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
@@ -6413,6 +6412,11 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        // An expected type reached through a class/interface back-edge is its named layout.
+        if let Some(ty) = expected.filter(|ty| ty.contains_recursive()) {
+            let expanded = ty.expand();
+            return self.lower_expr_with_expected_type(expr, Some(&expanded));
+        }
         // An object literal written where `any` is expected: its unannotated callbacks
         // are contextually `any`.
         if matches!(expr, Expr::Object(_))
