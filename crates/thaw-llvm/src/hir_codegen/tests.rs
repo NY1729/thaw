@@ -808,3 +808,4 @@ include!("tests/audit2_recursive_contracts.rs");
 include!("tests/error_inspect_contracts.rs");
 include!("tests/audit2_inspect_format_contracts.rs");
 include!("tests/audit2_async_streams_contracts.rs");
+include!("tests/audit2_leftovers_contracts.rs");
