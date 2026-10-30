@@ -103,6 +103,8 @@ struct FnLowerer<'a> {
     native_class_aliases: HashMap<Symbol, HirType>,
     /// Set when a class instance was converted to a distinct interface view object.
     class_method_view_made: bool,
+    /// Nesting of dynamic accessor projections (guards against recursive class types).
+    accessor_projection_depth: usize,
     member_receiver_bindings: HashSet<Symbol>,
     /// Names assigned somewhere after an uninitialized `let x: T;` in the
     /// same statement list (definite-assignment approximation).

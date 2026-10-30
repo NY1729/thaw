@@ -1387,6 +1387,13 @@ impl<'a> FnLowerer<'a> {
                     self.lower_expr(&assign.right)?
                 }
             }
+            // `row = []` takes its element type from the declared array type.
+            (Expr::Array(literal), Target::Var(name)) if literal.elems.is_empty() => {
+                match self.scope.get(name).cloned().filter(|ty| matches!(ty, HirType::Array(_))) {
+                    Some(expected) => HirExpr::TypedClosure(expected, Box::new(HirExpr::ArrayLit(Vec::new()))),
+                    None => self.lower_expr(&assign.right)?,
+                }
+            }
             _ => self.lower_expr(&assign.right)?,
         };
         let rhs_type = self.infer_expr_type(&rhs)?;

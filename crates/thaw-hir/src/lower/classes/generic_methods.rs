@@ -180,17 +180,11 @@ impl GenericClassMethodUseCollector<'_, '_> {
             Expr::Paren(parenthesized) => self.receiver_class(&parenthesized.expr),
             Expr::TsAs(assertion) => self.receiver_class(&assertion.expr),
             Expr::TsTypeAssertion(assertion) => self.receiver_class(&assertion.expr),
-            _ => infer_generic_constructor_expr_type(
-                expression,
-                self.interfaces,
-                self.generic_interfaces,
-                &self.scopes,
-                self.call_results,
-            )
-            .ok()
-            .as_ref()
-            .and_then(class_name_from_type)
-            .map(str::to_owned),
+            _ => self.infer_actual_type(expression)
+                .ok()
+                .as_ref()
+                .and_then(class_name_from_type)
+                .map(str::to_owned),
         }
     }
 
@@ -345,6 +339,7 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                         .iter()
                         .rev()
                         .find_map(|scope| scope.get(identifier.sym.as_ref()).cloned()),
+                    Expr::Call(_) => self.infer_actual_type(initializer).ok(),
                     _ => None,
                 })
                 .or_else(|| {
@@ -984,9 +979,13 @@ fn specialize_generic_class_methods(
                     let Some(annotation) = method.function.return_type.as_ref() else {
                         continue;
                     };
-                    let Ok(ty) =
-                        lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
-                    else {
+                    // A `this` return (fluent chaining) is the class's own instance type.
+                    let lowered = if matches!(annotation.type_ann.as_ref(), TsType::TsThisType(_)) {
+                        interfaces.get(&class).cloned().ok_or(())
+                    } else {
+                        lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces).map_err(|_| ())
+                    };
+                    let Ok(ty) = lowered else {
                         continue;
                     };
                     (
