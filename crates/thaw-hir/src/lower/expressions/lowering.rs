@@ -1246,12 +1246,9 @@ impl<'a> FnLowerer<'a> {
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))
                 } else {
-                    // A plain function (or an arrow inside one) called without a receiver sees the
-                    // sloppy-mode `this`: the global object.
-                    self.lower_expr(&Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
-                        "globalThis".into(),
-                        swc_common::DUMMY_SP,
-                    )))
+                    // A plain function (or an arrow inside one) called without a receiver: modules are
+                    // strict, so `this` is `undefined`.
+                    Ok(HirExpr::Lit(HirLit::Undefined))
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
