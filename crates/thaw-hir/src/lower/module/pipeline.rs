@@ -1927,6 +1927,16 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 if !method.is_static {
                     signature.params[0] = derived_type.clone();
                 }
+                // An unannotated method of an abstract base is never lowered (and its
+                // signature defaulted to `Void`); the derived copy infers its own return.
+                if base.class.is_abstract
+                    && !method.is_static
+                    && method.function.return_type.is_none()
+                    && !method.function.is_generator
+                    && method.kind != MethodKind::Setter
+                {
+                    signature.ret = HirType::Dynamic;
+                }
                 signatures.insert(derived_symbol.clone(), signature.clone());
                 if method.kind == MethodKind::Method && signature.uses_this {
                     let base_unbound = unbound_class_method_symbol(&base_symbol);
