@@ -299,7 +299,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             // A class instance prints its absent optional fields as `undefined` (Node's
             // define semantics); plain objects and error-family instances omit them.
-            let class_instance = fields.first().is_some_and(|(n, t)| {
+            // A generator/iterator result `{ value, done }` always has its `value` key.
+            let iterator_result = matches!(fields,
+                [(value, HirType::Optional(_)), (done, HirType::Bool)] if value == "value" && done == "done");
+            let class_instance = iterator_result || fields.first().is_some_and(|(n, t)| {
                 *t == HirType::Bool && n.strip_prefix("__thaw_class_identity_\u{1e}")
                     .is_some_and(|chain| !chain.split('\u{1f}').any(thaw_hir::is_error_family_name))
             });
