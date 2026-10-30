@@ -2278,7 +2278,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirType::NonArrowReceiver(inner) if **inner == HirType::JsValue))
             })
             .map(|(index, _)| 1u64 << index)
-            .sum();
+            .sum::<u64>()
+            // High half: `Str` positions. A `: Error` annotation lowers to `Str`, so an Error
+            // object arriving there must be framed as a native Error, not `String(error)`.
+            | params
+                .iter()
+                .enumerate()
+                .filter(|(index, param)| *index < 32 && **param == HirType::Str)
+                .map(|(index, _)| 1u64 << (32 + index))
+                .sum::<u64>();
         let (adapter, closure, finish) =
             self.compile_value_callback_from_closure(closure, params, ret, true, None, graph_mode, graph_mode, method_mode)?;
         let jsvalue_param_mask = self
