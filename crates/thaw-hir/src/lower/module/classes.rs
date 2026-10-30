@@ -63,6 +63,7 @@ fn collect_native_classes<'a>(
                 interfaces,
                 generic_interfaces,
                 &substitution,
+                method.function.body.as_ref().map(|body| body.stmts.as_slice()),
             )?
         } else {
             lower_fn_return_type(
@@ -171,6 +172,20 @@ fn collect_native_classes<'a>(
                         | "AggregateError"
                         | "SuppressedError"
                 ) {
+                    // A class imported from a JavaScript-realm package reaches here as its
+                    // generated constructor symbol (`__thaw_class_ctor_<hex of "$new$Name">`).
+                    let external = base_name.strip_prefix("__thaw_class_ctor_").and_then(|hex| {
+                        let bytes = (0..hex.len() / 2)
+                            .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16))
+                            .collect::<Result<Vec<_>, _>>()
+                            .ok()?;
+                        String::from_utf8(bytes).ok()?.strip_prefix("$new$").map(str::to_owned)
+                    });
+                    if let Some(external) = external {
+                        return Err(format!(
+                            "class `{name}` extends the external JavaScript class `{external}`, which AOT classes cannot subclass yet (supported builtin bases: Map, Set, Array, Date, RegExp, Error, and EventEmitter from node:events)"
+                        ));
+                    }
                     return Err(format!(
                         "class `{name}` extends unknown native class `{base_name}`"
                     ));

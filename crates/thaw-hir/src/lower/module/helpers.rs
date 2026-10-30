@@ -653,6 +653,8 @@ fn native_base_tag(ty: &HirType) -> Option<&'static str> {
         HirType::Map(..) => Some("Map"),
         HirType::Set(_) => Some("Set"),
         HirType::Array(_) => Some("Array"),
+        ty if *ty == date_object_type() => Some("Date"),
+        ty if *ty == regex_object_type() => Some("RegExp"),
         _ => None,
     }
 }
@@ -677,6 +679,12 @@ fn native_collection_base_type(
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Result<Option<HirType>, String> {
+    // `Date`/`RegExp` are plain (non-generic) native objects: the subclass wraps one.
+    match base_name {
+        "Date" => return Ok(Some(date_object_type())),
+        "RegExp" => return Ok(Some(regex_object_type())),
+        _ => {}
+    }
     let arity = match base_name {
         "Map" => 2,
         "Set" | "Array" => 1,

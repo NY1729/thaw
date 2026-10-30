@@ -1131,8 +1131,10 @@ impl<'a> FnLowerer<'a> {
                 } else if binding.type_ann.is_some() && sparse_index {
                     self.coerce_primitive_array_argument(value, &ty)?
                 } else {
+                    self.class_method_view_made = false;
                     self.coerce_to_declared_aliasing(&ty, value)?
                 };
+                let method_view_made = std::mem::take(&mut self.class_method_view_made);
 
                 let storage_type = if let Some((_, receiver)) = &private_receiver_alias {
                     HirType::NonArrowReceiver(Box::new(receiver.clone()))
@@ -1172,7 +1174,7 @@ impl<'a> FnLowerer<'a> {
                 // would dispatch methods on a pointer that is not a class instance.
                 // A `Map`/`Set` subclass bound to its collection type was projected to the
                 // wrapped collection: the binding holds the native collection itself.
-                if class_name_from_type(&actual_type).is_some() && actual_type != storage_type
+                if !method_view_made && class_name_from_type(&actual_type).is_some() && actual_type != storage_type
                     && native_base_type(&actual_type) != Some(&storage_type)
                     && !matches!(storage_type, HirType::Dynamic | HirType::Json | HirType::JsValue) {
                     self.native_class_aliases

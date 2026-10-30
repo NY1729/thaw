@@ -4,6 +4,7 @@ use std::process::{Command, ExitStatus};
 use inkwell::context::Context;
 use thaw_llvm::HirCompiler;
 
+mod event_emitter_base;
 mod module_graph;
 include!("compat.rs");
 include!("node_compat.rs");

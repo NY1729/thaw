@@ -275,6 +275,24 @@ pub(crate) fn is_generator_producer_type(ty: &HirType) -> bool {
     params.len() == 6 && params[0] == HirType::I64 && params[1] == HirType::Json
 }
 
+/// Whether `ty` is, or contains, an internal generator-producer function type.
+pub(crate) fn hir_type_mentions_generator(ty: &HirType) -> bool {
+    match ty {
+        _ if is_generator_producer_type(ty) => true,
+        HirType::Array(element) | HirType::Optional(element) | HirType::Nullable(element) => {
+            hir_type_mentions_generator(element)
+        }
+        HirType::Function(params, result) => {
+            params.iter().any(hir_type_mentions_generator) || hir_type_mentions_generator(result)
+        }
+        HirType::Tuple(elements) | HirType::Union(elements) => {
+            elements.iter().any(hir_type_mentions_generator)
+        }
+        HirType::Object(fields) => fields.iter().any(|(_, field)| hir_type_mentions_generator(field)),
+        _ => false,
+    }
+}
+
 fn generator_emits_value(statement: &HirStmt, values: &str) -> bool {
     match statement {
         HirStmt::Expr(HirExpr::Call(callee, arguments)) => {

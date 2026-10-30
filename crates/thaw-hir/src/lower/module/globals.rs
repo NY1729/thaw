@@ -361,6 +361,14 @@ fn lower_global_decls(
             };
             let name = binding.id.sym.to_string();
             let expected = global_types[&name].clone();
+            // A global holding an unannotated generator carries a stale
+            // placeholder type until the generator's signature converges:
+            // re-infer it from the initializer.
+            let expected = if hir_type_contains_dynamic(&expected) && hir_type_mentions_generator(&expected) {
+                HirType::Dynamic
+            } else {
+                expected
+            };
             let init_expr = declarator
                 .init
                 .as_deref()
