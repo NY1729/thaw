@@ -3279,7 +3279,12 @@ pub extern "C" fn thaw_json_parse_error_property(text: *const c_char) -> *mut Va
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
     let value = JsonParser::new(bytes).parse();
     PARSE_ERROR.with(|error| error.set(value.is_none()));
-    leak(revive_framed_errors(value.unwrap_or(Value::Null)))
+    let value = value.unwrap_or(Value::Null);
+    // A stored Error that is still alive stays that Error, so `err.cause.stack = x` edits it.
+    if error_ref(&value).is_some() {
+        return leak(value);
+    }
+    leak(revive_framed_errors(value))
 }
 
 enum DestroyNode {
