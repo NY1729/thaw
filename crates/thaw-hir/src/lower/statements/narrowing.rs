@@ -485,6 +485,68 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `const u = new Uint8Array(n)` becomes a native byte store (O(1) element access, no JS realm)
+    /// when `u` is only ever indexed (`u[i]`, `u[i] = v`) or measured (`u.length`) in `later`;
+    /// any other use keeps the live typed array, which supports the full API.
+    fn mark_native_uint8array_declarations(&mut self, declaration: &VarDecl, later: &[Stmt]) {
+        use swc_ecma_visit::{Visit, VisitWith};
+        struct OnlyIndexed<'a> {
+            name: &'a str,
+            ok: bool,
+        }
+        impl Visit for OnlyIndexed<'_> {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.ok &= ident.sym != self.name;
+            }
+            fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+                let own = matches!(member.obj.as_ref(), Expr::Ident(id) if id.sym == self.name);
+                let allowed = match &member.prop {
+                    swc_ecma_ast::MemberProp::Computed(_) => true,
+                    swc_ecma_ast::MemberProp::Ident(prop) => prop.sym == "length",
+                    _ => false,
+                };
+                if own && allowed {
+                    member.prop.visit_with(self);
+                } else {
+                    member.visit_children_with(self);
+                }
+            }
+            // `u.length = n` is not an index write.
+            fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+                if let Some(swc_ecma_ast::SimpleAssignTarget::Member(member)) = assign.left.as_simple() {
+                    if matches!(member.obj.as_ref(), Expr::Ident(id) if id.sym == self.name)
+                        && !matches!(member.prop, swc_ecma_ast::MemberProp::Computed(_))
+                    {
+                        self.ok = false;
+                    }
+                }
+                assign.visit_children_with(self);
+            }
+        }
+        if declaration.kind != VarDeclKind::Const {
+            return;
+        }
+        for declarator in &declaration.decls {
+            let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref()) else {
+                continue;
+            };
+            let Expr::New(construction) = init else { continue };
+            let Some(arguments) = construction.args.as_deref() else { continue };
+            if arguments.len() != 1
+                || !construction.callee.as_ident().is_some_and(|class| class.sym == "Uint8Array")
+            {
+                continue;
+            }
+            let mut uses = OnlyIndexed { name: binding.id.sym.as_ref(), ok: true };
+            for statement in later {
+                statement.visit_with(&mut uses);
+            }
+            if uses.ok {
+                self.native_u8_args.insert(arguments.as_ptr() as usize);
+            }
+        }
+    }
+
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let hoisted_closures = Self::hoist_forward_closure_consts(stmts);
         let hoisted_closures = Self::delay_forward_closure_consts(&hoisted_closures);
@@ -525,6 +587,7 @@ impl<'a> FnLowerer<'a> {
         let mut using_starts: Vec<usize> = Vec::new();
         for (index, stmt) in stmts.iter().enumerate() {
             if let Stmt::Decl(Decl::Var(var_decl)) = stmt {
+                self.mark_native_uint8array_declarations(var_decl, &stmts[index + 1..]);
                 let uninit: Vec<Symbol> = var_decl
                     .decls
                     .iter()
