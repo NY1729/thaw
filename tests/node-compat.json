@@ -3737,6 +3737,11 @@
       "name": "audit2 C instanceof Promise on any-typed JS promise",
       "expect": "matched",
       "source": "function main(): void {\n  const P: any = (globalThis as any).Promise;\n  const p: any = new P((r: any) => r(1));\n  const o: any = {};\n  console.log(p instanceof Promise, o instanceof Promise);\n}"
+    },
+    {
+      "name": "this field method call on a class-typed field",
+      "expect": "matched",
+      "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
     }
   ]
 }

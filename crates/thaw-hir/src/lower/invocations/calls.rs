@@ -1207,6 +1207,16 @@ impl<'a> FnLowerer<'a> {
                     };
                     return self.lower_unbound_this_error(&property, &result);
                 }
+                // `this.field.method()` in a detached method reads a field of
+                // `undefined`: unsupported, so the caller emits the throwing
+                // stub instead of a mistyped dynamic call.
+                let mut root = member.obj.as_ref();
+                while let Expr::Member(inner) = root {
+                    root = inner.obj.as_ref();
+                }
+                if matches!(root, Expr::This(_)) {
+                    return Err("detached method call through a `this` field".into());
+                }
             }
         }
 
