@@ -16,3 +16,6 @@ regress = "0.11.1"
 num-bigint = "=0.4.8"
 num-traits = "0.2"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"

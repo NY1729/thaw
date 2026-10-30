@@ -184,6 +184,8 @@ struct Walker {
     called: HashSet<String>,
     /// every property/function name the bundle itself defines
     defined: HashSet<String>,
+    /// identifiers used only as the right operand of `instanceof`
+    instance_refs: HashSet<String>,
     requires: Vec<Option<String>>,
     /// identifiers probed with `typeof X` (assumed guarded)
     probed: HashSet<String>,
@@ -324,6 +326,20 @@ impl Visit for Walker {
         }
         n.visit_children_with(self);
     }
+    fn visit_bin_expr(&mut self, n: &a::BinExpr) {
+        if let (a::BinaryOp::InstanceOf, a::Expr::Ident(i)) = (n.op, &*n.right) {
+            self.instance_refs.insert(i.sym.to_string());
+            n.left.visit_with(self);
+            return;
+        }
+        n.visit_children_with(self);
+    }
+    fn visit_prop(&mut self, n: &a::Prop) {
+        if let a::Prop::Shorthand(i) = n {
+            self.defined.insert(i.sym.to_string());
+        }
+        n.visit_children_with(self);
+    }
     fn visit_prop_name(&mut self, n: &a::PropName) {
         if let Some(k) = prop_key(n) {
             self.defined.insert(k);
@@ -373,7 +389,9 @@ impl Visit for Walker {
         if let a::Callee::Expr(c) = &n.callee {
             match &**c {
                 a::Expr::Member(m) => {
-                    if let a::MemberProp::Ident(p) = &m.prop {
+                    // the ESM origin is `undefined` under this loader; its calls are guarded and dead
+                    let origin = matches!(&*m.obj, a::Expr::Ident(o) if o.sym.starts_with("__thaw_esm_origin_"));
+                    if let (false, a::MemberProp::Ident(p)) = (origin, &m.prop) {
                         self.called.insert(p.sym.to_string());
                     }
                 }
@@ -403,7 +421,12 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
         ..Default::default()
     };
     let interp = crate::Interp::new();
-    let globals: HashSet<String> = interp.global_names().into_iter().collect();
+    // `File` exists only so `x instanceof File` is false for non-files; any other use is unsupported.
+    let globals: HashSet<String> = interp
+        .global_names()
+        .into_iter()
+        .filter(|n| n != "File")
+        .collect();
     let known_methods: HashSet<String> = interp.known_method_names().into_iter().collect();
     let params = [
         "module",
@@ -460,10 +483,23 @@ pub fn scan_bundle(source: &str) -> Result<Report, String> {
                 add(&mut report, format!("global:{r}"), 1, key);
             }
         }
+        for r in &w.instance_refs {
+            let known = globals.contains(r) || r == "File";
+            if !known
+                && !w.declared.contains(r)
+                && !params.contains(&r.as_str())
+                && !w.probed.contains(r)
+            {
+                add(&mut report, format!("global:{r}"), 1, key);
+            }
+        }
         for (g, p) in &w.builtin_members {
             if interp.is_builtin_global(g)
+                && g != "File"
                 && !w.declared.contains(g)
                 && !interp.builtin_member_exists(g, p)
+                // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
+                && !(g == "globalThis" && defined.contains(p))
             {
                 add(&mut report, format!("builtin:{g}.{p}"), 1, key);
             }
