@@ -181,7 +181,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or_else(|| format!("{symbol} returned no value"))?;
         self.compile_check_json_host_error(value,
-            (symbol == "thaw_json_as_string").then_some("thaw_cstring_destroy"))
+            matches!(symbol, "thaw_json_as_string" | "thaw_json_as_string_value").then_some("thaw_cstring_destroy"))
     }
 
     fn compile_json_as_bool_value(

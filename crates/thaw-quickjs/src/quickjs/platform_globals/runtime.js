@@ -630,6 +630,8 @@
         }
         return thawGraphStringify({ n: value[Symbol.toStringTag], v: items });
       }
+      // 28: an Error's own extra properties as JSON (`code`, ...), for its native framed text.
+      case 28: return globalThis.__thaw_error_properties_json(value);
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');

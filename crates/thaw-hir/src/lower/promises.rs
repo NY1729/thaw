@@ -714,6 +714,12 @@ impl<'a> FnLowerer<'a> {
             let mut arguments = Vec::new();
             for (index, expected) in fixed.iter().enumerate() {
                 let input = HirExpr::Var(input_names[index].clone());
+                // A live Error landing in a `string`/`: Error` slot keeps its Error identity
+                // (`JsonAsNative` decodes via the Error-aware string path, not `String(error)`).
+                if *expected == HirType::Str && supplied[index] == HirType::Json {
+                    arguments.push(HirExpr::JsonAsNative(Box::new(input), HirType::Str));
+                    continue;
+                }
                 arguments.push(self.coerce_to_declared(expected, input)?);
             }
             if let Some(element) = rest {
