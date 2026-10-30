@@ -531,6 +531,71 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// A callback with typed parameters (`(n: number) => ...`) stored in a `(...args: any[]) => R`
+    /// slot is entered with one rest array of `Json` values: wrap it so each argument is decoded
+    /// to the callback's own parameter type (an absent one reads `undefined`).
+    fn adapt_callback_to_json_rest(
+        &mut self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::CallableFunction(fixed, _, Some(rest), ret) = declared else {
+            return Ok(None);
+        };
+        if !fixed.is_empty() || **rest != HirType::Json {
+            return Ok(None);
+        }
+        let Ok(HirType::Function(params, actual_ret)) = self.infer_expr_type(value) else {
+            return Ok(None);
+        };
+        let rest_array = HirType::Array(rest.clone());
+        if params.is_empty()
+            || params == [rest_array.clone()]
+            || !(**ret == HirType::Void || *ret == actual_ret)
+            || params.iter().any(|ty| matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)))
+        {
+            return Ok(None);
+        }
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_rest_callback_{id}");
+        let args_name = format!("__thaw_rest_args_{id}");
+        let callback_type = HirType::Function(params.clone(), actual_ret.clone());
+        self.scope.insert(callback_name.clone(), callback_type.clone());
+        self.scope.insert(args_name.clone(), rest_array.clone());
+        let mut arguments = Vec::with_capacity(params.len());
+        for (index, ty) in params.iter().enumerate() {
+            let present = HirExpr::BinOp(
+                BinOp::Gt,
+                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(args_name.clone())))),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+            );
+            let element = HirExpr::TypedIndex(
+                Box::new(HirExpr::Var(args_name.clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                HirType::Json,
+            );
+            let absent = self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+            let json = HirExpr::Conditional(Box::new(present), Box::new(element), Box::new(absent), HirType::Json);
+            arguments.push(self.coerce_to_declared(ty, json)?);
+        }
+        let call = HirExpr::Call(Box::new(HirExpr::Var(callback_name.clone())), arguments);
+        let body = if **ret == HirType::Void {
+            HirExpr::Block(vec![HirStmt::Expr(call)])
+        } else {
+            call
+        };
+        let adapter = HirExpr::Lambda(
+            vec![HirParam { name: callback_name.clone(), ty: callback_type.clone() }],
+            vec![HirParam { name: args_name, ty: rest_array }],
+            ret.as_ref().clone(),
+            Box::new(body),
+        );
+        let closure = HirExpr::TypedClosure(declared.clone(), Box::new(adapter));
+        self.wrap_call_argument_bindings(closure, &[(callback_name, callback_type, value.clone())])
+            .map(Some)
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         // A slot typed through a class back-edge coerces to the layout it names; a value that
         // already has that layout (modulo back-edges) needs no conversion.
@@ -562,6 +627,9 @@ impl<'a> FnLowerer<'a> {
                     vec![coerced, HirExpr::Lit(HirLit::Str(label))],
                 ));
             }
+        }
+        if let Some(adapted) = self.adapt_callback_to_json_rest(declared, &value)? {
+            return Ok(adapted);
         }
         // An observed read of a maybe-uninitialised class field arrives with
         // its raw `Optional`; a slot that wants the bare payload unwraps it

@@ -1775,6 +1775,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         }
                     }
                 }
+                // `extends Date` takes the optional epoch milliseconds, `extends RegExp` its pattern.
+                None if base.sym.as_ref() == "Date" => (vec![HirType::Optional(Box::new(HirType::F64))], None),
+                None if base.sym.as_ref() == "RegExp" => (vec![HirType::Str], None),
                 None if matches!(base.sym.as_ref(), "Map" | "Set") => {
                     let iterable = match interfaces.get(derived_name).and_then(native_base_type) {
                         Some(HirType::Map(key, value)) => HirType::Array(Box::new(
@@ -1799,7 +1802,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             let base_omittable = signatures.get(&base_symbol).map_or_else(
                 || {
                     // The native collection's optional entries argument.
-                    let native = matches!(base.sym.as_ref(), "Map" | "Set");
+                    let native = matches!(base.sym.as_ref(), "Map" | "Set" | "Date");
                     HirOptionalMask::from_bools(&vec![native; base_params.len()])
                 },
                 |signature| signature.source_omittable.clone(),

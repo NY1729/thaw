@@ -5619,12 +5619,18 @@ impl<'a> FnLowerer<'a> {
             }
             // ... and so does a native class instance / object a method hands back.
             if let (true, HirType::Object(nested)) = (self.alias_native_arrays, &result) {
-                if self.live_projection_supported_with_classes(&result) {
+                if self.live_projection_supported_with_classes(&result)
+                    && !self.projecting_class_methods.contains(&result)
+                    && result != source_type
+                {
                     let nested_class = nested.iter().any(|(name, _)|
                         name.starts_with("__thaw_class_identity_\u{1e}"));
                     let nested = nested.clone();
-                    method_body = self.lower_fixed_object_as_dynamic_accessor_object(
-                        method_body, &nested, false, true, nested_class)?;
+                    self.projecting_class_methods.push(source_type.clone());
+                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(
+                        method_body, &nested, false, true, nested_class);
+                    self.projecting_class_methods.pop();
+                    method_body = projected?;
                     result = HirType::JsValue;
                 }
             }
