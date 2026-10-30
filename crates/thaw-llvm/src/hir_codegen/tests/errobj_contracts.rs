@@ -471,7 +471,7 @@ fn error_obj_console_log_props_and_stack() {
 "#;
     assert_eq!(
         compile_and_run(source, "error_obj_console_log_props_and_stack"),
-        "Error: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\na Error: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\n{\n  err: Error: boom\n      at x (y:1:1) {\n    code: 'E_X'\n  }\n}\n[\n  Error: boom\n      at x (y:1:1) {\n    code: 'E_X'\n  }\n]\n{ code: 'E_X' }\nError: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\nError: boom [ 'code' ]\n[Error: p] {\n  cause: Error: inner\n      at main (input.ts:1:1),\n  n: 1\n}\n"
+        "Error: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\na Error: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\n{\n  err: Error: boom\n      at x (y:1:1) {\n    code: 'E_X'\n  }\n}\n[\n  Error: boom\n      at x (y:1:1) {\n    code: 'E_X'\n  }\n]\n{ code: 'E_X' }\nError: boom\n    at x (y:1:1) {\n  code: 'E_X'\n}\nError: boom [ 'code' ]\n[Error: p] { cause: [Error: inner], n: 1 }\n"
     );
 }
 
