@@ -433,6 +433,11 @@ fn infer_class_field_reference_type(
     };
     match expr {
         Expr::Paren(parenthesized) => infer_class_field_reference_type(&parenthesized.expr, interfaces, generic_interfaces),
+        Expr::Cond(conditional) => {
+            let consequent = infer_class_field_reference_type(&conditional.cons, interfaces, generic_interfaces)?;
+            (infer_class_field_reference_type(&conditional.alt, interfaces, generic_interfaces)? == consequent)
+                .then_some(consequent)
+        }
         Expr::New(construction) => {
             let class = construction.callee.as_ident()?;
             match &construction.type_args {
