@@ -118,6 +118,7 @@ impl<'a> FnLowerer<'a> {
             deferred_generic_binds: HashMap::new(),
             native_method_values: HashMap::new(),
             native_class_aliases: HashMap::new(),
+            class_method_view_made: false,
             member_receiver_bindings: HashSet::new(),
             assigned_later: HashSet::new(),
             awaited_bindings: HashSet::new(),

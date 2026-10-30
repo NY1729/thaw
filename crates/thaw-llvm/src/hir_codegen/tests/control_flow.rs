@@ -315,7 +315,7 @@ fn compiles_throw_new_error_constructors() {
     "#;
     assert_eq!(
         compile_and_run(source, "throw_new_error"),
-        "Error: boom\nTypeError: wrong type\n[]\n"
+        "Error: boom\n    at main (input.ts:2:9)\nTypeError: wrong type\n    at main (input.ts:2:9)\n[]\n"
     );
 }
 
