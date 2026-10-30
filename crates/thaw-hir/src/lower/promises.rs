@@ -74,7 +74,12 @@ impl<'a> FnLowerer<'a> {
     fn promise_output_join(left: &HirType, right: &HirType) -> Option<HirType> {
         if left == right {
             Some(left.clone())
-        } else if left == &HirType::Json || right == &HirType::Json {
+        } else if left == &HirType::Json
+            || right == &HirType::Json
+            // `p.catch(() => {})` resolves to `T | undefined`, which Json represents.
+            || left == &HirType::Void
+            || right == &HirType::Void
+        {
             Some(HirType::Json)
         } else {
             None
