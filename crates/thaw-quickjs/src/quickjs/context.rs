@@ -1752,6 +1752,7 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript scrypt function");
+                // Cipher natives return hex, or `!message` on failure (hex never starts with `!`).
                 let cipher_hex = Function::new(
                     ctx.clone(),
                     |algorithm: String,
@@ -1759,41 +1760,37 @@ fn ensure_context() {
                      iv: String,
                      value: String,
                      decrypt: bool,
-                     finalize: bool|
-                     -> rquickjs::Result<String> {
-                        if !algorithm.eq_ignore_ascii_case("aes-256-cbc") {
-                            return Err(rquickjs::Error::new_from_js_message(
-                                "cipher",
-                                "aes-256-cbc",
-                                algorithm,
-                            ));
-                        }
-                        let key = hex_decode(&key);
-                        let iv = hex_decode(&iv);
-                        let value = hex_decode(&value);
-                        if decrypt {
-                            let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(&key, &iv)
-                                .map_err(|_| rquickjs::Error::new_from_js("key/iv", "AES-256-CBC"))?;
-                            let output = if finalize {
-                                cipher.decrypt_padded_vec_mut::<Pkcs7>(&value)
-                            } else {
-                                cipher.decrypt_padded_vec_mut::<NoPadding>(&value)
-                            }
-                                .map_err(|_| rquickjs::Error::new_from_js("ciphertext", "padded AES-256-CBC data"))?;
-                            Ok(hex_encode(&output))
-                        } else {
-                            let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(&key, &iv)
-                                .map_err(|_| rquickjs::Error::new_from_js("key/iv", "AES-256-CBC"))?;
-                            let output = if finalize {
-                                cipher.encrypt_padded_vec_mut::<Pkcs7>(&value)
-                            } else {
-                                cipher.encrypt_padded_vec_mut::<NoPadding>(&value)
-                            };
-                            Ok(hex_encode(&output))
-                        }
+                     finalize: bool,
+                     padding: bool|
+                     -> String {
+                        let algorithm = algorithm.to_ascii_lowercase();
+                        let ecb = algorithm.ends_with("-ecb");
+                        sym_block_cipher(ecb, &hex_decode(&key), &hex_decode(&iv), &hex_decode(&value), decrypt, finalize, padding)
+                            .map_or_else(|message| format!("!{message}"), |output| hex_encode(&output))
                     },
                 )
                 .expect("failed to create JavaScript cipher function");
+                let ctr_hex = Function::new(
+                    ctx.clone(),
+                    |gcm: bool, key: String, iv: String, offset: f64, value: String| -> String {
+                        let (key, iv, value) = (hex_decode(&key), hex_decode(&iv), hex_decode(&value));
+                        let output = if gcm {
+                            sym_gcm_xor(&key, &iv, offset as usize, &value)
+                        } else {
+                            sym_ctr_xor(&key, &iv, offset as usize, &value, true)
+                        };
+                        output.map_or_else(|message| format!("!{message}"), |output| hex_encode(&output))
+                    },
+                )
+                .expect("failed to create JavaScript CTR function");
+                let gcm_tag_hex = Function::new(
+                    ctx.clone(),
+                    |key: String, iv: String, aad: String, ciphertext: String| -> String {
+                        sym_gcm_tag(&hex_decode(&key), &hex_decode(&iv), &hex_decode(&aad), &hex_decode(&ciphertext))
+                            .map_or_else(|message| format!("!{message}"), |output| hex_encode(&output))
+                    },
+                )
+                .expect("failed to create JavaScript GCM tag function");
                 // Backs `createPrivateKey`/`createPublicKey`/`KeyObject.
                 // asymmetricKeyType` and `createSign`/`createVerify`/
                 // `crypto.sign`/`crypto.verify` (`asymmetric_crypto.rs`,
@@ -2797,6 +2794,12 @@ fn ensure_context() {
                     .expect("failed to install JavaScript scrypt function");
                 ctx.globals()
                     .set("__thaw_crypto_cipher_hex", cipher_hex)
+                    .expect("failed to install JavaScript cipher function");
+                ctx.globals()
+                    .set("__thaw_crypto_ctr_hex", ctr_hex)
+                    .expect("failed to install JavaScript CTR function");
+                ctx.globals()
+                    .set("__thaw_crypto_gcm_tag_hex", gcm_tag_hex)
                     .expect("failed to install JavaScript cipher function");
                 ctx.globals()
                     .set("__thaw_crypto_import_key_json", crypto_import_key)
