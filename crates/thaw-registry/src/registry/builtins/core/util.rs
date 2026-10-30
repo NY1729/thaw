@@ -16,6 +16,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20function render(input, remaining) {\n\
              \x20\x20\x20\x20if (input && options.customInspect !== false) { var custom = input[inspectCustom]; if (typeof custom === 'function') return String(custom.call(input, remaining, options, inspect)); }\n\
              \x20\x20if (input === null) return 'null';\n\
+             \x20\x20if (typeof input === 'bigint') return String(input) + 'n';\n\
+             \x20\x20if (typeof input === 'number') return fmtNumber(input);\n\
              \x20\x20if (typeof input === 'string') return \"'\" + input.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\") + \"'\";\n\
              \x20\x20if (typeof input === 'function') return '[Function' + (input.name ? ': ' + input.name : '') + ']';\n\
              \x20\x20if (typeof input === 'symbol' || typeof input === 'bigint') return String(input);\n\
@@ -23,10 +25,11 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20if (input instanceof Error) { var header = input.message ? input.name + ': ' + input.message : String(input.name), frames = String(input.stack || '').split('\\n').filter(function(line) { return /^\\s+at /.test(line) && !/thaw[A-Z]|eval_script/.test(line); }); return String(input.stack || '').indexOf(header) === 0 && frames.length === String(input.stack).split('\\n').length - 1 ? input.stack : [header].concat(frames).join('\\n'); }\n\
              \x20\x20\x20\x20if (input instanceof Date) return isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();\n\
              \x20\x20\x20\x20if (input instanceof RegExp) return String(input);\n\
+             \x20\x20\x20\x20if (ArrayBuffer.isView(input) && !(input instanceof DataView)) { if (typeof Buffer !== 'undefined' && Buffer.isBuffer(input)) { var hex = []; for (var b = 0; b < input.length && b < 50; b++) hex.push((input[b] < 16 ? '0' : '') + input[b].toString(16)); return '<Buffer' + (hex.length ? ' ' + hex.join(' ') : '') + (input.length > 50 ? ' ... ' + (input.length - 50) + ' more byte' + (input.length - 50 > 1 ? 's' : '') : '') + '>'; } var typedItems = []; for (var t = 0; t < input.length && t < 100; t++) typedItems.push(render(input[t], remaining - 1)); if (input.length > 100) typedItems.push('... ' + (input.length - 100) + ' more item' + (input.length - 100 > 1 ? 's' : '')); if (options.showHidden) typedItems.push('[BYTES_PER_ELEMENT]: ' + input.BYTES_PER_ELEMENT, '[length]: ' + input.length, '[byteLength]: ' + input.byteLength, '[byteOffset]: ' + input.byteOffset, '[buffer]: ' + render(input.buffer, remaining - 1)); return input[Symbol.toStringTag] + '(' + input.length + ') ' + (typedItems.length ? '[ ' + typedItems.join(', ') + ' ]' : '[]'); }\n\
              \x20\x20\x20\x20if (remaining < 0) return Array.isArray(input) ? '[Array]' : input instanceof Map ? '[Map]' : input instanceof Set ? '[Set]' : '[Object]';\n\
              \x20\x20\x20\x20if (seen.has(input)) return '[Circular]'; seen.add(input);\n\
              \x20\x20\x20\x20try {\n\
-             \x20\x20\x20\x20\x20\x20if (Array.isArray(input)) { var items = []; for (var index = 0; index < input.length; index++) items.push(renderProperty(input, String(index), remaining - 1)); return '[ ' + items.join(', ') + ' ]'; }\n\
+             \x20\x20\x20\x20\x20\x20if (Array.isArray(input)) { var items = []; for (var index = 0; index < input.length; index++) items.push(renderProperty(input, String(index), remaining - 1)); if (options.showHidden) items.push('[length]: ' + input.length); return items.length ? '[ ' + items.join(', ') + ' ]' : '[]'; }\n\
              \x20\x20\x20\x20\x20\x20if (input instanceof Map) return 'Map(' + input.size + ') { ' + Array.from(input).map(function(entry) { return render(entry[0], remaining - 1) + ' => ' + render(entry[1], remaining - 1); }).join(', ') + ' }';\n\
              \x20\x20\x20\x20\x20\x20if (input instanceof Set) return 'Set(' + input.size + ') { ' + Array.from(input).map(function(value) { return render(value, remaining - 1); }).join(', ') + ' }';\n\
              \x20\x20\x20\x20\x20\x20return '{ ' + Object.keys(input).map(function(key) { return key + ': ' + renderProperty(input, key, remaining - 1); }).join(', ') + ' }';\n\
@@ -35,18 +38,43 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20return render(value, depth);\n\
              }\n\
              inspect.custom = inspectCustom; inspect.defaultOptions = {};\n\
+             function fmtNumber(n) { return Object.is(n, -0) ? '-0' : String(n); }\n\
+             function hasBuiltInToString(value) {\n\
+             \x20\x20if (typeof value.toString !== 'function') return true;\n\
+             \x20\x20if (Object.prototype.hasOwnProperty.call(value, 'toString')) return false;\n\
+             \x20\x20var pointer = value; do { pointer = Object.getPrototypeOf(pointer); } while (pointer && !Object.prototype.hasOwnProperty.call(pointer, 'toString'));\n\
+             \x20\x20if (!pointer) return true; var descriptor = Object.getOwnPropertyDescriptor(pointer, 'constructor');\n\
+             \x20\x20return descriptor !== undefined && typeof descriptor.value === 'function' && globalThis[descriptor.value.name] === descriptor.value;\n\
+             }\n\
              function format() {\n\
-             \x20\x20var args = Array.prototype.slice.call(arguments); if (args.length === 0) return '';\n\
-             \x20\x20if (typeof args[0] !== 'string') return args.map(inspect).join(' ');\n\
-             \x20\x20var index = 1; var output = args[0].replace(/%[sdifjoOc%]/g, function(token) {\n\
-             \x20\x20\x20\x20if (token === '%%') return '%'; if (index >= args.length) return token; var value = args[index++];\n\
-             \x20\x20\x20\x20if (typeof value === 'symbol' && (token === '%d' || token === '%i' || token === '%f')) return 'NaN';\n\
-             \x20\x20\x20\x20if (token === '%s') return String(value); if (token === '%d') return String(Number(value));\n\
-             \x20\x20\x20\x20if (token === '%i') return String(parseInt(value, 10)); if (token === '%f') return String(parseFloat(value));\n\
-             \x20\x20\x20\x20if (token === '%j') { try { return JSON.stringify(value); } catch (_) { return '[Circular]'; } }\n\
-             \x20\x20\x20\x20if (token === '%c') return ''; return inspect(value);\n\
-             \x20\x20});\n\
-             \x20\x20while (index < args.length) { var extra = args[index++]; output += ' ' + (typeof extra === 'string' ? extra : inspect(extra)); } return output;\n\
+             \x20\x20var args = Array.prototype.slice.call(arguments), first = args[0], a = 0, str = '', join = '';\n\
+             \x20\x20if (typeof first === 'string') {\n\
+             \x20\x20\x20\x20if (args.length === 1) return first;\n\
+             \x20\x20\x20\x20var lastPos = 0, tempStr, tempArg;\n\
+             \x20\x20\x20\x20for (var i = 0; i < first.length - 1; i++) {\n\
+             \x20\x20\x20\x20\x20\x20if (first.charCodeAt(i) !== 37) continue;\n\
+             \x20\x20\x20\x20\x20\x20var next = first.charCodeAt(++i);\n\
+             \x20\x20\x20\x20\x20\x20if (a + 1 !== args.length) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20switch (next) {\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 115: tempArg = args[++a]; tempStr = typeof tempArg === 'number' ? fmtNumber(tempArg) : typeof tempArg === 'bigint' ? String(tempArg) + 'n' : (typeof tempArg !== 'object' || tempArg === null || !hasBuiltInToString(tempArg)) ? String(tempArg) : inspect(tempArg, { depth: 0 }); break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 106: tempArg = args[++a]; try { tempStr = JSON.stringify(tempArg); } catch (_) { tempStr = '[Circular]'; } break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 100: tempArg = args[++a]; tempStr = typeof tempArg === 'bigint' ? String(tempArg) + 'n' : typeof tempArg === 'symbol' ? 'NaN' : fmtNumber(Number(tempArg)); break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 79: tempStr = inspect(args[++a]); break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 111: tempStr = inspect(args[++a], { showHidden: true, depth: 4 }); break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 105: tempArg = args[++a]; tempStr = typeof tempArg === 'bigint' ? String(tempArg) + 'n' : typeof tempArg === 'symbol' ? 'NaN' : fmtNumber(parseInt(tempArg)); break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 102: tempArg = args[++a]; tempStr = typeof tempArg === 'symbol' ? 'NaN' : fmtNumber(parseFloat(tempArg)); break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 99: a += 1; tempStr = ''; break;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20case 37: str += first.slice(lastPos, i); lastPos = i + 1; continue;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20default: continue;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if (lastPos !== i - 1) str += first.slice(lastPos, i - 1);\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20str += tempStr; lastPos = i + 1;\n\
+             \x20\x20\x20\x20\x20\x20} else if (next === 37) { str += first.slice(lastPos, i); lastPos = i + 1; }\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20if (lastPos !== 0) { a++; join = ' '; if (lastPos < first.length) str += first.slice(lastPos); }\n\
+             \x20\x20}\n\
+             \x20\x20while (a < args.length) { var value = args[a]; str += join; str += typeof value !== 'string' ? inspect(value) : value; join = ' '; a++; }\n\
+             \x20\x20return str;\n\
              }\n\
              function formatWithOptions(options) { return format.apply(null, Array.prototype.slice.call(arguments, 1)); }\n\
              function inherits(constructor, superConstructor) { if (constructor === undefined || superConstructor === undefined) throw new TypeError('constructors are required'); constructor.super_ = superConstructor; Object.setPrototypeOf(constructor.prototype, superConstructor.prototype); }\n\

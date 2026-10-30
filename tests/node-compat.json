@@ -3607,6 +3607,36 @@
       "name": "class with a method returning its own type can be used as an instanceof operand",
       "expect": "matched",
       "source": "class E { n: number = 0; add(): E { this.n++; return this; } }\nclass S extends E {}\nfunction main(): void { const s = new S(); s.add(); console.log(s.n, s instanceof E, s instanceof S); }"
+    },
+    {
+      "name": "audit2 D U+0001-prefixed strings stay plain",
+      "expect": "matched",
+      "source": "function main(): void {\n  const s: string = \"\\u0001abc\";\n  console.log(s.length, s === \"\\u0001abc\", JSON.stringify(s), s.charCodeAt(0));\n  console.log([\"\\u0001\", \"\\u0001x\"], { k: \"\\u0001y\" });\n  console.log(\"\\u0001q\");\n}"
+    },
+    {
+      "name": "audit2 D util.format matches node",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.format(\"%s\", -0), util.format(\"%d\", -0), util.format(\"%i\", \"0x10\"));\n  console.log(util.format(\"%s\", { a: 1 }), util.format(\"%s\", [1, 2]));\n  console.log(util.format(\"%x\", 1), util.format(\"%s\"), util.format(1, 2), util.format(\"%c styled\", \"css\"), util.format(\"%d\", \"x\"), util.format(\"%s\", 5n), util.format(\"%d\", 5n));\n  console.log(util.format(\"%o\", [1]), util.format(\"%O\", { a: { b: { c: { d: 1 } } } }), util.format(\"%j\", { a: 1 }), util.format(\"%s:%s\", \"a\"));\n  console.log(util.format(\"%s\", null, undefined), util.format(\"%s\", \"a\", { b: 1 }, [2]), util.format(\"%%s\"), util.format(\"%s%%\", 1));\n}"
+    },
+    {
+      "name": "audit2 D console format nullish bigint symbol",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(\"%s\", null, undefined, 5n, Symbol(\"q\"));\n  console.log(\"%d\", 5n, \"%i\", 7n);\n  console.log(\"%s\", 5n);\n  console.log(\"%s\", Symbol(\"r\"));\n}"
+    },
+    {
+      "name": "audit2 D util.inspect bigint typed arrays buffer",
+      "expect": "matched",
+      "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.inspect({ a: 1n }), util.inspect([1n, -2n]), util.inspect(5n), util.inspect(-0));\n  console.log(util.inspect(new Uint8Array(3)), util.inspect(new Float64Array(2)), util.inspect(new Uint16Array([1, 2])), util.inspect(new Int8Array(0)));\n  console.log(util.inspect(Buffer.from(\"ab\")), util.inspect({ b: new Uint8Array(2) }));\n}"
+    },
+    {
+      "name": "audit2 D console.table Map and Set",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.table(new Map<string, number>([[\"k\", 1], [\"j\", 2]]));\n  console.table(new Set<number>([1, 2]));\n}"
+    },
+    {
+      "name": "audit2 D console.log symbol keys",
+      "expect": "matched",
+      "source": "function main(): void {\n  const k = Symbol(\"k\");\n  const o: any = { a: 2 };\n  o[k] = 1;\n  console.log(o);\n  const p = { a: 2, [k]: 1 };\n  console.log(p);\n}"
     }
   ]
 }
