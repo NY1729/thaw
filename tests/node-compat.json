@@ -3397,6 +3397,11 @@
       "name": "audit2 abstract base unannotated method calling abstract method",
       "expect": "matched",
       "source": "abstract class Base { abstract area(): number; d() { return this.area() + 1; } }\nclass Sq extends Base { area(): number { return 4; } }\nfunction main(): void { console.log(new Sq().d()); const b: Base = new Sq(); console.log(b.d(), b.area()); }"
+    },
+    {
+      "name": "audit2 class instance used through interface-typed param variable and array calls methods",
+      "expect": "matched",
+      "source": "interface Shape { area(): number; name: string }\nclass Circle implements Shape { name = \"c\"; constructor(private r: number) {} area(): number { return 2 * this.r; } }\nclass Rect implements Shape { name = \"r\"; constructor(private w: number, private h: number) {} area(): number { return this.w * this.h; } }\ninterface Counter { n: number; inc(by: number): number }\nclass C implements Counter { n = 0; inc(by: number): number { this.n += by; return this.n; } }\nfunction show(s: Shape) { return s.name + \":\" + s.area(); }\nfunction bump(c: Counter) { c.inc(2); c.n += 1; return c.n; }\nfunction main(): void {\n  console.log(show(new Circle(1)), show(new Rect(2, 3)));\n  const shapes: Shape[] = [new Circle(2), new Rect(1, 1)];\n  console.log(shapes.map((s) => s.area()), shapes[0].area());\n  const c = new C();\n  console.log(bump(c), c.n);\n  const k: Counter = c;\n  console.log(k.inc(5), c.n);\n  const d = new Circle(3);\n  const s: Shape = d;\n  console.log(s.name, s.area());\n}"
     }
   ]
 }
