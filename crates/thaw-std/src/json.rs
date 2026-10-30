@@ -6398,7 +6398,7 @@ fn console_format(args: &[Value]) -> String {
                     ),
                     other => bare(other),
                 }),
-                'd' if matches!(arg, Value::BigInt(_)) => out.push_str(&bare(arg)),
+                'd' | 'i' if matches!(arg, Value::BigInt(_)) => out.push_str(&bare(arg)),
                 'd' => out.push_str(&inspect_json(&number_value(number(arg)))),
                 'i' | 'f' => {
                     let text = bare(arg);

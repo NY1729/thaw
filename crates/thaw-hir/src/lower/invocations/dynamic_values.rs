@@ -836,13 +836,25 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_number_is_integer".to_string())),
                             vec![HirExpr::Var(value_name.clone())],
                         );
+                        let shown = self.coerce_primitive_to_string(HirExpr::Var(value_name.clone()))?;
+                        let concat = |left: HirExpr, right: HirExpr| HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![left, right],
+                        );
+                        let message = concat(
+                            concat(
+                                HirExpr::Lit(HirLit::Str("\u{1}RangeError\u{1}The number ".into())),
+                                shown,
+                            ),
+                            HirExpr::Lit(HirLit::Str(
+                                " cannot be converted to a BigInt because it is not an integer".into(),
+                            )),
+                        );
                         let body = HirExpr::Block(vec![
                             HirStmt::If(
                                 is_integer,
                                 Vec::new(),
-                                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                                    "\u{1}RangeError\u{1}The number cannot be converted to a BigInt because it is not an integer".into(),
-                                )))],
+                                vec![HirStmt::Throw(message)],
                             ),
                             HirStmt::Return(Some(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_i64_from_number".to_string())),

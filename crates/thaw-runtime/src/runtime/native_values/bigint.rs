@@ -401,4 +401,34 @@ mod bigint_arbitrary_tests {
         // raw zero (an uninitialised slot) reads as 0n
         assert_eq!(show(0), "0");
     }
+
+    #[test]
+    fn number_ordering_is_exact_above_2_pow_53() {
+        assert_eq!(thaw_bigint_cmp_f64(big("9007199254740993"), 9007199254740992.0), 1);
+        assert_eq!(thaw_bigint_cmp_f64(big("9007199254740992"), 9007199254740992.0), 0);
+        assert_eq!(thaw_bigint_cmp_f64(big("1180591620717411303424"), 2f64.powi(70)), 0);
+        assert_eq!(thaw_bigint_cmp_f64(big("1180591620717411303425"), 2f64.powi(70)), 1);
+        assert_eq!(thaw_bigint_cmp_f64(big("1"), f64::NAN), 2);
+        assert_eq!(thaw_bigint_cmp_f64(big("-5"), f64::NEG_INFINITY), 1);
+    }
+
+    #[test]
+    fn heap_backed_values_are_equal_map_keys_and_array_search_hits() {
+        let (one, two) = (thaw_bigint_pow(big("2"), big("70")), thaw_bigint_pow(big("2"), big("70")));
+        assert_ne!(one, two);
+        assert_eq!(<BigKey as KeyKind>::hash(one as u64), <BigKey as KeyKind>::hash(two as u64));
+        assert!(<BigKey as KeyKind>::eq(one as u64, two as u64));
+        assert!(!<BigKey as KeyKind>::eq(one as u64, big("5") as u64));
+        let map = unsafe { thaw_map_new() };
+        unsafe {
+            assert_eq!(thaw_map_big_set(map, one, 1), 1);
+            assert_eq!(thaw_map_big_set(map, two, 2), 1);
+            assert_eq!(thaw_map_big_set(map, big("5"), 3), 1);
+            assert_eq!(thaw_map_size(map), 2.0);
+            assert_eq!(thaw_map_big_get_i64(map, thaw_bigint_pow(big("2"), big("70"))), 2);
+            assert_eq!(thaw_map_big_has(map, big("6")), 0);
+            assert_eq!(thaw_map_big_delete(map, two), 1);
+            assert_eq!(thaw_map_size(map), 1.0);
+        }
+    }
 }

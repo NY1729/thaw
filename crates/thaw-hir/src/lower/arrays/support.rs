@@ -479,6 +479,7 @@ impl<'a> FnLowerer<'a> {
         }
         let prefix = match element_type {
             HirType::F64 => "number",
+            HirType::BigInt => "bigint",
             HirType::Str => "string",
             HirType::Bool => "bool",
             HirType::Object(_) => "object",

@@ -1930,6 +1930,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_expr(value)?;
                 return self.bigint_call("thaw_bigint_to_f64", &[value.into()]);
             }
+            "__thaw_bigint_cmp_number" => {
+                let [big, number] = args else {
+                    return Err("bigint/number comparison expects two operands".into());
+                };
+                let big = self.compile_expr(big)?;
+                let number = self.compile_expr(number)?;
+                let code = self.bigint_call("thaw_bigint_cmp_f64", &[big.into(), number.into()])?.into_int_value();
+                let i32_type = self.context.i32_type();
+                let f64_type = self.context.f64_type();
+                let ordered = self
+                    .builder
+                    .build_signed_int_to_float(code, f64_type, "bigint_order")
+                    .map_err(|error| error.to_string())?;
+                let unordered = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, code, i32_type.const_int(2, false), "bigint_nan")
+                    .map_err(|error| error.to_string())?;
+                return self
+                    .builder
+                    .build_select(unordered, f64_type.const_float(f64::NAN), ordered, "bigint_order_or_nan")
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_i64_from_number" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -2015,9 +2037,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(error_bb);
                 self.compile_throw_builtin_error("RangeError", if name == "__thaw_i64_to_radix_string" {
-                    "BigInt radix must be between 2 and 36"
+                    "toString() radix argument must be between 2 and 36"
                 } else {
-                    "BigInt bits must be a valid index"
+                    "Invalid value: not (convertible to) a safe integer"
                 })?;
                 self.builder.position_at_end(continue_bb);
                 let runtime = name.trim_start_matches("__thaw_").to_string();
@@ -2633,7 +2655,9 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_map_ref_has"
             | "__thaw_map_ref_delete"
             | "__thaw_map_any_has"
-            | "__thaw_map_any_delete" => {
+            | "__thaw_map_any_delete"
+            | "__thaw_map_big_has"
+            | "__thaw_map_big_delete" => {
                 let [map, key] = args else {
                     return Err(format!("{name} expects two operands"));
                 };
@@ -2679,7 +2703,11 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_map_any_get_f64"
             | "__thaw_map_any_get_bool"
             | "__thaw_map_any_get_ptr"
-            | "__thaw_map_any_get_i64" => {
+            | "__thaw_map_any_get_i64"
+            | "__thaw_map_big_get_f64"
+            | "__thaw_map_big_get_bool"
+            | "__thaw_map_big_get_ptr"
+            | "__thaw_map_big_get_i64" => {
                 let [map, key] = args else {
                     return Err(format!("{name} expects two operands"));
                 };
@@ -2715,7 +2743,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_map_num_set"
             | "__thaw_map_str_set"
             | "__thaw_map_ref_set"
-            | "__thaw_map_any_set" => {
+            | "__thaw_map_any_set"
+            | "__thaw_map_big_set" => {
                 let [map, key, value] = args else {
                     return Err(format!("{name} expects three operands"));
                 };

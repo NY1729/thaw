@@ -156,7 +156,7 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
     } else {
         match tag {
             1 => javascript_number_string(f64_value).into_bytes(),
-            2 => i64_value.to_string().into_bytes(),
+            2 => bigint_decode(i64_value).to_string().into_bytes(),
             3 => bool_value.to_string().into_bytes(),
             5 => b"undefined".to_vec(),
             6 => b"null".to_vec(),

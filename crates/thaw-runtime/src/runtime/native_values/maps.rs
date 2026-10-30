@@ -116,6 +116,21 @@ impl KeyKind for StrKey {
     }
 }
 
+/// A `bigint` key (tagged handle, see `bigint.rs`): equal values hash and compare equal
+/// whether inline or heap-backed, never by handle bits.
+struct BigKey;
+impl KeyKind for BigKey {
+    fn hash(key: u64) -> u64 {
+        match bigint_inline(key as i64) {
+            Some(small) => mix64(small as u64),
+            None => hash_bytes(&bigint_decode(key as i64).to_signed_bytes_le()),
+        }
+    }
+    fn eq(a: u64, b: u64) -> bool {
+        thaw_bigint_cmp(a as i64, b as i64) == 0
+    }
+}
+
 // `AnyKey` has no real Rust-level access to thaw-std's own `Value` type
 // (see `arrays.rs`'s own doc comment on `thaw_json_strict_equal`/
 // `thaw_json_same_value_zero` for why), so it inspects a key purely
@@ -656,6 +671,10 @@ fn encode_any_key(key: *const u8) -> u64 {
     key as u64
 }
 
+fn encode_big_key(key: i64) -> u64 {
+    key as u64
+}
+
 macro_rules! key_kind_functions {
     ($kind:ty, $key_ty:ty, $encode:ident, $has:ident, $set:ident, $delete:ident, $get_f64:ident, $get_bool:ident, $get_ptr:ident, $get_i64:ident) => {
         #[no_mangle]
@@ -774,6 +793,19 @@ key_kind_functions!(
     thaw_map_ref_get_bool,
     thaw_map_ref_get_ptr,
     thaw_map_ref_get_i64
+);
+
+key_kind_functions!(
+    BigKey,
+    i64,
+    encode_big_key,
+    thaw_map_big_has,
+    thaw_map_big_set,
+    thaw_map_big_delete,
+    thaw_map_big_get_f64,
+    thaw_map_big_get_bool,
+    thaw_map_big_get_ptr,
+    thaw_map_big_get_i64
 );
 
 key_kind_functions!(

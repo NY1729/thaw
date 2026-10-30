@@ -293,6 +293,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     "ffi_tagged_return_string",
                 )?
                 .into(),
+            HirType::BigInt => self.bigint_call("thaw_bigint_from_i64", &[native_value.into()])?,
             HirType::Array(_)
             | HirType::Tuple(_)
             | HirType::Object(_)
@@ -380,6 +381,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         "ffi_tuple_return_string",
                     )?
                     .into(),
+                // A native `int64_t` element is the raw integer, not a tagged handle.
+                HirType::BigInt => self.bigint_call("thaw_bigint_from_i64", &[value.into()])?,
                 HirType::Array(_)
                 | HirType::Tuple(_)
                 | HirType::Object(_)
@@ -784,6 +787,8 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &format!("ffi_{name}"),
                             )?
                             .into(),
+                        // A native `int64_t` field is the raw integer, not a tagged handle.
+                        HirType::BigInt => self.bigint_call("thaw_bigint_from_i64", &[field.into()])?,
                         HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)
                         | HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
                             if field.is_struct_value() => self
@@ -1165,6 +1170,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<(), String> {
         match ty {
             HirType::F64 | HirType::Str | HirType::JsValue => output.push(value.into()),
+            HirType::BigInt => {
+                let raw = self.bigint_call("thaw_bigint_to_i64_wrapping", &[value.into()])?;
+                output.push(raw.into());
+            }
             HirType::Bool => {
                 let promoted = self
                     .builder
