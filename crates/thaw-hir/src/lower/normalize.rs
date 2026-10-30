@@ -1318,11 +1318,42 @@ fn function_references_arguments(function: &swc_ecma_ast::Function) -> bool {
     finder.0
 }
 
+/// Gives a function that uses `arguments` a trailing `...__thaw_arguments_rest: any[]`
+/// parameter (when it has no rest of its own) so surplus call arguments are received.
+fn add_arguments_rest(function: &mut swc_ecma_ast::Function) {
+    use swc_ecma_ast::*;
+    if function.params.iter().any(|p| matches!(p.pat, Pat::Rest(_))) {
+        return;
+    }
+    let sp = swc_common::DUMMY_SP;
+    function.params.push(Param {
+        span: sp,
+        decorators: vec![],
+        pat: Pat::Rest(RestPat {
+            span: sp,
+            dot3_token: sp,
+            arg: Box::new(Pat::Ident(BindingIdent {
+                id: Ident::new_no_ctxt("__thaw_arguments_rest".into(), sp),
+                type_ann: None,
+            })),
+            type_ann: Some(Box::new(TsTypeAnn {
+                span: sp,
+                type_ann: Box::new(TsType::TsArrayType(TsArrayType {
+                    span: sp,
+                    elem_type: Box::new(TsType::TsKeywordType(TsKeywordType {
+                        span: sp,
+                        kind: TsKeywordTypeKind::TsAnyKeyword,
+                    })),
+                })),
+            })),
+        }),
+    });
+}
+
 /// `const arguments: any[] = [p1, p2, ...];` for a function whose body uses
-/// `arguments` -- an approximation binding it to the declared parameters (JS
-/// `arguments` also holds extra args, which thaw's fixed-arity functions
-/// cannot receive). `None` when a parameter is itself named `arguments` or
-/// isn't a simple identifier.
+/// `arguments`, bound to the declared parameters plus (once
+/// `add_arguments_rest` runs) the surplus arguments. `None` when a parameter
+/// is itself named `arguments` or isn't a simple identifier.
 fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
     use swc_ecma_ast::*;
     let mut elements = Vec::new();
@@ -1338,6 +1369,13 @@ fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
             expr: Box::new(Expr::Ident(binding.id.clone())),
         }));
     }
+    elements.push(Some(ExprOrSpread {
+        spread: Some(swc_common::DUMMY_SP),
+        expr: Box::new(Expr::Ident(Ident::new_no_ctxt(
+            "__thaw_arguments_rest".into(),
+            swc_common::DUMMY_SP,
+        ))),
+    }));
     let any = || TsType::TsKeywordType(TsKeywordType {
         span: swc_common::DUMMY_SP,
         kind: TsKeywordTypeKind::TsAnyKeyword,
@@ -1417,6 +1455,7 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
             function.visit_mut_children_with(self);
             if function_references_arguments(function) {
                 if let Some(binding) = arguments_binding(function) {
+                    add_arguments_rest(function);
                     if let Some(body) = &mut function.body {
                         body.stmts.insert(0, binding);
                     }

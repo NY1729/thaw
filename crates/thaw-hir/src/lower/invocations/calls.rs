@@ -1318,13 +1318,14 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
-            if rest.is_none() && arguments.len() > params.len() {
-                return Err(format!(
-                    "function value expects {} argument(s), got {}",
-                    params.len(),
-                    arguments.len()
-                ));
-            }
+            // JS evaluates and ignores surplus arguments.
+            // ponytail: surplus args are evaluated before the kept ones, so a
+            // side-effecting surplus arg reorders against side-effecting kept args.
+            let dropped_extras = if rest.is_none() && arguments.len() > params.len() {
+                arguments.split_off(params.len())
+            } else {
+                Vec::new()
+            };
             if arguments.len() < params.len()
                 && (arguments.len()..params.len())
                     .any(|index| !is_optional_parameter(&optional, index))
@@ -1375,6 +1376,10 @@ impl<'a> FnLowerer<'a> {
             } else {
                 result
             };
+            let result = dropped_extras
+                .into_iter()
+                .rev()
+                .fold(result, |inner, extra| HirExpr::EvalThen(Box::new(extra), Box::new(inner)));
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
