@@ -49,6 +49,12 @@ thaw_array_unshift_values
 thaw_atob
 thaw_bigint_add
 thaw_bigint_and
+thaw_bigint_array_includes
+thaw_bigint_array_index_of
+thaw_bigint_array_join
+thaw_bigint_array_last_index_of
+thaw_bigint_array_sort
+thaw_bigint_array_to_sorted
 thaw_bigint_binop_error
 thaw_bigint_cmp
 thaw_bigint_cmp_f64
@@ -84,12 +90,6 @@ thaw_bigint_to_f64
 thaw_bigint_to_i64_wrapping
 thaw_bigint_xor
 thaw_bool_array_fill
-thaw_bigint_array_includes
-thaw_bigint_array_sort
-thaw_bigint_array_to_sorted
-thaw_bigint_array_join
-thaw_bigint_array_index_of
-thaw_bigint_array_last_index_of
 thaw_bool_array_includes
 thaw_bool_array_index_of
 thaw_bool_array_join
