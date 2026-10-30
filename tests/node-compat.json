@@ -3697,6 +3697,41 @@
       "name": "this field method call on a class-typed field",
       "expect": "matched",
       "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
+    },
+    {
+      "name": "generator as any next return throw protocol",
+      "expect": "matched",
+      "source": "function* gen() { yield 1; yield 2; return 3; }\nfunction main(): void {\n  const g: any = gen();\n  console.log(g.next(), g.next(), g.next(), g.next());\n}"
+    },
+    {
+      "name": "generator as any for of and spread",
+      "expect": "matched",
+      "source": "function* gen() { yield 1; yield 2; }\nfunction main(): void {\n  const g: any = gen();\n  for (const x of g) console.log(x);\n  const h: any = gen();\n  console.log([...h].length);\n}"
+    },
+    {
+      "name": "generator as any return value identity and printing",
+      "expect": "matched",
+      "source": "function* gen() { yield 1; yield 2; return 3; }\nfunction main(): void {\n  const g: any = gen();\n  g.next();\n  console.log(g.return(9), g.next());\n  console.log(g, String(g), typeof g, typeof g[Symbol.iterator], g[Symbol.iterator]() === g);\n}"
+    },
+    {
+      "name": "generator as any param and array slot",
+      "expect": "matched",
+      "source": "function* gen() { const x = yield 1; console.log(\"got\", x); yield x * 2; }\nfunction use(g: any): any { g.next(); return g.next(21).value; }\nfunction main(): void {\n  console.log(use(gen()));\n  const arr: any[] = [gen()];\n  console.log([...arr[0]].length);\n}"
+    },
+    {
+      "name": "generator as any throw into any generator",
+      "expect": "matched",
+      "source": "function* gen() { try { yield 1; } catch (e: any) { console.log(\"caught\", e.message); yield 7; } }\nfunction main(): void {\n  const g: any = gen();\n  g.next();\n  console.log(g.throw(new Error(\"x\")));\n}"
+    },
+    {
+      "name": "generator as any yield star over any generator",
+      "expect": "matched",
+      "source": "function* inner() { yield 10; yield 11; return 12; }\nfunction* outer(g: any): Generator<any, void, unknown> { const r = yield* g; console.log(\"r\", r); yield 99; }\nfunction main(): void {\n  for (const v of outer(inner() as any)) console.log(v);\n}"
+    },
+    {
+      "name": "generator as any for of break runs finally",
+      "expect": "matched",
+      "source": "function* early() { try { yield 1; yield 2; } finally { console.log(\"closed\"); } }\nfunction main(): void {\n  const e: any = early();\n  for (const v of e) { console.log(v); break; }\n  console.log(e.next());\n}"
     }
   ]
 }

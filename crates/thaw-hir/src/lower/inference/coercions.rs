@@ -1441,30 +1441,49 @@ impl<'a> FnLowerer<'a> {
             // (`compile_dynamic_value_placeholder`'s own `is_int_value()`
             // detection, the args-JSON reviver, ...) treats it exactly
             // like any other live value crossing into a dynamic call.
-            // A generator's own internal "producer" function (thaw's own
-            // ABI, no dedicated `HirType` -- see `is_generator_producer_
-            // type`'s own doc comment, `lower/generators.rs`) is *not* a
-            // plain callable a JS caller could ever legitimately invoke
-            // directly (its first parameter is an internal `i64` resume
-            // point, not a real argument) -- reject it here, before it
-            // falls into the generic native-closure-to-`JsValue`
-            // wrapping path below. That generic path has no way to
-            // expose an `i64` parameter to real JS code and previously
-            // failed confusingly deep inside dynamic-call argument
-            // decoding ("unsupported dynamic result value I64") instead
-            // of at the coercion itself -- `Promise<T>` coerced to `any`
-            // similarly has no dedicated case anywhere in this function
-            // and simply falls through every special case here to the
-            // generic type-mismatch error at the very end, which is at
-            // least an honest "unsupported" rather than a confusing
-            // internal-ABI leak; this is the same fix in spirit for
-            // `Generator`, just needed an explicit early check instead
-            // of falling through cleanly, since the generic `Function`
-            // case right below *would* otherwise (wrongly) accept it.
+            // A generator's internal "producer" function (first parameter an
+            // `i64` resume mode, see `is_generator_producer_type`) is never
+            // handed to the generic native-closure wrapping below.  It is
+            // reified as a protocol object (`next`/`return`/`throw`
+            // lambdas that call the producer) so the `any` view behaves
+            // like a JS Generator.
             if is_generator_producer_type(&actual) {
-                return Err(
-                    "cannot coerce a Generator to a dynamic (any) value".into(),
+                if !matches!(&actual, HirType::Function(_, result) if matches!(result.as_ref(), HirType::Array(_))) {
+                    return Err("cannot coerce an async Generator to a dynamic (any) value".into());
+                }
+                let mut bindings = Vec::new();
+                let object = self.generator_protocol_object(
+                    &value, &actual, swc_common::DUMMY_SP, swc_common::SyntaxContext::empty(),
+                    &mut bindings, true)?;
+                let object = self.wrap_call_argument_bindings(object, &bindings)?;
+                let object = self.coerce_to_declared(&HirType::Json, object)?;
+                // `g[Symbol.iterator]()` returns the generator itself.
+                let name = format!("__thaw_generator_any_{}", self.next_binding);
+                self.next_binding += 1;
+                let iterator = HirExpr::Lambda(
+                    vec![HirParam { name: name.clone(), ty: HirType::Json }],
+                    Vec::new(),
+                    HirType::Json,
+                    Box::new(HirExpr::Var(name.clone())),
                 );
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam { name: name.clone(), ty: HirType::Json }],
+                        HirType::Json,
+                        Box::new(HirExpr::Block(vec![
+                            HirStmt::Expr(HirExpr::JsonSet(
+                                Box::new(HirExpr::Var(name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::Str("\u{1f}@@iterator".into()))),
+                                Box::new(iterator),
+                                HirType::Function(Vec::new(), Box::new(HirType::Json)),
+                                false,
+                            )),
+                            HirStmt::Return(Some(HirExpr::Var(name))),
+                        ])),
+                    )),
+                    vec![object],
+                ));
             }
             // A native `bigint` is a Json BigInt, the same value an array/object push builds.
             if matches!(actual, HirType::I64 | HirType::BigInt) {

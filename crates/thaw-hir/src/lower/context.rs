@@ -53,6 +53,7 @@ struct FnLowerer<'a> {
     /// `for...of` over a `Json` value is lowered twice (array loop / live-iterable protocol);
     /// `Some(true)` selects the live-iterable lowering, `Some(false)` the array loop.
     for_of_json_mode: Option<bool>,
+    for_of_native_iterator: bool,
     /// The right-hand side already lowered by the `for...of` dispatch.
     for_of_prelowered: Option<HirExpr>,
     destructuring_default_types: HashMap<Symbol, HirType>,

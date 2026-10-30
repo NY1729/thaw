@@ -810,3 +810,4 @@ include!("tests/error_inspect_contracts.rs");
 include!("tests/audit2_inspect_format_contracts.rs");
 include!("tests/perf_audit2_contracts.rs");
 include!("tests/audit2_async_streams_contracts.rs");
+include!("tests/generator_any_contracts.rs");

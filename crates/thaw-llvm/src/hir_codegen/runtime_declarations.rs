@@ -2726,6 +2726,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_is_native_iterator",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_is_live_iterable",
             json_as_bool_type,
             Some(Linkage::External),

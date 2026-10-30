@@ -82,6 +82,7 @@ impl<'a> FnLowerer<'a> {
             object_function_property_discriminants: HashMap::new(),
             destructured_union_correlations: HashMap::new(),
             for_of_json_mode: None,
+            for_of_native_iterator: false,
             for_of_prelowered: None,
             destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
