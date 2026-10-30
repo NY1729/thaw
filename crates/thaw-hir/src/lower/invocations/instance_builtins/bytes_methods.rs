@@ -801,9 +801,12 @@ impl<'a> FnLowerer<'a> {
         let call_intrinsic = |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.to_string())), args);
         let access = match (write, big) {
             (false, false) => call_intrinsic("__thaw_dataview_get", vec![receiver, number(kind), offset, little]),
-            (false, true) => call_intrinsic("__thaw_bytes_read_i64", vec![receiver, offset, little]),
+            (false, true) => {
+                let read = call_intrinsic("__thaw_bytes_read_i64", vec![receiver, offset, little]);
+                if property.sym.contains("Uint") { Self::unsigned_bigint_read(read) } else { read }
+            }
             (true, true) => {
-                self.expect_type(&HirType::I64, &arguments[1], "`DataView.prototype.setBigInt64` value")?;
+                self.expect_type(&HirType::BigInt, &arguments[1], "`DataView.prototype.setBigInt64` value")?;
                 call_intrinsic("__thaw_bytes_write_i64", vec![receiver, offset, arguments[1].clone(), little])
             }
             (true, false) => {
@@ -812,6 +815,15 @@ impl<'a> FnLowerer<'a> {
             }
         };
         self.wrap_call_argument_bindings(HirExpr::EvalThen(Box::new(check), Box::new(access)), &bindings)
+    }
+
+
+    /// `BigInt.asUintN(64, read)`: unsigned 64-bit reads (`readBigUInt64*`, `getBigUint64`).
+    fn unsigned_bigint_read(read: HirExpr) -> HirExpr {
+        HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_i64_as_uint_n".to_string())),
+            vec![read, HirExpr::Lit(HirLit::F64(64.0))],
+        )
     }
 
     /// `buf.readBigInt64LE(offset)` / `buf.writeBigUInt64BE(value,
@@ -833,7 +845,7 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
-        let (_signed, big_endian, write) = Self::bytes_bigint_accessor(property.sym.as_ref())
+        let (signed, big_endian, write) = Self::bytes_bigint_accessor(property.sym.as_ref())
             .expect("dispatch checked bytes_bigint_accessor");
         let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
@@ -854,7 +866,7 @@ impl<'a> FnLowerer<'a> {
                 ));
             };
             self.expect_type(
-                &HirType::I64,
+                &HirType::BigInt,
                 value,
                 &format!("`Buffer.prototype.{}` value", property.sym),
             )?;
@@ -878,12 +890,13 @@ impl<'a> FnLowerer<'a> {
             let offset = self.coerce_primitive_to_number(offset.clone())?;
             let offset = self.bind_bytes_number("__thaw_bytes_read_offset", offset, &mut bindings);
             let check = Self::bytes_access_check(&receiver, &offset, &HirExpr::Lit(HirLit::F64(8.0)), None);
+            let read = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_read_i64".to_string())),
+                vec![receiver, offset, le_lit],
+            );
             HirExpr::EvalThen(
                 Box::new(check),
-                Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_bytes_read_i64".to_string())),
-                    vec![receiver, offset, le_lit],
-                )),
+                Box::new(if signed { read } else { Self::unsigned_bigint_read(read) }),
             )
         };
         self.wrap_call_argument_bindings(result, &bindings)

@@ -24,7 +24,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn supports_ffi_aggregate_field(ty: &HirType) -> bool {
         match ty {
-            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => true,
+            HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str => true,
             HirType::Array(element) => matches!(
                 element.as_ref(),
                 HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
@@ -153,7 +153,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn ffi_object_field_layout(ty: &HirType, aggregate_abi: FfiAggregateAbi) -> (u64, u64) {
         match ty {
             HirType::Bool => (1, 1),
-            HirType::F64 | HirType::I64 => (8, 8),
+            HirType::F64 | HirType::I64 | HirType::BigInt => (8, 8),
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
                 if aggregate_abi != FfiAggregateAbi::Internal =>
             {
