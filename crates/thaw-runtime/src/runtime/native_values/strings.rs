@@ -1324,7 +1324,7 @@ pub unsafe extern "C" fn thaw_atob(value: *const c_char) -> *const c_char {
         .bytes()
         .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | 0x0c | b'\r'))
         .collect();
-    if data.len() % 4 == 0 {
+    if data.len().is_multiple_of(4) {
         for _ in 0..2 {
             if data.last() == Some(&b'=') {
                 data.pop();
