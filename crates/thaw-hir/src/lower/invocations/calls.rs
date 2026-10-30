@@ -468,6 +468,7 @@ impl<'a> FnLowerer<'a> {
             args.first(),
             args.len() == 1
                 && args[0].spread.is_none()
+                && matches!(base_name, "Map" | "Set")
                 && self.native_super_dispatches_overrides(base_name, &this_type),
         ) {
             // `new Map(iterable)` calls `this.set(key, value)` per entry (`add` for a `Set`),
@@ -1010,7 +1011,7 @@ impl<'a> FnLowerer<'a> {
             // (its own generated initializer function already runs this
             // assignment as part of its body), so only a *direct* `extends
             // Error`-family base needs this.
-            if matches!(base_name.as_str(), "Map" | "Set" | "Array") && !self.signatures.contains_key(&symbol) {
+            if matches!(base_name.as_str(), "Map" | "Set" | "Array" | "Date" | "RegExp") && !self.signatures.contains_key(&symbol) {
                 return self.lower_native_collection_super(&base_name, &call.args);
             }
             if matches!(
@@ -1318,13 +1319,14 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
-            if rest.is_none() && arguments.len() > params.len() {
-                return Err(format!(
-                    "function value expects {} argument(s), got {}",
-                    params.len(),
-                    arguments.len()
-                ));
-            }
+            // JS evaluates and ignores surplus arguments.
+            // ponytail: surplus args are evaluated before the kept ones, so a
+            // side-effecting surplus arg reorders against side-effecting kept args.
+            let dropped_extras = if rest.is_none() && arguments.len() > params.len() {
+                arguments.split_off(params.len())
+            } else {
+                Vec::new()
+            };
             if arguments.len() < params.len()
                 && (arguments.len()..params.len())
                     .any(|index| !is_optional_parameter(&optional, index))
@@ -1375,6 +1377,10 @@ impl<'a> FnLowerer<'a> {
             } else {
                 result
             };
+            let result = dropped_extras
+                .into_iter()
+                .rev()
+                .fold(result, |inner, extra| HirExpr::EvalThen(Box::new(extra), Box::new(inner)));
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
