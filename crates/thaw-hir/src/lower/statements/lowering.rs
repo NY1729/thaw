@@ -2807,18 +2807,32 @@ impl<'a> FnLowerer<'a> {
                                 .map(|ty| HirParam { name, ty })
                         })
                         .collect();
-                    escape.push(HirStmt::Expr(HirExpr::Call(
+                    // A body that awaits must be an async lambda the enclosing
+                    // frame awaits as a real suspension point; as a sync lambda its
+                    // awaits would block-spin the event loop and re-enter the
+                    // suspended generator frames (segfault on `for await` + timers).
+                    let suspends = contains_await(&lambda_body);
+                    let call = HirExpr::Call(
                         Box::new(HirExpr::Lambda(
                             captures,
                             vec![HirParam {
                                 name: producer,
                                 ty: producer_type,
                             }],
-                            HirType::Void,
+                            if suspends {
+                                HirType::Promise(Box::new(HirType::Void))
+                            } else {
+                                HirType::Void
+                            },
                             Box::new(lambda_body),
                         )),
                         vec![init],
-                    )));
+                    );
+                    escape.push(HirStmt::Expr(if suspends {
+                        HirExpr::AwaitPromise(Box::new(call), HirType::Void)
+                    } else {
+                        call
+                    }));
                     escape.extend(after_call);
                     Ok(escape)
                 })();
