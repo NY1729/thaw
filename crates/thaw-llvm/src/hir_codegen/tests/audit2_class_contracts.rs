@@ -243,3 +243,30 @@ function main(): void {
         "Dog { name: 'Rex', tricks: [ 'sit' ] } [ Animal { name: 'Cat' }, Dog { name: 'Rex', tricks: [ 'sit' ] } ]\nCircle { name: 'c', r: 2 } [ Circle { name: 'c', r: 1 } ] Circle Circle\np\n"
     );
 }
+
+#[test]
+fn audit2_dictionary_reads_generic_element_args_async_members_and_map_entries() {
+    let source = r##"enum State { Idle, Running, Done }
+const next: Record<State, State[]> = { [State.Idle]: [State.Running], [State.Running]: [State.Done], [State.Done]: [] };
+interface Shape { area(): number }
+class Sq implements Shape { constructor(private w: number) {} area(): number { return this.w * this.w; } }
+function one<T extends Shape>(x: T): number { return x.area(); }
+interface Repo { get(id: number): Promise<string>; name: string }
+class Mem implements Repo { name = "mem"; async get(id: number): Promise<string> { return "item" + id; } }
+async function use(r: Repo): Promise<string> { return r.name + ":" + (await r.get(7)); }
+async function main(): Promise<void> {
+  let s: State = State.Idle;
+  s = next[s][0];
+  const n: number = next[s][0];
+  console.log(s, n);
+  const shapes: Shape[] = [new Sq(2), new Sq(3)];
+  console.log(one(shapes[0]), one(shapes[1]));
+  console.log(await use(new Mem()));
+  console.log(Object.fromEntries(new Map([["k", 1]])));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_leftovers"),
+        "1 2\n4 9\nmem:item7\n{ k: 1 }\n"
+    );
+}

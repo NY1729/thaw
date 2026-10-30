@@ -5052,6 +5052,15 @@ impl<'a> FnLowerer<'a> {
                         };
                         let entries = entries.clone();
                         let ty = self.infer_expr_type(&entries)?;
+                        // `Object.fromEntries(map)`: a string-keyed map iterates as its entries.
+                        let (entries, ty) = match &ty {
+                            HirType::Map(key, _) if **key == HirType::Str => {
+                                let pairs = self.native_collection_entries(entries)?;
+                                let pairs_type = self.infer_expr_type(&pairs)?;
+                                (pairs, pairs_type)
+                            }
+                            _ => (entries, ty),
+                        };
                         if ty == HirType::JsValue {
                 let call_arguments =
                     self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![entries]))?;
