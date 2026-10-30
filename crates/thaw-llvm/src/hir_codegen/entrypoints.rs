@@ -12,7 +12,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
         // Live JS handles reaching a graph encoder or reader on the main thread
         // need the host operations whichever dynamic helper created them.
-        if self.uses_quickjs_handles {
+        if self.js_handles_used() {
             self.compile_register_js_callback_host_operations().unwrap();
         }
         let quickjs_failure = self

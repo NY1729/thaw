@@ -97,6 +97,31 @@ struct Converted {
     problems: Vec<&'static str>,
 }
 
+/// Names assigned or updated anywhere in the module (`x = ..`, `x += ..`, `x++`).
+// ponytail: destructuring-assignment targets are not tracked; add when a package needs it.
+fn reassigned_names(module: &a::Module) -> BTreeSet<String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    #[derive(Default)]
+    struct Assigned(BTreeSet<String>);
+    impl Visit for Assigned {
+        fn visit_assign_expr(&mut self, n: &a::AssignExpr) {
+            if let a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(i)) = &n.left {
+                self.0.insert(i.id.sym.to_string());
+            }
+            n.visit_children_with(self);
+        }
+        fn visit_update_expr(&mut self, n: &a::UpdateExpr) {
+            if let a::Expr::Ident(i) = &*n.arg {
+                self.0.insert(i.sym.to_string());
+            }
+            n.visit_children_with(self);
+        }
+    }
+    let mut v = Assigned::default();
+    module.visit_with(&mut v);
+    v.0
+}
+
 fn convert(source: &str) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
@@ -111,6 +136,7 @@ fn convert(source: &str) -> Result<Converted, String> {
     let mut specs: Vec<String> = Vec::new();
     let mut problems: Vec<&'static str> = Vec::new();
     let mut counter = 0usize;
+    let reassigned = reassigned_names(&module);
     fn tmp(counter: &mut usize) -> String {
         *counter += 1;
         format!("__thaw_esm_m{counter}")
@@ -163,11 +189,14 @@ fn convert(source: &str) -> Result<Converted, String> {
                         a::Decl::Fn(f) => names.push(f.ident.sym.to_string()),
                         a::Decl::Class(c) => names.push(c.ident.sym.to_string()),
                         a::Decl::Var(v) => {
-                            if !matches!(v.kind, a::VarDeclKind::Const) {
-                                problems.push("esm-live-binding");
-                            }
                             for d in &v.decls {
                                 binding_names(&d.name, &mut names);
+                            }
+                            // a mutable export only is a live binding when something reassigns it
+                            if !matches!(v.kind, a::VarDeclKind::Const)
+                                && names.iter().any(|n| reassigned.contains(n))
+                            {
+                                problems.push("esm-live-binding");
                             }
                         }
                         _ => problems.push("esm-declaration"),

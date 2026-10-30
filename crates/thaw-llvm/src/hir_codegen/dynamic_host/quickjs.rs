@@ -983,8 +983,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // May be the first QuickJS operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
@@ -1151,8 +1150,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
         chain_intermediate: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // May be the first QuickJS operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
@@ -1229,8 +1227,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let [handle] = args else {
             return Err("readDynamicValue expects exactly one argument".into());
         };

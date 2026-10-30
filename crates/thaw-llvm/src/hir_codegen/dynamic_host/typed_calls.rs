@@ -1707,13 +1707,28 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let name = self.intern_string(&signature.symbol, "thaw_js_symbol")
             .map_err(|error| error.to_string())?;
-        let json = self.compile_json_backend_values_with_extra(
+        let mut json = self.compile_json_backend_values_with_extra(
             name.as_pointer_value().into(),
             array,
             "thaw_tjs_call_typed_result",
             &[],
             &[],
         )?;
+        if signature.ret == HirType::Json {
+            // A class instance or function result comes back as a handle marker: adopt it as a host lease.
+            self.uses_thaw_js_handles = true;
+            json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_adopt_handle_marker").unwrap(),
+                    &[json.into()],
+                    "thaw_js_adopted_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_adopt_handle_marker returned no value")?;
+        }
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
