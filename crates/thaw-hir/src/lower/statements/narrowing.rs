@@ -411,6 +411,80 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `const f = () => y; let y = 2; f();`: the closure mentions a block binding declared after
+    /// it. Creating a closure has no side effects, so move it to just before its first use,
+    /// when every block binding it mentions is declared before that point.
+    pub(in crate::lower) fn delay_forward_closure_consts(stmts: &[Stmt]) -> std::borrow::Cow<'_, [Stmt]> {
+        use swc_ecma_visit::{Visit, VisitWith};
+        #[derive(Default)]
+        struct Names(HashSet<String>);
+        impl Visit for Names {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.0.insert(ident.sym.to_string());
+            }
+        }
+        let closure_name = |stmt: &Stmt| -> Option<String> {
+            let Stmt::Decl(Decl::Var(var)) = stmt else { return None };
+            let [declarator] = var.decls.as_slice() else { return None };
+            let (Pat::Ident(binding), Some(init)) = (&declarator.name, &declarator.init) else {
+                return None;
+            };
+            (var.kind == VarDeclKind::Const && matches!(init.as_ref(), Expr::Arrow(_) | Expr::Fn(_)))
+                .then(|| binding.id.sym.to_string())
+        };
+        if !stmts.iter().any(|stmt| closure_name(stmt).is_some()) {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        let mut order: Vec<Stmt> = stmts.to_vec();
+        let mut moved = false;
+        for _ in 0..order.len() {
+            let mentions: Vec<HashSet<String>> = order
+                .iter()
+                .map(|stmt| {
+                    let mut names = Names::default();
+                    stmt.visit_with(&mut names);
+                    names.0
+                })
+                .collect();
+            let mut cells: HashMap<String, usize> = HashMap::new();
+            for (index, stmt) in order.iter().enumerate() {
+                let mut bound = Vec::new();
+                match stmt {
+                    Stmt::Decl(Decl::Var(var)) => {
+                        for declarator in &var.decls {
+                            Self::collect_pattern_bindings(&declarator.name, &mut bound);
+                        }
+                    }
+                    Stmt::Decl(Decl::Class(class)) => bound.push(class.ident.sym.to_string()),
+                    _ => {}
+                }
+                for name in bound {
+                    cells.insert(name, index);
+                }
+            }
+            let step = (0..order.len()).find_map(|j| {
+                let name = closure_name(&order[j])?;
+                let last_dependency = mentions[j]
+                    .iter()
+                    .filter(|mention| **mention != name)
+                    .filter_map(|mention| cells.get(mention).copied())
+                    .filter(|&declared| declared > j)
+                    .max()?;
+                let k = (j + 1..order.len()).find(|&k| mentions[k].contains(&name))?;
+                (k > last_dependency).then_some((j, k))
+            });
+            let Some((j, k)) = step else { break };
+            let stmt = order.remove(j);
+            order.insert(k - 1, stmt);
+            moved = true;
+        }
+        if moved {
+            std::borrow::Cow::Owned(order)
+        } else {
+            std::borrow::Cow::Borrowed(stmts)
+        }
+    }
+
     /// `const u = new Uint8Array(n)` becomes a native byte store (O(1) element access, no JS realm)
     /// when `u` is only ever indexed (`u[i]`, `u[i] = v`) or measured (`u.length`) in `later`;
     /// any other use keeps the live typed array, which supports the full API.
@@ -493,6 +567,7 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_stmts_in_order(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let hoisted_closures = Self::hoist_forward_closure_consts(stmts);
+        let hoisted_closures = Self::delay_forward_closure_consts(&hoisted_closures);
         let forward = Self::forward_declare_arrows(&hoisted_closures);
         let hoisted = Self::hoist_function_declarations(&forward);
         let stmts: &[Stmt] = &hoisted;
