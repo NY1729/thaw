@@ -2477,6 +2477,8 @@ pub fn flatten_namespaces(module: &Module) -> Module {
         exported: &'a HashMap<String, Members>,
         order: &'a HashMap<String, Vec<String>>,
         types: &'a HashMap<String, TsType>,
+        /// Namespaces merged with a same-named class or enum: the bare name stays the class/enum.
+        merged: &'a HashSet<String>,
     }
     impl Rewrite<'_> {
         /// `NS` used as a value: an object of its exported values (types are skipped; a type
@@ -2577,7 +2579,9 @@ pub fn flatten_namespaces(module: &Module) -> Module {
             }
             if let Expr::Ident(ident) = expr {
                 if let Some(Binding::Namespace(path)) = self.env.get(ident.sym.as_ref()) {
-                    *expr = self.namespace_object(path);
+                    if !self.merged.contains(ident.sym.as_ref()) {
+                        *expr = self.namespace_object(path);
+                    }
                     return;
                 }
                 if let Some(flat) = self.flat(ident) {
@@ -2685,8 +2689,13 @@ pub fn flatten_namespaces(module: &Module) -> Module {
     }
     let exported = std::mem::take(&mut hoist.exported);
     let (order, types) = (std::mem::take(&mut hoist.order), std::mem::take(&mut hoist.types));
+    let merged: HashSet<String> = module.body.iter().filter_map(|item| match declared(item) {
+        Some((Decl::Class(class), _)) if top.contains_key(class.ident.sym.as_ref()) => Some(class.ident.sym.to_string()),
+        Some((Decl::TsEnum(declaration), _)) if top.contains_key(declaration.id.sym.as_ref()) => Some(declaration.id.sym.to_string()),
+        _ => None,
+    }).collect();
     let rewrite_item = |env: &Members, item: &mut ModuleItem| {
-        item.visit_mut_with(&mut Rewrite { env, exported: &exported, order: &order, types: &types });
+        item.visit_mut_with(&mut Rewrite { env, exported: &exported, order: &order, types: &types, merged: &merged });
     };
     let mut body = Vec::new();
     for slot in layout {

@@ -152,3 +152,32 @@ function main(): void {
         "true false true\ncircle:6\nrect:12\nrect 12\ncircle:3/3 rect:5/5\n7 -1\n"
     );
 }
+
+#[test]
+fn audit2_local_type_and_interface_in_function() {
+    let source = r##"function make(): number {
+  type Pair = { a: number; b: number };
+  interface Named { label: string }
+  const p: Pair = { a: 1, b: 2 };
+  const n: Named = { label: "x" };
+  return p.a + p.b + n.label.length;
+}
+function main(): void {
+  type Local = { v: string };
+  const l: Local = { v: "ok" };
+  console.log(make(), l, l.v);
+}
+"##;
+    assert_eq!(compile_and_run(source, "audit2_local_types"), "4 { v: 'ok' } ok\n");
+}
+
+#[test]
+fn audit2_enum_and_class_merged_with_namespace() {
+    let source = r##"enum E { A = 1 }
+namespace E { export function f() { return "E.f"; } }
+class Foo { static count = 0; constructor() { Foo.count++; } }
+namespace Foo { export const tag = "merged"; }
+function main(): void { new Foo(); console.log(E.f(), E.A, Foo.count, Foo.tag); }
+"##;
+    assert_eq!(compile_and_run(source, "audit2_merged_namespace"), "E.f 1 1 merged\n");
+}

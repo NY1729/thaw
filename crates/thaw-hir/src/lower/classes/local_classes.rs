@@ -183,3 +183,104 @@ fn lift_local_classes(module: &Module) -> Module {
     result.body = body;
     result
 }
+
+struct LocalTypeLifter {
+    top_names: HashSet<String>,
+    counts: HashMap<String, usize>,
+    lifted: Vec<ModuleItem>,
+}
+
+impl VisitMut for LocalTypeLifter {
+    fn visit_mut_stmts(&mut self, statements: &mut Vec<Stmt>) {
+        statements.visit_mut_children_with(self);
+        let mut kept = Vec::with_capacity(statements.len());
+        for statement in statements.drain(..) {
+            let name = match &statement {
+                Stmt::Decl(Decl::TsInterface(declaration)) => Some(declaration.id.sym.to_string()),
+                Stmt::Decl(Decl::TsTypeAlias(declaration)) => Some(declaration.id.sym.to_string()),
+                _ => None,
+            };
+            match name {
+                Some(name) if !self.top_names.contains(&name) && self.counts.get(&name) == Some(&1) => {
+                    self.lifted.push(ModuleItem::Stmt(statement));
+                }
+                _ => kept.push(statement),
+            }
+        }
+        *statements = kept;
+    }
+}
+
+/// Moves `type`/`interface` declarations nested in function bodies/blocks to module level. Types
+/// are erased and resolved by name, so this is sound when the name is unique in the module; a
+/// colliding name keeps the original statement (and its diagnostic).
+fn lift_local_type_declarations(module: &Module) -> Module {
+    #[derive(Default)]
+    struct Names(HashMap<String, usize>);
+    impl Visit for Names {
+        fn visit_stmts(&mut self, statements: &[Stmt]) {
+            for statement in statements {
+                if let Stmt::Decl(Decl::TsInterface(d)) = statement {
+                    *self.0.entry(d.id.sym.to_string()).or_default() += 1;
+                }
+                if let Stmt::Decl(Decl::TsTypeAlias(d)) = statement {
+                    *self.0.entry(d.id.sym.to_string()).or_default() += 1;
+                }
+            }
+            statements.visit_children_with(self);
+        }
+    }
+    let mut names = Names::default();
+    // Only declarations below the top level are candidates.
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) => declaration.visit_with(&mut names),
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => declaration.visit_with(&mut names),
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => declaration.visit_with(&mut names),
+            ModuleItem::Stmt(Stmt::Expr(statement)) => statement.visit_with(&mut names),
+            _ => {}
+        }
+    }
+    if names.0.is_empty() {
+        return module.clone();
+    }
+    let mut top_names = HashSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(d))) => { top_names.insert(d.id.sym.to_string()); }
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(d))) => { top_names.insert(d.id.sym.to_string()); }
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(d))) => { top_names.insert(d.id.sym.to_string()); }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(d))) => { top_names.insert(d.ident.sym.to_string()); }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                let mut bindings = ScopeBindings::default();
+                export.decl.visit_with(&mut bindings);
+                top_names.extend(bindings.0);
+                match &export.decl {
+                    Decl::TsInterface(d) => { top_names.insert(d.id.sym.to_string()); }
+                    Decl::TsTypeAlias(d) => { top_names.insert(d.id.sym.to_string()); }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut lifter = LocalTypeLifter { top_names, counts: names.0, lifted: Vec::new() };
+    let mut result = module.clone();
+    // Walk function bodies only (statement lists at the module top level are left alone).
+    for item in &mut result.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) => declaration.visit_mut_with(&mut lifter),
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => declaration.visit_mut_with(&mut lifter),
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => declaration.visit_mut_with(&mut lifter),
+            ModuleItem::Stmt(Stmt::Expr(statement)) => statement.visit_mut_with(&mut lifter),
+            _ => {}
+        }
+    }
+    if lifter.lifted.is_empty() {
+        return result;
+    }
+    let mut body = lifter.lifted;
+    body.append(&mut result.body);
+    result.body = body;
+    result
+}
