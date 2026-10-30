@@ -39,6 +39,8 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
     match key_type {
         HirType::F64 => Ok("num"),
         HirType::Str => Ok("str"),
+        // Arbitrary-precision `bigint` keys hash/compare by value (`BigKey`), never by handle bits.
+        HirType::BigInt => Ok("big"),
         // `Map<any, V>`/`Set<any>` -- a `Json` key can be a real
         // primitive at runtime, unlike every other "ref" case below, so
         // it gets its own key kind (`AnyKey`, thaw-runtime's `maps.rs`)

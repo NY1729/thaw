@@ -3634,6 +3634,46 @@
       "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.format(\"%s\", -0), util.format(\"%d\", -0), util.format(\"%i\", \"0x10\"));\n  console.log(util.format(\"%s\", { a: 1 }), util.format(\"%s\", [1, 2]));\n  console.log(util.format(\"%x\", 1), util.format(\"%s\"), util.format(1, 2), util.format(\"%c styled\", \"css\"), util.format(\"%d\", \"x\"), util.format(\"%s\", 5n), util.format(\"%d\", 5n));\n  console.log(util.format(\"%o\", [1]), util.format(\"%O\", { a: { b: { c: { d: 1 } } } }), util.format(\"%j\", { a: 1 }), util.format(\"%s:%s\", \"a\"));\n  console.log(util.format(\"%s\", null, undefined), util.format(\"%s\", \"a\", { b: 1 }, [2]), util.format(\"%%s\"), util.format(\"%s%%\", 1));\n}"
     },
     {
+      "name": "bigint followups: heap-backed equality search switch and Map/Set keys compare by value",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = 2n ** 70n;\n  const b = 2n ** 70n;\n  console.log(a === b, a !== b, a == b, a != b);\n  const arr: bigint[] = [a, 3n, 2n ** 80n];\n  console.log(arr.includes(b), arr.indexOf(b), arr.lastIndexOf(b), arr.includes(2n ** 80n), arr.indexOf(5n), arr.includes(3n));\n  switch (b) { case 1n: console.log(\"one\"); break; case a: console.log(\"a\"); break; default: console.log(\"def\"); }\n  console.log(Object.is(a, b), Object.is(a, a + 1n));\n  const s = new Set<bigint>([a, b, 2n ** 71n, 2n ** 71n]);\n  console.log(s.size, s.has(2n ** 70n), s.has(2n ** 72n));\n  const m = new Map<bigint, string>();\n  m.set(a, \"x\"); m.set(b, \"y\"); m.set(5n, \"z\");\n  console.log(m.size, m.get(2n ** 70n), m.has(2n ** 70n), m.get(5n));\n  m.delete(2n ** 70n);\n  console.log(m.size);\n}\n"
+    },
+    {
+      "name": "bigint followups: bigint vs number comparison is exact above 2^53",
+      "expect": "matched",
+      "source": "function main(): void {\n  const big = 2n ** 60n + 1n;\n  const f = 2 ** 60;\n  console.log(big > f, big < f, big == f, big >= f, big <= f);\n  console.log(9007199254740993n > 9007199254740992, 9007199254740993n == 9007199254740992, 9007199254740993n < 9007199254740994);\n  const h = 2n ** 80n;\n  console.log(h > 1e24, h < 1.3e24, h == 2 ** 80, h > 2 ** 80, 2 ** 80 < h, 2 ** 80 == h, 1e24 < h);\n  console.log(1n < NaN, 1n > NaN, 1n == NaN, 1n < Infinity, -(2n**70n) > -Infinity);\n  const n = 9007199254740993;\n  console.log(9007199254740993n === BigInt(n), 5n == 5.5, 5n < 5.5);\n}\n"
+    },
+    {
+      "name": "bigint followups: union and nullable members compare heap-backed bigints by value",
+      "expect": "matched",
+      "source": "function main(): void {\n  const t = 2n ** 70n;\n  const v: bigint | string = 2n ** 70n;\n  console.log(v === t, v === 2n ** 70n, v !== t, typeof v);\n  const n: bigint | null = 2n ** 70n;\n  console.log(n === t, n !== t, n === 2n ** 71n);\n  const u: bigint | undefined = 2n ** 70n;\n  console.log(u === t, u === 2n ** 71n);\n  const arr: (bigint | null)[] = [2n ** 70n, null, 5n];\n  console.log(arr[0] === t, arr[1] === t, arr[2] === 5n, arr[1] === null);\n  let m: bigint | string = \"x\";\n  console.log(m === t);\n  m = 2n ** 70n;\n  console.log(m === t);\n}\n"
+    },
+    {
+      "name": "bigint followups: join sort valueOf format and RangeError text",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = 2n ** 70n;\n  console.log([a, 3n, -a].join(), [a, 3n].join(\"|\"), String([a, 3n]), `${[a, 1n]}`, [a] + \"\");\n  console.log([a, 3n, 10n, -a, 2n].sort(), [10n, 9n, 1n].toSorted(), [a].valueOf(), a.valueOf() === a);\n  console.log(\"%d %i %s\", a, a, a);\n  for (const bad of [1.5, NaN, Infinity, -0.5, 1e21 + 0.5]) {\n    try { BigInt(bad); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  }\n}\n"
+    },
+    {
+      "name": "bigint followups: int64 boundary arithmetic around the inline range",
+      "expect": "matched",
+      "source": "function main(): void {\n  let a = 2n ** 62n;\n  console.log(a, a + a, a * 2n, a * 4n, -a, -a - a, -a - a - 1n);\n  let b = (2n ** 62n) - 1n;\n  console.log(b, b + 1n, b + 2n, -(b + 1n), -(b + 1n) - 1n);\n  let c = 2n ** 63n;\n  console.log(c - 1n, c, c + 1n, -c, -c - 1n);\n  console.log((c - 1n) === 9223372036854775807n, c === 9223372036854775808n, -c === -9223372036854775808n);\n}\n"
+    },
+    {
+      "name": "bigint followups: division shift bitwise and pow on large values",
+      "expect": "matched",
+      "source": "function main(): void {\n  const x = 10n ** 30n;\n  console.log(x / 7n, x % 7n, -x / 7n, -x % 7n, x / -7n, x % -7n, x / x, x % x);\n  console.log(x >> 10n, x << 10n, x >> 200n, -x >> 200n, x << 0n, x >> 0n, 1n << 100n >> 100n);\n  console.log(x & (x - 1n), x | 1n, x ^ x, ~x, -x & 0xffn, -x | 0xffn, -x ^ 0xffn);\n  console.log(x ** 2n, 2n ** 200n, (-2n) ** 201n, 0n ** 5n, 5n ** 0n);\n}\n"
+    },
+    {
+      "name": "bigint followups: comparisons with numbers and bigints",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = 2n ** 70n;\n  console.log(a > 1n, a < 1n, a >= a, a <= a - 1n, a == a, a != a + 1n);\n  console.log(a > 2 ** 69, a < 2 ** 71, 5n < 2 ** 70, -a < -(2 ** 69));\n  console.log(0n == 0, 0n === (0 as unknown as bigint), 1n == 1.0, 2n ** 53n == 2 ** 53, 2n ** 53n + 1n == 2 ** 53);\n  console.log(10n > 9.99, 10n >= 10, 10n <= 10.0001, 10n < -Infinity, 10n > -Infinity);\n}\n"
+    },
+    {
+      "name": "bigint followups: loops factorial fibonacci",
+      "expect": "matched",
+      "source": "function main(): void {\n  let total = 0n;\n  for (let i = 0n; i < 100n; i++) total += i * i * 2n ** 60n;\n  console.log(total);\n  let f = 1n;\n  for (let i = 2n; i <= 30n; i++) f *= i;\n  console.log(f, f.toString().length, f % 1000000007n);\n  let fib0 = 0n, fib1 = 1n;\n  for (let i = 0; i < 200; i++) { const t = fib0 + fib1; fib0 = fib1; fib1 = t; }\n  console.log(fib0);\n}\n"
+    },
+    {
       "name": "audit2 D console format nullish bigint symbol",
       "expect": "matched",
       "source": "function main(): void {\n  console.log(\"%s\", null, undefined, 5n, Symbol(\"q\"));\n  console.log(\"%d\", 5n, \"%i\", 7n);\n  console.log(\"%s\", 5n);\n  console.log(\"%s\", Symbol(\"r\"));\n}"

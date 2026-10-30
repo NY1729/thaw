@@ -1489,6 +1489,7 @@ impl<'a> FnLowerer<'a> {
                             let HirType::Array(element) = member else { unreachable!() };
                             let builtin = match element.as_ref() {
                                 HirType::F64 => "__thaw_number_array_join",
+                                HirType::BigInt => "__thaw_bigint_array_join",
                                 HirType::Str => "__thaw_string_array_join",
                                 HirType::Bool => "__thaw_bool_array_join",
                                 HirType::Object(_) => "__thaw_object_array_join",
@@ -1626,6 +1627,7 @@ impl<'a> FnLowerer<'a> {
                             } else {
                                 let builtin = match element.as_ref() {
                                     HirType::F64 => "__thaw_number_array_join",
+                                    HirType::BigInt => "__thaw_bigint_array_join",
                                     HirType::Str => "__thaw_string_array_join",
                                     HirType::Bool => "__thaw_bool_array_join",
                                     HirType::Object(_) => "__thaw_object_array_join",
@@ -1941,6 +1943,7 @@ impl<'a> FnLowerer<'a> {
                                     HirType::Str => "string",
                                     HirType::Bool => "bool",
                                     HirType::Object(_) => "object",
+                                    HirType::BigInt => "bigint",
                                     other => return Err(format!("array search does not support element type {other:?}")),
                                 };
                                 HirExpr::Call(
@@ -2149,6 +2152,7 @@ impl<'a> FnLowerer<'a> {
                         HirType::Str => "string",
                         HirType::Bool => "bool",
                         HirType::Object(_) => "object",
+                        HirType::BigInt => "bigint",
                         other => {
                             return Err(format!(
                                 "array search does not support element type {other:?}"

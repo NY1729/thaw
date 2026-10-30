@@ -958,6 +958,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let array_join_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false);
         for name in [
             "thaw_number_array_join",
+            "thaw_bigint_array_join",
             "thaw_string_array_join",
             "thaw_bool_array_join",
             "thaw_object_array_join",
@@ -1254,6 +1255,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let array_sort_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         for name in [
             "thaw_number_array_sort",
+            "thaw_bigint_array_sort",
+            "thaw_bigint_array_to_sorted",
             "thaw_string_array_sort",
             "thaw_bool_array_sort",
             "thaw_object_array_sort",
@@ -1314,6 +1317,9 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_string_array_includes", i8_ptr.into(), i8_type.into()),
             ("thaw_bool_array_index_of", i8_type.into(), f64_type.into()),
             ("thaw_bool_array_includes", i8_type.into(), i8_type.into()),
+            ("thaw_bigint_array_index_of", i64_type.into(), f64_type.into()),
+            ("thaw_bigint_array_includes", i64_type.into(), i8_type.into()),
+            ("thaw_bigint_array_last_index_of", i64_type.into(), f64_type.into()),
             ("thaw_object_array_index_of", i8_ptr.into(), f64_type.into()),
             ("thaw_object_array_includes", i8_ptr.into(), i8_type.into()),
             ("thaw_any_array_index_of", i8_ptr.into(), f64_type.into()),
@@ -2641,6 +2647,17 @@ impl<'ctx> HirCompiler<'ctx> {
             i64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        for (name, ty) in [
+            ("thaw_map_big_has", i8_type.fn_type(&[i8_ptr.into(), i64_type.into()], false)),
+            ("thaw_map_big_set", i8_type.fn_type(&[i8_ptr.into(), i64_type.into(), i64_type.into()], false)),
+            ("thaw_map_big_delete", i8_type.fn_type(&[i8_ptr.into(), i64_type.into()], false)),
+            ("thaw_map_big_get_f64", f64_type.fn_type(&[i8_ptr.into(), i64_type.into()], false)),
+            ("thaw_map_big_get_bool", i8_type.fn_type(&[i8_ptr.into(), i64_type.into()], false)),
+            ("thaw_map_big_get_ptr", i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false)),
+            ("thaw_map_big_get_i64", i64_type.fn_type(&[i8_ptr.into(), i64_type.into()], false)),
+        ] {
+            self.module.add_function(name, ty, Some(Linkage::External));
+        }
         self.module.add_function(
             "thaw_string_repeat",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),

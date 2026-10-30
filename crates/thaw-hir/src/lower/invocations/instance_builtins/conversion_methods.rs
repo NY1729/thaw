@@ -678,7 +678,7 @@ impl<'a> FnLowerer<'a> {
                     {
                         return Ok(receiver);
                     }
-                    if !matches!(receiver_type, HirType::F64 | HirType::Str | HirType::Bool) {
+                    if !matches!(receiver_type, HirType::F64 | HirType::Str | HirType::Bool | HirType::BigInt) {
                         return Err(format!(
                             "native `.valueOf()` requires a primitive or array receiver, got {receiver_type:?}"
                         ));

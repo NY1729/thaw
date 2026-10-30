@@ -84,6 +84,12 @@ thaw_bigint_to_f64
 thaw_bigint_to_i64_wrapping
 thaw_bigint_xor
 thaw_bool_array_fill
+thaw_bigint_array_includes
+thaw_bigint_array_sort
+thaw_bigint_array_to_sorted
+thaw_bigint_array_join
+thaw_bigint_array_index_of
+thaw_bigint_array_last_index_of
 thaw_bool_array_includes
 thaw_bool_array_index_of
 thaw_bool_array_join
@@ -408,6 +414,13 @@ thaw_map_any_get_i64
 thaw_map_any_get_ptr
 thaw_map_any_has
 thaw_map_any_set
+thaw_map_big_delete
+thaw_map_big_get_bool
+thaw_map_big_get_f64
+thaw_map_big_get_i64
+thaw_map_big_get_ptr
+thaw_map_big_has
+thaw_map_big_set
 thaw_map_clear
 thaw_map_iterator_next
 thaw_map_new

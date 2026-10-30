@@ -1150,6 +1150,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bytes);
                     }
                     "__thaw_number_array_join"
+                    | "__thaw_bigint_array_join"
                     | "__thaw_string_array_join"
                     | "__thaw_bool_array_join"
                     | "__thaw_object_array_join"
@@ -1301,6 +1302,8 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::F64);
                     }
                     "__thaw_number_array_sort"
+                    | "__thaw_bigint_array_sort"
+                    | "__thaw_bigint_array_to_sorted"
                     | "__thaw_string_array_sort"
                     | "__thaw_bool_array_sort"
                     | "__thaw_object_array_sort"
@@ -1338,7 +1341,10 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_array_includes"
                     | "__thaw_bool_array_includes"
                     | "__thaw_object_array_includes"
-                    | "__thaw_any_array_includes" => {
+                    | "__thaw_any_array_includes"
+                    | "__thaw_bigint_array_index_of"
+                    | "__thaw_bigint_array_last_index_of"
+                    | "__thaw_bigint_array_includes" => {
                         if args.len() != 3 {
                             return Err("array search expects three operands".into());
                         }
@@ -1533,6 +1539,14 @@ impl<'a> FnLowerer<'a> {
                             return Err("bigint number conversion expects one operand".into());
                         };
                         self.expect_type(&HirType::BigInt, value, "bigint number conversion")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_bigint_cmp_number" => {
+                        let [big, number] = args.as_slice() else {
+                            return Err("bigint/number comparison expects two operands".into());
+                        };
+                        self.expect_type(&HirType::BigInt, big, "bigint comparison")?;
+                        self.expect_type(&HirType::F64, number, "bigint comparison number")?;
                         return Ok(HirType::F64);
                     }
                     "__thaw_i64_from_number" => {
@@ -2214,7 +2228,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_map_ref_has" | "__thaw_map_ref_delete" | "__thaw_map_any_has"
-                    | "__thaw_map_any_delete" => {
+                    | "__thaw_map_any_delete" | "__thaw_map_big_has" | "__thaw_map_big_delete" => {
                         let [map, key] = args.as_slice() else {
                             return Err(format!("{name} expects two operands"));
                         };
@@ -2228,19 +2242,22 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_map_num_get_f64"
                     | "__thaw_map_str_get_f64"
                     | "__thaw_map_ref_get_f64"
-                    | "__thaw_map_any_get_f64" => {
+                    | "__thaw_map_any_get_f64"
+                    | "__thaw_map_big_get_f64" => {
                         return Ok(HirType::F64);
                     }
                     "__thaw_map_num_get_bool"
                     | "__thaw_map_str_get_bool"
                     | "__thaw_map_ref_get_bool"
-                    | "__thaw_map_any_get_bool" => {
+                    | "__thaw_map_any_get_bool"
+                    | "__thaw_map_big_get_bool" => {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_map_num_set"
                     | "__thaw_map_str_set"
                     | "__thaw_map_ref_set"
-                    | "__thaw_map_any_set" => {
+                    | "__thaw_map_any_set"
+                    | "__thaw_map_big_set" => {
                         let [map, ..] = args.as_slice() else {
                             return Err(format!("{name} expects three operands"));
                         };
