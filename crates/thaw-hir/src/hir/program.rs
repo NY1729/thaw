@@ -16,6 +16,9 @@ pub struct HirProgram {
     /// Where each source function (by `HirFunction::name`) is defined, for `Error.stack` frames.
     /// Debug metadata only: it never takes part in program equality.
     pub fn_locs: FnLocs,
+    /// Instance layouts of every native class (identity marker first), so a conversion through a
+    /// base-class type can dispatch to the allocation's real, more derived layout.
+    pub class_layouts: Vec<HirType>,
 }
 
 /// A source position: file name, 1-based line and column.
