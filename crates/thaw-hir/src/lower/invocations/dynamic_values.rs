@@ -722,7 +722,7 @@ impl<'a> FnLowerer<'a> {
                     vec![value],
                 ));
             }
-            if callee_name == "String" && ty == HirType::I64 {
+            if callee_name == "String" && ty == HirType::BigInt {
                 return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
                     vec![value],
@@ -766,7 +766,7 @@ impl<'a> FnLowerer<'a> {
             if callee_name == "Number" && ty == HirType::F64 {
                 return Ok(value);
             }
-            if callee_name == "Number" && ty == HirType::I64 {
+            if callee_name == "Number" && ty == HirType::BigInt {
                 return self.bigint_to_number(value);
             }
             if callee_name == "Number" && ty == HirType::Bool {
@@ -792,7 +792,7 @@ impl<'a> FnLowerer<'a> {
             }
             // A union of plain primitives is converted member by member below.
             let primitive_union = matches!(&ty, HirType::Union(members)
-                if members.iter().all(|m| matches!(m, HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str)));
+                if members.iter().all(|m| matches!(m, HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str)));
             if callee_name == "Number"
                 && !primitive_union
                 && matches!(
@@ -803,33 +803,16 @@ impl<'a> FnLowerer<'a> {
                 return self.coerce_primitive_to_number(value);
             }
             if callee_name == "BigInt" {
-                // `BigInt(string)` always goes through the real QuickJS
-                // BigInt constructor, string arg or not -- a native `i64`
-                // parse can't tell, at compile time, whether a runtime
-                // string is a small in-range integer, one requiring real
-                // arbitrary precision (`BigInt("999...999")`, far beyond
-                // `i64`), or outright invalid (`BigInt("123abc")`, a real
-                // `SyntaxError`); the previous native fast path silently
-                // truncated/saturated/accepted-with-trailing-garbage all
-                // three instead. `.toString()`/radix conversion on the
-                // resulting value stays exact either way (same as a large
-                // `bigint` literal, which already takes this same path).
+                // `BigInt(string)`: StringToBigInt natively (arbitrary precision,
+                // SyntaxError on invalid text); the runtime validates.
                 if ty == HirType::Str {
-                    let constructor = HirExpr::Call(
-                        Box::new(HirExpr::Var("getDynamicValue".into())),
-                        vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
-                    );
-                    let arguments = self.coerce_to_declared(
-                        &HirType::Json,
-                        HirExpr::ArrayLit(vec![value.clone()]),
-                    )?;
                     return Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("callDynamicValueHandle".into())),
-                        vec![constructor, arguments],
+                        Box::new(HirExpr::Var("__thaw_i64_from_string".to_string())),
+                        vec![value],
                     ));
                 }
                 return match ty {
-                    HirType::I64 => Ok(value),
+                    HirType::BigInt => Ok(value),
                     // Real `BigInt(number)` (`NumberToBigInt`) requires an
                     // *integral* number -- `NaN`/`Infinity`/a fractional
                     // value all throw `RangeError`, matching `.length =`'s
@@ -865,16 +848,16 @@ impl<'a> FnLowerer<'a> {
                     }
                     HirType::Bool => Ok(HirExpr::Conditional(
                         Box::new(value),
-                        Box::new(HirExpr::Lit(HirLit::I64(1))),
-                        Box::new(HirExpr::Lit(HirLit::I64(0))),
-                        HirType::I64,
+                        Box::new(HirExpr::Lit(HirLit::BigInt("1".into()))),
+                        Box::new(HirExpr::Lit(HirLit::BigInt("0".into()))),
+                        HirType::BigInt,
                     )),
                     other => Err(format!("`BigInt` cannot convert a value of type {other:?}")),
                 };
             }
             // `number | bigint`, `string | number`, ...: convert the active member.
             if let HirType::Union(members) = &ty {
-                if members.iter().all(|m| matches!(m, HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str)) {
+                if members.iter().all(|m| matches!(m, HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Bool | HirType::Str)) {
                     let name = format!("__thaw_union_convert_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(name.clone(), ty.clone());

@@ -214,7 +214,7 @@ pub(crate) fn render_ts_array_of(element: &HirType) -> String {
 pub(crate) fn render_ts_type(ty: &HirType) -> String {
     match ty {
         HirType::F64 => "number".to_string(),
-        HirType::I64 => "bigint".to_string(),
+        HirType::I64 | HirType::BigInt => "bigint".to_string(),
         HirType::Bool => "boolean".to_string(),
         HirType::Undefined => "undefined".to_string(),
         HirType::Null => "null".to_string(),

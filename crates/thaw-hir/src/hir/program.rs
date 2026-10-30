@@ -1324,7 +1324,7 @@ pub fn set_ffi_aggregate_layout(
                     ))
                 }
                 (HirType::Bool, None, None) => 1,
-                (HirType::F64 | HirType::I64 | HirType::Str, None, None) => 8,
+                (HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Str, None, None) => 8,
                 (HirType::Object(child_fields), Some(child_layout), None) => {
                     validate_layout(
                         symbol,
