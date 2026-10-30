@@ -1358,96 +1358,6 @@ fn class_contains_unresolved_generic_type(
     detector.found
 }
 
-fn class_field_layout_cycle(module: &Module) -> Option<Vec<Symbol>> {
-    struct References<'a> {
-        classes: &'a HashSet<Symbol>,
-        names: Vec<Symbol>,
-    }
-    impl Visit for References<'_> {
-        fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
-            if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
-                if self.classes.contains(name.sym.as_ref()) {
-                    self.names.push(name.sym.to_string());
-                }
-            }
-            reference.visit_children_with(self);
-        }
-    }
-
-    let declarations = module
-        .body
-        .iter()
-        .filter_map(|item| match item {
-            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
-                Some((declaration.ident.sym.to_string(), declaration))
-            }
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
-    let names = declarations.keys().cloned().collect::<HashSet<_>>();
-    let mut edges = HashMap::<Symbol, Vec<Symbol>>::new();
-    for (name, declaration) in &declarations {
-        let mut references = References {
-            classes: &names,
-            names: Vec::new(),
-        };
-        for member in &declaration.class.body {
-            match member {
-                ClassMember::ClassProp(property) if !property.is_static => {
-                    property.type_ann.visit_with(&mut references);
-                }
-                ClassMember::PrivateProp(property) if !property.is_static => {
-                    property.type_ann.visit_with(&mut references);
-                }
-                ClassMember::Constructor(constructor) if constructor.body.is_some() => {
-                    for parameter in &constructor.params {
-                        if matches!(parameter, ParamOrTsParamProp::TsParamProp(_)) {
-                            class_constructor_param_pattern(parameter).visit_with(&mut references);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        references.names.sort();
-        references.names.dedup();
-        edges.insert(name.clone(), references.names);
-    }
-
-    fn visit(
-        name: &str,
-        edges: &HashMap<Symbol, Vec<Symbol>>,
-        complete: &mut HashSet<Symbol>,
-        active: &mut Vec<Symbol>,
-    ) -> Option<Vec<Symbol>> {
-        if let Some(index) = active.iter().position(|candidate| candidate == name) {
-            let mut cycle = active[index..].to_vec();
-            cycle.push(name.to_string());
-            return Some(cycle);
-        }
-        if complete.contains(name) {
-            return None;
-        }
-        active.push(name.to_string());
-        for dependency in edges.get(name).into_iter().flatten() {
-            if let Some(cycle) = visit(dependency, edges, complete, active) {
-                return Some(cycle);
-            }
-        }
-        active.pop();
-        complete.insert(name.to_string());
-        None
-    }
-
-    let mut complete = HashSet::new();
-    for name in declarations.keys() {
-        if let Some(cycle) = visit(name, &edges, &mut complete, &mut Vec::new()) {
-            return Some(cycle);
-        }
-    }
-    None
-}
-
 struct GenericClassReferenceRewriter<'a, 'ast> {
     specializations: &'a [(Symbol, Vec<HirType>, Symbol)],
     templates: &'a HashMap<Symbol, GenericClassTemplate>,
@@ -1973,11 +1883,17 @@ fn specialize_generic_classes(
                 .into(),
         );
     }
-    if let Some(cycle) = class_field_layout_cycle(&specialized) {
-        return Err(format!(
-            "recursive generic class field layout `{}` cannot use Thaw's fixed-size native layout",
-            cycle.join(" -> ")
-        ));
+    // A specialized class may name itself or another specialization (`next: Node__thaw_X | null`):
+    // those names are class back-edges here, resolved for real by the native class pass.
+    let mut validation_interfaces = specialization_interfaces.clone();
+    for item in &specialized.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item {
+            if declaration.class.type_params.is_none() {
+                validation_interfaces
+                    .entry(declaration.ident.sym.to_string())
+                    .or_insert_with(|| HirType::Recursive(crate::new_recursive_key(&declaration.ident.sym)));
+            }
+        }
     }
     for item in &specialized.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
@@ -1987,7 +1903,7 @@ fn specialize_generic_classes(
             continue;
         }
         let validate = |annotation: &TsType| {
-            lower_ts_type(annotation, &specialization_interfaces, generic_interfaces).map_err(
+            lower_ts_type(annotation, &validation_interfaces, generic_interfaces).map_err(
                 |error| {
                     format!(
                         "recursive or unresolved generic class field layout in `{}` cannot use Thaw's fixed-size native layout: {error}",
