@@ -2739,7 +2739,7 @@ fn generator_try_catch_finally_survives_suspension() {
     "#;
     assert_eq!(
         compile_and_run(source, "generator_try_catch_finally"),
-        "1 0\nError: boom\n2 11\n3 111\ntrue 111\n"
+        "1 0\nError: boom\n    at main (input.ts:17:9)\n2 11\n3 111\ntrue 111\n"
     );
 }
 
@@ -8544,11 +8544,9 @@ fn compiles_turkish_and_azeri_string_casing() {
 /// `AggregateError` preserves statically typed errors and an arbitrary cause
 /// while retaining the existing tagged exception behavior when thrown.
 ///
-/// A caught `AggregateError` is printed as Node prints an error that has no stack
-/// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
-/// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
-/// the stack trace, which a native binary has no equivalent of, so it is omitted.
-/// A statically typed error value prints as its "Name: message" first line.
+/// An `AggregateError` itself captures no frames, so it prints as Node prints an error with
+/// no stack (`e.stack = "AggregateError: all failed"` under Node 22): `[AggregateError: all
+/// failed] { [errors]: [...] }`. Its member `Error`s carry frames and print like Node's.
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -8576,7 +8574,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "AggregateError\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
+        "AggregateError\n1,2,3\n17\ntrue\n[AggregateError: all failed] {\n  [errors]: [\n    Error: a\n        at main (input.ts:5:9)\n  ]\n}\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
     );
 }
 
@@ -10408,7 +10406,7 @@ fn compiles_promise_keyed_combinators() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_keyed_combinators"),
-        "1 two\nboom\nfulfilled rejected\n1\nError: boom\n"
+        "1 two\nboom\nfulfilled rejected\n1\nError: boom\n    at fail (input.ts:8:9)\n    at main (input.ts:11:9)\n    at main (input.ts:11:9)\n"
     );
 }
 
