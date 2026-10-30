@@ -3362,6 +3362,8 @@ dependencies = [
  "jiff",
  "libc",
  "num-bigint",
+ "num-integer",
+ "num-traits",
  "regex",
  "regress",
  "rustls",

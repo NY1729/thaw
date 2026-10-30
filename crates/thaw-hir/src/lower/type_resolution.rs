@@ -233,7 +233,7 @@ fn lower_ts_type(
         }
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => Ok(HirType::F64),
-            TsKeywordTypeKind::TsBigIntKeyword => Ok(HirType::I64),
+            TsKeywordTypeKind::TsBigIntKeyword => Ok(HirType::BigInt),
             TsKeywordTypeKind::TsStringKeyword => Ok(HirType::Str),
             TsKeywordTypeKind::TsSymbolKeyword => Ok(HirType::Symbol),
             TsKeywordTypeKind::TsBooleanKeyword => Ok(HirType::Bool),
@@ -274,7 +274,7 @@ fn lower_ts_type(
         },
         TsType::TsLitType(literal) => match &literal.lit {
             swc_ecma_ast::TsLit::Number(_) => Ok(HirType::F64),
-            swc_ecma_ast::TsLit::BigInt(_) => Ok(HirType::I64),
+            swc_ecma_ast::TsLit::BigInt(_) => Ok(HirType::BigInt),
             swc_ecma_ast::TsLit::Str(_) => Ok(HirType::Str),
             swc_ecma_ast::TsLit::Bool(_) => Ok(HirType::Bool),
             swc_ecma_ast::TsLit::Tpl(_) => Ok(HirType::Str),
@@ -348,7 +348,7 @@ fn lower_ts_type(
                     matches!(
                         element,
                         HirType::F64
-                            | HirType::I64
+                            | HirType::I64 | HirType::BigInt
                             | HirType::Bool
                             | HirType::Str
                             | HirType::StrLiteral(_)

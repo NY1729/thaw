@@ -29,7 +29,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn basic_type(&self, ty: &HirType) -> Result<BasicTypeEnum<'ctx>, String> {
         match ty {
             HirType::F64 => Ok(self.context.f64_type().into()),
-            HirType::I64 => Ok(self.context.i64_type().into()),
+            HirType::I64 | HirType::BigInt => Ok(self.context.i64_type().into()),
             HirType::Bool => Ok(self.context.bool_type().into()),
             // `void` has no top-level return value, but tagged containers
             // such as `void | T` still need a physical placeholder slot.

@@ -155,7 +155,10 @@ mod optional_mask_tests {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirType {
     F64,
+    /// Raw 64-bit integer used by compiler-internal machinery (tags, ids).
     I64,
+    /// A JavaScript `bigint`: an arbitrary-precision tagged handle stored in one `i64` word.
+    BigInt,
     Bool,
     Undefined,
     Null,
@@ -246,7 +249,7 @@ pub enum HirType {
 pub fn caught_exception_carrier_type() -> HirType {
     HirType::Union(vec![
         HirType::F64,
-        HirType::I64,
+        HirType::BigInt,
         HirType::Bool,
         HirType::Str,
         HirType::Undefined,
@@ -291,6 +294,8 @@ pub fn native_exception_layout_token(ty: &HirType) -> Option<String> {
 pub enum HirLit {
     F64(f64),
     I64(i64),
+    /// A `bigint` literal as decimal digits (any size).
+    BigInt(String),
     Str(String),
     /// A string literal that contains at least one lone UTF-16 surrogate,
     /// stored as WTF-8 bytes (UTF-8 extended to encode unpaired
