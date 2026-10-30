@@ -2239,6 +2239,29 @@ fn records_arrow_capture_names_and_types() {
 }
 
 #[test]
+fn record_and_mapped_keys_accept_literal_union_aliases() {
+    let program = lower(
+        r#"type State = "idle" | "done";
+        type N = 0 | 1;
+        function main(): void {
+            const next: Record<State, number> = { idle: 1, done: 2 };
+            const labels: { [K in State]: number } = { idle: 1, done: 2 };
+            const nn: Record<N, number> = { 0: 1, 1: 2 };
+            console.log(next.idle + labels.done + nn[1]);
+        }"#,
+    );
+    let keys = |i: usize| match &program.functions[0].body[i] {
+        HirStmt::Let(_, HirType::Object(fields), _) => {
+            fields.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        }
+        other => panic!("expected object-typed let, got {other:?}"),
+    };
+    assert_eq!(keys(0), ["idle", "done"]);
+    assert_eq!(keys(1), ["idle", "done"]);
+    assert_eq!(keys(2), ["0", "1"]);
+}
+
+#[test]
 fn map_accepts_object_and_array_keys_but_rejects_function_keys() {
     let program = lower(
         r#"function main(): void {
