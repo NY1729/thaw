@@ -459,7 +459,7 @@ impl StorageGraph {
         self.lookup(object.sym.as_ref()).is_none()
             && matches!((object.sym.as_ref(), property.sym.as_ref()),
                 ("Object", "fromEntries" | "groupBy") | ("Map", "groupBy")
-                | ("Buffer", "from" | "concat" | "alloc") | ("Uint8Array", "from"))
+                | ("Buffer", "from" | "concat" | "alloc" | "allocUnsafe" | "allocUnsafeSlow") | ("Uint8Array", "from"))
     }
 
     fn link(&mut self, left: Span, right: Span) {
