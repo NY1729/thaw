@@ -427,6 +427,7 @@ impl<'ctx> HirCompiler<'ctx> {
         aggregate_layout: Option<&FfiAggregateLayout>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
+            HirType::BigInt => self.bigint_call("thaw_bigint_from_i64", &[value.into()]),
             HirType::Str if string_abi == FfiStringAbi::PointerLength => {
                 let native = value.into_struct_value();
                 let source = self
@@ -1032,6 +1033,11 @@ impl<'ctx> HirCompiler<'ctx> {
         output: &mut Vec<BasicMetadataValueEnum<'ctx>>,
     ) -> Result<(), String> {
         match ty {
+            // Native `int64_t`: hand C the raw (wrapped) integer, not the tagged handle.
+            HirType::BigInt => {
+                let raw = self.bigint_call("thaw_bigint_to_i64_wrapping", &[value.into()])?;
+                output.push(raw.into());
+            }
             HirType::Array(element) if element.as_ref() == &HirType::Bool => {
                 let handle = value.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;

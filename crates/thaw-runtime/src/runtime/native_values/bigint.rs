@@ -26,7 +26,8 @@ fn bigint_encode(value: BigInt) -> i64 {
 fn bigint_decode(handle: i64) -> BigInt {
     if handle & 1 == 1 {
         BigInt::from(handle >> 1)
-    } else if handle == 0 {
+    } else if handle == 0 || handle & 7 != 0 || handle < 4096 {
+        // Zero-initialised slot, or a stray non-pointer: read as 0n instead of dereferencing it.
         BigInt::zero()
     } else {
         unsafe { (*(handle as *const BigInt)).clone() }
