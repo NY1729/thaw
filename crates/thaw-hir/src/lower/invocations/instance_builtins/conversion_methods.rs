@@ -546,7 +546,7 @@ impl<'a> FnLowerer<'a> {
                         bindings.extend(spread_bindings);
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
-                    if receiver_type == HirType::I64 && !call.args.is_empty() {
+                    if receiver_type == HirType::BigInt && !call.args.is_empty() {
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "BigInt.toString")?;
                         let [radix] = arguments.as_slice() else {
@@ -615,12 +615,12 @@ impl<'a> FnLowerer<'a> {
                         };
                         let receiver_name = format!("__thaw_bigint_radix_receiver_{}", self.next_binding);
                         self.next_binding += 1;
-                        self.scope.insert(receiver_name.clone(), HirType::I64);
+                        self.scope.insert(receiver_name.clone(), HirType::BigInt);
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_i64_to_radix_string".into())),
                             vec![HirExpr::Var(receiver_name.clone()), radix],
                         );
-                        let mut bindings = vec![(receiver_name, HirType::I64, receiver)];
+                        let mut bindings = vec![(receiver_name, HirType::BigInt, receiver)];
                         bindings.extend(spread_bindings);
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }

@@ -126,6 +126,7 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
     };
     Ok(match ty {
         HirType::F64 | HirType::I64 => keyword(TsKeywordTypeKind::TsNumberKeyword),
+        HirType::BigInt => keyword(TsKeywordTypeKind::TsBigIntKeyword),
         HirType::Str => keyword(TsKeywordTypeKind::TsStringKeyword),
         HirType::Bool => keyword(TsKeywordTypeKind::TsBooleanKeyword),
         HirType::Json => keyword(TsKeywordTypeKind::TsAnyKeyword),

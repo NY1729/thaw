@@ -5115,8 +5115,8 @@ fn byte_buffer_bigint_accessors() {
             console.log(next);
 
             // 2^63's bit pattern (`i64::MIN`), BE, via the BigUInt64
-            // writer -- reads back negative via *both* accessors, since
-            // Thaw has no genuine unsigned 64-bit storage.
+            // writer -- reads back negative via the signed accessor and
+            // as 2^63 via the unsigned one.
             buf.writeBigUInt64BE(-9223372036854775807n - 1n, 0);
             console.log(buf.toString("hex"));
             console.log(buf.readBigInt64BE(0));
@@ -5138,7 +5138,7 @@ fn byte_buffer_bigint_accessors() {
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_bigint_accessors"),
-        "0000000000000000\n0n\n0n\nffffffffffffff7f\n9223372036854775807n\n9223372036854775807n\n8\n8000000000000000\n-9223372036854775808n\n-9223372036854775808n\nffffffffffffffff\n-1n\n-1n\nRangeError ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 and <= 0. Received 1\n"
+        "0000000000000000\n0n\n0n\nffffffffffffff7f\n9223372036854775807n\n9223372036854775807n\n8\n8000000000000000\n-9223372036854775808n\n9223372036854775808n\nffffffffffffffff\n-1n\n18446744073709551615n\nRangeError ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 and <= 0. Received 1\n"
     );
 }
 

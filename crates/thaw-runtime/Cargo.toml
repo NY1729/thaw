@@ -12,6 +12,8 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 libc = "0.2"
 num-bigint = "=0.4.8"
+num-integer = "=0.1.47"
+num-traits = "=0.2.19"
 ryu = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 thaw-arena = { path = "../thaw-arena" }

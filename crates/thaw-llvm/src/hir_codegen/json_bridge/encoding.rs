@@ -1443,7 +1443,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let dynamic_string = matches!(field_type, HirType::Str) && self.compiling_quickjs_dynamic_arguments;
         let owned = owned
             || dynamic_string
-            || matches!(field_type, HirType::Null | HirType::Undefined | HirType::I64
+            || matches!(field_type, HirType::Null | HirType::Undefined | HirType::I64 | HirType::BigInt
                 | HirType::Map(..) | HirType::Set(_)
                 | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Recursive(_)
                 | HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
@@ -1517,8 +1517,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_json_object_set_json"
                 }
                 HirType::Null | HirType::Undefined => "thaw_json_object_set_json",
-                HirType::I64 => {
+                HirType::BigInt => {
                     value = self.compile_json_bigint(value)?;
+                    "thaw_json_object_set_json"
+                }
+                // Raw compiler-internal integers keep the exact-i64 Json BigInt.
+                HirType::I64 => {
+                    value = self.bigint_call("thaw_json_receiver_bigint", &[value.into()])?;
                     "thaw_json_object_set_json"
                 }
                 HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {
@@ -2287,15 +2292,6 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_array_push_native_with_undefined(json, value, element_type, false)
     }
 
-    /// A Json BigInt for a native `i64` (the runtime owns the allocation).
-    fn compile_json_bigint(&mut self, value: BasicValueEnum<'ctx>) -> Result<BasicValueEnum<'ctx>, String> {
-        self.builder
-            .build_call(self.module.get_function("thaw_json_receiver_bigint").unwrap(), &[value.into()], "json_bigint")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value().basic()
-            .ok_or_else(|| "thaw_json_receiver_bigint returned no value".to_string())
-    }
-
     fn compile_json_array_push_native_with_undefined(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -2353,7 +2349,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let dynamic_string = matches!(element_type, HirType::Str) && self.compiling_quickjs_dynamic_arguments;
         let generated_owned = dynamic_string || matches!(element_type,
-            HirType::Null | HirType::Undefined | HirType::Void | HirType::I64
+            HirType::Null | HirType::Undefined | HirType::Void | HirType::I64 | HirType::BigInt
             | HirType::Map(..) | HirType::Set(_)
             | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Recursive(_)
             | HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
@@ -2436,8 +2432,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "thaw_json_array_push_json"
             }
             // A bigint element becomes a Json BigInt (printed `123n`; `JSON.stringify` rejects it).
-            HirType::I64 => {
+            HirType::BigInt => {
                 value = self.compile_json_bigint(value)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::I64 => {
+                value = self.bigint_call("thaw_json_receiver_bigint", &[value.into()])?;
                 "thaw_json_array_push_json"
             }
             HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {

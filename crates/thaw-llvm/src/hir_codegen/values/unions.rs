@@ -31,7 +31,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_int_z_extend(value, self.context.i64_type(), "union_bool_bits")
                 .map_err(|error| error.to_string())?,
-            (HirType::I64 | HirType::JsValue, BasicValueEnum::IntValue(value)) => value,
+            (HirType::I64 | HirType::BigInt | HirType::JsValue, BasicValueEnum::IntValue(value)) => value,
             (_, BasicValueEnum::PointerValue(value)) => self
                 .builder
                 .build_ptr_to_int(value, self.context.i64_type(), "union_pointer_bits")
@@ -114,7 +114,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_int_truncate(payload, self.context.bool_type(), "union_bool")
                 .map(Into::into)
                 .map_err(|error| error.to_string()),
-            HirType::I64 | HirType::JsValue => Ok(payload.into()),
+            HirType::I64 | HirType::BigInt | HirType::JsValue => Ok(payload.into()),
             _ => {
                 let pointer = self
                     .builder
