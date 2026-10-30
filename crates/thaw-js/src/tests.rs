@@ -1031,3 +1031,42 @@ fn crypto_global_fills_random_values_and_makes_uuids() {
         "true true true 5 3 QuotaExceededError TypeMismatchError"
     );
 }
+
+#[test]
+fn crypto_create_hash_matches_node() {
+    assert_eq!(
+        one("var m = globalThis.__thaw_crypto_module;
+             console.log(m.createHash('sha1').update('a').update(Buffer.from('bc')).digest('hex'),
+               m.createHash('md5').update('abc').digest('base64'),
+               m.createHash('sha256').digest('hex'), m.createHash('sha1').digest().length)"),
+        "a9993e364706816aba3e25717850c26c9cd0d89d kAFQmDzST7DWlj99KOF/cg== e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 20"
+    );
+}
+
+#[test]
+fn blob_and_file_basics() {
+    assert_eq!(
+        one("var f = new File(['ab', new Uint8Array([99])], 'x.txt', { type: 'Text/Plain' });
+             console.log(f instanceof Blob, f instanceof File, f.name, f.size, f.type, new Blob([]) instanceof File,
+               f.slice(1).size)"),
+        "true true x.txt 3 text/plain false 2"
+    );
+}
+
+#[test]
+fn scan_accepts_esm_origin_calls_and_self_made_global_slots() {
+    let src = "module.exports = (function(require) {
+var __thaw_bundle_factories = {
+\"p/index.js\": function(__thaw_esm_origin_0) { return function(module, exports, require) {
+  if (typeof __thaw_esm_origin_0 !== 'undefined') __thaw_esm_origin_0.edge('./a', 1);
+  var _a; (_a = globalThis).__slot ?? (_a.__slot = {});
+  var tx = 1; exports.o = { tx }; exports.f = function () { return exports.o.tx(1); };
+  var s = globalThis.__slot;
+}; },
+};
+var __thaw_bundle_require_maps = { \"p/index.js\": {}, };
+var __thaw_bundle_entry_key = \"p/index.js\";
+})(globalThis.require);";
+    let report = crate::scan::scan_bundle(src).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+}
