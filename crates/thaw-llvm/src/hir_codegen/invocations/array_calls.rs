@@ -250,7 +250,24 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_float_compare(inkwell::FloatPredicate::OLT, index, length, "bytes_index_below_len")
             .map_err(|error| error.to_string())?;
-        self.builder.build_and(non_negative, below, "bytes_index_in_range").map_err(|error| error.to_string())
+        let in_range = self.builder.build_and(non_negative, below, "bytes_index_in_range").map_err(|error| error.to_string())?;
+        // A fractional index is not an element (`u8[1.5]` is `undefined`, a write is ignored).
+        let trunc = self.module.get_function("llvm.trunc.f64").unwrap_or_else(|| {
+            self.module.add_function("llvm.trunc.f64", f64_type.fn_type(&[f64_type.into()], false), None)
+        });
+        let truncated = self
+            .builder
+            .build_call(trunc, &[index.into()], "bytes_index_trunc")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("trunc returned no value")?
+            .into_float_value();
+        let integral = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OEQ, index, truncated, "bytes_index_integral")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_and(in_range, integral, "bytes_index_valid").map_err(|error| error.to_string())
     }
 
     /// Address of byte `index` of a view record `{ len, tag, base, store }`.
