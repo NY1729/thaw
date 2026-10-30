@@ -20,7 +20,7 @@ impl<'a> FnLowerer<'a> {
         }
         match &value_type {
             // Scalars are already copied by value; no cloning needed.
-            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined => {
+            HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined => {
                 Ok(value)
             }
             HirType::Array(element) => self.lower_structured_clone_array(
