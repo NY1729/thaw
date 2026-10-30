@@ -395,8 +395,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         self.compile_single_arg_call("thaw_js_get_global", args, "getDynamicValue")
     }
 
@@ -505,8 +504,7 @@ impl<'ctx> HirCompiler<'ctx> {
         handle: BasicValueEnum<'ctx>,
         call_args: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         // Arguments may carry live handles; encoding/decoding them needs the host operations.
         self.compile_register_js_callback_host_operations()?;
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
@@ -1687,8 +1685,7 @@ impl<'ctx> HirCompiler<'ctx> {
         constructor: BasicValueEnum<'ctx>,
         json_args: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.uses_quickjs = true;
-        self.uses_quickjs_handles = true;
+        self.js_mark_handles_used();
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
         let json_args = self.compile_expr(json_args);

@@ -898,6 +898,33 @@ fn class_instances_live_behind_handles_and_can_be_passed_back() {
     assert_eq!(crate::host::thaw_tjs_release_handle(id), 0);
 }
 
+#[test]
+fn global_construct_and_call_handles() {
+    use crate::host::*;
+    use std::ffi::CString;
+    let (name, source) = (
+        CString::new("g").unwrap(),
+        CString::new(
+            CLASS_BUNDLE
+                .replace("\"k/", "\"g/")
+                .replace("k/index", "g/index"),
+        )
+        .unwrap(),
+    );
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let q = |s: &str| CString::new(s).unwrap();
+    let ctor = thaw_tjs_get_global(q("g::Box").as_ptr());
+    assert!(ctor > 0);
+    assert!(thaw_tjs_get_global(q("Math.max").as_ptr()) > 0);
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":5}]}]}"#);
+    let made = thaw_tjs_construct_handle_graph_args_result(ctor as u64, args.as_ptr());
+    assert!(made.error.is_null() && made.value > 0);
+    let max = thaw_tjs_get_global(q("Math.max").as_ptr());
+    let args = q(r#"{"root":{"r":0},"nodes":[{"a":[{"v":3},{"v":9}]}]}"#);
+    let r = thaw_tjs_call_handle_handle_graph_args_result(max as u64, args.as_ptr(), false);
+    assert!(r.error.is_null() && r.value > 0);
+}
+
 // ----- WeakMap / WeakSet / WeakRef / FinalizationRegistry (expected text recorded from Node 22) -----
 
 #[test]
