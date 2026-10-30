@@ -267,6 +267,15 @@ impl<'a> FnLowerer<'a> {
                 )),
                 Box::new(false_lit()),
             )),
+            HirType::I64 => Ok(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value),
+                    Box::new(HirExpr::Lit(HirLit::I64(0))),
+                )),
+                Box::new(false_lit()),
+            )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
             // Truthiness is asked of the live engine value: a function (or any object
             // whose JSON projection is empty) is truthy, which a JSON round trip loses.
@@ -4337,7 +4346,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
-        if lhs_type == HirType::BigInt && rhs_type == HirType::BigInt {
+        if matches!((&lhs_type, &rhs_type), (HirType::I64, HirType::I64) | (HirType::BigInt, HirType::BigInt)) {
             return Ok(HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs)));
         }
         // A native `bigint` against a beyond-`i64` one (a live handle):
