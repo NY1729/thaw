@@ -44,6 +44,27 @@ fn builds_and_runs_a_constructor_overload() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `this.field.method()` on a class-typed field of `this` (receiver is a
+/// member expression, not an identifier) used to fail to build with
+/// "unsupported member call target".
+#[test]
+fn builds_and_runs_a_method_call_through_a_this_field() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-this-field-call-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nconsole.log(new Bar().run());\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The built-in error classes (`Error`, `TypeError`, ...) as *type*
 /// annotations -- parameters, return types, and `const` bindings -- while
 /// their runtime representation stays the tagged string `new Error(m)`
