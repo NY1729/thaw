@@ -532,6 +532,25 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        // A slot typed through a class back-edge coerces to the layout it names; a value that
+        // already has that layout (modulo back-edges) needs no conversion.
+        if declared.contains_recursive() {
+            if let Ok(actual) = self.infer_expr_type(&value) {
+                if actual.expand() == declared.expand() {
+                    return Ok(value);
+                }
+            }
+            return self.coerce_to_declared_expanded(&declared.expand(), value);
+        }
+        if let Ok(actual) = self.infer_expr_type(&value) {
+            if actual.contains_recursive() && actual.expand() == *declared {
+                return Ok(value);
+            }
+        }
+        self.coerce_to_declared_expanded(declared, value)
+    }
+
+    fn coerce_to_declared_expanded(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         // The function-name wrapper is transparent to a callable slot: coerce the closure and
         // keep its label (other slots wrap the labelled closure like any function value).
         if matches!(declared, HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..)) {

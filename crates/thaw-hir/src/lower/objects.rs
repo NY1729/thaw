@@ -1190,7 +1190,14 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_promise_callback(value, &params, Some(&ret));
                 }
             }
-            return self.lower_expr_with_expected_type(value, Some(expected));
+            let lowered = self.lower_expr_with_expected_type(value, Some(expected))?;
+            // A field typed through a back-edge is coerced right here, while the literal is
+            // still an `ArrayLit`/`ObjectLit` that can adopt the named layout.
+            return if expected.contains_recursive() {
+                self.coerce_to_declared(expected, lowered)
+            } else {
+                Ok(lowered)
+            };
         }
         let Expr::Call(call) = value else {
             return self.lower_expr(value);

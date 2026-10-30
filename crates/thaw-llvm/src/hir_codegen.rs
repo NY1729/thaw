@@ -159,6 +159,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         | HirType::WeakSet(_)
         | HirType::Tuple(_)
         | HirType::Object(_)
+        | HirType::Recursive(_)
         | HirType::Function(_, _)
         | HirType::CallableFunction(..)
         | HirType::NativeException

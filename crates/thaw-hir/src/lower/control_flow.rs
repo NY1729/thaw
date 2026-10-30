@@ -944,6 +944,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         | HirType::Bytes
         | HirType::Tuple(_)
         | HirType::Object(_)
+        | HirType::Recursive(_)
         | HirType::Json
         | HirType::Dictionary(_)
         | HirType::Map(_, _)

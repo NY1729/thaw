@@ -274,7 +274,43 @@ fn resolve_interfaces(
             &mut Vec::new(),
         )?;
     }
+    resolved.retain(|name, _| !name.starts_with(RECURSIVE_KEY_PREFIX));
     Ok((resolved, generic))
+}
+
+const RECURSIVE_KEY_PREFIX: &str = "\u{1}recursive:";
+
+/// The `Recursive` back-edge for a declaration that is referenced from inside its own
+/// definition (`interface T { kids: T[] }`, `type Tree = { kids: Tree[] }`); created on first use.
+fn recursive_back_edge(name: &str, resolved: &mut HashMap<Symbol, HirType>) -> HirType {
+    let edge = resolved
+        .entry(format!("{RECURSIVE_KEY_PREFIX}{name}"))
+        .or_insert_with(|| HirType::Recursive(crate::new_recursive_key(name)))
+        .clone();
+    // Visible to `lower_ts_type` by name until the declaration finishes and replaces it.
+    resolved.insert(name.to_string(), edge.clone());
+    edge
+}
+
+/// Publishes the finished layout of `name` if a back-edge to it was handed out.
+fn publish_recursive_layout(name: &str, ty: &HirType, resolved: &HashMap<Symbol, HirType>) -> Result<(), String> {
+    if let Some(HirType::Recursive(key)) = resolved.get(&format!("{RECURSIVE_KEY_PREFIX}{name}")) {
+        // Only an object may be referenced from inside itself, and only through an array,
+        // nullable or optional slot: a *required* direct field of its own type would need an
+        // infinite (or cyclic) value, which Thaw's fixed-size layout does not represent.
+        let HirType::Object(fields) = ty else {
+            return Err(format!(
+                "type declaration cycle `{name}` cannot use Thaw's fixed-size native layout"
+            ));
+        };
+        if fields.iter().any(|(_, field)| field == &HirType::Recursive(key.clone())) {
+            return Err(format!(
+                "`{name}` is (indirectly) self-referential, which Thaw's fixed-size object layout can't represent"
+            ));
+        }
+        crate::register_recursive_layout(key, ty.clone());
+    }
+    Ok(())
 }
 
 fn resolve_named_type(
@@ -289,15 +325,25 @@ fn resolve_named_type(
         return Ok(ty.clone());
     }
     if in_progress.iter().any(|active| active == name) {
-        if interfaces.contains_key(name) {
-            return resolve_interface(name, interfaces, aliases, generic, resolved, in_progress);
+        // An alias may be self-referential only when it names an object type literal
+        // (`type Tree = { kids: Tree[] }`); `type A = B; type B = A` is a plain cycle.
+        let object_alias = aliases.get(name).is_none_or(|alias| {
+            let mut ty = alias.type_ann.as_ref();
+            while let TsType::TsParenthesizedType(paren) = ty {
+                ty = paren.type_ann.as_ref();
+            }
+            matches!(ty, TsType::TsTypeLit(_))
+        });
+        if !object_alias {
+            let mut cycle = in_progress.clone();
+            cycle.push(name.to_string());
+            return Err(format!(
+                "type declaration cycle `{}` cannot use Thaw's fixed-size native layout",
+                cycle.join(" -> ")
+            ));
         }
-        let mut cycle = in_progress.clone();
-        cycle.push(name.to_string());
-        return Err(format!(
-            "type declaration cycle `{}` cannot use Thaw's fixed-size native layout",
-            cycle.join(" -> ")
-        ));
+        // A reference from inside the declaration's own body: a back-edge to its layout.
+        return Ok(recursive_back_edge(name, resolved));
     }
     if interfaces.contains_key(name) {
         resolve_interface(name, interfaces, aliases, generic, resolved, in_progress)
@@ -312,6 +358,7 @@ fn resolve_named_type(
             in_progress,
         )?;
         in_progress.pop();
+        publish_recursive_layout(name, &ty, resolved)?;
         resolved.insert(name.to_string(), ty.clone());
         Ok(ty)
     } else {
@@ -331,9 +378,7 @@ fn resolve_interface(
         return Ok(ty.clone());
     }
     if in_progress.iter().any(|n| n == name) {
-        return Err(format!(
-            "interface `{name}` is (indirectly) self-referential, which Thaw's fixed-size object layout can't represent"
-        ));
+        return Ok(recursive_back_edge(name, resolved));
     }
 
     let iface = raw
@@ -530,6 +575,7 @@ fn resolve_interface(
     } else {
         HirType::Object(fields)
     };
+    publish_recursive_layout(name, &hir_ty, resolved)?;
     resolved.insert(name.to_string(), hir_ty.clone());
     Ok(hir_ty)
 }

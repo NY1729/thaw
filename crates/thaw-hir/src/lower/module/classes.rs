@@ -474,6 +474,9 @@ fn collect_native_classes<'a>(
             }
         }
         remember_class_defined_order(name, defined);
+        if let Some(HirType::Recursive(key)) = interfaces.get(name) {
+            crate::register_recursive_layout(key, HirType::Object(fields.clone()));
+        }
         interfaces.insert(name.to_string(), HirType::Object(fields));
         active.pop();
         resolved.insert(name.to_string());
@@ -514,6 +517,13 @@ fn collect_native_classes<'a>(
             ));
         }
         classes.push(declaration);
+    }
+    // Until a class layout is resolved, a field naming it gets a `Recursive` back-edge (a
+    // self-, mutually- or forward-referencing field); resolution replaces the placeholder.
+    for declaration in &classes {
+        let name = declaration.ident.sym.to_string();
+        let key = crate::new_recursive_key(&name);
+        interfaces.insert(name, HirType::Recursive(key));
     }
     let mut resolved = HashSet::new();
     for declaration in &classes {

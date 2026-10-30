@@ -3417,6 +3417,31 @@
       "name": "audit2 any[] cursor keeps nested links",
       "expect": "matched",
       "source": "function main(): void {\n  const root: any[] = []; let cur = root;\n  for (let i = 0; i < 3; i++) { const n: any[] = []; cur.push(n); cur = n; }\n  console.log(JSON.stringify(root));\n  const r: any[] = []; const n: any[] = []; r.push(n); n.push(1); console.log(JSON.stringify(r));\n}"
+    },
+    {
+      "name": "audit2 self-referential class linked list",
+      "expect": "matched",
+      "source": "class N {\n  next: N | null = null;\n  v: number;\n  constructor(v: number) { this.v = v; }\n}\nclass List {\n  head: N | null = null;\n  size = 0;\n  push(v: number): void {\n    const n = new N(v);\n    const h = this.head;\n    if (h === null) { this.head = n; } else {\n      let cur: N | null = h;\n      while (cur !== null) { if (cur.next === null) { cur.next = n; break; } cur = cur.next; }\n    }\n    this.size++;\n  }\n  sum(): number { let s = 0; let c = this.head; while (c !== null) { s += c.v; c = c.next; } return s; }\n  reverse(): void {\n    let prev: N | null = null; let cur = this.head;\n    while (cur !== null) { const nx: N | null = cur.next; cur.next = prev; prev = cur; cur = nx; }\n    this.head = prev;\n  }\n  toArray(): number[] { const out: number[] = []; for (let c = this.head; c; c = c.next) out.push(c.v); return out; }\n}\nfunction main(): void {\n  const l = new List();\n  for (let i = 1; i <= 4; i++) l.push(i);\n  console.log(l.sum(), l.size, l.toArray());\n  l.reverse();\n  console.log(l.toArray(), l.head!.next!.v, l.head!.next!.next!.next!.next === null);\n  const a = new N(1);\n  console.log(a.next === null, a.v);\n}"
+    },
+    {
+      "name": "audit2 self-referential class tree and optional link",
+      "expect": "matched",
+      "source": "class T {\n  left: T | null = null; right: T | null = null; v: number;\n  constructor(v: number) { this.v = v; }\n  insert(v: number): void {\n    if (v < this.v) { const l = this.left; if (l === null) this.left = new T(v); else l.insert(v); }\n    else { const r = this.right; if (r === null) this.right = new T(v); else r.insert(v); }\n  }\n  inorder(out: number[]): void {\n    const l = this.left; if (l !== null) l.inorder(out);\n    out.push(this.v);\n    const r = this.right; if (r !== null) r.inorder(out);\n  }\n}\nclass N2 { next?: N2; v = 1; }\nfunction main(): void {\n  const root = new T(5);\n  for (const x of [3, 8, 1, 4, 9, 7]) root.insert(x);\n  const out: number[] = []; root.inorder(out);\n  console.log(out.join(\",\"));\n  const h = new N2(); h.next = new N2();\n  console.log(h.next.v, h.next.next === undefined);\n}"
+    },
+    {
+      "name": "audit2 mutually recursive and forward referenced classes",
+      "expect": "matched",
+      "source": "class Dept { name: string; staff: Emp[] = []; boss: Emp | null = null; constructor(n: string) { this.name = n; } }\nclass Emp { name: string; dept: Dept | null = null; constructor(n: string) { this.name = n; } }\nclass Tree { kids: Tree[] = []; label: string; constructor(l: string) { this.label = l; }\n  add(k: Tree): Tree { this.kids.push(k); return this; }\n  count(): number { let n = 1; for (const k of this.kids) n += k.count(); return n; }\n}\nclass Base { link: Base | null = null; id = 1; who(): string { return \"base\" + this.id; } }\nclass Derived extends Base { extra = 2; who(): string { return \"derived\" + this.id; } }\nfunction main(): void {\n  const d = new Dept(\"eng\"); const e = new Emp(\"ann\"); e.dept = d; d.staff.push(e); d.boss = e;\n  const b = d.boss;\n  console.log(d.staff.length, d.staff[0].name, b !== null ? b.name : \"none\", e.dept === d);\n  const t = new Tree(\"r\").add(new Tree(\"a\").add(new Tree(\"b\"))).add(new Tree(\"c\"));\n  console.log(t.count(), t.kids[0].kids[0].label);\n  const x = new Base(); const y = new Derived(); x.link = y;\n  const l = x.link; console.log(l !== null ? l.who() : \"-\", x.who());\n}"
+    },
+    {
+      "name": "audit2 self-referential interface and type alias",
+      "expect": "matched",
+      "source": "interface TreeNode { v: number; kids: TreeNode[]; parent?: TreeNode }\ntype Tree = { label: string; kids: Tree[] };\ntype Opt = { next: Opt | null; n: number };\nfunction sum(t: TreeNode): number { let s = t.v; for (const k of t.kids) s += sum(k); return s; }\nfunction depth(t: Tree): number { let d = 0; for (const k of t.kids) d = Math.max(d, depth(k)); return d + 1; }\nfunction len(o: Opt | null): number { return o === null ? 0 : 1 + len(o.next); }\nfunction main(): void {\n  const t: TreeNode = { v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] };\n  console.log(sum(t));\n  const u: Tree = { label: \"a\", kids: [{ label: \"b\", kids: [{ label: \"c\", kids: [] }] }] };\n  console.log(depth(u), u.kids[0].kids[0].label);\n  const o: Opt = { n: 1, next: { n: 2, next: null } };\n  console.log(len(o));\n  const extra: TreeNode = { v: 10, kids: [] }; t.kids.push(extra); console.log(sum(t));\n}"
+    },
+    {
+      "name": "audit2 method call on narrowed property local",
+      "expect": "matched",
+      "source": "class B { v = 1; m(): number { return this.v; } }\nclass A { b: B | null = null; }\nfunction main(): void {\n  const a = new A(); a.b = new B();\n  const x = a.b;\n  if (x !== null) console.log(x.m());\n  let c: B | null = new B();\n  while (c !== null) { c.v = 5; console.log(c.v); c = null; }\n}"
     }
   ]
 }

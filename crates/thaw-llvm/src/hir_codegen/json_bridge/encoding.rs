@@ -1272,6 +1272,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
                 }
+                HirType::Recursive(_) => return Err(
+                    "converting a self-referential class instance to JSON (console.log / JSON.stringify of the whole structure) is not supported yet".into()),
                 other => return Err(format!("unsupported dynamic object field {other:?}")),
             };
         if owned && setter == "thaw_json_object_set_json" {

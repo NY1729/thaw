@@ -220,6 +220,11 @@ pub enum HirType {
     /// This is metadata only: storage and runtime representation follow `physical`.
     OverloadedFunction(Vec<HirType>, Box<HirType>),
     Union(Vec<HirType>),
+    /// A back-edge to a class layout that is still being resolved (a self- or
+    /// forward-referencing class field such as `next: N | null`). The key names an entry in the
+    /// process-wide recursive-layout table (see `register_recursive_layout`). Physically a
+    /// pointer, exactly like `Object`; every place that inspects a read value calls `expand`.
+    Recursive(Symbol),
     /// A native `T | undefined` value represented as an explicit presence
     /// tag plus a payload. This avoids sentinel collisions with NaN/pointers.
     Optional(Box<HirType>),
@@ -365,4 +370,64 @@ pub fn is_error_family_name(name: &str) -> bool {
             | "AggregateError"
             | "SuppressedError"
     )
+}
+
+static RECURSIVE_LAYOUTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<Symbol, HirType>>,
+> = std::sync::OnceLock::new();
+static RECURSIVE_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A fresh, process-unique key for `name`'s recursive layout (the part before `\u{1e}` is the
+/// display name), so independent compilations in one process never collide.
+pub fn new_recursive_key(name: &str) -> Symbol {
+    let id = RECURSIVE_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{name}\u{1e}{id}")
+}
+
+pub fn register_recursive_layout(key: &str, layout: HirType) {
+    RECURSIVE_LAYOUTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), layout);
+}
+
+impl HirType {
+    /// Replaces a `Recursive` back-edge reachable through value wrappers (nullable/optional/
+    /// array/tuple/union/promise) by the layout it names. Never descends into an `Object`'s
+    /// fields, so it always terminates. Types without a `Recursive` are returned unchanged.
+    pub fn expand(&self) -> HirType {
+        match self {
+            HirType::Recursive(key) => RECURSIVE_LAYOUTS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
+            HirType::Optional(inner) => HirType::Optional(Box::new(inner.expand())),
+            HirType::Nullable(inner) => HirType::Nullable(Box::new(inner.expand())),
+            HirType::Nullish(inner) => HirType::Nullish(Box::new(inner.expand())),
+            HirType::Array(inner) => HirType::Array(Box::new(inner.expand())),
+            HirType::Promise(inner) => HirType::Promise(Box::new(inner.expand())),
+            HirType::Tuple(items) => HirType::Tuple(items.iter().map(HirType::expand).collect()),
+            HirType::Union(items) => HirType::Union(items.iter().map(HirType::expand).collect()),
+            other => other.clone(),
+        }
+    }
+
+    pub fn contains_recursive(&self) -> bool {
+        match self {
+            HirType::Recursive(_) => true,
+            HirType::Optional(inner)
+            | HirType::Nullable(inner)
+            | HirType::Nullish(inner)
+            | HirType::Array(inner)
+            | HirType::Promise(inner) => inner.contains_recursive(),
+            HirType::Tuple(items) | HirType::Union(items) => {
+                items.iter().any(HirType::contains_recursive)
+            }
+            _ => false,
+        }
+    }
 }

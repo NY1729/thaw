@@ -6374,6 +6374,11 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        // An expected type reached through a class/interface back-edge is its named layout.
+        if let Some(ty) = expected.filter(|ty| ty.contains_recursive()) {
+            let expanded = ty.expand();
+            return self.lower_expr_with_expected_type(expr, Some(&expanded));
+        }
         // An object literal written where `any` is expected: its unannotated callbacks
         // are contextually `any`.
         if matches!(expr, Expr::Object(_))
