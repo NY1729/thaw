@@ -563,6 +563,7 @@ include!("tests/t_contracts.rs");
 include!("tests/tick_contracts.rs");
 include!("tests/z_contracts.rs");
 include!("tests/thaw_js_contracts.rs");
+include!("tests/thaw_js_handle_intrinsics_contracts.rs");
 include!("tests/evloop_contracts.rs");
 include!("tests/an_contracts.rs");
 include!("tests/aa_contracts.rs");

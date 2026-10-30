@@ -3899,6 +3899,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_adopt_handle_marker",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_tjs_frame_error",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -3922,6 +3927,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()],
                 false,
             ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_tjs_retain_graph_result",
+            handle_result_type.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
