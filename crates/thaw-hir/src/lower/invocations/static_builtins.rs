@@ -60,6 +60,168 @@ fn json_has_borrowed_handle(value: HirExpr) -> HirExpr {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// Builds the `__thawNativeIterator` protocol object (next/return/throw
+    /// lambdas over the generator producer `source`).  `dynamic_any` makes the
+    /// object a plain `any` view of the generator: `next(v)` takes the resume
+    /// value and `throw(e)` takes any thrown value.
+    pub(in crate::lower) fn generator_protocol_object(
+        &mut self,
+        source: &HirExpr,
+        source_type: &HirType,
+        span: swc_common::Span,
+        ctxt: swc_common::SyntaxContext,
+        bindings: &mut Vec<LoweredBinding>,
+        dynamic_any: bool,
+    ) -> Result<HirExpr, String> {
+                            let producer = format!("__thaw_iterator_producer_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(producer.clone(), source_type.clone());
+                            bindings.push((producer.clone(), source_type.clone(), source.clone()));
+                let return_parameter = format!("__thaw_iterator_return_{}", self.next_binding);
+                            self.next_binding += 1;
+                let throw_parameter = format!("__thaw_iterator_throw_{}", self.next_binding);
+                            self.next_binding += 1;
+                let next_parameter = format!("__thaw_iterator_next_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let mut lower_protocol_method =
+                                |method: &str, parameter: Option<(String, HirType)>| {
+                                let protocol_call = CallExpr {
+                                    span: span,
+                                    ctxt: ctxt,
+                                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                        span: span,
+                                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                                producer.clone().into(),
+                                                span,
+                                ))),
+                                prop: MemberProp::Ident(IdentName::new(method.into(), span)),
+                                    }))),
+                                    args: parameter
+                                        .as_ref()
+                                        .map(|(name, _)| {
+                                            vec![swc_ecma_ast::ExprOrSpread {
+                                                spread: None,
+                                                expr: Box::new(Expr::Ident(
+                                                    swc_ecma_ast::Ident::new_no_ctxt(
+                                                        name.clone().into(),
+                                                        span,
+                                                    ),
+                                                )),
+                                            }]
+                                        })
+                                        .unwrap_or_default(),
+                                    type_args: None,
+                                };
+                        let previous = parameter
+                            .as_ref()
+                            .and_then(|(name, ty)| self.scope.insert(name.clone(), ty.clone()));
+                                let body = self.lower_call(&protocol_call);
+                                let result = match &body {
+                                    Ok(body) => self.infer_expr_type(body),
+                                    Err(error) => Err(error.clone()),
+                                };
+                                if let Some((name, _)) = &parameter {
+                                    if let Some(previous) = previous {
+                                        self.scope.insert(name.clone(), previous);
+                                    } else {
+                                        self.scope.remove(name);
+                                    }
+                                }
+                                let body = body?;
+                                let result = result?;
+                                let captures = vec![HirParam {
+                                    name: producer.clone(),
+                                    ty: source_type.clone(),
+                                }];
+                                if let Some((name, ty)) = parameter {
+                                    let converted = match &ty {
+                                HirType::F64 => {
+                                    HirExpr::JsonAsNumber(Box::new(HirExpr::Var(name.clone())))
+                                }
+                                HirType::Json => HirExpr::Var(name.clone()),
+                                HirType::Str => {
+                                    HirExpr::JsonAsString(Box::new(HirExpr::Var(name.clone())))
+                                }
+                                HirType::Bool => {
+                                    HirExpr::JsonAsBool(Box::new(HirExpr::Var(name.clone())))
+                                        }
+                                HirType::Undefined => HirExpr::Lit(HirLit::Undefined),
+                                        _ => HirExpr::JsonAsNative(
+                                            Box::new(HirExpr::Var(name.clone())),
+                                            ty.clone(),
+                                        ),
+                                    };
+                                    let native = HirExpr::Lambda(
+                                        captures.clone(),
+                                        vec![HirParam {
+                                            name: name.clone(),
+                                            ty,
+                                        }],
+                                        result.clone(),
+                                        Box::new(body),
+                                    );
+                                    Ok::<_, String>(HirExpr::Lambda(
+                                        captures,
+                                        vec![HirParam {
+                                            name,
+                                            ty: HirType::Json,
+                                        }],
+                                        result,
+                                        Box::new(HirExpr::Call(Box::new(native), vec![converted])),
+                                    ))
+                                } else {
+                                    Ok::<_, String>(HirExpr::Lambda(
+                                        captures,
+                                        Vec::new(),
+                                        result,
+                                        Box::new(body),
+                                    ))
+                                }
+                            };
+                            let HirType::Function(params, _) = &source_type else {
+                                unreachable!("native iterator producer was matched as a function")
+                            };
+                            let HirType::Array(return_values) = &params[3] else {
+                                unreachable!("native iterator return channel was matched as an array")
+                            };
+                            let mut object = HirExpr::ObjectLit(vec![
+                                (
+                                    "__thawNativeIterator".into(),
+                                    HirExpr::Lit(HirLit::Bool(true)),
+                                ),
+                                ("next".into(), if dynamic_any {
+                                    lower_protocol_method("next", Some((next_parameter.clone(), params[2].clone())))?
+                                } else {
+                                    lower_protocol_method("next", None)?
+                                }),
+                                (
+                                    "__thawNext".into(),
+                        lower_protocol_method("next", Some((next_parameter, params[2].clone())))?,
+                                ),
+                                ("return".into(), if dynamic_any {
+                                    lower_protocol_method("return", Some((format!("{return_parameter}_any"), return_values.as_ref().clone())))?
+                                } else {
+                                    lower_protocol_method("return", None)?
+                                }),
+                                (
+                                    "__thawReturn".into(),
+                                    lower_protocol_method(
+                                        "return",
+                            Some((return_parameter, return_values.as_ref().clone())),
+                                    )?,
+                                ),
+                                (
+                                    "__thawThrow".into(),
+                        lower_protocol_method("throw", Some((throw_parameter, if dynamic_any { HirType::Json } else { HirType::Str })))?,
+                                ),
+                            ]);
+        if let (true, HirExpr::ObjectLit(fields)) = (dynamic_any, &mut object) {
+            let throw = fields.last().map(|(_, method)| method.clone());
+            fields.extend(throw.map(|method| ("throw".into(), method)));
+        }
+        Ok(object)
+    }
+
     /// Visible parameters of an `Array.from` mapper; a `this`-taking closure
     /// exposes the parameters of the signature it wraps.
     fn array_mapper_params(ty: &HirType) -> Option<Vec<HirType>> {
@@ -3602,139 +3764,7 @@ impl<'a> FnLowerer<'a> {
                             if matches!(params.as_slice(), [HirType::I64, HirType::Json, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
                                 && matches!(result.as_ref(), HirType::Array(_)))
                         {
-                            let producer = format!("__thaw_iterator_producer_{}", self.next_binding);
-                            self.next_binding += 1;
-                            self.scope.insert(producer.clone(), source_type.clone());
-                            bindings.push((producer.clone(), source_type.clone(), source.clone()));
-                let return_parameter = format!("__thaw_iterator_return_{}", self.next_binding);
-                            self.next_binding += 1;
-                let throw_parameter = format!("__thaw_iterator_throw_{}", self.next_binding);
-                            self.next_binding += 1;
-                let next_parameter = format!("__thaw_iterator_next_{}", self.next_binding);
-                            self.next_binding += 1;
-                            let mut lower_protocol_method =
-                                |method: &str, parameter: Option<(String, HirType)>| {
-                                let protocol_call = CallExpr {
-                                    span: call.span,
-                                    ctxt: call.ctxt,
-                                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                                        span: call.span,
-                                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
-                                                producer.clone().into(),
-                                                call.span,
-                                ))),
-                                prop: MemberProp::Ident(IdentName::new(method.into(), call.span)),
-                                    }))),
-                                    args: parameter
-                                        .as_ref()
-                                        .map(|(name, _)| {
-                                            vec![swc_ecma_ast::ExprOrSpread {
-                                                spread: None,
-                                                expr: Box::new(Expr::Ident(
-                                                    swc_ecma_ast::Ident::new_no_ctxt(
-                                                        name.clone().into(),
-                                                        call.span,
-                                                    ),
-                                                )),
-                                            }]
-                                        })
-                                        .unwrap_or_default(),
-                                    type_args: None,
-                                };
-                        let previous = parameter
-                            .as_ref()
-                            .and_then(|(name, ty)| self.scope.insert(name.clone(), ty.clone()));
-                                let body = self.lower_call(&protocol_call);
-                                let result = match &body {
-                                    Ok(body) => self.infer_expr_type(body),
-                                    Err(error) => Err(error.clone()),
-                                };
-                                if let Some((name, _)) = &parameter {
-                                    if let Some(previous) = previous {
-                                        self.scope.insert(name.clone(), previous);
-                                    } else {
-                                        self.scope.remove(name);
-                                    }
-                                }
-                                let body = body?;
-                                let result = result?;
-                                let captures = vec![HirParam {
-                                    name: producer.clone(),
-                                    ty: source_type.clone(),
-                                }];
-                                if let Some((name, ty)) = parameter {
-                                    let converted = match &ty {
-                                HirType::F64 => {
-                                    HirExpr::JsonAsNumber(Box::new(HirExpr::Var(name.clone())))
-                                }
-                                HirType::Str => {
-                                    HirExpr::JsonAsString(Box::new(HirExpr::Var(name.clone())))
-                                }
-                                HirType::Bool => {
-                                    HirExpr::JsonAsBool(Box::new(HirExpr::Var(name.clone())))
-                                        }
-                                HirType::Undefined => HirExpr::Lit(HirLit::Undefined),
-                                        _ => HirExpr::JsonAsNative(
-                                            Box::new(HirExpr::Var(name.clone())),
-                                            ty.clone(),
-                                        ),
-                                    };
-                                    let native = HirExpr::Lambda(
-                                        captures.clone(),
-                                        vec![HirParam {
-                                            name: name.clone(),
-                                            ty,
-                                        }],
-                                        result.clone(),
-                                        Box::new(body),
-                                    );
-                                    Ok::<_, String>(HirExpr::Lambda(
-                                        captures,
-                                        vec![HirParam {
-                                            name,
-                                            ty: HirType::Json,
-                                        }],
-                                        result,
-                                        Box::new(HirExpr::Call(Box::new(native), vec![converted])),
-                                    ))
-                                } else {
-                                    Ok::<_, String>(HirExpr::Lambda(
-                                        captures,
-                                        Vec::new(),
-                                        result,
-                                        Box::new(body),
-                                    ))
-                                }
-                            };
-                            let HirType::Function(params, _) = &source_type else {
-                                unreachable!("native iterator producer was matched as a function")
-                            };
-                            let HirType::Array(return_values) = &params[3] else {
-                                unreachable!("native iterator return channel was matched as an array")
-                            };
-                            HirExpr::ObjectLit(vec![
-                                (
-                                    "__thawNativeIterator".into(),
-                                    HirExpr::Lit(HirLit::Bool(true)),
-                                ),
-                                ("next".into(), lower_protocol_method("next", None)?),
-                                (
-                                    "__thawNext".into(),
-                        lower_protocol_method("next", Some((next_parameter, params[2].clone())))?,
-                                ),
-                                ("return".into(), lower_protocol_method("return", None)?),
-                                (
-                                    "__thawReturn".into(),
-                                    lower_protocol_method(
-                                        "return",
-                            Some((return_parameter, return_values.as_ref().clone())),
-                                    )?,
-                                ),
-                                (
-                                    "__thawThrow".into(),
-                        lower_protocol_method("throw", Some((throw_parameter, HirType::Str)))?,
-                                ),
-                            ])
+                            self.generator_protocol_object(source, &source_type, call.span, call.ctxt, &mut bindings, false)?
                         } else {
                             source.clone()
                         };

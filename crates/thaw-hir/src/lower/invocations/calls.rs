@@ -4699,6 +4699,39 @@ impl<'a> FnLowerer<'a> {
                     }],
                     type_args: None,
                 };
+                if receiver_type == HirType::Json {
+                    // A reified `any` generator is its own iterator.
+                    let param = format!("__thaw_iter_source_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(param.clone(), HirType::Json);
+                    let mut from = from;
+                    from.args[0].expr = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        param.as_str().into(),
+                        call.span,
+                    )));
+                    let lowered = self.lower_expr(&Expr::Call(from));
+                    let lowered = lowered.and_then(|from| self.coerce_to_declared(&HirType::Json, from));
+                    self.scope.remove(&param);
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            Vec::new(),
+                            vec![HirParam { name: param.clone(), ty: HirType::Json }],
+                            HirType::Json,
+                            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(
+                                HirExpr::Conditional(
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_is_native_iterator".into())),
+                                        vec![HirExpr::Var(param.clone())],
+                                    )),
+                                    Box::new(HirExpr::Var(param)),
+                                    Box::new(lowered?),
+                                    HirType::Json,
+                                ),
+                            ))])),
+                        )),
+                        vec![receiver],
+                    ));
+                }
                 self.lower_expr(&Expr::Call(from))
             }
             "dispose" | "asyncDispose" => {

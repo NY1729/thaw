@@ -310,6 +310,7 @@ thaw_json_is_date_shape
 thaw_json_is_error_instance
 thaw_json_is_host_error_family
 thaw_json_is_live_iterable
+thaw_json_is_native_iterator
 thaw_json_is_not_iterable
 thaw_json_is_null
 thaw_json_is_nullish

@@ -5528,6 +5528,9 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     if let Some(number) = non_finite_number(value) {
         return Node::Number(number);
     }
+    if is_native_iterator(value) {
+        return Node::Raw("Object [Generator] {}".to_string());
+    }
     if let Some(source) = regexp_wrapper_property(value, "source") {
         let flags = regexp_wrapper_property(value, "flags")
             .and_then(|flags| flags.as_str().map(str::to_string))
@@ -7534,6 +7537,7 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
         Value::Array(_) => {
             return unsafe { thaw_json_array_join(value, c",".as_ptr()) };
         }
+        other @ Value::Object(_) if is_native_iterator(other) => "[object Generator]".to_string(),
         Value::Object(_) => "[object Object]".to_string(),
         Value::Host(lease) => {
             let encoded = host_query(lease, 3).unwrap_or_else(|| "\"\"".into());
@@ -7836,6 +7840,27 @@ pub extern "C" fn thaw_json_is_live_iterable(value: *const Value) -> u8 {
         host_query(lease, 9).as_deref() == Some("1")
             && host_query(lease, 4).as_deref() == Some("0"),
     )
+}
+
+/// A reified `any` generator: the object carries the `__thawNativeIterator`
+/// marker (see `generator_protocol_object`).
+#[no_mangle]
+pub extern "C" fn thaw_json_is_native_iterator(value: *const Value) -> u8 {
+    u8::from(unsafe { value.as_ref() }.is_some_and(is_native_iterator))
+}
+
+fn is_native_iterator(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            shared_object_ref(object).contains_key(b"__thawNativeIterator".as_slice())
+        }
+        // Stored in an array or field the protocol object is a host-backed alias.
+        Value::Host(lease) => matches!(
+            host_get_property(lease, b"__thawNativeIterator"),
+            Value::Bool(true)
+        ),
+        _ => false,
+    }
 }
 
 /// A dynamic value that `for...of` can never iterate: a number, boolean,
