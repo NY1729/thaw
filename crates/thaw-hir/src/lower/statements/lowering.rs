@@ -1829,8 +1829,11 @@ impl<'a> FnLowerer<'a> {
                 let cond = self.lower_condition_expr(&do_while.test)?;
                 let guard = HirStmt::If(cond.clone(), Vec::new(), vec![HirStmt::Break]);
                 let mut body = self.lower_loop_body(&do_while.body)?;
-                body = inject_do_while_guard_before_continue(body, &cond);
-                body.push(guard);
+                // `do { } while (true)` has no exit test, so the loop only ends by `break`.
+                if !matches!(cond, HirExpr::Lit(HirLit::Bool(true))) {
+                    body = inject_do_while_guard_before_continue(body, &cond);
+                    body.push(guard);
+                }
                 Ok(vec![HirStmt::While(
                     HirExpr::Lit(HirLit::Bool(true)),
                     body,
@@ -3195,8 +3198,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     self.restore_narrowings(switch_narrowings);
                     let exhaustive = default_index < case_count
-                        && switch_stmt.cases.iter().all(|case| {
-                            case.cons.last().is_some_and(Self::stmt_definitely_exits)
+                        && switch_stmt.cases.iter().enumerate().all(|(index, case)| {
+                            // An empty case (`case 1: case 2: ...`) falls into the next one.
+                            case.cons.last().map_or(index + 1 < case_count, Self::stmt_definitely_exits)
                         });
                     let unreachable = HirStmt::Throw(HirExpr::Lit(HirLit::Str(
                         "unreachable exhaustive switch".into(),

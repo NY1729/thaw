@@ -1777,12 +1777,11 @@ fn resolves_forward_type_aliases_and_rejects_cycles() {
         ])
     );
 
+    // An alias of an interface that refers back through the alias is a legal recursive type.
     let module =
         thaw_parser::parse_typescript("type Link = Node; interface Node { next: Link; }")
             .unwrap();
-    assert!(lower_module(&module)
-        .unwrap_err()
-        .contains("self-referential"));
+    assert!(lower_module(&module).is_ok());
 }
 
 #[test]
@@ -2038,17 +2037,20 @@ fn interfaces_can_reference_each_other_regardless_of_declaration_order() {
 }
 
 #[test]
-fn rejects_self_referential_interface() {
-    let module = thaw_parser::parse_typescript(
+fn lowers_self_referential_interface_through_a_back_edge() {
+    // TypeScript (and Node, which only strips the types) accept this declaration.
+    let program = lower(
         r#"interface Node {
             value: number;
             next: Node;
         }
+        function value(n: Node): number { return n.value; }
         function main(): void {}"#,
-    )
-    .unwrap();
-    let err = lower_module(&module).unwrap_err();
-    assert!(err.contains("self-referential"), "unexpected error: {err}");
+    );
+    let HirType::Object(fields) = &program.functions[0].params[0].ty else {
+        panic!("expected an object layout");
+    };
+    assert!(matches!(&fields[1], (name, HirType::Recursive(_)) if name == "next"));
 }
 
 #[test]

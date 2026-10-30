@@ -330,6 +330,65 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(object.into())
     }
 
+    /// Decodes a `Json` value into the object a `Recursive` back-edge names, through one internal
+    /// helper per layout (see `compile_recursive_to_json`).
+    fn compile_recursive_from_json(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        key: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let name = format!(
+            "__thaw_recursive_from_json_{}",
+            key.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
+        );
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let helper = match self.module.get_function(&name) {
+            Some(helper) => helper,
+            None => {
+                let layout = HirType::Recursive(key.to_string()).expand();
+                if !matches!(layout, HirType::Object(_)) {
+                    return Err(format!("unresolved recursive layout `{key}`"));
+                }
+                let helper = self.module.add_function(
+                    &name,
+                    pointer.fn_type(&[pointer.into()], false),
+                    Some(Linkage::Internal),
+                );
+                let parent_block = self.builder.get_insert_block().ok_or("recursive decoder outside a function")?;
+                let saved_variables = std::mem::take(&mut self.variables);
+                let saved_scope_context = self.take_codegen_scope_context();
+                let saved_for_iteration_frame_slots = std::mem::take(&mut self.for_iteration_frame_slots);
+                let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
+                let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+                let saved_arena_variables = std::mem::take(&mut self.arena_variables);
+                let result = (|| -> Result<(), String> {
+                    let entry = self.context.append_basic_block(helper, "entry");
+                    self.builder.position_at_end(entry);
+                    self.emit_stack_overflow_guard()?;
+                    let node = helper.get_first_param().ok_or("recursive decoder has no parameter")?;
+                    let object = self.compile_json_to_native_object(node, &layout)?;
+                    self.builder.build_return(Some(&object)).map_err(|error| error.to_string())?;
+                    Ok(())
+                })();
+                self.variables = saved_variables;
+                self.replace_codegen_scope_context(saved_scope_context);
+                self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
+                self.catch_native_text = saved_catch_native_text;
+                self.variable_hir_types = saved_variable_hir_types;
+                self.arena_variables = saved_arena_variables;
+                self.builder.position_at_end(parent_block);
+                result?;
+                helper
+            }
+        };
+        self.builder
+            .build_call(helper, &[json.into()], "recursive_from_json")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "recursive decoder returned no value".to_string())
+    }
+
     fn compile_json_to_native(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -346,6 +405,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Map(..) | HirType::Set(_) => self.compile_json_to_native_collection(json, ty),
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            HirType::Recursive(key) => self.compile_recursive_from_json(json, key),
             HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) => {
                 self.compile_json_value_to_native(json, ty)
             }
@@ -817,6 +877,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(json, ty)
             }
+            HirType::Recursive(key) => self.compile_recursive_from_json(json, key),
             // A `Union`-typed object field (or callback argument) decodes by
             // runtime `typeof` discrimination -- the same
             // `compile_json_to_union_result` `compile_json_to_native`'s own

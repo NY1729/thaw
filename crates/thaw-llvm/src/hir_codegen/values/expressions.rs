@@ -37,6 +37,22 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_throw_builtin_error("TypeError", message)
     }
 
+    /// Throws a `RangeError` when `overflow` (an `i1`) is set; control continues otherwise.
+    fn compile_bigint_overflow_guard(&mut self, overflow: IntValue<'ctx>) -> Result<(), String> {
+        let function = self.current_function();
+        let error_bb = self.context.append_basic_block(function, "bigint_overflow_error");
+        let continue_bb = self.context.append_basic_block(function, "bigint_overflow_ok");
+        self.builder.build_conditional_branch(overflow, error_bb, continue_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(error_bb);
+        self.compile_throw_builtin_error(
+            "RangeError",
+            "Maximum BigInt size exceeded (native bigint is limited to 64 bits)",
+        )?;
+        self.builder.position_at_end(continue_bb);
+        Ok(())
+    }
+
     fn compile_throw_builtin_error(&mut self, kind: &str, message: &str) -> Result<(), String> {
         let message = self
             .builder

@@ -1116,6 +1116,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.add_function(name, ty, Some(Linkage::External));
         }
         self.module.add_function(
+            "thaw_bigint_pow_overflows",
+            self.context.bool_type().fn_type(&[i64_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_bigint_pow",
             i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
             Some(Linkage::External),
@@ -3085,6 +3090,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_object_new",
             i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_recursive_lookup",
+            i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_recursive_register",
+            self.context.void_type().fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_recursive_unregister",
+            self.context.void_type().fn_type(&[self.context.i64_type().into()], false),
             Some(Linkage::External),
         );
         for (name, value_type) in [
