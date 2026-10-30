@@ -554,7 +554,9 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 var numericSymbol = Symbol('numeric');\n\
              \x20 if (util.format('%d:%i:%f', numericSymbol, numericSymbol, numericSymbol) !== 'NaN:NaN:NaN') throw new Error('format numeric Symbol');\n\
              \x20 if (util.format('%d %s', numericSymbol, 'next', 7) !== 'NaN next 7') throw new Error('format Symbol argument consumption');\n\
-             \x20 if (util.format('%% %d') !== '% %d') throw new Error('format missing numeric argument');\n\
+             \x20 if (util.format('%% %d') !== '%% %d') throw new Error('format missing numeric argument');\n\
+             \x20 if (util.format('%s %d %i', -0, -0, '0x10') !== '-0 -0 16' || util.format('%s', { a: 1 }) !== '{ a: 1 }' || util.format('%s', [1, 2]) !== '[ 1, 2 ]' || util.format('%s %d', 5n, 5n) !== '5n 5n' || util.format('%%s') !== '%%s' || util.format('%s%%', 1) !== '1%') throw new Error('format node parity');\n\
+             \x20 if (util.inspect({ a: 1n }) !== '{ a: 1n }' || util.inspect(5n) !== '5n' || util.inspect(new Uint8Array(3)) !== 'Uint8Array(3) [ 0, 0, 0 ]' || util.inspect(Buffer.from('ab')) !== '<Buffer 61 62>' || util.format('%o', [1]) !== '[ 1, [length]: 1 ]') throw new Error('inspect bigint typed arrays');\n\
              \x20 if (util.format('%s', numericSymbol) !== 'Symbol(numeric)' || util.format('%o', numericSymbol) !== 'Symbol(numeric)') throw new Error('format nonnumeric Symbol');\n\
              \x20 if (util.format('%d:%i:%f', '12.5', '12.5', '12.5') !== '12.5:12:12.5') throw new Error('format numeric coercion');\n\
              \x20 var numericHookCalls = 0, numericHook = {}; numericHook[util.inspect.custom] = function() { numericHookCalls++; return 'kept'; };\n\
