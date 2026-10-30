@@ -604,11 +604,13 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
 fn constructor_function_uses_this(function: &swc_ecma_ast::Function) -> bool {
     struct Finder(bool);
     impl swc_ecma_visit::Visit for Finder {
-        fn visit_expr(&mut self, expr: &Expr) {
-            if matches!(expr, Expr::This(_)) {
+        // `this.x` (read or assignment target) is the constructor shape; a bare `this`
+        // (`typeof this`, `() => this`) does not make a function a constructor.
+        fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::This(_)) {
                 self.0 = true;
             }
-            expr.visit_children_with(self);
+            member.visit_children_with(self);
         }
         // A nested (non-arrow) function has its own `this`; a `this` inside
         // it doesn't make the *enclosing* function a constructor. An arrow

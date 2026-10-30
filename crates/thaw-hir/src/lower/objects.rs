@@ -1190,7 +1190,14 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_promise_callback(value, &params, Some(&ret));
                 }
             }
-            return self.lower_expr_with_expected_type(value, Some(expected));
+            let lowered = self.lower_expr_with_expected_type(value, Some(expected))?;
+            // A field typed through a back-edge is coerced right here, while the literal is
+            // still an `ArrayLit`/`ObjectLit` that can adopt the named layout.
+            return if expected.contains_recursive() {
+                self.coerce_to_declared(expected, lowered)
+            } else {
+                Ok(lowered)
+            };
         }
         let Expr::Call(call) = value else {
             return self.lower_expr(value);
@@ -7086,7 +7093,52 @@ impl<'a> FnLowerer<'a> {
         fields: &[(Symbol, HirType)],
         hint: &str,
     ) -> Result<Option<HirExpr>, String> {
-        let key = well_known_symbol_key("toPrimitive");
+        self.invoke_object_conversion_method(
+            value,
+            fields,
+            well_known_symbol_key("toPrimitive"),
+            Some(hint),
+        )
+    }
+
+    /// Whether `String(value)` of this object type runs user code (`toString`, `valueOf` or
+    /// `[Symbol.toPrimitive]` on a class instance, or the same members of an object literal),
+    /// so a join over such elements cannot use the fixed `[object Object]` text.
+    fn object_has_custom_string_conversion(&self, ty: &HirType) -> bool {
+        let HirType::Object(fields) = ty else {
+            return false;
+        };
+        if let Some(class) = class_name_from_type(ty) {
+            return ["toString", "valueOf", &well_known_symbol_key("toPrimitive")]
+                .iter()
+                .any(|method| self.signatures.contains_key(&class_method_symbol(class, method)));
+        }
+        fields.iter().any(|(name, field)| {
+            (name == "toString" || *name == well_known_symbol_key("toPrimitive"))
+                && matches!(field, HirType::Function(..) | HirType::CallableFunction(..))
+        })
+    }
+
+    /// An object literal's own `toString()` method (the string-conversion fallback after
+    /// `[Symbol.toPrimitive]`): called with no arguments, its result widened to `Json`.
+    fn invoke_object_to_string_method(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<Option<HirExpr>, String> {
+        self.invoke_object_conversion_method(value, fields, "toString".to_string(), None)
+    }
+
+    fn invoke_object_conversion_method(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        key: Symbol,
+        hint: Option<&str>,
+    ) -> Result<Option<HirExpr>, String> {
+        let hint_args = || -> Vec<HirExpr> {
+            hint.map(|hint| vec![HirExpr::Lit(HirLit::Str(hint.to_string()))]).unwrap_or_default()
+        };
         let Some((_, method_ty)) = fields.iter().find(|(name, _)| *name == key) else {
             return Ok(None);
         };
@@ -7104,7 +7156,7 @@ impl<'a> FnLowerer<'a> {
         let Some(receiver_param) = params.first() else {
             let call = HirExpr::Call(
                 Box::new(method),
-                vec![HirExpr::Lit(HirLit::Str(hint.to_string()))],
+                hint_args(),
             );
             // Callers expect the raw `Json` result; a typed return is widened.
             let call = if *ret == HirType::Json { call } else { self.coerce_to_declared(&HirType::Json, call)? };
@@ -7116,13 +7168,12 @@ impl<'a> FnLowerer<'a> {
                 let js_receiver = self.coerce_to_declared(&HirType::JsValue, bound.clone())?;
                 let call = HirExpr::Call(
                     Box::new(method),
-                    vec![
-                        HirExpr::NonArrowReceiverPack {
-                            value: Box::new(js_receiver),
-                            declared: HirType::JsValue,
-                        },
-                        HirExpr::Lit(HirLit::Str(hint.to_string())),
-                    ],
+                    std::iter::once(HirExpr::NonArrowReceiverPack {
+                        value: Box::new(js_receiver),
+                        declared: HirType::JsValue,
+                    })
+                    .chain(hint_args())
+                    .collect(),
                 );
                 let call = if *ret == HirType::Json {
                     call
@@ -7135,7 +7186,7 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 return Ok(Some(result));
             }
-            let call = HirExpr::Call(Box::new(method), vec![HirExpr::Lit(HirLit::Str(hint.to_string()))]);
+            let call = HirExpr::Call(Box::new(method), hint_args());
             let call = if *ret == HirType::Json { call } else { self.coerce_to_declared(&HirType::Json, call)? };
             let result = self.wrap_call_argument_bindings(call, &[(name, object_type, value)])?;
             return Ok(Some(result));
@@ -7145,9 +7196,9 @@ impl<'a> FnLowerer<'a> {
         )?;
         let call = HirExpr::Call(
             Box::new(method),
-            vec![HirExpr::NonArrowReceiverPack {
+            std::iter::once(HirExpr::NonArrowReceiverPack {
                 value: Box::new(this_arg), declared: HirType::Object(receiver_fields.to_vec()),
-            }, HirExpr::Lit(HirLit::Str(hint.to_string()))],
+            }).chain(hint_args()).collect(),
         );
         // Callers expect the raw `Json` result; a typed return is widened.
         let call = if *ret == HirType::Json { call } else { self.coerce_to_declared(&HirType::Json, call)? };

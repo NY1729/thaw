@@ -221,6 +221,7 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         HirType::Void => "void".to_string(),
         HirType::Str | HirType::StrLiteral(_) => "string".to_string(),
         HirType::Symbol => "symbol".to_string(),
+        HirType::Recursive(_) => "object".to_string(),
         HirType::Json => "Json".to_string(),
         HirType::Dictionary(element) => {
             format!("{{ [key: string]: {} }}", render_ts_type(element))
