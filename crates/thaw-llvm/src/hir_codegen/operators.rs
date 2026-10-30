@@ -119,6 +119,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
+            HirExpr::Lit(HirLit::BigInt(_)) => Some(HirType::BigInt),
             HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))
             | HirExpr::JsonAsString(_) => Some(HirType::Str),
             HirExpr::EnvVar(_) => Some(HirType::Optional(Box::new(HirType::Str))),
@@ -199,6 +200,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     && self.expr_hir_type(right) == Some(HirType::I64) =>
                 {
                     HirType::I64
+                }
+                _ if self.expr_hir_type(left) == Some(HirType::BigInt)
+                    && self.expr_hir_type(right) == Some(HirType::BigInt) =>
+                {
+                    HirType::BigInt
                 }
                 _ => HirType::F64,
             }),
@@ -388,7 +394,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_i64_from_string"
                         | "__thaw_i64_as_int_n"
                         | "__thaw_i64_as_uint_n"
-                        | "__thaw_bytes_read_i64" => return Some(HirType::I64),
+                        | "__thaw_bytes_read_i64" => return Some(HirType::BigInt),
                         "__thaw_any_array_flat" => {
                             return Some(HirType::Array(Box::new(HirType::Json)))
                         }
@@ -587,6 +593,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let lhs_value = self.compile_expr(lhs)?;
         let rhs_value = self.compile_expr(rhs)?;
 
+        if self.expr_hir_type(lhs) == Some(HirType::BigInt)
+            && self.expr_hir_type(rhs) == Some(HirType::BigInt)
+        {
+            return self.compile_bigint_binop(op, lhs_value.into_int_value(), rhs_value.into_int_value());
+        }
+
         if op == BinOp::EqEqEq {
             // A symbol is represented as the same tagged string a `Str` is,
             // so it compares by content (identity): `Symbol.for("x")` is
@@ -770,25 +782,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 BinOp::Gt => self.builder.build_int_compare(IntPredicate::SGT, lhs, rhs, "bigint_gt"),
                 BinOp::LtEq => self.builder.build_int_compare(IntPredicate::SLE, lhs, rhs, "bigint_le"),
                 BinOp::GtEq => self.builder.build_int_compare(IntPredicate::SGE, lhs, rhs, "bigint_ge"),
-                BinOp::Exp => {
-                    let overflow = self.builder.build_call(
-                        self.module.get_function("thaw_bigint_pow_overflows").unwrap(),
-                        &[lhs.into(), rhs.into()], "bigint_pow_overflows",
-                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                        .ok_or("thaw_bigint_pow_overflows returned no value")?.into_int_value();
-                    self.compile_bigint_overflow_guard(overflow)?;
-                    return self
-                        .builder
-                        .build_call(
-                            self.module.get_function("thaw_bigint_pow").unwrap(),
-                            &[lhs.into(), rhs.into()],
-                            "bigint_pow",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or_else(|| "thaw_bigint_pow did not return a value".to_string())
-                }
+                BinOp::Exp => return Err("raw integer exponentiation is not supported".into()),
                 BinOp::ZeroFillRShift | BinOp::EqEqEq => unreachable!(),
             }
             .map(Into::into)

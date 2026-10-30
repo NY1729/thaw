@@ -1927,30 +1927,32 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [value] = args else {
                     return Err("bigint number conversion expects one operand".into());
                 };
-                let value = self.compile_expr(value)?.into_int_value();
-                return self
-                    .builder
-                    .build_signed_int_to_float(value, self.context.f64_type(), "bigint_number")
-                    .map(Into::into)
-                    .map_err(|error| error.to_string());
+                let value = self.compile_expr(value)?;
+                return self.bigint_call("thaw_bigint_to_f64", &[value.into()]);
             }
-            "__thaw_i64_from_number" | "__thaw_i64_from_string" => {
+            "__thaw_i64_from_number" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
                 };
                 let value = self.compile_expr(value)?;
-                let runtime = name.trim_start_matches("__thaw_").to_string();
-                return self
-                    .builder
-                    .build_call(
-                        self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
-                        &[value.into()],
-                        "bigint_conversion",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("bigint conversion returned no value".into());
+                return self.bigint_call("thaw_bigint_from_f64", &[value.into()]);
+            }
+            "__thaw_i64_from_string" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let text = self.compile_expr(value)?;
+                let valid = self.bigint_call("thaw_bigint_parse_ok", &[text.into()])?.into_int_value();
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "bigint_parse_error");
+                let continue_bb = self.context.append_basic_block(function, "bigint_parse_ok");
+                self.builder.build_conditional_branch(valid, continue_bb, error_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                let message = self.bigint_call("thaw_bigint_parse_error_message", &[text.into()])?.into_pointer_value();
+                self.compile_throw_builtin_error_with("SyntaxError", message)?;
+                self.builder.position_at_end(continue_bb);
+                return self.bigint_call("thaw_i64_from_string", &[text.into()]);
             }
             "__thaw_i64_as_int_n"
             | "__thaw_i64_as_uint_n"
