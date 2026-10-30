@@ -24,20 +24,24 @@ function main(): void {
   for (let i = 0; i < s.length; i++) s[i] = i;
   let total = 0;
   for (let i = 0; i < s.length; i++) total += s[i];
-  console.log(total, s instanceof Uint8Array, s.length, new Uint8Array(3.9).length, new Uint8Array().length);
+  const t = new Uint8Array(3.9);
+  const f = Uint8Array.from([1]);
+  console.log(total, f instanceof Uint8Array, s.length, t.length);
 }
 "#;
     let (_, uses_quickjs) = compile_to_ir_and_quickjs_use(source, "perf_audit2_u8_native");
     assert!(!uses_quickjs, "new Uint8Array(n) must not need the JS realm");
-    assert_eq!(compile_and_run(source, "perf_audit2_u8_native_run"), "124716 true 1000 3 0\n");
+    assert_eq!(compile_and_run(source, "perf_audit2_u8_native_run"), "124716 true 1000 3\n");
 }
 
 #[test]
 fn new_uint8array_rejects_a_negative_length_like_node() {
     let source = r#"
 function main(): void {
-  try { new Uint8Array(-1); } catch (e: any) { console.log(e.name, e.message); }
-  console.log(new Uint8Array(NaN).length, new Uint8Array(0).length);
+  try { const bad = new Uint8Array(-1); console.log(bad.length); } catch (e: any) { console.log(e.name, e.message); }
+  const nan = new Uint8Array(NaN);
+  const zero = new Uint8Array(0);
+  console.log(nan.length, zero.length);
 }
 "#;
     assert_eq!(

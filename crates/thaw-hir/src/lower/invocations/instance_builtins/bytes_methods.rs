@@ -646,17 +646,15 @@ impl<'a> FnLowerer<'a> {
                     )),
                 )
             }
-            // `new Uint8Array()` / `new Uint8Array(length)`: a native
+            // `const u = new Uint8Array(length)`: a native
             // byte store (O(1) element access) instead of a JS-realm typed array whose every
             // element access would cross the bridge.
-            ("Uint8Array", 0 | 1) => {
+            ("Uint8Array", 1) if self.native_u8_args.contains(&(args.as_ptr() as usize)) => {
                 let as_u8 = |buffer: HirExpr| {
                     HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_as_u8".into())), vec![buffer])
                 };
                 let alloc = |size: HirExpr| HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_alloc".into())), vec![size]);
-                let Some(argument) = args.first() else {
-                    return Ok(Some(as_u8(alloc(number(0.0)))));
-                };
+                let argument = &args[0];
                 let value = self.lower_expr(&argument.expr)?;
                 match self.infer_expr_type_inner(&value)? {
                     HirType::F64 => {
@@ -955,6 +953,12 @@ impl<'a> FnLowerer<'a> {
             _ => return Err("native `.set()` expects a source and an optional offset".into()),
         };
         let offset = self.coerce_primitive_to_number(offset)?;
+        // A live typed array from the JS realm (`new Uint8Array([9])`) is read as a `number[]`.
+        let source = if self.infer_expr_type(&source)? == HirType::JsValue {
+            self.coerce_to_declared(&HirType::Array(Box::new(HirType::F64)), source)?
+        } else {
+            source
+        };
         let source = self.as_bytes_value(source)?;
         // Source and offset are read twice (range check, then copy): bind both once.
         let source_type = self.infer_expr_type(&source)?;

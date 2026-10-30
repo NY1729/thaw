@@ -156,6 +156,9 @@ struct FnLowerer<'a> {
     expected_arrow_return_hint: Option<HirType>,
     /// One-shot: declared `Map`/`Set`/`WeakMap`/`WeakSet` type for a type-argument-less `new` of it.
     expected_collection_hint: Option<HirType>,
+    /// Addresses of the argument lists of `const u = new Uint8Array(n)` declarations whose variable
+    /// is only indexed or measured; only those constructions become a native byte store.
+    native_u8_args: HashSet<usize>,
     /// One-shot: the next object literal lowered is an `any` literal, so its array-literal property
     /// values (recursively through nested object literals) are `Array<Json>`: an `any` array takes any
     /// element type later (`h.list.push("x")`), which a typed native array cannot hold.
