@@ -5235,6 +5235,27 @@ impl<'a> FnLowerer<'a> {
         live: bool,
         class_methods: bool,
     ) -> Result<HirExpr, String> {
+        // A class whose methods return its own type projects itself without end; report it
+        // instead of overflowing the compiler's stack.
+        if self.accessor_projection_depth >= 24 {
+            return Err("a recursive class type (a method returning its own class, or a self-referential field) cannot be projected as a dynamic object".into());
+        }
+        self.accessor_projection_depth += 1;
+        let result = self.lower_fixed_object_as_dynamic_accessor_object_inner(
+            value, fields, factory_body, live, class_methods,
+        );
+        self.accessor_projection_depth -= 1;
+        result
+    }
+
+    fn lower_fixed_object_as_dynamic_accessor_object_inner(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        factory_body: bool,
+        live: bool,
+        class_methods: bool,
+    ) -> Result<HirExpr, String> {
         let source_type = HirType::Object(fields.to_vec());
         // A class receiver is entered through the ordinary callback ABI, so its
         // parameter must not carry the non-arrow `__thaw_this` name.

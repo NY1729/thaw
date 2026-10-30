@@ -123,3 +123,32 @@ function main(): void {
         "[ 2, 4 ] [ 'n1', 'n2' ]\n4 s2\n"
     );
 }
+
+#[test]
+fn audit2_interface_view_keeps_class_identity() {
+    let source = r##"interface Shape { area(): number; name: string }
+abstract class Base implements Shape {
+  constructor(public name: string) {}
+  abstract area(): number;
+  describe(): string { return this.name + ":" + this.area(); }
+}
+class Circle extends Base { constructor(private r: number) { super("circle"); } area(): number { return 3 * this.r; } }
+class Rect extends Base { constructor(private w: number, private h: number) { super("rect"); } area(): number { return this.w * this.h; } }
+interface Sized { size: number }
+class Sq implements Sized { size = 2; constructor(public s: number) {} }
+function side(s: Sized): number { return s instanceof Sq ? s.s : -1; }
+function describe(b: Base): string { return b.describe() + "/" + b.area(); }
+function main(): void {
+  const shapes: Shape[] = [new Circle(2), new Rect(3, 4)];
+  console.log(shapes[0] instanceof Circle, shapes[1] instanceof Circle, shapes[0] instanceof Base);
+  shapes.forEach((s) => console.log((s as Base).describe()));
+  for (const s of shapes) { if (s instanceof Rect) console.log("rect", s.area()); }
+  console.log(describe(new Circle(1)), describe(new Rect(1, 5)));
+  console.log(side(new Sq(7)), side({ size: 1 }));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "audit2_interface_view_identity"),
+        "true false true\ncircle:6\nrect:12\nrect 12\ncircle:3/3 rect:5/5\n7 -1\n"
+    );
+}

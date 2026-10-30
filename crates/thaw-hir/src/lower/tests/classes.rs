@@ -3117,3 +3117,17 @@ fn widens_inherited_bare_fields_through_an_instantiated_subclass() {
     assert!(layout.contains(&("x".to_string(), widened.clone())));
     assert!(layout.contains(&("y".to_string(), widened)));
 }
+
+#[test]
+fn recursive_class_projection_is_a_diagnostic_not_a_stack_overflow() {
+    let module = thaw_parser::parse_typescript(
+        "class Chain { n = 0; add(): this { this.n++; return this; } }\n\
+         function main(): void { const s = new Chain().add(); console.log(Object.getPrototypeOf(s) === Chain.prototype); }",
+    )
+    .unwrap();
+    let result = lower_module(&module);
+    // Either the projection now terminates or it reports why it cannot; it must not abort.
+    if let Err(error) = result {
+        assert!(error.contains("recursive class type"), "{error}");
+    }
+}
