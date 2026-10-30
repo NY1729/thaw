@@ -978,6 +978,12 @@ fn decimal_magnitude(text: &str) -> (bool, String) {
 
 /// `base ** exp` for fixed-width native `bigint` values; wraps on overflow like the
 /// other native `bigint` operators and yields 0 for a negative exponent.
+/// Whether `base ** exp` does not fit the 64-bit native `bigint` (negative exponents yield 0).
+#[no_mangle]
+pub extern "C" fn thaw_bigint_pow_overflows(base: i64, exp: i64) -> bool {
+    u32::try_from(exp).is_ok_and(|exp| base.checked_pow(exp).is_none())
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_bigint_pow(base: i64, exp: i64) -> i64 {
     u32::try_from(exp).map_or(0, |exp| base.wrapping_pow(exp))

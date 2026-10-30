@@ -5962,6 +5962,31 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Math" && matches!(property.sym.as_ref(), "min" | "max") {
+                        // `Math.max(...arr, 10)` / `Math.max(...set)`: a runtime-length spread
+                        // (anything but an array literal) among other arguments, or a non-array
+                        // iterable alone, collects into one array literal first.
+                        let runtime_spread = |a: &swc_ecma_ast::ExprOrSpread| {
+                            a.spread.is_some() && !matches!(a.expr.as_ref(), Expr::Array(_))
+                        };
+                        let mut is_set = false;
+                        if let [a] = call.args.as_slice() {
+                            if runtime_spread(a) {
+                                let lowered = self.lower_expr(&a.expr)?;
+                                is_set = matches!(self.infer_expr_type(&lowered)?, HirType::Set(_));
+                            }
+                        }
+                        if (call.args.len() > 1 && call.args.iter().any(runtime_spread)) || is_set {
+                            let spread = Expr::Array(swc_ecma_ast::ArrayLit {
+                                span: swc_common::DUMMY_SP,
+                                elems: call.args.iter().cloned().map(Some).collect(),
+                            });
+                            let mut rewritten = call.clone();
+                            rewritten.args = vec![swc_ecma_ast::ExprOrSpread {
+                                spread: Some(swc_common::DUMMY_SP),
+                                expr: Box::new(spread),
+                            }];
+                            return self.lower_static_builtin_call(object, property, &rewritten);
+                        }
                         if let [argument] = call.args.as_slice() {
                             if argument.spread.is_some() {
                                 let source = self.lower_expr(&argument.expr)?;

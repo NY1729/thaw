@@ -710,22 +710,73 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_throw_builtin_error("RangeError", "Division by zero")?;
                 self.builder.position_at_end(continue_bb);
             }
+            // Native `bigint` is 64-bit: an overflowing result throws instead of
+            // silently wrapping to a different value.
+            let checked = match op {
+                BinOp::Add => Some("llvm.sadd.with.overflow"),
+                BinOp::Sub => Some("llvm.ssub.with.overflow"),
+                BinOp::Mul => Some("llvm.smul.with.overflow"),
+                _ => None,
+            };
+            if let Some(name) = checked {
+                let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
+                    .ok_or_else(|| format!("missing intrinsic {name}"))?
+                    .get_declaration(&self.module, &[lhs.get_type().into()])
+                    .ok_or_else(|| format!("cannot declare intrinsic {name}"))?;
+                let pair = self.builder.build_call(intrinsic, &[lhs.into(), rhs.into()], "bigint_checked")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic().ok_or("overflow intrinsic returned no value")?
+                    .into_struct_value();
+                let overflow = self.builder.build_extract_value(pair, 1, "bigint_overflow")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let value = self.builder.build_extract_value(pair, 0, "bigint_value")
+                    .map_err(|error| error.to_string())?;
+                self.compile_bigint_overflow_guard(overflow)?;
+                return Ok(value);
+            }
+            if op == BinOp::LShift {
+                // Exact only when the count is < 64 and shifting back restores the operand.
+                // The count is clamped first so an oversized one never yields poison.
+                let wide = self.builder.build_int_compare(
+                    IntPredicate::UGE, rhs, rhs.get_type().const_int(64, false), "bigint_lshift_wide")
+                    .map_err(|error| error.to_string())?;
+                let count = self.builder.build_select(wide, rhs.get_type().const_zero(), rhs, "bigint_lshift_count")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let shifted = self.builder.build_left_shift(lhs, count, "bigint_lshift")
+                    .map_err(|error| error.to_string())?;
+                let back = self.builder.build_right_shift(shifted, count, true, "bigint_lshift_back")
+                    .map_err(|error| error.to_string())?;
+                let lossy = self.builder.build_int_compare(IntPredicate::NE, back, lhs, "bigint_lshift_lossy")
+                    .map_err(|error| error.to_string())?;
+                let zero = self.builder.build_int_compare(IntPredicate::EQ, lhs, rhs.get_type().const_zero(), "bigint_lshift_zero")
+                    .map_err(|error| error.to_string())?;
+                let not_zero = self.builder.build_not(zero, "bigint_lshift_nonzero").map_err(|e| e.to_string())?;
+                let wide_nonzero = self.builder.build_and(wide, not_zero, "bigint_lshift_wide_nz")
+                    .map_err(|error| error.to_string())?;
+                let overflow = self.builder.build_or(lossy, wide_nonzero, "bigint_lshift_overflow")
+                    .map_err(|error| error.to_string())?;
+                self.compile_bigint_overflow_guard(overflow)?;
+                return Ok(shifted.into());
+            }
             return match op {
-                BinOp::Add => self.builder.build_int_add(lhs, rhs, "bigint_add"),
-                BinOp::Sub => self.builder.build_int_sub(lhs, rhs, "bigint_sub"),
-                BinOp::Mul => self.builder.build_int_mul(lhs, rhs, "bigint_mul"),
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::LShift => unreachable!(),
                 BinOp::Div => self.builder.build_int_signed_div(lhs, rhs, "bigint_div"),
                 BinOp::Mod => self.builder.build_int_signed_rem(lhs, rhs, "bigint_mod"),
                 BinOp::BitOr => self.builder.build_or(lhs, rhs, "bigint_or"),
                 BinOp::BitXor => self.builder.build_xor(lhs, rhs, "bigint_xor"),
                 BinOp::BitAnd => self.builder.build_and(lhs, rhs, "bigint_and"),
-                BinOp::LShift => self.builder.build_left_shift(lhs, rhs, "bigint_lshift"),
                 BinOp::RShift => self.builder.build_right_shift(lhs, rhs, true, "bigint_rshift"),
                 BinOp::Lt => self.builder.build_int_compare(IntPredicate::SLT, lhs, rhs, "bigint_lt"),
                 BinOp::Gt => self.builder.build_int_compare(IntPredicate::SGT, lhs, rhs, "bigint_gt"),
                 BinOp::LtEq => self.builder.build_int_compare(IntPredicate::SLE, lhs, rhs, "bigint_le"),
                 BinOp::GtEq => self.builder.build_int_compare(IntPredicate::SGE, lhs, rhs, "bigint_ge"),
                 BinOp::Exp => {
+                    let overflow = self.builder.build_call(
+                        self.module.get_function("thaw_bigint_pow_overflows").unwrap(),
+                        &[lhs.into(), rhs.into()], "bigint_pow_overflows",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("thaw_bigint_pow_overflows returned no value")?.into_int_value();
+                    self.compile_bigint_overflow_guard(overflow)?;
                     return self
                         .builder
                         .build_call(
