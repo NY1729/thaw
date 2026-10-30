@@ -642,8 +642,20 @@ impl<'a> FnLowerer<'a> {
         if !fixed.is_empty() || **rest != HirType::Json {
             return Ok(None);
         }
-        let Ok(HirType::Function(params, actual_ret)) = self.infer_expr_type(value) else {
-            return Ok(None);
+        // A callback with an optional parameter (`(x: number, y?: string) => ...`) is a
+        // rest-free `CallableFunction`; its physical ABI is the fixed prefix.
+        let inferred = self.infer_expr_type(value);
+        let (params, actual_ret, callback_type) = match inferred {
+            Ok(HirType::Function(params, ret)) => {
+                (params.clone(), ret.clone(), HirType::Function(params, ret))
+            }
+            Ok(callback @ HirType::CallableFunction(..)) => {
+                let HirType::CallableFunction(params, _, None, ret) = &callback else {
+                    return Ok(None);
+                };
+                (params.clone(), ret.clone(), callback.clone())
+            }
+            _ => return Ok(None),
         };
         let rest_array = HirType::Array(rest.clone());
         if params.is_empty()
@@ -657,7 +669,6 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let callback_name = format!("__thaw_rest_callback_{id}");
         let args_name = format!("__thaw_rest_args_{id}");
-        let callback_type = HirType::Function(params.clone(), actual_ret.clone());
         self.scope.insert(callback_name.clone(), callback_type.clone());
         self.scope.insert(args_name.clone(), rest_array.clone());
         let mut arguments = Vec::with_capacity(params.len());

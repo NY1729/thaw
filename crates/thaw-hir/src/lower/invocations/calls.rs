@@ -2682,7 +2682,7 @@ impl<'a> FnLowerer<'a> {
 
         if matches!(
             callee_name.as_str(),
-            "atob" | "btoa" | "escape" | "unescape"
+            "escape" | "unescape"
         ) {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
@@ -2691,8 +2691,6 @@ impl<'a> FnLowerer<'a> {
             };
             let value = self.coerce_primitive_to_string(value.clone())?;
             let intrinsic = match callee_name.as_str() {
-                "atob" => "__thaw_atob",
-                "btoa" => "__thaw_btoa",
                 "escape" => "__thaw_escape",
                 _ => "__thaw_unescape",
             };
@@ -2702,7 +2700,7 @@ impl<'a> FnLowerer<'a> {
 
         if matches!(
             callee_name.as_str(),
-            "encodeURIComponent" | "encodeURI" | "decodeURIComponent" | "decodeURI"
+            "encodeURIComponent" | "encodeURI" | "decodeURIComponent" | "decodeURI" | "atob" | "btoa"
         ) {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
@@ -2714,7 +2712,15 @@ impl<'a> FnLowerer<'a> {
                 "encodeURIComponent" => "__thaw_encode_uri_component",
                 "encodeURI" => "__thaw_encode_uri",
                 "decodeURIComponent" => "__thaw_decode_uri_component",
+                "atob" => "__thaw_atob",
+                "btoa" => "__thaw_btoa",
                 _ => "__thaw_decode_uri",
+            };
+            // `atob`/`btoa` reject bad input with a DOMException-shaped error.
+            let failure = if matches!(callee_name.as_str(), "atob" | "btoa") {
+                "\u{1}InvalidCharacterError\u{1}Invalid character\u{5}{\"code\":5}"
+            } else {
+                "\u{1}URIError\u{1}URI malformed"
             };
             let raw_name = format!("__thaw_decode_uri_raw_{}", self.next_binding);
             self.next_binding += 1;
@@ -2730,9 +2736,7 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_string_is_null".to_string())),
                         vec![HirExpr::Var(raw_name.clone())],
                     ),
-                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                        "\u{1}URIError\u{1}URI malformed".into(),
-                    )))],
+                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(failure.into())))],
                     Vec::new(),
                 ),
                 HirStmt::Return(Some(HirExpr::Var(raw_name))),
