@@ -2739,7 +2739,7 @@ fn generator_try_catch_finally_survives_suspension() {
     "#;
     assert_eq!(
         compile_and_run(source, "generator_try_catch_finally"),
-        "1 0\nError: boom\n2 11\n3 111\ntrue 111\n"
+        "1 0\nError: boom\n    at main (input.ts:17:9)\n2 11\n3 111\ntrue 111\n"
     );
 }
 
@@ -10406,7 +10406,7 @@ fn compiles_promise_keyed_combinators() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_keyed_combinators"),
-        "1 two\nboom\nfulfilled rejected\n1\nError: boom\n"
+        "1 two\nboom\nfulfilled rejected\n1\nError: boom\n    at fail (input.ts:8:9)\n    at main (input.ts:11:9)\n    at main (input.ts:11:9)\n"
     );
 }
 
