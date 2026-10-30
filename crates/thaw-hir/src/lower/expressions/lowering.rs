@@ -1246,10 +1246,12 @@ impl<'a> FnLowerer<'a> {
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))
                 } else {
-                    Err(
-                        "`this` is only available inside a native class constructor or method"
-                            .into(),
-                    )
+                    // A plain function (or an arrow inside one) called without a receiver sees the
+                    // sloppy-mode `this`: the global object.
+                    self.lower_expr(&Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        "globalThis".into(),
+                        swc_common::DUMMY_SP,
+                    )))
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),

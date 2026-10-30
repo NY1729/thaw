@@ -3462,6 +3462,26 @@
       "name": "audit2 non-literal class field initializers infer their type",
       "expect": "matched",
       "source": "class A { static x = 1; static y = A.x + 1; static f = (A.x, \"s\" + A.x); }\nclass C { static count = 0; id = ++C.count; label = \"n\" + this.id; }\nclass B0 { x = 1; }\nclass B extends B0 { y = this.x + 1; big = this.y > 1; }\nfunction main(): void {\n  console.log(A.y, A.f);\n  new C(); const c = new C();\n  console.log(c.id, c.label, new B().y, new B().big);\n}"
+    },
+    {
+      "name": "audit2 toString is used by join and array conversion",
+      "expect": "matched",
+      "source": "class A { toString(): string { return \"A!\"; } }\nfunction main(): void {\n  const a = new A();\n  const o = { toString() { return \"O\"; } };\n  console.log(String(a), `${a}`, a + \"\", [a].join(), [a, a].join(\"-\"), [a].toString(), \"\" + [a]);\n  console.log(String(o), `${o}`, [o].join());\n}"
+    },
+    {
+      "name": "audit2 nested toJSON methods are called",
+      "expect": "matched",
+      "source": "class A { toJSON(): { t: number } { return { t: 1 }; } }\nfunction main(): void {\n  console.log(JSON.stringify(new A()), JSON.stringify([new A()]), JSON.stringify({ k: new A() }));\n  console.log(JSON.stringify({ toJSON(k: string) { return \"key:\" + k; } }), JSON.stringify({ a: { toJSON(k: string) { return \"key:\" + k; } } }));\n}"
+    },
+    {
+      "name": "audit2 this in a plain function and arrow",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log(\"before\");\n  console.log((() => { return typeof this; })());\n  console.log(typeof this, \"after\");\n}"
+    },
+    {
+      "name": "audit2 sort follows V8 TimSort call order for small arrays",
+      "expect": "matched",
+      "source": "function main(): void {\n  console.log([3, 1, 2, 5, 4].sort((a, b) => (a > b ? 1 : 0)));\n  console.log([5, 2, 9, 1, 7, 3, 8].sort((a, b) => (a < b ? -1 : 0)));\n  const a = [5, 2, 9, 1, 7, 3, 8, 4, 6, 0, 11, 15, 12, 13, 10, 14];\n  console.log(a.sort((x, y) => (x > y ? 1 : 0)).join());\n  const c = [3, 1, 2]; console.log(c.sort(() => -1), [3, 1, 2].sort(() => 1));\n  const calls: string[] = []; [4, 2, 3, 1].sort((x, y) => { calls.push(x + \">\" + y); return x - y; });\n  console.log(calls.join(\" \"));\n  const s: string[] = []; [\"d\", \"a\", \"c\", \"b\", \"e\", \"f\", \"g\"].sort((x, y) => { s.push(x + y); return x < y ? -1 : x > y ? 1 : 0; });\n  console.log(s.join(\" \"));\n  console.log([2, 1].sort((x, y) => x - y), [1].sort((x, y) => x - y));\n}"
     }
   ]
 }

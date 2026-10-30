@@ -1437,6 +1437,9 @@ impl<'a> FnLowerer<'a> {
                 )? {
                     return Ok(HirExpr::JsonAsString(Box::new(result)));
                 }
+                if let Some(result) = self.invoke_object_to_string_method(value.clone(), &fields)? {
+                    return Ok(HirExpr::JsonAsString(Box::new(result)));
+                }
                 // A class extending `Error`/`TypeError`/etc. (see
                 // `lower/module/classes.rs`) is a real object with
                 // inherited `message`/`name: Str` fields, not the tagged
@@ -1655,6 +1658,28 @@ impl<'a> FnLowerer<'a> {
                         ))
                     }
                 }
+            }
+            HirType::Array(element) if self.object_has_custom_string_conversion(&element) => {
+                // `String([obj])` is `[obj].join()`, which converts each element through its own
+                // `toString`.
+                let name = format!("__thaw_array_to_string_source_{}", self.next_binding);
+                self.next_binding += 1;
+                let array_type = HirType::Array(element.clone());
+                self.scope.insert(name.clone(), array_type.clone());
+                let span = swc_common::DUMMY_SP;
+                let join = Expr::Call(CallExpr {
+                    span,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span,
+                        obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.as_str().into(), span))),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("join".into(), span)),
+                    }))),
+                    args: Vec::new(),
+                    type_args: None,
+                });
+                let joined = self.lower_expr(&join)?;
+                self.wrap_call_argument_bindings(joined, &[(name, array_type, value)])
             }
             HirType::Array(element) => {
                 let builtin = match element.as_ref() {
