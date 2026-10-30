@@ -800,7 +800,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_check_json_host_error(json, None)?;
                 Ok(value)
             }
-            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
+            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string_value"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json | HirType::Dictionary(_) => Ok(json),
             HirType::Null => Ok(self.context.bool_type().const_int(1, false).into()),
